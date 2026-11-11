@@ -19,6 +19,12 @@
 #                       fresh boots, which is what a speed claim needs.
 # EXACT=1               token-exact gate (default); 0 skips it.
 # QUALITY=1             adds the quality gate (default 0).
+# STALL=1               stall probe on every speed boot (default; 0 skips it): the
+#                       hard gate and the relative gate of the contract.
+# STALL_REPEATS=3       repeats of each scenario (the gates use the median);
+#                       STALL_LENS=4096,16384 prefill lengths; STALL_DECODERS:
+#                       decoders (default: the recipe's --max-num-seqs less one, so
+#                       that the injected prefill has a slot).
 # CELLS                 speed cells "in:out:conc[:prompts] ..." (default: the
 #                       contract's matrix, `pr_receipt_report.py cells`); none skips.
 # EXACT_CELLS           cells whose greedy texts are hashed on the deterministic
@@ -38,8 +44,9 @@
 #
 # Boots (a fresh server each, one at a time):
 #   exact  base, head  VLLM_RDNA2_MOE_DETERMINISTIC=1: greedy hashes, concurrency probe
-#   speed  base, head (abba: head, base) production mode: the cells, the probes and,
-#                      with QUALITY=1, the topk_kl / quality_ab collects of each boot
+#   speed  base, head (abba: head, base) production mode: the cells (with per-request
+#                      times), the probes, the stall probe and, with QUALITY=1, the
+#                      topk_kl / quality_ab collects of each boot
 #   floor  base again (ab with QUALITY=1): the base-vs-base floor of the KL check
 # Greedy (--temperature 0), --ignore-eos, seed 12345, prefix cache reset before every
 # cell, capture-ladder warm-up after boot, KFD evictions invalidate cells: all
@@ -50,10 +57,14 @@
 # Taking the GPU lease is the caller's job. A GPU holding more than MAX_USED_MIB
 # (4096) of VRAM stops the run; TEMPWATCH=1 (default) runs tp8pp2/tempwatch.py.
 #
+# Before the boots, pr_receipt_scan.py lists the lines the diff adds that look like host
+# syncs or unchecked launches (scan.md, scan.json): for the reviewer, never a gate.
+#
 # Results: $OUT/receipt.md and receipt.json (tables of the PR template), the raw
-# boots/<id>/ directories, plans/, quality/. Exit 0: every gate that ran passed;
-# 1: a gate or a boot failed; 2: bad input; 3: aborted (busy GPUs, thermal limit).
-# Speed verdicts are reported, never gated.
+# boots/<id>/ directories (stall/ holds the stall probe), plans/, quality/. Exit 0:
+# every gate that ran passed (token-exact, quality, overlap, hard stall gate, and under
+# MODE=abba a regression of the relative stall gate); 1: a gate or a boot failed; 2: bad
+# input; 3: aborted (busy GPUs, thermal limit). Speed verdicts are reported, never gated.
 set -uo pipefail
 
 TOOLS=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -86,6 +97,12 @@ QUALITY_TOP=${QUALITY_TOP:-20}
 QUALITY_PASSAGES=${QUALITY_PASSAGES:-6}
 MAX_PPL_REL=${MAX_PPL_REL:-0.02}
 FAIL_FAST=${FAIL_FAST:-1}
+STALL=${STALL:-1}
+STALL_REPEATS=${STALL_REPEATS:-3}
+STALL_LENS=${STALL_LENS:-4096,16384}
+[[ $STALL == 0 || $STALL == 1 ]] || die "STALL is 0 or 1, not $STALL"
+[[ $STALL_REPEATS =~ ^[1-9][0-9]*$ ]] || die "STALL_REPEATS is a positive integer, not $STALL_REPEATS"
+[[ $STALL_LENS =~ ^[0-9]+(,[0-9]+)*$ ]] || die "STALL_LENS is a comma list of token counts, not $STALL_LENS"
 PORT=${PORT:-18780}
 OWNER=${OWNER:-${QUIET_OWN:-${USER:-pr-receipt}}}
 OVERRIDES=("$@")
@@ -170,10 +187,20 @@ PLAN_DIFF=$(rcpt plan-diff "$OUT/plans/base.txt" "$OUT/plans/head.txt" \
     --mask "$OUT/cache/base=<CACHE>" --mask "$OUT/cache/head=<CACHE>" \
     --out "$OUT/plans/diff.txt")
 COMPILATION=$(rcpt plan-field "$OUT/plans/head.txt" compilation)
+if [[ $STALL == 1 && -z ${STALL_DECODERS:-} ]]; then
+    _seqs=$(rcpt plan-field "$OUT/plans/head.txt" max-num-seqs)
+    if [[ ! $_seqs =~ ^[0-9]+$ ]] || ((_seqs < 2)); then
+        die "no --max-num-seqs of at least 2 in plans/head.txt: set STALL_DECODERS"
+    fi
+    STALL_DECODERS=$((_seqs - 1))
+fi
+STALL_DECODERS=${STALL_DECODERS:-0}
+[[ $STALL_DECODERS =~ ^[0-9]+$ ]] || die "STALL_DECODERS is a number of decoders, not $STALL_DECODERS"
+[[ $STALL == 0 ]] || ((STALL_DECODERS >= 1)) || die "STALL_DECODERS is at least 1"
 
 PLAN=()
 [[ $EXACT == 1 ]] && PLAN+=(XA:base:exact XB:head:exact)
-if [[ $CELLS != none || $QUALITY == 1 ]]; then
+if [[ $CELLS != none || $QUALITY == 1 || $STALL == 1 ]]; then
     if [[ $MODE == abba ]]; then
         PLAN+=(A1:base:speed B1:head:speed B2:head:speed A2:base:speed)
     else
@@ -181,7 +208,7 @@ if [[ $CELLS != none || $QUALITY == 1 ]]; then
         [[ $QUALITY == 1 ]] && PLAN+=(A2:base:floor)
     fi
 fi
-((${#PLAN[@]})) || die "nothing to run: EXACT=0, CELLS=none and QUALITY=0"
+((${#PLAN[@]})) || die "nothing to run: EXACT=0, CELLS=none, STALL=0 and QUALITY=0"
 
 GENERATE_WINDOWS=0
 if [[ $QUALITY == 1 && -z ${QUALITY_WINDOWS:-} ]]; then
@@ -216,6 +243,7 @@ shq() { # KEY=value or word, quoted only where the shell needs it
 REPRO=""
 for _w in "BASE_TREE=$BASE_TREE" "HEAD_TREE=$HEAD_TREE" "BASE_VENV=$BASE_VENV" "HEAD_VENV=$HEAD_VENV" \
     "RECIPE=$RECIPE" "MODEL=$MODEL" "GPUS=$GPUS" "MODE=$MODE" "EXACT=$EXACT" "QUALITY=$QUALITY" \
+    "STALL=$STALL" "STALL_REPEATS=$STALL_REPEATS" "STALL_LENS=$STALL_LENS" "STALL_DECODERS=$STALL_DECODERS" \
     "CELLS=$CELLS" "EXACT_CELLS=$EXACT_CELLS" bash tools/rdna/pr_receipt.sh \
     ${OVERRIDES[@]+"${OVERRIDES[@]}"}; do
     REPRO+=$(shq "$_w")
@@ -224,6 +252,7 @@ REPRO=${REPRO% }
 rcpt set "$OUT" "mode=$MODE" "recipe=$RECIPE" "model=$MODEL" "model_rev=$(model_rev)" \
     "model_cfg_sha=$cfg_sha" "gpus=$GPUS" "overrides=${OVERRIDES[*]-}" "cells=$CELLS" \
     "exact_cells=$EXACT_CELLS" "exact=$EXACT" "quality=$QUALITY" "quality_limit=$QUALITY_LIMIT" \
+    "stall=$STALL" "stall_repeats=$STALL_REPEATS" "stall_lens=$STALL_LENS" "stall_decoders=$STALL_DECODERS" \
     "quality_windows=$QUALITY_WINDOWS" "max_ppl_rel=$MAX_PPL_REL" \
     "base_tree=$BASE_TREE" "base_sha=$BASE_SHA" "base_venv=$BASE_VENV" \
     "base_rocm_c=$(rocm_c_md5 "$BASE_TREE")" \
@@ -234,6 +263,10 @@ rcpt set "$OUT" "mode=$MODE" "recipe=$RECIPE" "model=$MODEL" "model_rev=$(model_
     "change_class=${CHANGE_CLASS:-}" "reached=${REACHED:-}" "not_run=${NOT_RUN:-}" \
     "command=$REPRO" || die "cannot write $OUT/manifest.json"
 
+"$PY" "$TOOLS/tools/rdna/pr_receipt_scan.py" "$BASE_TREE" "$HEAD_TREE" --json "$OUT/scan.json" \
+    --md "$OUT/scan.md" > /dev/null 2> "$OUT/scan.err" \
+    || note "warning: the diff scan failed (see scan.err): the receipt says it did not run"
+SCAN_NOTE=$(head -n 1 "$OUT/scan.md" 2> /dev/null)
 if [[ -n ${DRY_RUN:-} ]]; then
     echo "DRY RUN: $OUT"
     echo "launch plans: $PLAN_DIFF; compilation $COMPILATION"
@@ -241,6 +274,8 @@ if [[ -n ${DRY_RUN:-} ]]; then
     echo "speed cells: $CELLS"
     echo "exactness cells: $EXACT_CELLS"
     echo "quality: $QUALITY (windows ${QUALITY_WINDOWS:-none}, limit $QUALITY_LIMIT)"
+    echo "stall probe: $STALL (decoders $STALL_DECODERS, prefill $STALL_LENS, repeats $STALL_REPEATS)"
+    echo "diff scan: ${SCAN_NOTE:-did not run}"
     exit 0
 fi
 
@@ -331,7 +366,7 @@ fi
 
 run_boot() { # id role kind
     local id=$1 role=$2 kind=$3 tree venv bdir cells bench_extra hold=0 hook="" conc=1 rc t0 py
-    local -a det=()
+    local -a det=() stall=()
     if [[ $role == base ]]; then tree=$BASE_TREE; venv=$BASE_VENV; else tree=$HEAD_TREE; venv=$HEAD_VENV; fi
     py=$(command -v "$(pyof "$venv")")
     bdir=$OUT/boots/$id
@@ -344,9 +379,12 @@ run_boot() { # id role kind
             ;;
         speed)
             cells=$CELLS
-            bench_extra="--temperature 0"
-            [[ $cells == none ]] || hold=1
+            bench_extra="--temperature 0 --save-detailed"
+            [[ $cells == none && $STALL != 1 ]] || hold=1
             [[ $QUALITY == 1 ]] && hook=$TOOLS/tools/rdna/pr_receipt_hook.sh
+            if [[ $STALL == 1 ]]; then
+                stall=(STALL_PROBE=1 STALL_ITER_LOG=0 "STALL_ARGS=--scenarios solo,inject,reverse --decoders $STALL_DECODERS --prefill-lens $STALL_LENS --repeats $STALL_REPEATS --max-starved 0 --min-decode-tokens-during-prefill 1 --gate-stat worst")
+            fi
             ;;
         *)
             cells=none
@@ -370,6 +408,7 @@ run_boot() { # id role kind
         OUT="$bdir" CACHE="$OUT/cache/$role/$id" VENV="$venv" SERVE_TREE="$tree" \
         TRITON_CACHE_DIR="$OUT/cache/$role/triton" TORCHINDUCTOR_CACHE_DIR="$OUT/cache/$role/inductor" \
         CELLS="$cells" BENCH_EXTRA="$bench_extra" RESET_PREFIX_CACHE=1 CONC_PROBE="$conc" \
+        PREFIX_WORDS="${PREFIX_WORDS:-2600}" ${stall[@]+"${stall[@]}"} \
         QUIET_HOLD="$hold" READY_TIMEOUT="${READY_TIMEOUT:-1800}" STOP_GRACE="${STOP_GRACE:-120}" \
         LOAD_HOOK="$hook" RECEIPT_PY="$py" RECEIPT_TOOLS="$TOOLS" QUALITY_WINDOWS="$QUALITY_WINDOWS" \
         QUALITY_LIMIT="$QUALITY_LIMIT" QUALITY_TOP="$QUALITY_TOP" QUALITY_PASSAGES="$QUALITY_PASSAGES" \

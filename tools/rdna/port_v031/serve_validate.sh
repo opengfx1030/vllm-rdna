@@ -22,7 +22,8 @@
 #
 # STALL_PROBE=1 (default 0) runs tools/rdna/port_v031/stall_probe.py (mixed
 # prefill/decode stall probe, docs/rdna2/mixed-batch-stall-probe.md) after the
-# probes, with STALL_ARGS passed through (gates, lengths, repeats). It also
+# bench cells, inside their quiet window (renewed like between cells), with
+# STALL_ARGS passed through (gates, lengths, repeats). It also
 # boots the server with --enable-logging-iteration-details (log only, no
 # behaviour change; STALL_ITER_LOG=0 turns that off) so the probe can tie
 # stalls to scheduler steps. Results: $OUT/stall/{summary.txt,stall_probe.json,
@@ -300,18 +301,18 @@ if [[ ${WARMUP:-1} == 1 ]]; then
     sort -t: -k2 -g -r "$OUT/warmup.txt" 2>/dev/null | head -3 | sed 's/^/    /' | tee -a "$SUM"
 fi
 
-if [[ ${STALL_PROBE:-0} == 1 ]]; then
-    log "stall probe: ${STALL_ARGS:-defaults}"
-    # shellcheck disable=SC2086
-    "$VENV/bin/python" "$TREE/tools/rdna/port_v031/stall_probe.py" \
-        --base-url "http://127.0.0.1:$PORT" --model "$SERVED" --out "$OUT/stall" \
-        --server-log "$OUT/serve.log" --server-pid "$SPID" --timeline ${STALL_ARGS:-} \
-        > "$OUT/stall.txt" 2>&1
-    rc=$?
-    verdict=$(sed -n 's/^verdict: //p' "$OUT/stall.txt" | tail -1)
-    log "STALL PROBE ${verdict:-ERROR} (rc=$rc, see $OUT/stall.txt)"
-    sed -n '/^stall_probe:/,$p' "$OUT/stall.txt" | sed 's/^/    /' | tee -a "$SUM"
-fi
+# Measured steps share the quiet window: before each one, re-check the boot lock
+# and renew a window that has outlived QUIET_WIN_MAX (a no-op while none is open).
+quiet_renew() {
+    [[ -n $QUIET_FILE ]] && quiet_lock_wait
+    if [[ -n $QUIET_FILE && -n ${QUIET_WIN_MAX:-} ]] \
+        && (( $(date +%s) - QUIET_T0 > QUIET_WIN_MAX )); then
+        quiet_end
+        log "quiet gap: ${QUIET_GAP:-120} s without a window between cells"
+        sleep "${QUIET_GAP:-120}"
+        quiet_begin
+    fi
+}
 
 # Concurrency correctness: greedy outputs at c=N and under slot churn must
 # match the solo outputs. The c=1 probes above always run in slot 0.
@@ -331,15 +332,8 @@ cd "$OUT"
 quiet_begin
 for cell in $CELLS; do
     # a booter may take the lock just before the window's file appeared: every cell
-    # re-checks it (a no-op while no window is open)
-    [[ -n $QUIET_FILE ]] && quiet_lock_wait
-    if [[ -n $QUIET_FILE && -n ${QUIET_WIN_MAX:-} ]] \
-        && (( $(date +%s) - QUIET_T0 > QUIET_WIN_MAX )); then
-        quiet_end
-        log "quiet gap: ${QUIET_GAP:-120} s without a window between cells"
-        sleep "${QUIET_GAP:-120}"
-        quiet_begin
-    fi
+    # re-checks it
+    quiet_renew
     IFS=: read -r in out conc nreq <<< "$cell"
     n=$(( conc * 4 > 8 ? conc * 4 : 8 ))
     (( conc == 1 )) && n=4
@@ -382,6 +376,19 @@ for cell in $CELLS; do
         break
     fi
 done
+if [[ ${STALL_PROBE:-0} == 1 ]] && kill -0 "$SPID" 2>/dev/null; then
+    quiet_renew
+    log "stall probe: ${STALL_ARGS:-defaults}"
+    # shellcheck disable=SC2086
+    "$VENV/bin/python" "$TREE/tools/rdna/port_v031/stall_probe.py" \
+        --base-url "http://127.0.0.1:$PORT" --model "$SERVED" --out "$OUT/stall" \
+        --server-log "$OUT/serve.log" --server-pid "$SPID" --timeline ${STALL_ARGS:-} \
+        > "$OUT/stall.txt" 2>&1
+    rc=$?
+    verdict=$(sed -n 's/^verdict: //p' "$OUT/stall.txt" | tail -1)
+    log "STALL PROBE ${verdict:-ERROR} (rc=$rc, see $OUT/stall.txt)"
+    sed -n '/^stall_probe:/,$p' "$OUT/stall.txt" | sed 's/^/    /' | tee -a "$SUM"
+fi
 quiet_end
 if [[ -n ${LOAD_HOOK:-} && -n ${QUIET_DIR:-} && ${QUIET_HOLD:-0} == 1 ]] \
     && kill -0 "$SPID" 2>/dev/null; then

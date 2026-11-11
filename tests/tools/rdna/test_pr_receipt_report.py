@@ -56,6 +56,18 @@ def test_default_cells_are_the_contract_matrix():
     assert "32k/2k c=8" not in [c.label for c in cells]
 
 
+def test_contributing_lists_the_default_cells():
+    text = (ROOT / ".github/CONTRIBUTING.md").read_text()
+    table = text.split("Cells, as prompt tokens / generated tokens:")[1]
+    rows = table.strip().split("\n\n")[0].splitlines()[2:]
+    listed = []
+    for row in rows:
+        size, conc = (part.strip() for part in row.strip("|").split("|"))
+        for c in re.findall(r"\d+", conc.split("(")[0]):
+            listed.append(f"{size.replace(' ', '')} c={c}")
+    assert listed == [c.label for c in rep.parse_cells(rep.DEFAULT_CELLS)]
+
+
 def test_cell_names_and_request_counts_follow_serve_validate():
     script = (ROOT / "tools/rdna/port_v031/serve_validate.sh").read_text()
     # the report derives names and request counts the way the driver does
@@ -258,6 +270,22 @@ def test_parse_summary_boot_failure():
 # ---------------------------------------------------------------- run fixtures
 
 
+def request_arrays(n, conc, serial=False):
+    """Per-request times of ``--save-detailed``: waves of ``conc`` overlapping
+    requests, or one request after another when ``serial``."""
+    starts = [
+        1000.0 + (i if serial else i // conc) * 20.0 + (0.0 if serial else 0.01 * i)
+        for i in range(n)
+    ]
+    return {
+        "start_times": starts,
+        "ttfts": [0.7] * n,
+        "latencies": [19.0] * n,
+        "errors": [""] * n,
+        "output_lens": [512] * n,
+    }
+
+
 def bench(
     ttft=700.0,
     itl=20.0,
@@ -267,6 +295,7 @@ def bench(
     in_len=1024,
     tpot=22.0,
     prefill_p99=None,
+    serial=False,
     **extra,
 ):
     data = {
@@ -283,6 +312,7 @@ def bench(
         "mean_itl_ms": itl,
         "p99_itl_ms": itl * 2,
         "output_throughput": out,
+        **request_arrays(n, conc, serial),
     }
     data.update(extra)
     return data
@@ -712,21 +742,24 @@ def test_ppl_total_line_is_parsed():
 
 
 def receipt_run(tmp_path):
-    """An ABBA run with one regression cell and one invalid cell."""
+    """An ABBA run: one regression cell, one cell invalidated in the base's A2."""
     base = {
         CELL_A: (bench(ttft=700.0), 4, EVICT_OK),
-        CELL_B: (bench(ttft=700.0, n=16, conc=4), 16, EVICT_OK),
+        CELL_B: (bench(ttft=700.0, n=16, conc=4, out=400.0), 16, EVICT_OK),
     }
     head_slow = {
         CELL_A: (bench(ttft=800.0), 4, EVICT_OK),
-        CELL_B: (bench(ttft=700.0, n=16, conc=4), 16, EVICT_BAD),
+        CELL_B: (bench(ttft=700.0, n=16, conc=4, out=400.0), 16, EVICT_OK),
+    }
+    base_evicted = {
+        k: (v[0], v[1], EVICT_BAD if k == CELL_B else EVICT_OK) for k, v in base.items()
     }
     return abba_run(
         tmp_path,
         base,
         head_slow,
-        {k: (v[0], v[1], EVICT_OK) for k, v in head_slow.items()},
-        base,
+        head_slow,
+        base_evicted,
         cells="1024:512:1 1024:512:4",
         change_class="tool",
         recipe="flashnext-mtp2",
@@ -751,14 +784,22 @@ def test_report_writes_the_receipt(tmp_path, capsys):
         "Exactness",
         "Quality",
         "Speed",
+        "Concurrency and stalls",
         "Boots",
         "Raw results",
     ]
     assert "REGRESSION" in text  # cell A
-    assert "INVALID" in text  # cell B: KFD eviction in head run B1
+    assert "INVALID" in text  # cell B: KFD eviction in the base's A2
     assert "Change class: tool" in text
+    assert "max GPU temp" in text
     data = json.loads((run / "receipt.json").read_text())
-    assert data["gates"] == {"exact": "NOT RUN", "quality": "NOT RUN"}
+    assert data["gates"] == {
+        "exact": "NOT RUN",
+        "quality": "NOT RUN",
+        "overlap": "PASS",
+        "stall": "NOT RUN",
+        "stall_relative": "NOT RUN",
+    }
     assert data["speed"]["counts"]["regression"] == 1
     assert data["speed"]["counts"]["invalid"] == 1
 
@@ -771,7 +812,13 @@ def test_pr_template_mirrors_the_receipt(tmp_path):
     template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text()
     block = template[template.index("## RDNA receipt") :].split("\n---\n")[0]
     assert headings(block, 3) == headings(receipt, 3)
-    assert set(headings(block, 4)) <= {"Speculative acceptance length"}
+    assert set(headings(block, 4)) == {
+        "Speculative acceptance length",
+        "Overlap",
+        "Stall probe",
+        "Added host syncs and launches",
+    }
+    assert set(headings(receipt, 4)) <= set(headings(block, 4))
 
     def gate_rows(text: str) -> list[str]:
         table = text.split("| gate | result |")[1].split("\n\n")[0]
@@ -783,7 +830,11 @@ def test_pr_template_mirrors_the_receipt(tmp_path):
         == [
             "token-exact",
             "quality",
+            "overlap",
+            "stall, hard gate",
+            "stall, relative gate",
             "speed",
+            "added syncs and launches",
             "boots",
         ]
     )
@@ -853,3 +904,128 @@ def test_plan_commands(tmp_path, capsys):
     assert "+x" in out.read_text()
     assert rep.main(["plan-diff", str(tmp_path / "a"), str(tmp_path / "none")]) == 0
     assert capsys.readouterr().out.strip() == "a launch plan is missing"
+
+
+def test_max_gpu_temp_reads_the_tempwatch_log(tmp_path):
+    assert rep.max_gpu_temp(tmp_path) is None
+    (tmp_path / "temps-gpus.log").write_text(
+        "23:07:14 d9=31 dc=30 df=32 e2=31\n23:07:15 d9=31 dc=73 df=32 e2=31\n"
+    )
+    assert rep.max_gpu_temp(tmp_path) == 73
+
+
+# ------------------------------------------------------------ overlap and stalls
+
+
+def cell_result(cell, out_tps, status="ok", detail=""):
+    values = {"out_tps": out_tps} if status == "ok" else None
+    return rep.CellResult(cell, status, detail, values)
+
+
+def test_peak_overlap_counts_the_requests_open_at_once():
+    assert rep.peak_overlap([]) == 0
+    assert rep.peak_overlap([(0, 1), (1, 2), (2, 3)]) == 1  # touching is not meeting
+    assert rep.peak_overlap([(0, 3), (1, 4), (2, 5)]) == 3
+
+
+def test_request_times_are_relative_to_the_first_submit_and_skip_failures():
+    data = {
+        "start_times": [100.0, 100.5, 101.0],
+        "ttfts": [0.4, 0.5, 0.0],
+        "latencies": [5.0, 6.0, 0.0],
+        "errors": ["", "", ""],
+        "output_lens": [64, 64, 0],
+    }
+    rows = rep.request_times(data)
+    assert [(r.index, r.submit) for r in rows] == [(0, 0.0), (1, 0.5)]
+    assert rows[0].first == pytest.approx(0.4) and rows[0].last == pytest.approx(5.0)
+    assert rep.request_times({"completed": 4}) is None  # no --save-detailed
+
+
+def test_overlapping_requests_that_scale_pass_the_overlap_check():
+    cell, one = rep.Cell(1024, 512, 4), rep.Cell(1024, 512, 1)
+    requests = rep.request_times(request_arrays(8, 4))
+    got = rep.judge_overlap_run(
+        cell, cell_result(cell, 400.0), cell_result(one, 160.0), requests
+    )
+    assert got["verdict"] == "PASS" and got["peak_generating"] == 4
+    assert got["scaling"] == pytest.approx(2.5)
+    assert [r["submit"] for r in got["requests"]][:2] == [0.0, pytest.approx(0.01)]
+
+
+def test_requests_one_after_another_or_without_scaling_fail_the_overlap_check():
+    cell, one = rep.Cell(1024, 512, 4), rep.Cell(1024, 512, 1)
+    serial = rep.request_times(request_arrays(8, 4, serial=True))
+    got = rep.judge_overlap_run(
+        cell, cell_result(cell, 400.0), cell_result(one, 160.0), serial
+    )
+    assert got["verdict"] == "FAIL" and got["peak_generating"] == 1
+    assert "one after another" in got["reasons"][0]
+    overlapping = rep.request_times(request_arrays(8, 4))
+    got = rep.judge_overlap_run(
+        cell, cell_result(cell, 150.0), cell_result(one, 160.0), overlapping
+    )
+    assert got["verdict"] == "FAIL" and got["peak_generating"] == 4
+    assert "not above" in got["reasons"][0]
+
+
+def test_an_overlap_check_without_data_is_invalid_not_passed():
+    cell = rep.Cell(1024, 512, 4)
+    got = rep.judge_overlap_run(cell, cell_result(cell, 400.0), None, None)
+    assert got["verdict"] == "INVALID" and "save-detailed" in got["reasons"][0]
+    evicted = cell_result(cell, 0.0, status="invalid", detail="KFD eviction")
+    requests = rep.request_times(request_arrays(8, 4))
+    got = rep.judge_overlap_run(cell, evicted, None, requests)
+    assert got["verdict"] == "INVALID" and "KFD eviction" in got["reasons"][0]
+
+
+def stall_window(length, starved=0, tokens=7):
+    return {"len": length, "starved": starved, "decode_tokens_min": tokens}
+
+
+def stall_data(windows_by_repeat, repeats=None, lens=(4096, 16384), **extra):
+    runs = [
+        {"scenario": "inject", "repeat": r, "windows": windows}
+        for r, windows in enumerate(windows_by_repeat)
+    ]
+    config = {"prefill_lens": list(lens), "repeats": repeats or len(runs)}
+    return {"config": config, "runs": runs, "verdict": "PASS", **extra}
+
+
+def stall_boot(tmp_path, data, role="head"):
+    path = tmp_path / "B1"
+    (path / "stall").mkdir(parents=True, exist_ok=True)
+    target = path / "stall" / "stall_probe.json"
+    target.unlink(missing_ok=True)
+    if data is not None:
+        target.write_text(json.dumps(data))
+    return rep.Boot("B1", role, "speed", path, {}, rep.BootLog())
+
+
+def test_the_hard_stall_gate_checks_every_injected_prefill_of_every_repeat():
+    good = [stall_window(4096), stall_window(16384)]
+    assert rep.stall_hard_failures(stall_data([good, good])) == []
+    starved = [stall_window(4096), stall_window(16384, starved=2)]
+    silent = [stall_window(4096, tokens=0), stall_window(16384)]
+    got = rep.stall_hard_failures(stall_data([good, starved, silent]))
+    assert got == [
+        "inject:16384 repeat 1: 2 decoder stream(s) starved",
+        "inject:4096 repeat 2: a decoder produced no token during the prefill",
+    ]
+    reverse = {"scenario": "reverse", "repeat": 0, "windows": [stall_window(16384, 3)]}
+    data = stall_data([good])
+    data["runs"].append(reverse)  # reverse arrivals are reported, not hard-gated
+    assert rep.stall_hard_failures(data) == []
+
+
+def test_a_stall_boot_is_missing_error_invalid_fail_or_pass(tmp_path):
+    good = [stall_window(4096), stall_window(16384)]
+    status = lambda data: rep.judge_stall_boot(stall_boot(tmp_path, data))["status"]  # noqa: E731
+    assert status(None) == "MISSING"
+    assert status(stall_data([good, good])) == "PASS"
+    assert status(stall_data([good, [stall_window(4096, 1), stall_window(16384)]])) == (
+        "FAIL"
+    )
+    assert status(stall_data([good], repeats=2)) == "ERROR"  # fewer prefills than asked
+    assert status(stall_data([good], kfd_evictions={"invalid": ["w1"]})) == "INVALID"
+    assert status(stall_data([good], verdict="ERROR")) == "ERROR"

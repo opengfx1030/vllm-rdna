@@ -13,15 +13,19 @@ directories into ``receipt.md`` and ``receipt.json``.
     pr_receipt_report.py boot RUN_DIR ID ROLE KIND DIR [KEY=VALUE ...]
     pr_receipt_report.py env --gpus 2,3,4,5 [--out FILE] [--buses]
     pr_receipt_report.py plan-diff BASE_PLAN HEAD_PLAN [--mask FROM=TO ...]
-    pr_receipt_report.py plan-field PLAN compilation
+    pr_receipt_report.py plan-field PLAN compilation|max-num-seqs
     pr_receipt_report.py report RUN_DIR
 
 A boot has a role (``base`` or ``head``) and a kind: ``exact`` (deterministic
-MoE, token hashes), ``speed`` (production mode: bench cells, quality
-collects) or ``floor`` (a second base boot that only feeds the quality floor).
+MoE, token hashes), ``speed`` (production mode: bench cells, the stall probe,
+quality collects) or ``floor`` (a second base boot that only feeds the quality
+floor).
 
 ``report`` exits 0 when every gate that was run passed, 1 when one failed or
-could not be judged. Speed verdicts are reported, not gated. Standard library
+could not be judged: token-exact, quality, the overlap of the c=4 and c=8
+cells, the hard stall gate and, under ``MODE=abba``, a regression of the
+relative stall gate. Speed verdicts are reported, not gated; so is the diff
+scan (``scan.json``), which lists lines for the reviewer. Standard library
 and ``regex`` only; run it with the python of a built venv.
 """
 
@@ -49,6 +53,9 @@ DEFAULT_CELLS = (
 )
 DEFAULT_EXACT_CELLS = "1024:128:1:4 16384:128:1:2"
 MAX_PPL_REL = 0.02
+# Gate results that do not fail the run: a gate that was not asked for, and a
+# comparison of single runs, which shows a direction and no verdict.
+GATE_OK = ("PASS", "NOT RUN", "direction only")
 
 
 def load_sibling(name: str) -> ModuleType:
@@ -397,6 +404,14 @@ def read_text(path: Path) -> str:
         return ""
 
 
+def max_gpu_temp(bootdir: Path) -> int | None:
+    """Hottest sample (degrees C) of the boot's tempwatch.py log, if it has one."""
+    temps = [
+        int(t) for t in re.findall(r"=(\d+)", read_text(bootdir / "temps-gpus.log"))
+    ]
+    return max(temps) if temps else None
+
+
 def load_boots(run: Path, manifest: dict) -> list[Boot]:
     boots = []
     for rec in manifest.get("boots", []):
@@ -491,6 +506,358 @@ def judge_speed(
         "boots": {b.id: b.role for b in speed},
         "cells": out_cells,
         "counts": counts if mode == "abba" else counts_ab,
+    }
+
+
+# ----------------------------------------------------------------- overlap
+
+OVERLAP_MIN_CONC = 4  # the contract asks for the c=4 and c=8 cells
+
+
+@dataclass(frozen=True)
+class RequestTimes:
+    """One request of a bench cell; times in seconds from the cell's first submit."""
+
+    index: int
+    submit: float
+    first: float
+    last: float
+    tokens: int
+
+
+def request_times(data: dict) -> list[RequestTimes] | None:
+    """Per-request times of a cell that ran with ``--save-detailed``, else None."""
+    starts = data.get("start_times") or []
+    ttfts = data.get("ttfts") or []
+    latencies = data.get("latencies") or []
+    n = min(len(starts), len(ttfts), len(latencies))
+    if not n:
+        return None
+    errors = data.get("errors") or [""] * n
+    lens = data.get("output_lens") or [0] * n
+    t0 = min(starts[:n])
+    rows = []
+    for i in range(n):
+        if (i < len(errors) and errors[i]) or not ttfts[i] or not latencies[i]:
+            continue
+        submit = starts[i] - t0
+        tokens = int(lens[i]) if i < len(lens) else 0
+        rows.append(
+            RequestTimes(i, submit, submit + ttfts[i], submit + latencies[i], tokens)
+        )
+    return rows
+
+
+def peak_overlap(spans: Iterable[tuple[float, float]]) -> int:
+    """The most intervals open at once; one that ends at t does not meet one at t."""
+    events = []
+    for begin, end in spans:
+        events += [(begin, 1), (end, -1)]
+    open_now = peak = 0
+    for _, step in sorted(events):
+        open_now += step
+        peak = max(peak, open_now)
+    return peak
+
+
+def judge_overlap_run(
+    cell: Cell, run: CellResult, ref: CellResult | None, requests: list | None
+) -> dict[str, object]:
+    """Do the requests of one cell on one boot overlap, and does the aggregate scale?"""
+    out: dict[str, object] = {"status": run.status, "detail": run.detail}
+    if run.status != "ok" or run.values is None:
+        out["verdict"] = "INVALID"
+        out["reasons"] = [f"{run.status}: {run.detail}".rstrip(": ")]
+        return out
+    if requests is None:
+        out["verdict"] = "INVALID"
+        out["reasons"] = ["no per-request times (the cell ran without --save-detailed)"]
+        return out
+    out["requests"] = [
+        {"i": r.index, "submit": r.submit, "first": r.first, "last": r.last}
+        | {"tokens": r.tokens}
+        for r in requests
+    ]
+    generating = peak_overlap((r.first, r.last) for r in requests)
+    queued = peak_overlap((r.submit, r.last) for r in requests)
+    out["peak_generating"] = generating
+    out["peak_in_flight"] = queued
+    out["out_tps"] = run.values["out_tps"]
+    reasons = []
+    if generating < 2:
+        reasons.append(
+            "requests ran one after another: at most one generating at a time"
+        )
+    scaling = None
+    if ref is not None and ref.status == "ok" and ref.values:
+        out["ref_out_tps"] = ref.values["out_tps"]
+        if ref.values["out_tps"] > 0:
+            scaling = run.values["out_tps"] / ref.values["out_tps"]
+    out["scaling"] = scaling
+    if scaling is not None and scaling <= 1.0:
+        reasons.append(
+            f"aggregate output {run.values['out_tps']:.2f} tok/s at c={cell.conc} "
+            f"is not above {ref.values['out_tps']:.2f} tok/s at c=1"  # type: ignore[union-attr, index]
+        )
+    out["verdict"] = "FAIL" if reasons else "PASS"
+    out["reasons"] = reasons
+    return out
+
+
+def judge_overlap(boots: Sequence[Boot], cells: Sequence[Cell]) -> dict[str, object]:
+    """The c=4 and c=8 cells of every speed boot: overlap and aggregate scaling.
+
+    A cell fails when its requests run one after another (never two generating
+    at once) or when its aggregate output tok/s is not above the c=1 cell of
+    the same shape on the same boot. The gate is the head boots; the base
+    boots are shown beside them.
+    """
+    speed = [b for b in boots if b.kind == "speed"]
+    out_cells = []
+    for cell in cells:
+        if cell.conc < OVERLAP_MIN_CONC:
+            continue
+        ref_cell = next(
+            (
+                c
+                for c in cells
+                if (c.in_len, c.out_len, c.conc) == (cell.in_len, cell.out_len, 1)
+            ),
+            None,
+        )
+        runs = {}
+        for b in speed:
+            result = load_cell(b.path, cell, b.log)
+            ref = load_cell(b.path, ref_cell, b.log) if ref_cell else None
+            requests = None
+            if result.status in ("ok", "invalid"):
+                try:
+                    requests = request_times(
+                        json.loads((b.path / f"{cell.name}.json").read_text())
+                    )
+                except (OSError, ValueError):
+                    requests = None
+            runs[b.id] = {"role": b.role} | judge_overlap_run(
+                cell, result, ref, requests
+            )
+        out_cells.append(
+            {
+                "name": cell.name,
+                "label": cell.label,
+                "n": cell.n,
+                "conc": cell.conc,
+                "runs": runs,
+            }
+        )
+    head = [
+        (c["label"], i, r)
+        for c in out_cells
+        for i, r in c["runs"].items()  # type: ignore[attr-defined]
+        if r["role"] == "head"
+    ]
+    if not out_cells:
+        verdict = "NOT RUN"
+    elif any(r["verdict"] == "FAIL" for _, _, r in head):
+        verdict = "FAIL"
+    elif not head or any(r["verdict"] != "PASS" for _, _, r in head):
+        verdict = "INVALID"
+    else:
+        verdict = "PASS"
+    return {
+        "verdict": verdict,
+        "boots": {b.id: b.role for b in speed},
+        "cells": out_cells,
+        "failing": [f"{label} {i}" for label, i, r in head if r["verdict"] == "FAIL"],
+    }
+
+
+# ------------------------------------------------------------------ stalls
+
+STALL_METRICS = (
+    Metric("max_gap_ms", "longest stall", "ms", 1.0, 0, True),
+    Metric("stalled_s_max", "stalled time of the worst decoder", "s", 1.0, 2, True),
+    Metric(
+        "decode_tokens_total", "decode tokens during the prefill", "", 1.0, 0, False
+    ),
+    Metric("jain", "Jain fairness", "", 1.0, 3, False),
+    Metric("slowdown", "injected TTFT / solo TTFT", "x", 1.0, 2, True),
+)
+BAD_STALL = ("ERROR", "INVALID", "MISSING")  # a boot whose numbers cannot be used
+
+
+def stall_hard_failures(data: dict) -> list[str]:
+    """Hard gate of one stall_probe.json: every injected prefill, every repeat.
+
+    No decoder stream is starved and every decoder produced tokens while the
+    prefill was in flight.
+    """
+    out = []
+    for run in data.get("runs", []):
+        if run.get("scenario") != "inject":
+            continue
+        for w in run.get("windows", []):
+            tag = f"inject:{w.get('len')} repeat {run.get('repeat')}"
+            starved = int(w.get("starved") or 0)
+            if starved:
+                out.append(f"{tag}: {starved} decoder stream(s) starved")
+            elif int(w.get("decode_tokens_min") or 0) < 1:
+                out.append(f"{tag}: a decoder produced no token during the prefill")
+    return out
+
+
+def stall_coverage(data: dict) -> tuple[int, int]:
+    """Injected prefills measured, and the number the settings ask for."""
+    cfg = data.get("config", {})
+    wanted = len(cfg.get("prefill_lens") or []) * int(cfg.get("repeats") or 0)
+    got = sum(
+        len(r.get("windows", []))
+        for r in data.get("runs", [])
+        if r.get("scenario") == "inject"
+    )
+    return got, wanted
+
+
+def judge_stall_boot(boot: Boot) -> dict[str, object]:
+    """Status of the stall probe of one boot: PASS, FAIL, INVALID, ERROR, MISSING."""
+    data = read_json(boot.path / "stall" / "stall_probe.json")
+    if not data:
+        return {"role": boot.role, "status": "MISSING", "failures": [], "data": {}}
+    got, wanted = stall_coverage(data)
+    failures = stall_hard_failures(data)
+    invalid = (data.get("kfd_evictions") or {}).get("invalid") or []
+    errors = [
+        f"{r['scenario']} r{r['repeat']}: {r.get('error') or e}"
+        for r in data.get("runs", [])
+        for e in ([None] if r.get("error") else r.get("stream_errors", []))
+    ]
+    if data.get("verdict") == "ERROR" or got < wanted:
+        status = "ERROR"
+        if got < wanted:
+            errors.append(f"{got} of {wanted} injected prefills were measured")
+    elif invalid:
+        status = "INVALID"
+    elif failures:
+        status = "FAIL"
+    else:
+        status = "PASS"
+    windows = [
+        w
+        for r in data.get("runs", [])
+        if r.get("scenario") == "inject"
+        for w in r.get("windows", [])
+    ]
+    cfg = data.get("config", {})
+    return {
+        "role": boot.role,
+        "status": status,
+        "failures": failures,
+        "invalid": invalid,
+        "errors": errors,
+        "decoders": cfg.get("decoders"),
+        "repeats": cfg.get("repeats"),
+        "lens": cfg.get("prefill_lens"),
+        "injected": len(windows),
+        "starved_max": max((int(w.get("starved") or 0) for w in windows), default=None),
+        "tokens_min": min(
+            (int(w.get("decode_tokens_min") or 0) for w in windows), default=None
+        ),
+        "data": data,
+    }
+
+
+def stall_values(data: dict) -> dict[str, dict[str, float | None]]:
+    """Median over repeats of every relative-gate metric, per window key."""
+    out: dict[str, dict[str, float | None]] = {}
+    for key, metrics in (data.get("aggregate") or {}).get("windows", {}).items():
+        if key.split(":")[0] not in ("inject", "reverse") or key.endswith("busy"):
+            continue
+        out[key] = {
+            m.key: (metrics.get(m.key) or {}).get("median") for m in STALL_METRICS
+        }
+    return out
+
+
+def window_order(key: str) -> tuple[int, int]:
+    scenario, _, length = key.partition(":")
+    return (0 if scenario == "inject" else 1, int(length) if length.isdigit() else 0)
+
+
+def judge_stall(boots: Sequence[Boot], settings: dict, mode: str) -> dict[str, object]:
+    """Hard gate and relative gate of the stall probes of the speed boots.
+
+    Hard: no starved decoder stream and tokens from every decoder during every
+    injected prefill (head boots decide, base boots are shown). Relative: the
+    ABBA rule of the speed receipt on the longest stall, the stalled time, the
+    decode tokens during the prefill, Jain fairness and the injected TTFT
+    against its solo TTFT; with one run of each, direction only.
+    """
+    speed = [b for b in boots if b.kind == "speed"]
+    per_boot = {b.id: judge_stall_boot(b) for b in speed}
+    asked = str(settings.get("stall", "0")) == "1"
+    if not asked and all(p["status"] == "MISSING" for p in per_boot.values()):
+        return {"ran": False, "verdict": "NOT RUN", "relative": "NOT RUN"}
+    head = [p["status"] for p in per_boot.values() if p["role"] == "head"]
+    if not head or any(s in ("ERROR", "MISSING") for s in head):
+        verdict = "ERROR"
+    elif "INVALID" in head:
+        verdict = "INVALID"
+    elif "FAIL" in head:
+        verdict = "FAIL"
+    else:
+        verdict = "PASS"
+    usable = {
+        i: stall_values(p["data"])  # type: ignore[arg-type]
+        for i, p in per_boot.items()
+        if p["status"] not in BAD_STALL
+    }
+    keys = sorted({k for v in usable.values() for k in v}, key=window_order)
+    abba = mode == "abba"
+    windows = []
+    counts = {"regression": 0, "win": 0, "none": 0, "worse": 0, "better": 0, "equal": 0}
+    for key in keys:
+        metrics: dict[str, dict[str, object]] = {}
+        for m in STALL_METRICS:
+            values = {i: v[key][m.key] for i, v in usable.items() if key in v}
+            base = [
+                x
+                for i, x in values.items()
+                if per_boot[i]["role"] == "base" and x is not None
+            ]
+            hd = [
+                x
+                for i, x in values.items()
+                if per_boot[i]["role"] == "head" and x is not None
+            ]
+            entry: dict[str, object] = {"values": values, "base": base, "head": hd}
+            if base and hd:
+                entry["delta_pct"] = delta_pct(base, hd)
+                entry["verdict"] = abba_verdict(base, hd, m.lower_is_better)
+                entry["direction"] = ab_direction(
+                    mean(base), mean(hd), m.lower_is_better
+                )
+                counts[str(entry["verdict"] if abba else entry["direction"])] += 1
+            else:
+                entry["delta_pct"] = None
+                entry["verdict"] = entry["direction"] = "n/a"
+            metrics[m.key] = entry
+        windows.append({"key": key, "metrics": metrics})
+    if not windows or not any(p["role"] == "base" for p in per_boot.values()):
+        relative = "NOT RUN"
+    elif abba:
+        relative = "REGRESSION" if counts["regression"] else "PASS"
+    else:
+        relative = "direction only"
+    return {
+        "ran": True,
+        "mode": mode,
+        "verdict": verdict,
+        "relative": relative,
+        "boots": {b.id: b.role for b in speed},
+        "per_boot": {
+            i: {k: v for k, v in p.items() if k != "data"} for i, p in per_boot.items()
+        },
+        "windows": windows,
+        "counts": counts,
     }
 
 
@@ -861,6 +1228,195 @@ def accept_markdown(speed: dict) -> str | None:
     return md_table(head, rows)
 
 
+def fmt_seconds(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2f}"
+
+
+def overlap_markdown(overlap: dict) -> str:
+    """The overlap table, then every request's times of every c=4 and c=8 cell."""
+    cells = overlap["cells"]
+    if not cells:
+        return "No c=4 or c=8 cell was run."
+    rows = []
+    for cell in cells:
+        for boot_id, run in cell["runs"].items():
+            scaling, ref = run.get("scaling"), run.get("ref_out_tps")
+            result = run["verdict"]
+            if result != "PASS":
+                result += ": " + "; ".join(run["reasons"])
+            rows.append(
+                [
+                    cell["label"],
+                    f"{boot_id} {run['role']}",
+                    f"{len(run['requests'])} of {cell['n']}"
+                    if "requests" in run
+                    else "-",
+                    run.get("peak_generating", "-"),
+                    run.get("peak_in_flight", "-"),
+                    "-" if run.get("out_tps") is None else f"{run['out_tps']:.2f}",
+                    "-" if ref is None else f"{ref:.2f}",
+                    "-" if scaling is None else f"x{scaling:.2f}",
+                    result,
+                ]
+            )
+    head = [
+        "cell",
+        "boot",
+        "requests timed",
+        "most generating at once",
+        "most in flight",
+        "output tok/s",
+        "c=1 output tok/s",
+        "scaling",
+        "result",
+    ]
+    text = [
+        md_table(head, rows),
+        (
+            "\nA cell fails when no two of its requests generate at the same time "
+            "(first token to last token), or when its aggregate output tok/s is "
+            "not above the c=1 cell of the same shape on the same boot. Times are "
+            "seconds from the first submit of the cell. The gate is the head boots."
+        ),
+    ]
+    for cell in cells:
+        for boot_id, run in cell["runs"].items():
+            if not run.get("requests"):
+                continue
+            table = md_table(
+                [
+                    "request",
+                    "submit (s)",
+                    "first token (s)",
+                    "last token (s)",
+                    "output tokens",
+                ],
+                [
+                    [
+                        r["i"],
+                        fmt_seconds(r["submit"]),
+                        fmt_seconds(r["first"]),
+                        fmt_seconds(r["last"]),
+                        r["tokens"],
+                    ]
+                    for r in run["requests"]
+                ],
+            )
+            text.append(
+                f"\n<details><summary>{cell['label']}, {boot_id} {run['role']}: "
+                "submit, first token and last token of each request</summary>\n\n"
+                f"{table}\n\n</details>"
+            )
+    return "\n".join(text)
+
+
+STALL_INTRO = (
+    "`stall_probe.py` on every speed boot (`inject` and `reverse`, with `solo` "
+    "for the reference TTFT; `--server-pid`, so a KFD eviction invalidates a "
+    "window). Hard gate: no decoder stream is starved, and every decoder "
+    "produces tokens during every injected prefill. Relative gate, with the "
+    "ABBA rule of the speed table: the longest stall, the stalled time, the "
+    "decode tokens during the prefill, Jain fairness and the injected "
+    "request's TTFT against its solo TTFT must not regress."
+)
+
+
+def stall_markdown(stall: dict) -> str:
+    """The hard-gate table per boot, then the relative gate per window."""
+    if not stall["ran"]:
+        return "Not run."
+    rows = []
+    notes = []
+    for boot_id, p in stall["per_boot"].items():
+        rows.append(
+            [
+                boot_id,
+                p["role"],
+                p.get("decoders", "-"),
+                p.get("repeats", "-"),
+                "/".join(str(n) for n in p.get("lens") or []) or "-",
+                p.get("injected", "-"),
+                "-" if p.get("starved_max") is None else p["starved_max"],
+                "-" if p.get("tokens_min") is None else p["tokens_min"],
+                len(p.get("invalid") or []),
+                p["status"],
+            ]
+        )
+        notes += [
+            f"- {boot_id}: {line}"
+            for line in (p.get("failures") or [])
+            + (p.get("invalid") or [])
+            + (p.get("errors") or [])
+        ]
+        if p["status"] == "MISSING":
+            notes.append(f"- {boot_id}: no stall_probe.json (the probe did not finish)")
+    text = [
+        md_table(
+            [
+                "boot",
+                "role",
+                "decoders",
+                "repeats",
+                "prefill tokens",
+                "injected prefills measured",
+                "most decoders starved in a window",
+                "fewest tokens of a decoder in a window",
+                "windows hit by a KFD eviction",
+                "hard gate",
+            ],
+            rows,
+        )
+    ]
+    if notes:
+        text.append("\n" + "\n".join(notes))
+    if stall["windows"]:
+        abba = stall["mode"] == "abba"
+        ids = list(stall["boots"])
+        head = ["window", "metric"] + [f"{i} {stall['boots'][i]}" for i in ids]
+        head += ["head vs base", "result"]
+        marks = {"regression": "REGRESSION", "win": "win"}
+        detail = []
+        for w in stall["windows"]:
+            for m in STALL_METRICS:
+                e = w["metrics"][m.key]
+                row = [w["key"], m.title + (f" ({m.unit})" if m.unit else "")]
+                row += [fmt_value(m, e["values"].get(i)) for i in ids]
+                shown = e["verdict"] if abba else e["direction"]
+                row += [
+                    fmt_delta(e["delta_pct"]),
+                    marks.get(shown, shown if shown in ("worse", "better") else ""),
+                ]
+                detail.append(row)
+        text.append("\n" + md_table(head, detail))
+        text.append(
+            "\n`inject:<n>`: a prefill of n tokens injected into the running "
+            "decoders, from its submit to its first token. `reverse:<n>`: the "
+            "n-token prefill is already running when the decoders arrive. Each "
+            "value is the median over the repeats of one boot. "
+            + (
+                "`REGRESSION` and `win` apply the ABBA rule: both head runs on "
+                "the same side of both base runs."
+                if abba
+                else "One base run and one head run: the result column shows "
+                "the direction, which is not a verdict; rerun with `MODE=abba`."
+            )
+        )
+    return "\n".join(text)
+
+
+def scan_text(run: Path) -> tuple[str, str]:
+    """Gate-table cell and body of the diff scan (pr_receipt_scan.py)."""
+    data = read_json(run / "scan.json")
+    body = read_text(run / "scan.md").strip()
+    if not data or not body:
+        return "NOT RUN", "Not run."
+    found = data.get("findings") or []
+    if not found:
+        return "none", body
+    steps = data.get("step_count", 0)
+    return f"{len(found)} lines to review ({steps} in the per-step path)", body
+
+
 def exact_markdown(exact: dict) -> str:
     if not exact["ran"]:
         return "Not run."
@@ -996,6 +1552,7 @@ def health_markdown(boots: Sequence[Boot]) -> str:
                 state,
                 probes if seen else "-",
                 log.evicted_since_ready or "-",
+                "-" if (temp := max_gpu_temp(b.path)) is None else f"{temp} C",
                 "-" if log.fault_markers is None else log.fault_markers,
                 log.dmesg_faults or "-",
                 "-" if b.rc is None else b.rc,
@@ -1010,6 +1567,7 @@ def health_markdown(boots: Sequence[Boot]) -> str:
             "summary",
             "probes",
             "KFD evictions since READY",
+            "max GPU temp",
             "fault markers",
             "dmesg faults",
             "exit",
@@ -1149,10 +1707,23 @@ def build_receipt(run: Path) -> dict:
         else {"ran": False, "verdict": "NOT RUN"}
     )
     quality = judge_quality(run, boots, settings)
+    overlap = (
+        judge_overlap(boots, cells)
+        if cells
+        else {"verdict": "NOT RUN", "boots": {}, "cells": [], "failing": []}
+    )
+    stall = judge_stall(boots, settings, mode)
+    scan = read_json(run / "scan.json")
     boot_bad = [b.id for b in boots if b.rc not in (None, 0) or b.log.boot_failed]
-    gates = {"exact": exact["verdict"], "quality": quality["verdict"]}
+    gates = {
+        "exact": exact["verdict"],
+        "quality": quality["verdict"],
+        "overlap": overlap["verdict"],
+        "stall": stall["verdict"],
+        "stall_relative": stall["relative"],
+    }
     ok = (
-        all(v in ("PASS", "NOT RUN") for v in gates.values())
+        all(v in GATE_OK for v in gates.values())
         and not boot_bad
         and (exact["ran"] or str(settings.get("exact", "1")) != "1")
     )
@@ -1164,6 +1735,13 @@ def build_receipt(run: Path) -> dict:
         "exact": exact,
         "quality": quality,
         "speed": speed,
+        "overlap": overlap,
+        "stall": stall,
+        "scan": {
+            "ran": bool(scan),
+            "findings": len(scan.get("findings") or []),
+            "per_step_path": scan.get("step_count", 0),
+        },
         "gates": gates,
         "boot_failures": boot_bad,
         "ok": ok,
@@ -1219,6 +1797,38 @@ def raw_results(settings: dict, run: Path) -> str:
     )
 
 
+SCAN_INTRO = (
+    "Lines the change adds that match a host-synchronization pattern "
+    "(`synchronize(`, `.item()`, `.cpu()`, `.tolist()`, a blocking copy) in "
+    "`vllm/`, or a kernel launch on the null stream or without a launch check "
+    "in `csrc/`. The scan lists them for the reviewer, who decides whether one "
+    "is on the per-step path and whether the PR measures why it is needed; it "
+    "gives no verdict."
+)
+
+
+def stall_relative_text(stall: dict) -> str:
+    """The relative stall gate as one table cell."""
+    if not stall["ran"] or stall["relative"] == "NOT RUN":
+        return "NOT RUN"
+    c = stall["counts"]
+    if stall["relative"] == "direction only":
+        return (
+            f"direction only: {c['worse']} worse, {c['better']} better, "
+            f"{c['equal']} equal (one run each; not a verdict)"
+        )
+    if stall["relative"] == "REGRESSION":
+        return f"REGRESSION on {c['regression']} comparisons ({c['win']} win)"
+    return f"PASS ({c['win']} win, {c['none']} no measurable difference)"
+
+
+def overlap_text(overlap: dict) -> str:
+    """The overlap gate as one table cell."""
+    if overlap["failing"]:
+        return "FAIL: " + ", ".join(overlap["failing"])
+    return overlap["verdict"]
+
+
 def render(receipt: dict, run: Path) -> str:
     """receipt.md: the tables of the PR template, in its order."""
     settings = receipt["settings"]
@@ -1237,6 +1847,19 @@ def render(receipt: dict, run: Path) -> str:
             speed_body += "\n\n#### Speculative acceptance length\n\n" + accept
     else:
         speed_body += "No speed cells were run."
+    scan_gate, scan_body = scan_text(run)
+    concurrency_body = "\n\n".join(
+        [
+            "#### Overlap",
+            overlap_markdown(receipt["overlap"]),
+            "#### Stall probe",
+            STALL_INTRO,
+            stall_markdown(receipt["stall"]),
+            "#### Added host syncs and launches",
+            SCAN_INTRO,
+            scan_body,
+        ]
+    )
     sections = [
         ("Environment", environment_markdown(settings, run)),
         ("Change class and reach", reach_markdown(settings, boots, run)),
@@ -1246,6 +1869,7 @@ def render(receipt: dict, run: Path) -> str:
             quality_intro(settings) + "\n\n" + quality_markdown(receipt["quality"]),
         ),
         ("Speed", speed_body),
+        ("Concurrency and stalls", concurrency_body),
         ("Boots", health_markdown(boots)),
         ("Raw results", raw_results(settings, run)),
     ]
@@ -1256,7 +1880,11 @@ def render(receipt: dict, run: Path) -> str:
         [
             ["token-exact", gates["exact"]],
             ["quality", gates["quality"]],
+            ["overlap", overlap_text(receipt["overlap"])],
+            ["stall, hard gate", gates["stall"]],
+            ["stall, relative gate", stall_relative_text(receipt["stall"])],
             ["speed", speed_counts(speed)],
+            ["added syncs and launches", scan_gate],
             ["boots", "FAILED: " + ", ".join(failed) if failed else "all exited 0"],
         ],
     )
@@ -1281,6 +1909,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     speed = receipt["speed"]
     print(f"token-exact: {gates['exact']}")
     print(f"quality: {gates['quality']}")
+    print(f"overlap: {gates['overlap']}")
+    print(f"stall: {gates['stall']} (relative: {gates['stall_relative']})")
     if speed:
         print(
             f"speed ({speed['mode']}): "
@@ -1385,11 +2015,15 @@ def cmd_plan_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+PLAN_FIELDS = {
+    "compilation": r"'--compilation-config'\s+'([^']*)'",
+    "max-num-seqs": r"'--max-num-seqs'\s+'(\d+)'",
+}
+
+
 def cmd_plan_field(args: argparse.Namespace) -> int:
-    text = read_text(Path(args.plan))
-    if args.field == "compilation":
-        m = re.search(r"'--compilation-config'\s+'([^']*)'", text)
-        print(m.group(1) if m else "")
+    m = re.search(PLAN_FIELDS[args.field], read_text(Path(args.plan)))
+    print(m.group(1) if m else "")
     return 0
 
 
@@ -1469,7 +2103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.set_defaults(func=cmd_plan_diff)
     p = sub.add_parser("plan-field", help="one value of a launch plan")
     p.add_argument("plan")
-    p.add_argument("field", choices=["compilation"])
+    p.add_argument("field", choices=sorted(PLAN_FIELDS))
     p.set_defaults(func=cmd_plan_field)
     p = sub.add_parser("report", help="write receipt.md and receipt.json")
     p.add_argument("run")

@@ -16,7 +16,7 @@
 
 <!-- Explain motivation, design decisions, root cause, tradeoffs, and limitations concisely. Link or collapse lengthy supporting material. -->
 
-## RDNA receipt: <head sha> against <base sha>
+## RDNA receipt: head-sha against base-sha
 
 <!-- RDNA fork: required for every pull request, see .github/CONTRIBUTING.md. Run tools/rdna/pr_receipt.sh and paste its receipt.md in place of this block (its sections are these sections); fill in what the script cannot know. Write "not run" for anything you did not run: not run is not a pass. -->
 
@@ -24,7 +24,11 @@
 |---|---|
 | token-exact | <!-- PASS / FAIL / INCONCLUSIVE / NOT RUN --> |
 | quality | <!-- PASS / FAIL / NOT RUN --> |
+| overlap | <!-- c=4 and c=8 cells: PASS / FAIL / INVALID / NOT RUN --> |
+| stall, hard gate | <!-- PASS / FAIL / INVALID / ERROR / NOT RUN --> |
+| stall, relative gate | <!-- PASS / REGRESSION / direction only (MODE=ab) / NOT RUN --> |
 | speed | <!-- cells: no measurable difference / win / REGRESSION / invalid --> |
+| added syncs and launches | <!-- lines to review / none / NOT RUN --> |
 | boots | <!-- all exited 0, or the boots that failed --> |
 
 ### Environment
@@ -50,6 +54,22 @@
 #### Speculative acceptance length
 
 <!-- Only when the recipe speculates or the change touches speculative decoding / drafter / verify. -->
+
+### Concurrency and stalls
+
+<!-- Serving must be concurrent and asynchronous: requests overlap, decoders keep producing tokens while others prefill, no change adds a sequential step. -->
+
+#### Overlap
+
+<!-- c=4 and c=8 cells, per boot: each request's submit, first-token and last-token times, the most requests generating at once, and the aggregate output tok/s against c=1. A cell whose requests run one after another, or whose aggregate output at c=N is not above c=1, fails. -->
+
+#### Stall probe
+
+<!-- stall_probe.py on every speed boot (inject and reverse, decoders = the recipe's max concurrency less the injected request's slot, prefill 4096 and 16384; a KFD eviction invalidates a window). Hard gate: no starved decoder stream, tokens from every decoder during every injected prefill. Relative gate (ABBA rule): longest stall, stalled time, decode tokens during the prefill, Jain fairness, injected TTFT against solo. -->
+
+#### Added host syncs and launches
+
+<!-- Added lines in the diff that match host-sync patterns (synchronize(, .item(), .cpu(), .tolist(), blocking copies) in vllm/, and kernel launches on the null stream or without a launch check in csrc/. For the reviewer; if a sync is needed on the per-step path, say where the PR measures why. -->
 
 ### Boots
 

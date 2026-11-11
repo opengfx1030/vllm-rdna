@@ -23,11 +23,17 @@ PLAN_STUB = """#!/usr/bin/env bash
 tree=$(cd "$(dirname "$0")/../.." && pwd)
 echo "export PYTHONPATH='$tree'"
 extra=$(cat "$tree/plan_extra" 2> /dev/null)
-echo "'$tree/bin/python' '--compilation-config' '{\\"mode\\":3}' $extra"
+seqs=$(cat "$tree/seqs" 2> /dev/null || echo 8)
+args="'--compilation-config' '{\\"mode\\":3}' '--max-num-seqs' '$seqs'"
+echo "'$tree/bin/python' $args $extra"
 """
 
 VALIDATE_WRAPPER = """#!/usr/bin/env bash
 exec "$STUB_PYTHON" "$(dirname "$0")/stub_validate.py" "$@"
+"""
+
+PYTHON_WRAPPER = """#!/usr/bin/env bash
+PYTHONPATH="$(dirname "$0")/block" exec "$STUB_PYTHON" "$@"
 """
 
 VALIDATE_STUB = r"""
@@ -45,7 +51,8 @@ role = "head" if boot in ("XB", "B1", "B2") else "base"
 args = sys.argv[1:]
 keys = ("CELLS", "BENCH_EXTRA", "RESET_PREFIX_CACHE", "CONC_PROBE", "QUIET_HOLD",
         "LOAD_HOOK", "SERVE_TREE", "VENV", "QUALITY_WINDOWS", "QUALITY_LIMIT",
-        "HIP_VISIBLE_DEVICES", "QUIET_OWN", "QUIET_WIN_MAX", "RECEIPT_PY")
+        "HIP_VISIBLE_DEVICES", "QUIET_OWN", "QUIET_WIN_MAX", "RECEIPT_PY",
+        "STALL_PROBE", "STALL_ARGS", "STALL_ITER_LOG", "PREFIX_WORDS")
 with open(cfg["calls"], "a") as f:
     f.write(json.dumps({"boot": boot, "args": args,
                         "env": {k: os.environ.get(k) for k in keys}}) + "\n")
@@ -77,20 +84,50 @@ for cell in ([] if cells == ["none"] else cells):
     name = f"bench-{in_len}x{out_len}-c{conc}"
     speed = dict(cfg["speed"][role])
     ttft = speed["ttft"] * (1 + 0.05 * conc)
+    serial = cfg.get("serial", False)
     data = {"completed": n, "failed": 0, "duration": 20.0,
             "total_input_tokens": n * in_len, "max_concurrency": conc,
             "mean_ttft_ms": ttft, "median_ttft_ms": ttft, "p99_ttft_ms": ttft * 1.5,
             "mean_tpot_ms": 22.0, "median_itl_ms": speed["itl"],
             "mean_itl_ms": speed["itl"], "p99_itl_ms": speed["itl"] * 2,
-            "output_throughput": speed["out"],
+            "output_throughput": speed["out"] * (1 if serial else 1 + 0.5 * (conc - 1)),
             "spec_decode_acceptance_length": 2.9}
     if "--save-detailed" in os.environ.get("BENCH_EXTRA", ""):
         data["generated_texts"] = [f"text {i}" for i in range(n)]
+        step = 1 if serial else conc
+        data["start_times"] = [500.0 + (i // step) * 20.0 for i in range(n)]
+        data["ttfts"] = [0.7] * n
+        data["latencies"] = [19.0] * n
+        data["errors"] = [""] * n
+        data["output_lens"] = [out_len] * n
     (out / f"{name}.json").write_text(json.dumps(data))
     evict = cfg.get("invalid", {}).get(f"{boot}:{name}")
     lines += [f"[10:04:00] PREFIX RESET PASS before {name}",
               f"[10:04:00] bench {name} (n={n})", f"    {name} prefill 1.0",
               "    evicted_ms Worker_TP0=+0 -> " + ("INVALID (x)" if evict else "ok")]
+if os.environ.get("STALL_PROBE") == "1":
+    sargs = os.environ["STALL_ARGS"].split()
+    decoders = int(sargs[sargs.index("--decoders") + 1])
+    lens = [int(x) for x in sargs[sargs.index("--prefill-lens") + 1].split(",")]
+    repeats = int(sargs[sargs.index("--repeats") + 1])
+    vals = {"max_gap_ms": 500.0, "stalled_s_max": 1.0, "decode_tokens_total": 100,
+            "jain": 0.99, "slowdown": 1.1, **cfg.get("stall", {}).get(role, {})}
+    starved = cfg.get("starved", {}).get(boot, 0)
+    def win(n):
+        return {"len": n, "starved": starved,
+                "decode_tokens_min": 0 if starved else 7, **vals}
+    runs = [{"scenario": "inject", "repeat": r, "windows": [win(n) for n in lens]}
+            for r in range(repeats)]
+    runs += [{"scenario": "reverse", "repeat": r, "windows": [win(max(lens))]}
+             for r in range(repeats)]
+    keys_w = [f"inject:{n}" for n in lens] + [f"reverse:{max(lens)}"]
+    agg = {"windows": {k: {m: {"median": v} for m, v in vals.items()} for k in keys_w}}
+    (out / "stall").mkdir()
+    (out / "stall" / "stall_probe.json").write_text(json.dumps({
+        "config": {"decoders": decoders, "prefill_lens": lens, "repeats": repeats},
+        "runs": runs, "aggregate": agg, "verdict": "PASS",
+        "kfd_evictions": {"invalid": cfg.get("stall_invalid", {}).get(boot, [])}}))
+    lines.append("[10:08:30] STALL PROBE PASS (rc=0, see stall.txt)")
 if os.environ.get("LOAD_HOOK"):
     shutil.copy(cfg["npz"][boot], out / "topk.npz")
     shutil.copy(cfg["quality"][boot], out / "quality.json")
@@ -124,6 +161,11 @@ class Run:
         self.tmp = tmp_path
         self.base = make_tree(tmp_path, "base", "b" * 40)
         self.head = make_tree(tmp_path, "head", "c" * 40, config.pop("head_plan", ""))
+        if "head_seqs" in config:
+            (self.head / "seqs").write_text(str(config.pop("head_seqs")))
+        for rel, text in config.pop("head_files", {}).items():
+            (self.head / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.head / rel).write_text(text)
         self.calls = tmp_path / "calls.jsonl"
         self.config = {
             "calls": str(self.calls),
@@ -138,6 +180,15 @@ class Run:
         wrapper.write_text(VALIDATE_WRAPPER)
         wrapper.chmod(0o755)
         (tmp_path / "home").mkdir()
+        # The driver's python must not import torch: that would be slow, and on a
+        # GPU host it would query the devices named in GPUS.
+        (tmp_path / "block/torch").mkdir(parents=True)
+        (tmp_path / "block/torch/__init__.py").write_text(
+            "raise ImportError('torch is blocked in the driver tests')\n"
+        )
+        python = tmp_path / "python"
+        python.write_text(PYTHON_WRAPPER)
+        python.chmod(0o755)
         self.out = tmp_path / "out"
 
     def run(self, extra_env=None, args=()):
@@ -150,7 +201,7 @@ class Run:
             "BASE_TREE": str(self.base),
             "HEAD_TREE": str(self.head),
             "VENV": str(self.tmp / "no-venv"),
-            "PYTHON": sys.executable,
+            "PYTHON": str(self.tmp / "python"),
             "STUB_PYTHON": sys.executable,
             "STUB_CONFIG": str(cfg),
             "SERVE_VALIDATE": str(self.tmp / "stub_validate.sh"),
@@ -244,7 +295,10 @@ def test_inputs_are_checked(harness):
     assert h.run({"MODE": "abab"}).returncode == 2
     assert h.run({"RECIPE": "nope"}).returncode == 2
     assert h.run({"CELLS": "1024:512"}).returncode == 2
-    assert h.run({"EXACT": "0", "CELLS": "none"}).returncode == 2
+    assert h.run({"EXACT": "0", "CELLS": "none", "STALL": "0"}).returncode == 2
+    assert h.run({"STALL": "2"}).returncode == 2
+    assert h.run({"STALL_REPEATS": "0"}).returncode == 2
+    assert h.run({"STALL_LENS": "4096;16384"}).returncode == 2
     assert not h.boots()
 
 
@@ -268,7 +322,8 @@ def test_ab_run_writes_the_receipt(harness):
     for b in (a1, b1):  # production boots: no deterministic flag, measured window
         assert "VLLM_RDNA2_MOE_DETERMINISTIC=1" not in b["args"]
         assert b["env"]["CELLS"] == "1024:512:1 1024:512:4"
-        assert b["env"]["BENCH_EXTRA"] == "--temperature 0"
+        assert b["env"]["BENCH_EXTRA"] == "--temperature 0 --save-detailed"
+        assert b["env"]["STALL_PROBE"] == "1" and b["env"]["STALL_ITER_LOG"] == "0"
         assert b["env"]["QUIET_HOLD"] == "1" and not b["env"]["LOAD_HOOK"]
     for b in boots:
         assert b["args"][:3] == ["VLLM_SERVER_DEV_MODE=1", "SEQS=4"] + b["args"][2:3]
@@ -278,7 +333,10 @@ def test_ab_run_writes_the_receipt(harness):
     assert xa["env"]["SERVE_TREE"] == str(h.base) == a1["env"]["SERVE_TREE"]
     assert xb["env"]["SERVE_TREE"] == str(h.head) == b1["env"]["SERVE_TREE"]
     receipt = h.receipt()
-    assert receipt["gates"] == {"exact": "PASS", "quality": "NOT RUN"}
+    gates = receipt["gates"]
+    assert gates["exact"] == "PASS" and gates["quality"] == "NOT RUN"
+    assert gates["overlap"] == "PASS" and gates["stall"] == "PASS"
+    assert gates["stall_relative"] == "direction only"  # one run each
     assert receipt["ok"] is True
     assert {c["verdict"] for c in receipt["speed"]["cells"]} == {"worse"}
     text = (h.out / "receipt.md").read_text()
@@ -348,6 +406,84 @@ def test_a_second_run_in_the_same_directory_is_refused(harness):
     assert h.run({"EXACT": "0"}).returncode == 0
     res = h.run({"EXACT": "0"})
     assert res.returncode == 2 and "already holds" in res.stderr
+
+
+def stall_options(boot: dict) -> dict:
+    words = boot["env"]["STALL_ARGS"].split()
+    return dict(zip(words[::2], words[1::2]))
+
+
+def test_the_stall_probe_runs_on_the_speed_boots_with_the_recipes_concurrency(harness):
+    h = harness(head_seqs=6)
+    dry = h.run({"DRY_RUN": "1", "OUT": str(h.tmp / "dry")})
+    assert "stall probe: 1 (decoders 5, prefill 4096,16384, repeats 3)" in dry.stdout
+    assert "diff scan: No added line matches" in dry.stdout
+    res = h.run({"STALL_REPEATS": "2"})
+    assert res.returncode == 0, res.stdout + res.stderr
+    by_boot = {b["boot"]: b for b in h.boots()}
+    for boot in ("XA", "XB"):  # the deterministic boots do not run it
+        assert not by_boot[boot]["env"]["STALL_PROBE"]
+    for boot in ("A1", "B1"):
+        env = by_boot[boot]["env"]
+        assert env["STALL_PROBE"] == "1" and env["PREFIX_WORDS"] == "2600"
+        assert stall_options(by_boot[boot]) == {
+            "--scenarios": "solo,inject,reverse",
+            "--decoders": "5",  # --max-num-seqs 6 less the injected request's slot
+            "--prefill-lens": "4096,16384",
+            "--repeats": "2",
+            "--max-starved": "0",
+            "--min-decode-tokens-during-prefill": "1",
+            "--gate-stat": "worst",
+        }
+    manifest = json.loads((h.out / "manifest.json").read_text())
+    assert str(manifest["settings"]["stall_decoders"]) == "5"
+    text = (h.out / "receipt.md").read_text()
+    assert "#### Overlap" in text and "#### Stall probe" in text
+
+
+def test_the_stall_probe_can_be_resized_or_skipped(harness):
+    h = harness()
+    assert h.run({"STALL_DECODERS": "3", "EXACT": "0"}).returncode == 0
+    assert "--decoders 3 " in h.boots()[0]["env"]["STALL_ARGS"]
+    off = harness()
+    res = off.run({"STALL": "0", "EXACT": "0"})
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert all(not b["env"]["STALL_PROBE"] for b in off.boots())
+    gates = off.receipt()["gates"]
+    assert gates["stall"] == "NOT RUN" and gates["stall_relative"] == "NOT RUN"
+
+
+def test_a_starved_decoder_fails_the_hard_stall_gate(harness):
+    h = harness(starved={"B1": 2})
+    assert h.run({"EXACT": "0"}).returncode == 1
+    assert h.receipt()["gates"]["stall"] == "FAIL"
+
+
+def test_requests_that_run_one_after_another_fail_the_overlap_gate(harness):
+    h = harness(serial=True)
+    assert h.run({"EXACT": "0"}).returncode == 1
+    assert h.receipt()["gates"]["overlap"] == "FAIL"
+
+
+def test_the_relative_stall_gate_needs_abba(harness):
+    worse = {"base": {}, "head": {"max_gap_ms": 900.0, "stalled_s_max": 2.0}}
+    h = harness(stall=worse)
+    assert h.run({"MODE": "abba", "EXACT": "0"}).returncode == 1
+    assert h.receipt()["gates"]["stall_relative"] == "REGRESSION"
+    ab = harness(stall=worse)
+    res = ab.run({"EXACT": "0"})
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert ab.receipt()["gates"]["stall_relative"] == "direction only"
+
+
+def test_the_diff_scan_lists_added_host_syncs(harness):
+    step = "def step(x):\n    return x.item()\n"
+    h = harness(head_files={"vllm/model_executor/step.py": step})
+    res = h.run({"EXACT": "0"})
+    assert res.returncode == 0, res.stdout + res.stderr  # a finding is not a gate
+    scan = json.loads((h.out / "scan.json").read_text())
+    assert [f["pattern"] for f in scan["findings"]] == ["item"]
+    assert "vllm/model_executor/step.py" in (h.out / "receipt.md").read_text()
 
 
 # ------------------------------------------------------------------ quality
