@@ -5,12 +5,12 @@
 Independent of RocmAttentionImpl/rocm_attn.py so upstream changes to the
 ROCM dispatcher cannot touch FA-RDNA2. Kernels live in
 ``csrc/rocm/fa_rdna2.cu`` and are loaded by
-``vllm/v1/attention/ops/fa_rdna2_backend.py`` via ``load_inline``.
+``vllm/v1/attention/ops/fa_rdna2_backend.py`` via compiled ROCm custom ops.
 
 Selected on gfx1030 when VLLM_USE_RDNA2_FA=1 (see platforms/rocm.py).
-Coverage: head_size {128, 256}, fp16, non-quantized KV cache; anything
-else is rejected by validate_configuration and the selector falls back
-to ROCM_ATTN/TRITON_ATTN.
+Coverage: head_size {128, 256}, fp16 or bf16, with a non-quantized KV cache
+or the opt-in int4_fp16_block KV cache (fp16 only). Unsupported combinations
+are rejected during backend selection.
 """
 
 from __future__ import annotations
@@ -41,6 +41,11 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     has_native_kv_cache_layout,
 )
+from vllm.v1.attention.ops.int4_fp16_kv_layout import (
+    int4_fp16_cache_view,
+    int4_fp16_read_views,
+    int4_fp16_record_bytes,
+)
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -56,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.platforms.interface import DeviceCapability
 
 logger = init_logger(__name__)
 
@@ -99,6 +105,20 @@ def _get_fa_rdna2_module():
 
         _fa_rdna2_module = _m
     return _fa_rdna2_module
+
+
+def _int4_fp16_cache_view(
+    kv_cache: torch.Tensor, num_kv_heads: int, head_size: int
+) -> torch.Tensor:
+    """Alias the RDNA_ATTN packed cache as [2, pages, slots, heads, record]."""
+    return int4_fp16_cache_view(kv_cache, num_kv_heads, head_size)
+
+
+def _int4_fp16_read_views(
+    cache: torch.Tensor, head_size: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return [pages, heads, slots, payload/scale] aliases, preserving strides."""
+    return int4_fp16_read_views(cache, head_size)
 
 
 def _reinterpret_v_to_5d(
@@ -226,6 +246,14 @@ class RdnaAttentionMetadataBuilder(AttentionMetadataBuilder[RdnaAttentionMetadat
         common_attn_metadata.query_start_loc.zero_()
         return attn_metadata
 
+    def update_draft_decode_metadata(self, _metadata: RdnaAttentionMetadata) -> None:
+        # Draft decode steps (one query per request) advance seq_lens,
+        # slot_mapping and block_table in the persistent common buffers that
+        # the metadata already references, so there is nothing to refresh.
+        # max_seq_len is only read by the prefill kernels, never by the
+        # split-K decode path the draft steps use.
+        pass
+
 
 class RdnaAttentionImpl(AttentionImpl):
     def __init__(
@@ -252,6 +280,24 @@ class RdnaAttentionImpl(AttentionImpl):
             raise NotImplementedError("RDNA_ATTN: logits_soft_cap is not supported")
         if alibi_slopes is not None:
             raise NotImplementedError("RDNA_ATTN: ALiBi is not supported")
+        self._is_int4_fp16 = kv_cache_dtype == "int4_fp16_block"
+        if self._is_int4_fp16:
+            if not is_available():
+                raise NotImplementedError("int4_fp16_block requires native RDNA2 FA")
+            if attn_type != AttentionType.DECODER or sinks is not None:
+                raise NotImplementedError(
+                    "int4_fp16_block requires causal decoder attention without sinks"
+                )
+            if kv_sharing_target_layer_name is not None:
+                raise NotImplementedError(
+                    "int4_fp16_block cross-layer KV sharing is not supported"
+                )
+            if num_kv_heads <= 0 or num_heads % num_kv_heads:
+                raise ValueError("int4_fp16_block requires integral GQA groups")
+            if not _get_fa_rdna2_module().int4_fp16_kernels_available():
+                raise RuntimeError(
+                    "int4_fp16_block native ops are missing; rebuild the ROCm extension"
+                )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -274,7 +320,9 @@ class RdnaAttentionImpl(AttentionImpl):
     ) -> bool:
         if not is_available():
             return False
-        if query.dtype != torch.float16:
+        if query.dtype not in (torch.float16, torch.bfloat16):
+            return False
+        if key_cache.dtype != query.dtype or value_cache.dtype != query.dtype:
             return False
         if key_cache.dim() != 5 or value_cache.dim() != 5:
             return False
@@ -300,6 +348,13 @@ class RdnaAttentionImpl(AttentionImpl):
     ) -> torch.Tensor:
         if attn_metadata is None:
             return output.fill_(0)
+
+        if self._is_int4_fp16:
+            if output_scale is not None or output_block_scale is not None:
+                raise NotImplementedError(
+                    "int4_fp16_block fused output quantization is not supported"
+                )
+            return self._forward_int4_fp16(query, kv_cache, attn_metadata, output)
 
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache.transpose(0, 1), self.num_kv_heads, self.head_size
@@ -350,7 +405,24 @@ class RdnaAttentionImpl(AttentionImpl):
             else torch.empty(out.shape, dtype=out.dtype, device=out.device)
         )
 
-        if max_seqlen_q <= 1:
+        if query.dtype == torch.bfloat16 or not attn_metadata.causal:
+            # The GQA prefill kernel handles bf16 and symmetric non-causal
+            # windows. Split-K decode and the other prefill kernels are fp16
+            # causal paths; a single query still uses GQA prefill here.
+            self._forward_prefill(
+                q,
+                key_cache,
+                value_cache,
+                block_table,
+                attn_metadata.query_start_loc,
+                seqused_k,
+                attn_metadata.max_seq_len,
+                paged_block_size,
+                sliding_window,
+                dst,
+                causal=attn_metadata.causal,
+            )
+        elif max_seqlen_q <= 1:
             # hippihx V1 (VLLM_HIPPIHX=1): writes straight into `output`
             # when its attention.fa_fdot2 plan is ready; otherwise the
             # extras kernel below runs unchanged.
@@ -387,8 +459,6 @@ class RdnaAttentionImpl(AttentionImpl):
                 out=dst,
             )
         else:
-            if not attn_metadata.causal:
-                raise NotImplementedError("RDNA_ATTN: non-causal prefill not supported")
             nd = attn_metadata.num_decodes
             nd_tok = attn_metadata.num_decode_tokens
             if nd_tok and nd_tok * self.num_heads <= _SPLIT_DECODE_MAX_ROWS:
@@ -438,6 +508,109 @@ class RdnaAttentionImpl(AttentionImpl):
             out.copy_(dst)
         return output
 
+    def _forward_int4_fp16(
+        self,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        metadata: RdnaAttentionMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if query.dtype != torch.float16 or output.dtype != torch.float16:
+            raise NotImplementedError(
+                "int4_fp16_block requires FP16 queries and output"
+            )
+        if not metadata.causal:
+            raise NotImplementedError("int4_fp16_block requires causal attention")
+        num_tokens = metadata.num_actual_tokens
+        if num_tokens == 0:
+            return output
+        cache = _int4_fp16_cache_view(kv_cache, self.num_kv_heads, self.head_size)
+        key, value, k_scale, v_scale = _int4_fp16_read_views(cache, self.head_size)
+        block_size = cache.shape[2]
+        q = query[:num_tokens].contiguous()
+        out = output[:num_tokens].view(num_tokens, self.num_heads, self.head_size)
+        dst = (
+            out
+            if out.is_contiguous()
+            else torch.empty(out.shape, dtype=out.dtype, device=out.device)
+        )
+        sliding_window = (
+            self.sliding_window[0] + 1 if self.sliding_window[0] >= 0 else 0
+        )
+        fa = _get_fa_rdna2_module()
+
+        def run(q_part, table, cu_query, seq_lens, decode, target):
+            fa.fa_rdna2_paged_int4_fp16_block(
+                q_part,
+                key,
+                value,
+                k_scale,
+                v_scale,
+                table,
+                cu_query,
+                seq_lens,
+                block_size,
+                kv_splits=16 if decode else 1,
+                sliding_window=sliding_window,
+                scale=self.scale,
+                decode=decode,
+                out=target,
+            )
+
+        nd, nd_tokens = metadata.num_decodes, metadata.num_decode_tokens
+        if metadata.max_query_len <= 1:
+            run(
+                q,
+                metadata.block_table,
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                True,
+                dst,
+            )
+        elif nd_tokens:
+            # Mixed batch: the decode rows take the split-K decode kernel and
+            # the prefill rows the streaming prefill kernel.
+            #
+            # There is deliberately no row-count gate here. The prefill
+            # kernel has no split-K over the KV range, so a decode row routed
+            # through it gets one CTA that walks the whole context: at a 16k
+            # context that is a handful of CTAs on a 72-CU GPU. The decode
+            # kernel splits the KV range 16 ways, so it stays occupied
+            # whatever the batch size. Gating the split on the row count
+            # therefore turned a high-concurrency batch into a streaming
+            # kernel with almost no parallelism.
+            if metadata.decode_query_start_loc is None:
+                raise ValueError("int4_fp16_block decode query ranges are missing")
+            run(
+                q[:nd_tokens],
+                metadata.block_table[:nd],
+                metadata.decode_query_start_loc,
+                metadata.seq_lens[:nd],
+                True,
+                dst[:nd_tokens],
+            )
+            if nd_tokens < num_tokens:
+                run(
+                    q[nd_tokens:],
+                    metadata.block_table[nd:],
+                    metadata.prefill_query_start_loc,
+                    metadata.seq_lens[nd:],
+                    False,
+                    dst[nd_tokens:],
+                )
+        else:
+            run(
+                q,
+                metadata.block_table,
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                False,
+                dst,
+            )
+        if dst is not out:
+            out.copy_(dst)
+        return output
+
     def _forward_prefill(
         self,
         q: torch.Tensor,
@@ -450,6 +623,7 @@ class RdnaAttentionImpl(AttentionImpl):
         paged_block_size: int,
         sliding_window: int,
         dst: torch.Tensor,
+        causal: bool = True,
     ) -> None:
         fa = _get_fa_rdna2_module()
         _num_seqs = seqused_k.size(0)
@@ -457,11 +631,11 @@ class RdnaAttentionImpl(AttentionImpl):
         if (
             self.num_kv_heads
             and self.num_heads % self.num_kv_heads == 0
-            and _gqa_mode() == "subgroup"
+            and (_gqa_mode() == "subgroup" or q.dtype == torch.bfloat16 or not causal)
         ):
-            # O and the softmax in registers, 16 query rows per CTA: 2 heads
-            # of a GQA group for even groups, 1 head otherwise. Any other
-            # VLLM_FA_RDNA2_GQA_MODE value falls back to the kernels below.
+            # O and softmax stay in registers. BF16 groups of four use four
+            # heads per CTA; FP16 keeps its existing two-head or one-head
+            # tiles. Other FP16 GQA modes use the kernels below.
             fa.fa_rdna2_prefill_paged_varlen_gqa(
                 q,
                 key_cache,
@@ -470,7 +644,7 @@ class RdnaAttentionImpl(AttentionImpl):
                 cu_seqlens_q,
                 seqused_k,
                 paged_block_size,
-                causal=True,
+                causal=causal,
                 sliding_window=sliding_window,
                 scale=self.scale,
                 out=dst,
@@ -532,6 +706,12 @@ class RdnaAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
+        if self._is_int4_fp16:
+            cache = _int4_fp16_cache_view(kv_cache, self.num_kv_heads, self.head_size)
+            _get_fa_rdna2_module().reshape_and_cache_int4_fp16_rdna2(
+                key, value, cache, slot_mapping
+            )
+            return
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache.transpose(0, 1), self.num_kv_heads, self.head_size
         )
@@ -548,6 +728,7 @@ class RdnaAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                False,  # interleaved_v: the RDNA backend uses the plain V layout
             )
         else:
             # The native writer assumes densely packed blocks and corrupts
@@ -579,8 +760,13 @@ class RdnaAttentionImpl(AttentionImpl):
 
 
 class RdnaAttentionBackend(AttentionBackend):
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "float16"]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+        "int4_fp16_block",
+    ]
 
     forward_includes_kv_cache_update: bool = False
 
@@ -613,11 +799,81 @@ class RdnaAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_compute_capability(cls, capability) -> bool:
         return _on_gfx10x()
 
     @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
+        device_capability: DeviceCapability,
+        attn_type: str,
+        has_sliding_window: bool = False,
+        use_non_causal: bool = False,
+        use_batch_invariant: bool = False,
+        use_kv_connector: bool = False,
+        use_pcp: bool = False,
+        use_adaptive_verification: bool = False,
+        use_dcp: bool = False,
+        use_rswa: bool = False,
+    ) -> list[str]:
+        invalid_reasons = super().validate_configuration(
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=block_size,
+            use_mla=use_mla,
+            has_sink=has_sink,
+            use_sparse=use_sparse,
+            use_mm_prefix=use_mm_prefix,
+            use_per_head_quant_scales=use_per_head_quant_scales,
+            device_capability=device_capability,
+            attn_type=attn_type,
+            has_sliding_window=has_sliding_window,
+            use_non_causal=use_non_causal,
+            use_batch_invariant=use_batch_invariant,
+            use_kv_connector=use_kv_connector,
+            use_pcp=use_pcp,
+            use_adaptive_verification=use_adaptive_verification,
+            use_dcp=use_dcp,
+            use_rswa=use_rswa,
+        )
+        # The packed INT4 cache stores FP16 block scales, so the dequantized
+        # values are FP16 by construction: a BF16 model cannot read it back
+        # without changing the stored scale semantics.
+        if kv_cache_dtype == "int4_fp16_block" and dtype != torch.float16:
+            invalid_reasons.append("int4_fp16_block requires an FP16 model dtype")
+        return invalid_reasons
+
+    @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        if spec.kv_quant_mode == KVQuantMode.INT4_FP16_BLOCK:
+            if (
+                spec.dtype != torch.uint8
+                or spec.head_size not in _SUPPORTED_HEAD_SIZES
+                or spec.head_size_v != spec.head_size
+            ):
+                raise ValueError(
+                    "int4_fp16_block requires equal K/V head sizes 128 or 256"
+                )
+            content = spec.num_kv_heads * int4_fp16_record_bytes(spec.head_size)
+            if spec.state_content_bytes is not None:
+                if spec.num_head_slots != 2 or spec.state_content_bytes != content:
+                    raise ValueError("incompatible int4_fp16_block cache specification")
+                return spec
+            return replace(spec, num_head_slots=2, state_content_bytes=content)
         # K/V as two head groups so split_kv_cache's x-packed views are
         # view-expressible (mirrors RocmAttentionBackend; without this the
         # framework allocates interleaved K/V and the views fail).
@@ -634,7 +890,10 @@ class RdnaAttentionBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC)
+        # The HIP kernels and stride-aware cache writer support a padded block
+        # stride. BLHNC lets hybrid models pack QSA side-caches beside each
+        # attention page without changing the per-layer [B, H, N, C] view.
+        return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
 
 
 if is_available():

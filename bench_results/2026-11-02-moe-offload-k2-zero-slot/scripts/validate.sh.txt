@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Qualification gate (greedy / PPL / prefix cache / concurrency probes of serve_validate.sh) on a TP2 offload pair.
+#   bash validate.sh TAG      env: OTREE (-off), GPUSET (6,7), SMI_IDX ("0 1"), PORT (18427), MONO_CFG, CELLS (none)
+# Output: $LANE/validate-TAG/{summary.txt,probe.txt,serve.log,...}.  serve_validate.sh holds BOOT_LOCK until the server answers.
+set -uo pipefail
+source "$(dirname "$0")/env.sh"
+TAG=${1:?tag}
+OTREE=${OTREE:-$HOME/vllm-rdna-0.32.0-off}
+GPUSET=${GPUSET:-6,7}
+SMI_IDX=${SMI_IDX:-"0 1"}
+PORT=${PORT:-18427}
+OUT=$LANE/validate-$TAG
+rm -rf "$OUT"
+mkdir -p "$OUT"
+for g in $SMI_IDX; do
+    used=$(rocm-smi --showmeminfo vram -d "$g" 2> /dev/null | awk '/Total Used Memory/ {print $NF}')
+    if [[ -z $used || $used -gt 1000000000 ]]; then
+        echo "rocm-smi GPU $g not idle (used=${used:-?}); abort"
+        exit 3
+    fi
+done
+# The launcher's rdna_kill_stale kills every vLLM process that shares VLLM_CACHE_ROOT: one cache root per concurrently running pair.
+CD=${CACHE_DIR:-$LANE/cache-off}
+export VLLM_CACHE_ROOT=$CD/vllm TRITON_CACHE_DIR=$CD/triton TORCHINDUCTOR_CACHE_DIR=$CD/inductor
+mkdir -p "$VLLM_CACHE_ROOT" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR"
+rm -f "$VLLM_CACHE_ROOT/rdna_ar_wedged"
+# serve_validate.sh takes BOOT_LOCK itself (and releases it once the server answers); a second holder here would deadlock it.
+cd "$OTREE" || exit 1
+{
+    echo "tree $OTREE MONO_CFG=${MONO_CFG:-} GPUSET=$GPUSET PORT=$PORT"
+    git -C "$OTREE" log -1 --format='git HEAD %h %s' 2> /dev/null
+} > "$OUT/arm-info.txt"
+export TP=2 GPUS=$GPUSET ALLOWED_GPU_SETS=$GPUSET VENV=$V PORT=$PORT TAG=val-$TAG PLE_QUANT_DIR=$P MONO_CFG="${MONO_CFG:-}"
+export VALIDATE=1 CELLS=${CELLS:-none} OUT
+bash tools/rdna/mono/serve_offload.sh > "$OUT/validate.log" 2>&1 < /dev/null
+echo "$(date +%T) validate $TAG rc=$? ; summary in $OUT/summary.txt" >> "$OUT/validate.log"
+p=$(pgrep -f "[-]-port $PORT" | head -1)
+[[ -n $p ]] && pkill -9 -s "$(ps -o sid= -p "$p" | tr -d ' ')"

@@ -121,6 +121,7 @@ class SparseMLAIndexGroup:
         *,
         block_stride_rows: int | None,
         return_valid_counts: bool,
+        idx_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         num_tokens = logical_topk_indices.shape[0]
         if num_tokens > self.physical_topk_indices.shape[0]:
@@ -132,6 +133,7 @@ class SparseMLAIndexGroup:
                 BLOCK_STRIDE_ROWS=block_stride_rows,
                 NUM_TOPK_TOKENS=logical_topk_indices.shape[1],
                 return_valid_counts=return_valid_counts,
+                idx_mapping=idx_mapping,
             )
 
         physical_topk_indices = self.physical_topk_indices[:num_tokens]
@@ -155,6 +157,7 @@ class SparseMLAIndexGroup:
                     valid_counts_out=(
                         valid_topk_counts if return_valid_counts else None
                     ),
+                    idx_mapping=idx_mapping,
                 )
                 self.physical_topk_ready.record(self.side_stream)
         compute_stream.wait_event(self.physical_topk_ready)
@@ -233,7 +236,10 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         cache = self.cache(layer_index)
         num_tokens = logical_topk_indices.shape[0]
         req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
-        if num_tokens > self.physical_topk_indices.shape[0]:
+        if num_tokens > cache.runtime.max_swap_rows or (
+            cache.all_context_pages_resident
+            and cache.num_decode_tokens < cache.num_actual_tokens
+        ):
             # Prefill-sized batches do not fit the decode residency workspace.
             # Non-resident prefills are staged before reaching this path.
             assert cache.all_context_pages_resident
@@ -247,6 +253,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 leader.view.block_size,
                 block_stride_rows=leader.view.attention_block_stride,
                 return_valid_counts=return_valid_counts,
+                idx_mapping=leader.runtime.request_state_indices,
             )
         source_block_table = cache.source_block_table
         assert source_block_table is not None
@@ -268,8 +275,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert staging_plan is not None
         resident_cache = None
         if cache.view is not None and cache.block_table is not None:
+            state_indices = cache.runtime.request_state_indices
+            assert state_indices is not None
             staging_plan.ensure_gpu_sources(
-                cache.block_table[attn_metadata.num_decodes :],
+                cache.block_table,
+                state_indices[attn_metadata.num_decodes :],
                 cache.view.block_size,
             )
             resident_cache = cache.view.cache
@@ -291,8 +301,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         plan = prefill.host_staging_plan if prefill is not None else None
         assert plan is not None
         assert cache.view is not None and cache.block_table is not None
+        state_indices = cache.runtime.request_state_indices
+        assert state_indices is not None
         plan.ensure_gpu_sources(
-            cache.block_table[attn_metadata.num_decodes :],
+            cache.block_table,
+            state_indices[attn_metadata.num_decodes :],
             cache.view.block_size,
         )
         assert plan.gpu_row_ids is not None

@@ -2,22 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HIP-side QSA (Qwen Sparse Attention) decode kernels for Qwen4Exp on gfx1030.
 
-Opt-in replacement for the QSA decode Triton kernels in
+HIP replacement for the QSA decode Triton kernels in
 ``vllm/models/qwen4_exp/amd/ops/qsa.py``:
 
 - ``qsa_store_cache_rows_rdna2`` mirrors ``_store_qsa_rows_kernel``.
 - ``qsa_compress_groups_rdna2`` mirrors ``_compress_qsa_groups_kernel``.
-- ``qsa_mqa_paged_rdna2`` reuses the existing
-  ``paged_mqa_logits_decode_rdna2`` indexer kernel when the shape
-  contract matches (single Q head, single KV head, paged).
+- ``qsa_mqa_paged_rdna2`` mirrors ``_qsa_mqa_paged_kernel`` (fp16, arbitrary
+  head count, request-indirected page table, ``compress_ratio`` visibility).
 
 The sparse splitk attention (``_qsa_sparse_paged_gqa_splitk_kernel`` and
 ``_qsa_merge_splitk_kernel``) is left to the Triton path for now; it
 only fires at prefill (M >> 8) and the prefill cudagraph story on
 gfx1030 is still being worked through.
 
-Gated by ``VLLM_RDNA_QSA_HIP=1`` and ``on_gfx10x()``. Default off
-(Triton path stays the source of truth until verified).
+Gated by ``VLLM_RDNA_QSA_HIP=1`` and ``on_gfx10x()``. Default on since
+2026-10-16 (faster than Triton at every served shape).
 """
 
 import os as _os
@@ -25,7 +24,7 @@ import os as _os
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.envs import VLLM_RDNA_QSA_HIP
+from vllm.envs import VLLM_RDNA_QSA_DECODE_MODE, VLLM_RDNA_QSA_HIP
 from vllm.logger import init_logger
 from vllm.platforms.rocm import on_gfx10x
 
@@ -34,9 +33,53 @@ logger = init_logger(__name__)
 _DEBUG = _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1"
 
 
-def qsa_use_rdna2() -> bool:
-    """True iff the HIP QSA decode path is enabled for this process."""
-    return bool(VLLM_RDNA_QSA_HIP) and on_gfx10x()
+def qsa_decode_mode() -> str:
+    """Which fused HIP QSA decode the non-monokernel path may use.
+
+    ``auto`` picks the kernel that matches the cache layout, ``int4`` requires
+    the packed-int4 fused decode, ``off`` disables the fused decode. The
+    Triton kernels cannot read the packed record layout, so a deployment that
+    needs the packed decode must have the native kernel.
+    """
+    mode = (VLLM_RDNA_QSA_DECODE_MODE or "auto").strip().lower()
+    if mode not in ("auto", "int4", "off"):
+        raise ValueError(
+            "VLLM_RDNA_QSA_DECODE_MODE must be one of 'auto', 'int4', 'off'"
+        )
+    return mode
+
+
+def qsa_use_rdna2(dtype: torch.dtype | None = None) -> bool:
+    """True iff the fp16 HIP QSA decode path is enabled for this process.
+
+    The HIP kernels implement fp16 only; ``dtype`` (when given) additionally
+    gates on the caller's tensor dtype so a bf16 model keeps the Triton path.
+    """
+    mode = qsa_decode_mode()
+    if mode in ("off", "int4"):
+        return False
+    return (
+        bool(VLLM_RDNA_QSA_HIP)
+        and on_gfx10x()
+        and (dtype is None or dtype == torch.float16)
+    )
+
+
+def qsa_use_rdna2_int4() -> bool:
+    """True iff the native packed-INT4 QSA decode is available.
+
+    The packed ``int4_fp16_block`` record layout has no Triton counterpart,
+    so the packed path is only available when the HIP kernel is compiled in.
+    Callers must refuse rather than fall back: reading a packed record as
+    fp16 yields finite, plausible, silently wrong numbers.
+    """
+    if qsa_decode_mode() == "off":
+        return False
+    return (
+        bool(VLLM_RDNA_QSA_HIP)
+        and on_gfx10x()
+        and hasattr(ops, "qsa_sparse_paged_attention_int4_rdna2")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -104,27 +147,119 @@ def qsa_compress_groups(
 
 def qsa_mqa_paged(
     q: torch.Tensor,
-    kv_cache: torch.Tensor,
-    weights: torch.Tensor,
-    context_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-    max_model_len: int,
-) -> torch.Tensor:
-    """MQA paged indexer logits (single Q head, single KV head).
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    compress_ratio: int,
+    num_columns: int,
+    score_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """MQA paged indexer logits (mirrors the Triton ``qsa_mqa_paged``).
 
-    Returns a logits tensor of shape ``[num_rows, max_kv_per_request]``.
-    Wraps the existing ``paged_mqa_logits_decode_rdna2`` indexer kernel
-    when the shape contract matches.
+    Returns ``(logits [rows, num_columns] fp32, visible_blocks [rows] int32)``;
+    ``logits`` is ``-inf`` outside each row's visible compressed-column range.
     """
     return ops.qsa_mqa_paged_rdna2(
-        q, kv_cache, weights, context_lens, block_tables, max_model_len
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        compress_ratio,
+        num_columns,
+        float(score_scale),
+    )
+
+
+def qsa_expand_indices(
+    block_indices: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_to_req: torch.Tensor,
+    compress_ratio: int,
+    token_topk: int,
+    out: torch.Tensor | None = None,
+    canonical_order: bool = False,
+) -> torch.Tensor:
+    """Expand compressed block indices and compact the causal tail.
+
+    Mirrors the Triton ``expand_qsa_block_indices_cuda``; returns
+    ``[rows, token_topk + compress_ratio - 1]`` int32 with ``-1`` for slots
+    that are neither an expanded block entry nor a valid tail entry.
+    """
+    return ops.qsa_expand_indices_rdna2(
+        block_indices,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        compress_ratio,
+        token_topk,
+        out,
+        canonical_order,
+    )
+
+
+def qsa_sparse_paged_attention(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Sparse GQA attention over paged K/V (mirrors the Triton entry point).
+
+    Split-K with fp32 partials merged by log-sum-exp; returns ``out``
+    (``[rows, heads, head_dim]`` in ``q``'s dtype).
+    """
+    return ops.qsa_sparse_paged_attention_rdna2(
+        q, k_cache, v_cache, logical_indices, block_table, token_to_req, out
+    )
+
+
+def qsa_sparse_paged_attention_int4(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Sparse GQA attention over a packed INT4 + FP16 block-scale KV cache.
+
+    ``k_cache``/``v_cache`` are the payload views ``[pages, heads, slots,
+    D/2]`` and ``k_scale``/``v_scale`` the scale views ``[pages, heads,
+    slots, D/32]``; the scale words are a window onto the tail of the same
+    physical records. The kernel dequantizes into the same fp16 tile the
+    fp16 path fills, so the attention math is identical.
+    """
+    return ops.qsa_sparse_paged_attention_int4_rdna2(
+        q,
+        k_cache,
+        v_cache,
+        k_scale,
+        v_scale,
+        logical_indices,
+        block_table,
+        token_to_req,
+        out,
     )
 
 
 __all__ = [
     "qsa_compress_groups",
     "qsa_compress_groups_with_ratio_compat",
+    "qsa_expand_indices",
     "qsa_mqa_paged",
+    "qsa_sparse_paged_attention",
+    "qsa_sparse_paged_attention_int4",
     "qsa_store_cache_rows",
     "qsa_store_cache_rows_compat",
     "qsa_use_rdna2",
@@ -137,6 +272,17 @@ __all__ = [
 # ``qsa_use_rdna2()`` gate without changing call sites. The shape checks are
 # the RDNA2 kernel's responsibility (TORCH_CHECK inside the .cu).
 # ---------------------------------------------------------------------------
+
+
+_ACTIVE_LOGGED: set[str] = set()
+
+
+def _log_active(what: str) -> None:
+    """One line per process when a HIP QSA route first runs (the env gate is
+    read in the workers; this shows it reached them)."""
+    if what not in _ACTIVE_LOGGED:
+        _ACTIVE_LOGGED.add(what)
+        logger.info("QSA HIP path (VLLM_RDNA_QSA_HIP=1): %s active", what)
 
 
 def qsa_store_cache_rows_compat(
@@ -158,6 +304,7 @@ def qsa_store_cache_rows_compat(
     page_size = cache.shape[1]
     width = cache.shape[3]
     ops.qsa_store_cache_rows_rdna2(rows, slot_mapping, cache, page_size, width)
+    _log_active("qsa_store_cache_rows_rdna2")
 
 
 def qsa_compress_groups_with_ratio_compat(
@@ -223,6 +370,7 @@ def qsa_compress_groups_with_ratio_compat(
         head_dim,
         bool(load_rope_positions),
     )
+    _log_active("qsa_compress_groups_rdna2")
     if _DEBUG:
         torch.accelerator.synchronize()
         changed = int((first_positions != pre_first).any(dim=1).sum())

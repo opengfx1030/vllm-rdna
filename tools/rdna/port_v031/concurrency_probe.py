@@ -84,14 +84,16 @@ def long_prompt(k: int, sentences: int) -> str:
     return f"Document {k} is about {topic}.\n{body}\nSummarize document {k}:"
 
 
-def complete(url: str, model: str, prompt: str, max_tokens: int) -> dict:
+def complete(
+    url: str, model: str, prompt: str, max_tokens: int, ignore_eos: bool = True
+) -> dict:
     """Greedy completion: tokens, their logprobs and the top-5 per step."""
     body = {
         "model": model,
         "prompt": prompt,
         "max_tokens": max_tokens,
         "temperature": 0,
-        "ignore_eos": True,
+        "ignore_eos": ignore_eos,
         "logprobs": 5,
         "return_tokens_as_token_ids": True,
     }
@@ -109,10 +111,12 @@ def complete(url: str, model: str, prompt: str, max_tokens: int) -> dict:
         "top": [t or {} for t in top],
         "lps": [x if x is not None else 0.0 for x in token_lps],
         "text": choice["text"],
+        "finish_reason": choice.get("finish_reason"),
+        "stop_reason": choice.get("stop_reason"),
     }
 
 
-def run_parallel(jobs, url, model):
+def run_parallel(jobs, url, model, ignore_eos=True):
     """jobs: list of (key, prompt, max_tokens, start_delay_s)."""
     results: dict = {}
     errors: dict = {}
@@ -121,7 +125,7 @@ def run_parallel(jobs, url, model):
     def worker(key, prompt, max_tokens, delay):
         time.sleep(max(0.0, delay - (time.monotonic() - t0)))
         try:
-            results[key] = complete(url, model, prompt, max_tokens)
+            results[key] = complete(url, model, prompt, max_tokens, ignore_eos)
         except Exception as e:  # noqa: BLE001
             errors[key] = repr(e)
 
@@ -169,6 +173,19 @@ def compare(ref: dict, got: dict, args, noise_at: int | None = None) -> tuple[st
     diverged; a margin-only divergence at that token is run-to-run noise.
     """
     n = min(len(ref["tokens"]), len(got["tokens"]))
+    stop_note = ""
+    if (
+        not args.ignore_eos
+        and "stop" in (ref.get("finish_reason"), got.get("finish_reason"))
+        and (ref.get("finish_reason"), ref.get("stop_reason"), len(ref["tokens"]))
+        != (got.get("finish_reason"), got.get("stop_reason"), len(got["tokens"]))
+    ):
+        stop_note = (
+            f", normal-EOS stopping differs: solo {len(ref['tokens'])} tokens "
+            f"({ref.get('finish_reason')}/{ref.get('stop_reason')}), "
+            f"got {len(got['tokens'])} "
+            f"({got.get('finish_reason')}/{got.get('stop_reason')})"
+        )
     for i in range(n):
         a, b = ref["tokens"][i], got["tokens"][i]
         if a == b:
@@ -192,7 +209,7 @@ def compare(ref: dict, got: dict, args, noise_at: int | None = None) -> tuple[st
         m = "not in solo top-5" if margin is None else f"margin {margin:.3f}"
         detail = (
             f"token {i}/{n}: {m}, continuation mean lp {got_lp:.2f} "
-            f"vs solo {ref_lp:.2f}{repeat_note}"
+            f"vs solo {ref_lp:.2f}{repeat_note}{stop_note}"
         )
         if garbage:
             return "FAIL", f"{detail}, garbage: {garbage}"
@@ -205,7 +222,11 @@ def compare(ref: dict, got: dict, args, noise_at: int | None = None) -> tuple[st
         if margin <= args.tie_nats:
             return "tie", detail
         return "soft", detail
-    return "ok", f"identical / {n}"
+    if not args.ignore_eos and len(ref["tokens"]) != len(got["tokens"]):
+        shorter = ref if len(ref["tokens"]) < len(got["tokens"]) else got
+        if shorter.get("finish_reason") == "stop":
+            return "FAIL", f"different stopping point after {n} matching tokens"
+    return "ok", f"matching / {n}"
 
 
 def main() -> int:
@@ -214,6 +235,15 @@ def main() -> int:
     ap.add_argument("--model", required=True)
     ap.add_argument("-n", "--num-prompts", type=int, default=8)
     ap.add_argument("--max-tokens", type=int, default=64)
+    ap.add_argument(
+        "--ignore-eos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="force continuation past EOS (default); disable to test normal stopping",
+    )
+    ap.add_argument(
+        "--save-results", help="write token/logprob results for cross-run comparison"
+    )
     ap.add_argument("--tie-nats", type=float, default=0.2)
     ap.add_argument("--fail-nats", type=float, default=1.0)
     ap.add_argument("--max-lp-drop", type=float, default=1.5)
@@ -246,7 +276,7 @@ def main() -> int:
 
     try:
         solo = {
-            i: complete(args.url, args.model, p, args.max_tokens)
+            i: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos)
             for i, p in enumerate(prompts)
         }
     except Exception as e:  # noqa: BLE001
@@ -256,13 +286,14 @@ def main() -> int:
         print("RESULT FAIL: solo requests fail")
         return 1
     solo2 = {
-        i: complete(args.url, args.model, p, args.max_tokens)
+        i: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos)
         for i, p in enumerate(prompts)
     }
     together, err_t = run_parallel(
         [(i, p, args.max_tokens, 0.0) for i, p in enumerate(prompts)],
         args.url,
         args.model,
+        args.ignore_eos,
     )
     # Churn: short and long requests interleaved with staggered starts, so
     # early finishers free slots that later arrivals take while long
@@ -273,18 +304,36 @@ def main() -> int:
         i = (k * 3) % n
         mt = min(lengths[k % len(lengths)], args.max_tokens)
         churn_jobs.append(((k, i), prompts[i], mt, 0.15 * k))
-    churned, err_c = run_parallel(churn_jobs, args.url, args.model)
+    churned, err_c = run_parallel(churn_jobs, args.url, args.model, args.ignore_eos)
 
     longs = [long_prompt(k, args.long_sentences) for k in range(args.long_prompts)]
     long_solo = {
-        k: complete(args.url, args.model, p, args.max_tokens)
+        k: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos)
         for k, p in enumerate(longs)
     }
     long_together, err_l = run_parallel(
         [(k, p, args.max_tokens, 0.0) for k, p in enumerate(longs)],
         args.url,
         args.model,
+        args.ignore_eos,
     )
+
+    if args.save_results:
+        with open(args.save_results, "w") as output:
+            json.dump(
+                {
+                    "ignore_eos": args.ignore_eos,
+                    "prompts": prompts,
+                    "solo": solo,
+                    "solo2": solo2,
+                    "together": together,
+                    "churn": {str(k): v for k, v in churned.items()},
+                    "long_prompts": longs,
+                    "long_solo": long_solo,
+                    "long_together": long_together,
+                },
+                output,
+            )
 
     counts = {"ok": 0, "tie": 0, "soft": 0, "noise": 0, "FAIL": 0}
     lines = []

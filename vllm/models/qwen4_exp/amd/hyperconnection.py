@@ -97,7 +97,7 @@ class GatedResidual(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.lora_rank = config.hc_lowrank
+        self.hc_lowrank = config.hc_lowrank
         self.hc_count = config.hc_count
         self.hidden_size = config.hidden_size
         self.use_combine = use_combine
@@ -118,11 +118,11 @@ class GatedResidual(nn.Module):
         # -- vLLM Linear weights --------------------------------------------
         # The merged skinny-GEMM shape is physically padded to 16 rows for
         # alignment and efficient backend dispatch.
-        self.pad_size = (-(self.lora_rank + self.hc_count)) % 16 if use_combine else 0
+        self.pad_size = (-(self.hc_lowrank + self.hc_count)) % 16 if use_combine else 0
         if use_combine:
             self.input_mix_weight_down_block_inject = MergedColumnParallelLinear(
                 self.hyper_hidden_size,
-                [self.lora_rank, self.hc_count]
+                [self.hc_lowrank, self.hc_count]
                 + ([self.pad_size] if self.pad_size else []),
                 bias=False,
                 params_dtype=config.params_dtype,
@@ -134,7 +134,7 @@ class GatedResidual(nn.Module):
         else:
             self.input_mix_weight_down = ReplicatedLinear(
                 self.hyper_hidden_size,
-                self.lora_rank,
+                self.hc_lowrank,
                 bias=False,
                 params_dtype=config.params_dtype,
                 quant_config=None,
@@ -142,7 +142,7 @@ class GatedResidual(nn.Module):
                 return_bias=False,
             )
         self.input_mix_weight_up = ReplicatedLinear(
-            self.lora_rank,
+            self.hc_lowrank,
             self.hyper_hidden_size,
             bias=False,
             params_dtype=config.params_dtype,
@@ -150,16 +150,6 @@ class GatedResidual(nn.Module):
             prefix=maybe_prefix(prefix, "input_mix_weight_up"),
             return_bias=False,
         )
-
-    def _injection_slice(self, dai: torch.Tensor) -> torch.Tensor:
-        """Contiguous HC injection slice.
-
-        ``dai[:, lora_rank:lora_rank+hc_count]`` is a non-contiguous view
-        (row stride ``lora_rank + hc_count + pad_size``). Compiled piecewise
-        CUDA graphs specialize on the trace-time stride and abort capture when
-        the runtime tensor differs, so materialize the slice here.
-        """
-        return dai[:, self.lora_rank : self.lora_rank + self.hc_count].contiguous()
 
     def mix(
         self, hidden_states: torch.Tensor
@@ -183,7 +173,7 @@ class GatedResidual(nn.Module):
                 else self.input_mix_weight_down
             )
             up = self.input_mix_weight_up
-            block_input, dai = torch.ops.vllm.rdna_hc_mix(
+            block_input, inj = torch.ops.vllm.rdna_hc_mix(
                 xn,
                 lin.weight,
                 getattr(lin, "weight_i8", None),
@@ -191,10 +181,10 @@ class GatedResidual(nn.Module):
                 up.weight,
                 getattr(up, "weight_i8", None),
                 getattr(up, "weight_i8_scale", None),
-                self.lora_rank,
+                self.hc_lowrank,
                 self.hc_count,
             )
-            injection = self._injection_slice(dai) if self.use_combine else None
+            injection = inj if self.use_combine else None
             if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
                 torch.cuda.is_current_stream_capturing()
             ):
@@ -207,16 +197,16 @@ class GatedResidual(nn.Module):
 
         if self.use_combine:
             # produce injection logits for combine
-            split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
+            split_sizes = [self.hc_lowrank, self.hc_count, self.pad_size]
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+            lowrank, injection, _ = down_and_injection.split(split_sizes, dim=-1)
             injection = injection.contiguous()
         else:
-            lora = self.input_mix_weight_down(xn)
+            lowrank = self.input_mix_weight_down(xn)
             injection = None
 
-        lora = hc_silu(lora, self.hc_count)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
+        lowrank = hc_silu(lowrank, self.hc_count)
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection
@@ -267,7 +257,7 @@ class GatedResidual(nn.Module):
                 else self.input_mix_weight_down
             )
             up = self.input_mix_weight_up
-            block_input, dai = torch.ops.vllm.rdna_hc_mix(
+            block_input, inj = torch.ops.vllm.rdna_hc_mix(
                 xn,
                 lin.weight,
                 getattr(lin, "weight_i8", None),
@@ -275,10 +265,10 @@ class GatedResidual(nn.Module):
                 up.weight,
                 getattr(up, "weight_i8", None),
                 getattr(up, "weight_i8_scale", None),
-                self.lora_rank,
+                self.hc_lowrank,
                 self.hc_count,
             )
-            injection = self._injection_slice(dai) if self.use_combine else None
+            injection = inj if self.use_combine else None
             if os.environ.get("VLLM_HC_NAN_DEBUG") == "1" and not (
                 torch.cuda.is_current_stream_capturing()
             ):
@@ -291,16 +281,16 @@ class GatedResidual(nn.Module):
 
         if self.use_combine:
             # produce injection logits for combine
-            split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
+            split_sizes = [self.hc_lowrank, self.hc_count, self.pad_size]
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+            lowrank, injection, _ = down_and_injection.split(split_sizes, dim=-1)
             injection = injection.contiguous()
         else:
-            lora = self.input_mix_weight_down(xn)
+            lowrank = self.input_mix_weight_down(xn)
             injection = None
 
-        lora = hc_silu(lora, self.hc_count)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
+        lowrank = hc_silu(lowrank, self.hc_count)
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection

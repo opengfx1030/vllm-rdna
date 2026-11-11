@@ -1,0 +1,119 @@
+{
+  "passed": true,
+  "scope": "offline audit of saved 16k performance cells only; forced random outputs are not semantic evidence; original failed qualification unchanged",
+  "selected_cells": [
+    "16k-c1",
+    "16k-c8"
+  ],
+  "partial_scope": true,
+  "cells": [
+    {
+      "name": "bench-16384x1024-c1",
+      "source_run": "~/w4a8_runs/moe-offload/tp2-qualified-long/long",
+      "source_sha256": "fdf52b88b8d6417b53e53417f8268e59a1df3d0fca9a3a26ec000da671308795",
+      "metrics_sha256": "ebdbbeae41cda35e66964166e153106d95af09095b5b9883e7be98186e575394",
+      "completed": 1,
+      "failed": 0,
+      "actual_input_tokens": [
+        16384
+      ],
+      "actual_output_tokens": [
+        1024
+      ],
+      "duration_seconds": 51.80464448499697,
+      "output_throughput": 19.766567460887767,
+      "mean_ttft_ms": 17307.460682000965,
+      "forced_ignore_eos": true,
+      "output_quality_warnings": [
+        {
+          "request": 0,
+          "garbage": null,
+          "repetition_warning": "repeated 24-char span"
+        }
+      ],
+      "counter_deltas": {
+        "vllm:num_preemptions": 0.0,
+        "vllm:kv_offload_load_bytes": 0.0,
+        "vllm:kv_offload_store_bytes": 926941184.0,
+        "vllm:kv_offload_load_time": 0.0,
+        "vllm:kv_offload_store_time": 0.31500807762145994
+      },
+      "peak_cache_usage": {
+        "vllm:kv_offload_cpu_cache_usage_perc": 0.037162162162162164,
+        "vllm:kv_cache_usage_perc": 0.21739130434782605
+      },
+      "metric_sample_errors": 0
+    },
+    {
+      "name": "bench-16384x1024-c8",
+      "source_run": "~/w4a8_runs/moe-offload/tp2-qualified-long/long",
+      "source_sha256": "cb7fa2afa845286bf91cdab58837e24987d079e80b044db103f779c87d00e9a4",
+      "metrics_sha256": "d53bcc05d38c41ab200991988e1267d1ad0b9378bce7df66fadacb3a75f5b495",
+      "completed": 8,
+      "failed": 0,
+      "actual_input_tokens": [
+        16384,
+        16384,
+        16384,
+        16384,
+        16384,
+        16384,
+        16384,
+        16384
+      ],
+      "actual_output_tokens": [
+        1024,
+        1024,
+        1024,
+        1024,
+        1024,
+        1024,
+        1024,
+        1024
+      ],
+      "duration_seconds": 306.6058180849941,
+      "output_throughput": 26.71834491323677,
+      "mean_ttft_ms": 106260.38888587663,
+      "forced_ignore_eos": true,
+      "output_quality_warnings": [
+        {
+          "request": 0,
+          "garbage": null,
+          "repetition_warning": "repeated 24-char span"
+        },
+        {
+          "request": 3,
+          "garbage": null,
+          "repetition_warning": "repeated 24-char span"
+        },
+        {
+          "request": 4,
+          "garbage": "non-Latin script 733/795",
+          "repetition_warning": "repeated 24-char span"
+        },
+        {
+          "request": 5,
+          "garbage": "non-Latin script 1190/1200",
+          "repetition_warning": "repeated 24-char span"
+        },
+        {
+          "request": 7,
+          "garbage": "empty",
+          "repetition_warning": "repeated 24-char span"
+        }
+      ],
+      "counter_deltas": {
+        "vllm:num_preemptions": 0.0,
+        "vllm:kv_offload_load_bytes": 0.0,
+        "vllm:kv_offload_store_bytes": 7415529472.0,
+        "vllm:kv_offload_load_time": 0.0,
+        "vllm:kv_offload_store_time": 2.481739624023438
+      },
+      "peak_cache_usage": {
+        "vllm:kv_offload_cpu_cache_usage_perc": 0.04054054054054054,
+        "vllm:kv_cache_usage_perc": 1.0
+      },
+      "metric_sample_errors": 0
+    }
+  ]
+}

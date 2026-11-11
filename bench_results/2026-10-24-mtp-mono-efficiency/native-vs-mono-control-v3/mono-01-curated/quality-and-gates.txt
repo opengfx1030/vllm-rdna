@@ -1,0 +1,20 @@
+Validated serving arm: MonoKernel target and dense Mono MTP2 drafter
+Remote run directory: /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-v3-results
+[10:06:46] boot TREE=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v3 RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=6,7,8,9 PORT=18916 overrides=PLE=int4 PLE_QUANT_DIR=/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4 KV=4026531840 GMEM=0.92 LPTH=1024 PREFILL_INTERVAL=2 SEQS=8 SERVE_TREE=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v3 SERVE_SCRIPT=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v3/tools/rdna/serve_rdna.sh bench_extra=--temperature 0 --save-detailed
+[10:10:37] READY in 231s served=flash-next
+[10:10:37] MONO ROUTE monokernel=1 ranks=4 mtp_ranks=4 requested_drafter=1 dense_calls=4
+[10:10:37] GDN ROUTE requested=1 opaque_marker_count=1
+RESULT PASS (3/3)
+    PPL 4.88 (mean NLL 1.586 over 261 tokens) PASS
+    cold TTFT 5.66 s, warm TTFT 0.68 s, speedup 8.3x -> PASS
+    RESULT PASS: 0 failing, 17 near-tie, 0 soft, 0 solo-noise, 31 identical of 48 checks (42.1s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[10:12:01] MTP K2 DISPATCH dense_calls=4 mono_route_markers=68
+[10:12:06] PREFIX RESET PASS before bench-1024x512-c1
+[10:13:16] PREFIX RESET PASS before bench-1024x512-c8
+[10:14:47] PREFIX RESET PASS before bench-16384x1024-c1
+[10:17:37] PREFIX RESET PASS before bench-16384x1024-c8
+[10:23:58] LOAD HOOK rc=0 PASS
+[10:24:05] PROBE-AFTER-LOAD PASS
+[10:24:05] fault markers in serve.log: 0
+[10:24:05] new amdgpu dmesg faults: 0
+[10:24:05] done

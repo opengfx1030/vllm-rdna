@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Generate three Python-only diagnostics from exact healthy fail-stop sources."""
+
+import hashlib
+import json
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
+PREFIX = "vllm/models/qwen4_exp/amd/mono/rdna2/"
+BASE = {
+    "debug.py": "9694c95a7e7f75f9ad3cb2388b73105f0503413909dc381d24c3ebb93cf30f95",
+    "layout.py": "00e730f8d40b5ec9966ff096040e872be2547068e60e4af87d93b8bb17a575c1",
+    "k2.py": "64cc1b2a22737b59f2e6113ceeaa551509a63e4a307abe44c286849a426788dc",
+}
+
+
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+def replace(s, old, new):
+    if s.count(old) != 1:
+        raise ValueError(f"anchor count {s.count(old)}: {old[:70]}")
+    return s.replace(old, new)
+
+
+def transform(name, s):
+    if name == "debug.py":
+        s = replace(
+            s,
+            "STATS: dict[int, torch.Tensor] = {}",
+            (
+                "STATS: dict[int, torch.Tensor] = {}\n"
+                "MTP_STATS: dict[int, torch.Tensor] = {}"
+            ),
+        )
+        s = replace(s, "_last_log = [0.0]", "_last_log = [0.0]\n_mtp_last_log = [0.0]")
+        s = replace(
+            s,
+            "def log_stats():",
+            '''def statistics(scope: str = "model"):
+    """Separate workspace stats; no automatic migration between scopes."""
+    if scope == "model":
+        return STATS
+    if scope == "mtp":
+        return MTP_STATS
+    raise ValueError(f"unknown timing scope: {scope}")
+
+
+def mtp_kernel_timing(st: torch.Tensor, enabled: bool) -> None:
+    """Diagnostic-only captured flag fill, once before/after each MTP K2.
+
+    K1 shares the MTP workspace but returns before the timing epilogue. Keep
+    its native entry stamps disabled so K2 cannot inherit K1 entry_min/max.
+    The two fills add diagnostic launches; callers guard on timing=True.
+    """
+    st[STAT_ROWS * STAT_COLS + 3].fill_(int(enabled))
+
+
+def log_stats(scope: str = "model"):''',
+        )
+        s = replace(
+            s,
+            """    if now - _last_log[0] < 30.0:
+        return
+    _last_log[0] = now
+    for idx, st in STATS.items():""",
+            """    registry = statistics(scope)
+    throttle = _mtp_last_log if scope == "mtp" else _last_log
+    if now - throttle[0] < 30.0:
+        return
+    throttle[0] = now
+    for idx, st in registry.items():""",
+        )
+        s = replace(
+            s,
+            """            logger.info(
+                "mono k2_rdna2 timing""",
+            """            if scope == "mtp":
+                logger.info(
+                    "mono MTP k2_rdna2 timing dev%d w%d: region n=%d %.1f us | "
+                    "kernel n=%d total %.1f phases %s | entry spread %.1f "
+                    "wg0 %.1f | mark->first %.1f mark->last %.1f | "
+                    "scope=mtp_k2_body_plus_ffn_ar k1_attention=unmeasured",
+                    idx, w, nm, us(r[13], nm), n, us(r[9], n), ph,
+                    us(r[8], n), us(r[10], n), us(r[14], n), us(r[15], n),
+                )
+                continue
+            logger.info(
+                "mono k2_rdna2 timing""",
+        )
+    elif name == "layout.py":
+        s = replace(
+            s,
+            """        if OPTS.timing and scope == "model":
+            st[sc + 3] = 1  # enabled
+            debug.STATS[idx] = st""",
+            """        if OPTS.timing and scope in ("model", "mtp"):
+            # MTP K1 shares this arena and lacks a final stats epilogue.
+            # Only its K2 body enables native timing around the actual call.
+            st[sc + 3] = int(scope == "model")
+            debug.statistics(scope)[idx] = st""",
+        )
+    elif name == "k2.py":
+        s = replace(
+            s,
+            """    timed = OPTS.timing and fits and md != "eager" and not mono.is_mtp
+    st = debug.STATS.get(hidden_states.device.index) if timed else None
+    if OPTS.timing and not mono.is_mtp and not torch.cuda.is_current_stream_capturing():
+        debug.log_stats()""",
+            """    timed = OPTS.timing and fits and md != "eager"
+    scope = "mtp" if mono.is_mtp else "model"
+    st = debug.statistics(scope).get(hidden_states.device.index) if timed else None
+    if OPTS.timing and not torch.cuda.is_current_stream_capturing():
+        debug.log_stats(scope)""",
+        )
+        s = replace(
+            s,
+            """        mark(st, 5, m | (32 if qsa else 0))  # attention done
+        mark(st, 0 if mono.first else 2, m)""",
+            """        if mono.is_mtp:
+            debug.mtp_kernel_timing(st, True)
+        else:
+            mark(st, 5, m | (32 if qsa else 0))  # target attention done
+        # MTP records only K2 body+FFN AR, never a gap or K1/attention span.
+        mark(st, 0 if mono.is_mtp or mono.first else 2, m)""",
+        )
+        s = replace(
+            s,
+            """        torch.ops._rocm_C.mono_k2_rdna2_mark(st, 1, m)
+    return result""",
+            """        torch.ops._rocm_C.mono_k2_rdna2_mark(st, 1, m)
+        if mono.is_mtp:
+            debug.mtp_kernel_timing(st, False)
+    return result""",
+        )
+        # Keep flag cleanup even if a Python launch/module call raises.
+        start = s.index("    if st is not None:\n", s.index("def _k2("))
+        end = s.index("    return result", start)
+        block = s[start:end]
+        block = replace(
+            block,
+            "        if mono.is_mtp:\n            debug.mtp_kernel_timing(st, False)\n",
+            "",
+        )
+        s = (
+            s[:start]
+            + "    try:\n"
+            + "".join(
+                "    " + line if line.strip() else line
+                for line in block.splitlines(keepends=True)
+            )
+            + "    finally:\n        if st is not None and mono.is_mtp:\n"
+            "            debug.mtp_kernel_timing(st, False)\n" + s[end:]
+        )
+    else:
+        raise ValueError(name)
+    return s
+
+
+def main():
+    manifest = {
+        "diagnostic_only": True,
+        "default_timing_false_gpu_extras": 0,
+        "core_sha256": (
+            "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed"
+        ),
+        "changes": {},
+    }
+    for name, expected in BASE.items():
+        path = ROOT / (PREFIX + name)
+        if sha(path) != expected:
+            raise ValueError(f"wrong exact healthy base: {path}")
+        candidate = transform(name, path.read_text())
+        target = HERE / "candidate-overlay" / (PREFIX + name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(candidate)
+        manifest["changes"][PREFIX + name] = {
+            "original": expected,
+            "candidate": sha(target),
+        }
+    (HERE / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()

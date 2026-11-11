@@ -1,0 +1,111 @@
+{
+  "passed": true,
+  "cells": [
+    {
+      "name": "bench-32256x256-c1",
+      "command": [
+        "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/bin/python",
+        "-m",
+        "vllm.entrypoints.cli.main",
+        "bench",
+        "serve",
+        "--backend",
+        "openai",
+        "--endpoint",
+        "/v1/completions",
+        "--base-url",
+        "http://127.0.0.1:18766",
+        "--model",
+        "flash-next",
+        "--tokenizer",
+        "/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c",
+        "--dataset-name",
+        "random",
+        "--random-input-len",
+        "32256",
+        "--random-output-len",
+        "256",
+        "--random-range-ratio",
+        "0.0",
+        "--num-prompts",
+        "1",
+        "--max-concurrency",
+        "1",
+        "--request-rate",
+        "inf",
+        "--temperature",
+        "0",
+        "--ignore-eos",
+        "--seed",
+        "805378780",
+        "--save-result",
+        "--save-detailed",
+        "--result-dir",
+        "/home/chenco_adm/w4a8_runs/moe-offload/tp2-32k-tail/long",
+        "--result-filename",
+        "bench-32256x256-c1.json",
+        "--disable-tqdm"
+      ],
+      "forced_ignore_eos": true,
+      "requested_input_tokens": 32256,
+      "input_length_relative_tolerance": 0.01,
+      "max_context_tokens": 32768,
+      "requested_output_tokens": 256,
+      "actual_input_tokens": [
+        32256
+      ],
+      "actual_output_tokens": [
+        256
+      ],
+      "headline": "bench-32256x256-c1           prefill    957.2 tok/s/req (agg   957.2) | decode  30.08 tok/s/req (agg out    6.07) | TTFT   33.70 s | ITL med    61.1 ms mean    71.8 ms | ok 1",
+      "output_quality_warnings": [],
+      "counter_deltas": {
+        "vllm:num_preemptions": 0.0,
+        "vllm:kv_offload_load_bytes": 0.0,
+        "vllm:kv_offload_store_bytes": 1100742656.0,
+        "vllm:kv_offload_load_time": 0.0,
+        "vllm:kv_offload_store_time": 0.37174482154846195
+      },
+      "peak_cache_usage": {
+        "vllm:kv_cache_usage_perc": 0.2681159420289855,
+        "vllm:kv_offload_cpu_cache_usage_perc": 0.02702702702702703
+      },
+      "metric_sample_errors": 0
+    }
+  ],
+  "selected_cells": [
+    "32k-c1"
+  ],
+  "partial_scope": true,
+  "scope": "selected performance cells plus normal-EOS retrieval; no baseline speedup claim",
+  "transfer_contention": "not attributed; transfer counters and per-request latency recorded",
+  "retrieval": {
+    "normal_eos": true,
+    "marker_found": true,
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 32256,
+      "total_tokens": 32329,
+      "completion_tokens": 73,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": null,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": null
+    },
+    "text": "\n\n<think>\nThe user is asking me to return the deployment marker that was given at the start of the message. Let me find it.\n\nThe deployment marker stated at the beginning is: ORBITAL_FENCE_4729\n\nThey want only that exact marker, without explanation.\n</think>\n\nORBITAL_FENCE_4729",
+    "counter_deltas": {
+      "vllm:num_preemptions": 0.0,
+      "vllm:kv_offload_load_bytes": 0.0,
+      "vllm:kv_offload_store_bytes": 1100742656.0,
+      "vllm:kv_offload_load_time": 0.0,
+      "vllm:kv_offload_store_time": 0.3844562692642213
+    },
+    "peak_cache_usage": {
+      "vllm:kv_cache_usage_perc": 0.2681159420289855,
+      "vllm:kv_offload_cpu_cache_usage_perc": 0.02702702702702703
+    },
+    "metric_sample_errors": 0
+  }
+}

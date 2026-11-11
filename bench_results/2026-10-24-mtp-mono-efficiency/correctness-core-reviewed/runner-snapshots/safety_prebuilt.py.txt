@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Prebuilt scratch safety, keeping dense reset=False host rejection explicit."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from dense_round_adapter import _STATE, HERE, PREFIX, invoke, load_prebuilt
+
+
+def load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--native-harness", type=Path, required=True)
+    parser.add_argument("--native-harness-sha256", required=True)
+    parser.add_argument("--expected-core-sha256", required=True)
+    parser.add_argument("--expected-native-source-sha256", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--seed", type=int, default=50124)
+    args = parser.parse_args()
+    if args.output.exists():
+        raise SystemExit("refusing output overwrite")
+    import hashlib
+
+    if (
+        args.native_harness_sha256
+        != "741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca"
+    ):
+        raise SystemExit("use the reviewed actual-native harness SHA 741f988f")
+    harness_path = args.native_harness.resolve(strict=True)
+    if (
+        hashlib.sha256(harness_path.read_bytes()).hexdigest()
+        != args.native_harness_sha256
+    ):
+        raise SystemExit("actual-native harness hash mismatch")
+    native_harness = load(harness_path, "dense_scratch_native_reference")
+    gpu = native_harness.selected_gpu()
+    root = args.repo_root.resolve(strict=True)
+    sys.path.insert(0, str(root))
+    os.environ["VLLM_SOURCE_ROOT"] = str(root)
+    import torch
+    import vllm._rocm_C as core
+
+    assert torch.version.hip and torch.cuda.device_count() == 1
+    assert torch.cuda.get_device_properties(0).gcnArchName.startswith("gfx10")
+    core_path = Path(core.__file__).resolve(strict=True)
+    if hashlib.sha256(core_path.read_bytes()).hexdigest() != args.expected_core_sha256:
+        raise SystemExit("actual native core hash mismatch")
+    native_source = root / "csrc/rocm/moe_unquantized_rdna2.cu"
+    if (
+        hashlib.sha256(native_source.read_bytes()).hexdigest()
+        != args.expected_native_source_sha256
+    ):
+        raise SystemExit("actual native source hash mismatch")
+    ext = load_prebuilt()
+    common = load(
+        HERE.parent / "large-m-mono-ordinary-safety/prebuilt_timeout_recovery.py",
+        "dense_scratch_common_safety",
+    )
+    fixture = load(
+        HERE.parent / "large-m-mono-global-validation/validate_global_m_fixture.py",
+        "dense_scratch_fixture",
+    )
+    tests = load(
+        root / "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py",
+        "dense_scratch_tests",
+    )
+    payload = {
+        "complete": False,
+        "status": "RUNNING",
+        "gpu": gpu,
+        "provenance": _STATE["provenance"],
+        "records": [],
+        "scope": "synthetic native safety; no cross-mode or serving qualification",
+        "dense_sticky_retention_tested": False,
+    }
+
+    def save():
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n")
+        temporary.replace(args.output)
+
+    def error(ws):
+        return common.error(ext, PREFIX, ws)
+
+    save()
+    last_outputs = None
+    inputs = None
+    output_stage = None
+    try:
+        for dense in (False, True):
+            if dense:
+                mono = fixture._make_dense_mtp_fixture(tests, torch, args.seed)
+                reference = native_harness.build_native_reference(root, mono.t, torch)
+            else:
+                generator = torch.Generator(device="cuda").manual_seed(args.seed)
+                weights, _ = tests._make_layer(generator, keep_golden=True)
+                mono = SimpleNamespace(t=weights, eps=tests.EPS, base=0, ar_on=False)
+
+                def reference(*inputs, weights=weights):
+                    outputs = tests._today_ffn(weights, *inputs)
+                    return (outputs[1], outputs[0], outputs[2]), None
+
+            nbytes = int(
+                getattr(ext, PREFIX + "_workspace_bytes")(2560, 320, 336, 512, 160, 640)
+            )
+            alloc = getattr(ext, PREFIX + "_workspace_alloc")
+            for rows in (3, 24):
+                mono.ws = alloc(nbytes + 8192, 0)
+                fresh = SimpleNamespace(**vars(mono))
+                fresh.ws = alloc(nbytes + 8192, 0)
+                assert mono.ws.data_ptr() != fresh.ws.data_ptr()
+                inputs = tests._inputs(rows, args.seed + rows)
+                record = {
+                    "dense": dense,
+                    "M": rows,
+                    "complete": False,
+                    "num_wg": 2,
+                    "timeout_ms": 0.0,
+                }
+                payload["records"].append(record)
+                save()
+                failed = invoke(
+                    mono,
+                    *inputs,
+                    reset=dense,
+                    dense=dense,
+                    timeout_ms=0.0,
+                    sentinels=True,
+                )
+                torch.cuda.synchronize()
+                last_outputs, output_stage = failed, "timeout"
+                fault = error(mono.ws)
+                record["timeout_record"] = fault
+                save()
+                if fault[0] != 1:
+                    raise AssertionError(f"real barrier timeout not triggered: {fault}")
+                assert 1 <= fault[1] <= 8 and fault[3] == 2
+                common.poison(failed, torch)
+                record["timeout_full_output_poison"] = True
+                if dense:
+                    try:
+                        invoke(mono, *inputs, reset=False, dense=True)
+                    except RuntimeError as exc:
+                        record["dense_reset_false_rejection"] = str(exc)
+                        if "dense expert branch is MTP-only" not in str(exc):
+                            raise
+                    else:
+                        raise AssertionError("dense reset=False unexpectedly accepted")
+                    assert error(mono.ws)[:3] == fault[:3]
+                    record["dense_sticky_retention_tested"] = False
+                else:
+                    sticky = invoke(
+                        mono, *inputs, reset=False, dense=False, sentinels=True
+                    )
+                    torch.cuda.synchronize()
+                    last_outputs, output_stage = sticky, "ordinary_sticky"
+                    common.poison(sticky, torch)
+                    assert error(mono.ws)[:3] == fault[:3]
+                    record["ordinary_sticky_without_reset_poison"] = True
+                recovered = invoke(mono, *inputs, reset=True, dense=dense)
+                clean = invoke(fresh, *inputs, reset=True, dense=dense)
+                torch.cuda.synchronize()
+                last_outputs, output_stage = recovered, "reset_recovery"
+                common.equal(recovered, clean, torch)
+                common.finite(recovered, torch)
+                assert error(mono.ws)[0] == error(fresh.ws)[0] == 0
+                assert torch.equal(
+                    common.topk(ext, PREFIX, mono.ws, rows),
+                    common.topk(ext, PREFIX, fresh.ws, rows),
+                )
+                record["reset_fresh_equivalence"] = True
+
+                def check_reference(
+                    outputs, current, label, reference=reference, record=record
+                ):
+                    expected, _ = reference(*current)
+                    check = native_harness.output_diagnostics(outputs, expected, torch)
+                    if not check["passed"]:
+                        record[label] = check
+                        save()
+                        raise AssertionError(
+                            f"strict unmasked reference {label} failed"
+                        )
+                    return check
+
+                record["recovery_reference"] = check_reference(
+                    recovered, inputs, "recovery"
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    graph_out = invoke(mono, *inputs, reset=dense, dense=dense)
+                torch.cuda.synchronize()
+                assert error(mono.ws)[0] == 0
+                record["changed_graphs"] = []
+                for delta in (100000, 200000):
+                    changed = tests._inputs(rows, args.seed + rows + delta)
+                    for dst, src in zip(inputs, changed):
+                        dst.copy_(src)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    last_outputs, output_stage = graph_out, f"changed_graph_{delta}"
+                    graph_error = error(mono.ws)
+                    assert graph_error[0] == 0
+                    graph_ids = common.topk(ext, PREFIX, mono.ws, rows)
+                    eager = invoke(fresh, *inputs, reset=dense, dense=dense)
+                    torch.cuda.synchronize()
+                    assert error(fresh.ws)[0] == 0
+                    common.equal(graph_out, eager, torch)
+                    common.finite(graph_out, torch)
+                    assert torch.equal(
+                        graph_ids, common.topk(ext, PREFIX, fresh.ws, rows)
+                    )
+                    check = check_reference(graph_out, inputs, f"changed_graph_{delta}")
+                    record["changed_graphs"].append(
+                        {
+                            "seed_delta": delta,
+                            "bit_identical_to_eager": True,
+                            "error": graph_error,
+                            "reference": check,
+                            "topk_equal": True,
+                        }
+                    )
+                    save()
+                record["complete"] = True
+                save()
+        payload.update(complete=True, status="PASS")
+        save()
+    except BaseException as exc:
+        payload.update(status="FAIL", failure=repr(exc))
+        # Preserve complete failing row data; no near-tie mask or binary artifact.
+        try:
+            payload["raw_failure"] = {
+                "output_stage": output_stage,
+                "inputs": [x.detach().cpu().tolist() for x in inputs]
+                if inputs is not None
+                else None,
+                "outputs": [x.detach().cpu().tolist() for x in last_outputs]
+                if last_outputs is not None
+                else None,
+            }
+        except BaseException as diagnostic_error:
+            payload["raw_failure_readback_error"] = repr(diagnostic_error)
+        save()
+        raise
+
+
+if __name__ == "__main__":
+    main()

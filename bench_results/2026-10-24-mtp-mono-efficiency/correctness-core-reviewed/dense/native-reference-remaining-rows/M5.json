@@ -1,0 +1,229 @@
+{
+  "candidate": "dense_round_adapter:run",
+  "candidate_binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/torch-extensions-dense-round-v2/mono_k2_dense_native_rounding_v2_scratch_20261024/mono_k2_dense_native_rounding_v2_scratch_20261024.so",
+  "candidate_binary_sha256": "837e6ab2ff6c43831bfcaa39e807d8a7916a542039c32d503ee680d9d3bca601",
+  "candidate_error_record": [
+    0,
+    0,
+    0,
+    144,
+    0,
+    8
+  ],
+  "candidate_graph_changed_input_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      6.103515625e-05,
+      6.103515625e-05,
+      6.103515625e-05,
+      3.0517578125e-05,
+      6.103515625e-05
+    ],
+    "max_abs_error_ffn": 6.103515625e-05,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "candidate_graph_second_changed_input_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      6.103515625e-05,
+      6.103515625e-05,
+      6.103515625e-05,
+      3.0517578125e-05,
+      6.103515625e-05
+    ],
+    "max_abs_error_ffn": 6.103515625e-05,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "candidate_source": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-dense-native-round-v2/mono_k2_dense_native_rounding.cu",
+  "candidate_source_sha256": "28356022f2ca23c667c70fc0712cef300fcdfa16b0dc1c8a23626b2cc413efa8",
+  "changed_input_topk_ids_equal_by_expert": true,
+  "changed_input_topk_weights_max_abs_error_by_expert": null,
+  "device_arch": "gfx1030",
+  "eager_output_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05
+    ],
+    "max_abs_error_ffn": 0.0001220703125,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "fixture": "synthetic existing dense-MTP random FP16 fixture",
+  "fixture_seed": 50124,
+  "gpu": 6,
+  "gpu_selector_alias_normalization": {
+    "CUDA_VISIBLE_DEVICES": "6",
+    "GPU_DEVICE_ORDINAL": null,
+    "HIP_VISIBLE_DEVICES": "6",
+    "ROCR_VISIBLE_DEVICES": null,
+    "matching_cuda_alias_present": true,
+    "policy": "single physical HIP6-9; empty or identical CUDA alias; no ROCR/ordinal mask",
+    "startup_normalizer": "vllm.platforms.rocm._sync_hip_cuda_env_vars"
+  },
+  "loaded_candidate_binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/torch-extensions-dense-round-v2/mono_k2_dense_native_rounding_v2_scratch_20261024/mono_k2_dense_native_rounding_v2_scratch_20261024.so",
+  "loaded_core": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so",
+  "loaded_core_sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+  "module_reference": {
+    "all_reduce": "omitted; rank-local partial comparison",
+    "down": "native RDNA2 HIP op includes router weight before per-slot FP16 store",
+    "gate_up_activation": "native RDNA2 HIP fused op; FP32 reduction then one FP16 act store",
+    "router_logits_dtype": "float16",
+    "shared_combine": "FP16 shared + FP16 routed at MoERunner._finalize local combine point",
+    "slot_sum": "_custom_ops.moe_sum; FP32 sum in fused_topk-returned slot order then FP16 store"
+  },
+  "native_backend": "Rdna2UnquantizedExperts / RDNA2 HIP ops",
+  "native_expert_source": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/csrc/rocm/moe_unquantized_rdna2.cu",
+  "native_expert_source_sha256": "b2cdb9b6a4e5886749ad0530b76f26072f9e38d93c34f8743111160afc09de77",
+  "native_reference_graph_changed_input_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max_abs_error_ffn": 0.0,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "native_reference_graph_second_changed_input_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max_abs_error_ffn": 0.0,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "notes": [
+    "Output comparison is strict for every row; no router-near-tie masking is applied.",
+    "Top-k sets/weights are compared by expert ID; both observed slot orders are recorded and full FFN parity remains strict.",
+    "Synthetic fixture is diagnostic only and has no model/checkpoint provenance.",
+    "Post-timing eager output, route, finite, and zero-error gates are rerun.",
+    "Zero-error record is not a sticky-timeout retry test; use the separate direct-op fault harness for that guarantee."
+  ],
+  "post_timing_error_record": [
+    0,
+    0,
+    0,
+    144,
+    0,
+    12
+  ],
+  "post_timing_output_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05
+    ],
+    "max_abs_error_ffn": 0.0001220703125,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "post_timing_topk_check": {
+    "ids_equal_by_expert": true,
+    "tolerance": 0.005,
+    "weights_max_abs_error_by_expert": null
+  },
+  "rows": 5,
+  "schema": "actual-rdna2-dense-mtp-reference-v1",
+  "second_changed_input_topk_ids_equal_by_expert": true,
+  "second_changed_input_topk_weights_max_abs_error_by_expert": null,
+  "status": "PASS",
+  "timing_ms": {
+    "candidate_mono": {
+      "mean": 0.26443749889731405,
+      "median": 0.26428499817848206,
+      "samples": [
+        0.2409600019454956,
+        0.2779400050640106,
+        0.2461099922657013,
+        0.2877199947834015,
+        0.25119999051094055,
+        0.278219997882843,
+        0.25110000371932983,
+        0.2795200049877167,
+        0.2478799968957901,
+        0.2845599949359894,
+        0.24815000593662262,
+        0.2796199917793274,
+        0.24858999252319336,
+        0.27737000584602356,
+        0.24932000041007996,
+        0.2795700132846832,
+        0.24819999933242798,
+        0.27796998620033264,
+        0.24852000176906586,
+        0.2862299978733063
+      ]
+    },
+    "native_actual_module": {
+      "mean": 0.36536060124635694,
+      "median": 0.36801500618457794,
+      "samples": [
+        0.36017000675201416,
+        0.3748300075531006,
+        0.3465900123119354,
+        0.3687500059604645,
+        0.3637399971485138,
+        0.37716999650001526,
+        0.3465209901332855,
+        0.37470099329948425,
+        0.38304999470710754,
+        0.3654100000858307,
+        0.36059001088142395,
+        0.3805199861526489,
+        0.34777000546455383,
+        0.3672800064086914,
+        0.33959001302719116,
+        0.37964001297950745,
+        0.3395099937915802,
+        0.3783400058746338,
+        0.3745499849319458,
+        0.37849000096321106
+      ]
+    }
+  },
+  "topk_check": {
+    "ids_equal_by_expert": true,
+    "mono_slot_order_observed": "other-observed-order",
+    "native_slot_order_observed": "as returned by fused_topk",
+    "slot_ids_equal_in_order": false,
+    "tolerance": 0.005,
+    "weight_comparison_status": "unavailable: M<=8 weights are not published",
+    "weights_check_available": false,
+    "weights_max_abs_error_by_expert": null
+  }
+}

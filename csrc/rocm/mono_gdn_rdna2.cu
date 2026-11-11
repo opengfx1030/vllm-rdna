@@ -23,7 +23,7 @@
 //      fused_sigmoid_gating_delta_rule_update math (per-token state slots,
 //      initial state from num_accepted - 1).
 //   3. gated RMSNorm (norm before gate) over the head: the tiles publish
-//      their fp16 outputs and int64 fixed-point sums of squares; the last
+//      their fp16 outputs and one FP32 squared-sum partial per tile; the last
 //      tile of a (sequence, head) normalizes and clears the counters.
 //
 // Output y [M, HV * V] fp16 is today's out_proj input. Null / padded slots
@@ -35,6 +35,8 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <cstdio>
+#include <cstdlib>
 
 namespace gdn_fused {
 
@@ -70,16 +72,37 @@ struct Args {
   const half* normw;  // [V]
   float scale, eps;
   int sig, H, HV, CD, slots, tmax;
-  unsigned long long*
-      ssq;     // [kCapRows, HV] fixed-point sums (zero between calls)
-  int* cnt;    // [kCapRows, HV] norm arrivals (zero between calls)
-  int* cntqk;  // [kCapRows, H] q|k state arrivals (zero between calls)
-  half* obuf;  // [M, HV, V] fp16
-  half* y;     // [M, HV * V]
+  float* ssq;       // [kCapRows, HV, kV/kBV] per-tile FP32 squared sums
+  int* cnt;         // [kCapRows, HV] norm arrivals (zero between calls)
+  int* cntqk;       // [kCapRows, H] q|k state arrivals (zero between calls)
+  half* obuf;       // [M, HV, V] fp16
+  half* y;          // [M, HV * V]
+  int* diagnostic;  // one first-error flag after the output scratch
 };
+
+// Bit tests remain effective when HIP is built with finite/fast-math flags.
+__device__ __forceinline__ bool finite32(float value) {
+  return (__float_as_uint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+// Diagnostic specialization only: report the first detected error per launch.
+// Codes are stable so the tiny scratch flag can also be checked by GPU tests.
+__device__ __forceinline__ void diagnose(const Args& a, int kind, float value,
+                                         long tok, long slot) {
+  if (atomicCAS(a.diagnostic, 0, kind) != 0) return;
+  const int seq = blockIdx.x / a.HV;
+  const int hv = blockIdx.x % a.HV;
+  printf(
+      "RDNA_GDN_DIAG scratch=%p kind=%d seq=%d head=%d tile=%d thread=%d "
+      "nacc=%d cslot=%d slot=%ld tok=%ld value=%g\n",
+      (void*)a.ssq, kind, seq, hv, (int)blockIdx.y, (int)threadIdx.x,
+      a.nacc ? a.nacc[seq] : 1, a.sidx[(long)seq * a.sidx_seq], slot, tok,
+      (double)value);
+}
 
 // conv1d update of one channel: T outputs (fp16-rounded, like today's conv
 // output tensor) to out[t * ostride], the rolled state window to nst
+template <bool DIAG>
 __device__ __forceinline__ void conv_channel(const Args& a, int ch,
                                              const half* base, long off,
                                              int state_len, int T, long bos,
@@ -88,6 +111,10 @@ __device__ __forceinline__ void conv_channel(const Args& a, int ch,
   float c0 = __half2float(base[off * a.cs_tok]);
   float c1 = __half2float(base[(off + 1) * a.cs_tok]);
   float c2 = __half2float(base[(off + 2) * a.cs_tok]);
+  if constexpr (DIAG) {
+    if (!finite32(c0) || !finite32(c1) || !finite32(c2))
+      diagnose(a, 2, !finite32(c0) ? c0 : (!finite32(c1) ? c1 : c2), bos, -1);
+  }
   const long shift = spec ? 1 : T;
 #pragma unroll
   for (int t = 0; t < kMaxSL; t++) {
@@ -104,12 +131,18 @@ __device__ __forceinline__ void conv_channel(const Args& a, int ch,
   for (int t = 0; t < kMaxT; t++) {
     if (t < T) {
       const float x = __half2float(a.qkvz[(bos + t) * a.ldq + ch]);
+      if constexpr (DIAG) {
+        if (!finite32(x)) diagnose(a, 3, x, bos + t, -1);
+      }
       // spec: the Triton update (fp16 products into fp32); non-spec: the HIP
       // causal_conv1d_update_rdna2 (fp32 multiply-adds)
       const float acc =
           spec ? b + rh(w0 * c0) + rh(w1 * c1) + rh(w2 * c2) + rh(w3 * x)
                : fmaf(w3, x, fmaf(w2, c2, fmaf(w1, c1, fmaf(w0, c0, b))));
       out[t * ostride] = rh(silu_f(acc));
+      if constexpr (DIAG) {
+        if (!finite32(out[t * ostride])) diagnose(a, 6, acc, bos + t, -1);
+      }
       c0 = c1;
       c1 = c2;
       c2 = x;
@@ -154,7 +187,7 @@ __device__ __forceinline__ float ksum8(float x) {
   return x;
 }
 
-template <int KMAP>
+template <int KMAP, bool DIAG>
 __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
   const int seq = blockIdx.x / a.HV, hv = blockIdx.x % a.HV;
   const int tile = blockIdx.y, h = hv / (a.HV / a.H);
@@ -166,11 +199,30 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
   const int T = spec ? min(a.qsl[seq + 1] - (int)bos, a.tmax) : 1;
   if (T <= 0) return;
   const int* srow = a.sidx + (long)seq * a.sidx_seq;
-  const int acc_i = spec ? a.nacc[seq] - 1 : 0;
   const long cslot = srow[0];
-  const long slot0 = srow[acc_i];
   const int VD = a.HV * kV;
-  if (slot0 <= 0 || slot0 >= a.slots || cslot <= 0 || cslot >= a.slots) {
+  // Padded sequences may carry nacc=0. Never read their accepted-state index.
+  if (cslot <= 0 || cslot >= a.slots) {
+    if (tile == 0)
+      for (int t = 0; t < T; t++)
+        for (int i = tid; i < kV; i += kThreads)
+          a.y[(bos + t) * VD + hv * kV + i] = __float2half(0.f);
+    return;
+  }
+  const int accepted = spec ? a.nacc[seq] : 1;
+  if (accepted < 1 || accepted > a.tmax) {
+    if constexpr (DIAG) diagnose(a, 1, (float)accepted, bos, cslot);
+    // Real invalid metadata must poison the output rather than read outside
+    // srow. The ordinary nonfinite-logit fail-stop will reject the request.
+    if (tile == 0)
+      for (int t = 0; t < T; t++)
+        for (int i = tid; i < kV; i += kThreads)
+          a.y[(bos + t) * VD + hv * kV + i] = __float2half(nanf(""));
+    return;
+  }
+  const int acc_i = accepted - 1;
+  const long slot0 = srow[acc_i];
+  if (slot0 <= 0 || slot0 >= a.slots) {
     if (tile == 0)  // null / padded: y = 0
       for (int t = 0; t < T; t++)
         for (int i = tid; i < kV; i += kThreads)
@@ -190,13 +242,13 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
   half* cbase = a.cs + cslot * a.cs_slot;
   const int ch = tid < kK ? h * kK + tid : a.H * kK + h * kK + (tid - kK);
   half nst[kMaxSL];
-  conv_channel(a, ch, cbase + (long)ch * a.cs_dim, off, state_len, T, bos, spec,
-               s_qk + tid, 2 * kK, nst);
+  conv_channel<DIAG>(a, ch, cbase + (long)ch * a.cs_dim, off, state_len, T, bos,
+                     spec, s_qk + tid, 2 * kK, nst);
   if (tid < kBV) {
     const int chv = 2 * a.H * kK + hv * kV + tile * kBV + tid;
     half nv[kMaxSL];
-    conv_channel(a, chv, cbase + (long)chv * a.cs_dim, off, state_len, T, bos,
-                 spec, s_v + tid, kBV, nv);
+    conv_channel<DIAG>(a, chv, cbase + (long)chv * a.cs_dim, off, state_len, T,
+                       bos, spec, s_v + tid, kBV, nv);
     store_window(a, cbase + (long)chv * a.cs_dim, state_len,
                  nv);  // own channel
   }
@@ -217,7 +269,12 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
   {
     const float* p = a.ssm + slot0 * a.ss_slot + ((long)hv * kV + o_v) * kK;
 #pragma unroll
-    for (int j = 0; j < 16; j++) hs[j] = ld_state(p + KIDX(j));
+    for (int j = 0; j < 16; j++) {
+      hs[j] = ld_state(p + KIDX(j));
+      if constexpr (DIAG) {
+        if (!finite32(hs[j])) diagnose(a, 4, hs[j], bos, slot0);
+      }
+    }
   }
   const float A = expf(a.alog[hv]);
   for (int t = 0; t < T; t++) {
@@ -246,6 +303,10 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
     }
     const float av = __half2float(a.ba[tok * a.ldba + a.HV + hv]);
     const float bv = __half2float(a.ba[tok * a.ldba + hv]);
+    if constexpr (DIAG) {
+      if (!finite32(av) || !finite32(bv))
+        diagnose(a, 5, !finite32(av) ? av : bv, tok, slot0);
+    }
     const float xg = av + a.dtb[hv];
     const float softplus = xg <= 20.f ? logf(1.f + expf(xg)) : xg;
     const float decay = expf(-A * softplus);
@@ -265,6 +326,12 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
     for (int j = 0; j < 16; j++) oa += hs[j] * q[j];
     oa = ksum8(oa);
     const half o16 = __float2half(oa);
+    if constexpr (DIAG) {
+      if (!finite32(oa))
+        diagnose(a, 7, oa, tok, slot0);
+      else if (!finite32(__half2float(o16)))
+        diagnose(a, 8, oa, tok, slot0);
+    }
     const long slot_t = spec ? srow[t] : slot0;
     if (slot_t > 0 && slot_t < a.slots) {
       float* p = a.ssm + slot_t * a.ss_slot + ((long)hv * kV + o_v) * kK;
@@ -285,8 +352,10 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
       float tot = 0.f;
 #pragma unroll
       for (int w8 = 0; w8 < kThreads / 32; w8++) tot += s_red[w8];
-      atomicAdd(&a.ssq[tok * a.HV + hv],
-                (unsigned long long)__float2ll_rn(tot * 4294967296.f));
+      // Each tile has one writer; publish before the existing arrival fence.
+      // FP32 squares of every finite FP16 core value fit without scaling.
+      *reinterpret_cast<volatile float*>(
+          &a.ssq[(tok * a.HV + hv) * (kV / kBV) + tile]) = tot;
     }
     __syncthreads();
   }
@@ -301,10 +370,13 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
   __threadfence();
   for (int t = 0; t < T; t++) {
     const long tok = bos + t;
-    unsigned long long* ps = &a.ssq[tok * a.HV + hv];
-    const long long fx = (long long)__hip_atomic_load(ps, __ATOMIC_RELAXED,
-                                                      __HIP_MEMORY_SCOPE_AGENT);
-    const float tot = __ll2float_rn(fx) * (1.f / 4294967296.f);
+    const volatile float* partials = &a.ssq[(tok * a.HV + hv) * (kV / kBV)];
+    // A fixed tile order is deterministic regardless of arrival order. Q32
+    // overflowed above RMS4096 and discarded small squared sums; FP32 covers
+    // the complete finite FP16 range without a precision/range tradeoff.
+    float tot = 0.f;
+#pragma unroll
+    for (int part = 0; part < kV / kBV; ++part) tot += partials[part];
     const float rstd = rsqrtf(tot / kV + a.eps);
     for (int i = tid; i < kV; i += kThreads) {
       const unsigned short ob =
@@ -316,9 +388,13 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
       const float gate = a.sig ? sg : zv * sg;
       a.y[tok * VD + hv * kV + i] =
           __float2half(o * rstd * __half2float(a.normw[i]) * gate);
+      if constexpr (DIAG) {
+        if (!finite32(zv)) diagnose(a, 3, zv, tok, slot0);
+        if (!finite32(__half2float(a.y[tok * VD + hv * kV + i])))
+          diagnose(a, 9, rstd, tok, slot0);
+      }
     }
     __syncthreads();
-    if (tid == 0) *ps = 0ull;
   }
   if (tid == 0) a.cnt[seq * a.HV + hv] = 0;
 }
@@ -388,10 +464,16 @@ void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
                 "mono_gdn_rdna2: qsl [N+1], nacc [N] int32");
   TORCH_CHECK(M <= kCapRows && N <= kCapRows,
               "mono_gdn_rdna2: at most 64 rows");
-  // scratch: [ssq | cnt | cntqk] at fixed offsets (zero between calls) then
+  // scratch: [FP32 ssq partials | cnt | cntqk] at fixed offsets, then
   // obuf
-  const int64_t zb = (int64_t)kCapRows * (HV * 12 + H * 4);
-  const int64_t need = zb + (int64_t)M * HV * kV * 2;
+  const int64_t zb = (int64_t)kCapRows * (HV * 20 + H * 4);
+  // Env selection is process-static; no getenv or extra finite checks in the
+  // default device specialization. The flag follows this launch's output rows.
+  static const bool diagnostics = [] {
+    const char* value = std::getenv("VLLM_RDNA_GDN_DIAGNOSTICS");
+    return value && value[0] == '1' && value[1] == '\0';
+  }();
+  const int64_t need = zb + (int64_t)M * HV * kV * 2 + sizeof(int);
   TORCH_CHECK(scratch.numel() * scratch.element_size() >= need,
               "mono_gdn_rdna2: scratch too small");
   if (M == 0 || N == 0) return;
@@ -428,21 +510,39 @@ void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
   a.CD = CD;
   a.slots = (int)std::min(conv_state.size(0), ssm_state.size(0));
   a.tmax = tmax;
-  a.ssq = reinterpret_cast<unsigned long long*>(sp);
-  a.cnt = reinterpret_cast<int*>(sp + (int64_t)kCapRows * HV * 8);
-  a.cntqk = reinterpret_cast<int*>(sp + (int64_t)kCapRows * HV * 12);
+  a.ssq = reinterpret_cast<float*>(sp);
+  a.cnt = reinterpret_cast<int*>(sp + (int64_t)kCapRows * HV * 16);
+  a.cntqk = reinterpret_cast<int*>(sp + (int64_t)kCapRows * HV * 20);
   a.obuf = reinterpret_cast<half*>(sp + zb);
   a.y = reinterpret_cast<half*>(y.data_ptr());
+  a.diagnostic = reinterpret_cast<int*>(sp + need - sizeof(int));
+  if (diagnostics) {
+    const auto error = hipMemsetAsync(a.diagnostic, 0, sizeof(int), stream);
+    TORCH_CHECK(
+        error == hipSuccess,
+        "mono_gdn_rdna2: diagnostic reset failed: ", hipGetErrorString(error));
+  }
   const size_t lds = (size_t)tmax * (2 * kK + kBV) * sizeof(float);
   const dim3 grid(N * HV, kV / kBV);
-  if (!spec && M > 16)
-    hipLaunchKernelGGL(gdn_fused_k<0>, grid, dim3(kThreads), lds, stream, a);
-  else
-    hipLaunchKernelGGL(gdn_fused_k<1>, grid, dim3(kThreads), lds, stream, a);
+  if (diagnostics) {
+    if (!spec && M > 16)
+      hipLaunchKernelGGL((gdn_fused_k<0, true>), grid, dim3(kThreads), lds,
+                         stream, a);
+    else
+      hipLaunchKernelGGL((gdn_fused_k<1, true>), grid, dim3(kThreads), lds,
+                         stream, a);
+  } else {
+    if (!spec && M > 16)
+      hipLaunchKernelGGL((gdn_fused_k<0, false>), grid, dim3(kThreads), lds,
+                         stream, a);
+    else
+      hipLaunchKernelGGL((gdn_fused_k<1, false>), grid, dim3(kThreads), lds,
+                         stream, a);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 int64_t mono_gdn_rdna2_scratch_bytes(int64_t M, int64_t HV, int64_t H) {
-  return (int64_t)gdn_fused::kCapRows * (HV * 12 + H * 4) +
-         M * HV * gdn_fused::kV * 2;
+  return (int64_t)gdn_fused::kCapRows * (HV * 20 + H * 4) +
+         M * HV * gdn_fused::kV * 2 + sizeof(int);
 }

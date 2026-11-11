@@ -1,0 +1,17 @@
+{
+  "scope": "APIServer initial exec environment only, whitelist excludes secrets; worker runtime environment may be updated after exec",
+  "utc": "2026-10-24T08:13:33.129476+00:00",
+  "rows": [
+    {
+      "pid": 82207,
+      "initial_exec_environment": {
+        "VLLM_ROCM_MONO_DECODE": null,
+        "VLLM_RAISE_ON_LOGIT_NANS": "1",
+        "VLLM_TEST_MTP_FAULT_MARKER": null,
+        "VLLM_RDNA_PHASE_TIMING": "0",
+        "VLLM_RDNA_OP_TIMING": "0",
+        "HIP_VISIBLE_DEVICES": "6,7,8,9"
+      }
+    }
+  ]
+}

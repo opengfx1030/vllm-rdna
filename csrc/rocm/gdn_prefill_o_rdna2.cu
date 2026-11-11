@@ -2,27 +2,28 @@
 // (gfx1030). Hand port of chunk_fwd_kernel_o from
 // vllm/third_party/flash_linear_attention/ops/chunk_o.py (chunk_fwd_o).
 //
-// Per (V-tile, chunk, batch*head) workgroup:
-//   1. Stage q[BT, K]   into LDS (16 KB fp16)
-//   2. Stage k[BT, K]   into LDS (16 KB fp16); accumulate
-//      b_A[BT, BT] = q @ k^T (fp32 in registers, V_DOT2_F32_F16)
-//   3. Stage h[BV, K]   into LDS (8 KB fp16); accumulate
-//      b_o[BT, BV] = (q @ h^T) * scale * exp(g[:,None])
+//   1. Stage q[BT, K], k[BT, K], h[BV, K], v[BT, BV] and g[BT] into
+//      disjoint LDS slots, then hit ONE barrier. Every global load for the
+//      chunk is in flight across that barrier, so the workgroup pays a
+//      single exposed memory round instead of one per tile.
+//   2. b_A[BT, BT] = q @ k^T (fp32 in registers, V_DOT2_F32_F16).
+//   3. b_o[BT, BV] = (q @ h^T) * scale * exp(g[:, None]).
 //   4. Apply gating b_A *= exp(g_j - g_i) and INCLUSIVE >= causal mask
 //      (zero upper triangle + OOB rows/cols) — mask is INCLUSIVE >= per
 //      chunk_o.py:124; chunk_scaled_dot_kkt uses strict > which is a
 //      DIFFERENT mask and is not used here.
-//   5. Spill the masked/scaled b_A[BT, BT] fp32 to LDS (reuses s_q's
-//      16 KB slot, so the LDS budget never grows), then load v[BT, BV]
-//      into s_v_T[oc, c] (oc outer, c inner — 4 KB transposed).
-//   6. bo += (b_A.to(fp16) @ v) * scale via V_DOT2_F32_F16 using the
-//      transposed v so that (v[c], v[c+1]) is a contiguous half2 along
-//      the c-axis. Without the transpose, the default [BT, BV] layout
-//      pairs v[c, oc] with v[c, oc+1] (wrong axis) and the dot is wrong.
-//   7. Store b_o[BT, BV] fp16 to global, zeroing rows >= T_local.
+//   5. Store the masked/gated b_A[BT, BT] fp16 into s_bA, which reuses s_k
+//      (k is dead after step 2), then bo += (b_A.to(fp16) @ v) * scale via
+//      V_DOT2_F32_F16 on the transposed v so that (v[c], v[c+1]) is one
+//      contiguous half2 along the c-axis. Without the transpose, the
+//      default [BT, BV] layout pairs v[c, oc] with v[c, oc+1] (wrong axis)
+//      and the dot is wrong.
+//   6. Store b_o[BT, BV] fp16 to global, zeroing rows >= T_local.
+//      BV=64 means only (V/BV) = 2 V-tiles per (chunk, head), so b_A = q @ k^T
+//      and the q/k staging are paid twice per chunk instead of four times.
 //
-// Tile: BT=64, BV=32, K=128 (FLA_CHUNK_SIZE=64 fixed by reference).
-//       256 threads; each owns a 4x4 fp32 sub-block of b_A and a 4x2 fp32
+// Tile: BT=64, BV=64, K=128 (FLA_CHUNK_SIZE=64 fixed by reference).
+//       256 threads; each owns a 4x4 fp32 sub-block of b_A and a 4x4 fp32
 //       sub-block of b_o. b_A and b_o live in registers; only the staged
 //       tiles (q, k, h, v, s_bA) traverse LDS. V_DOT2_F32_F16 via
 //       __builtin_amdgcn_fdot2. h is templated on fp16/fp32.
@@ -41,6 +42,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <hip/hip_runtime.h>  // hipFuncSetAttribute for the dynamic-LDS opt-in
 #include <type_traits>
 
 namespace {
@@ -48,35 +50,51 @@ namespace {
 // Tile dimensions — match vllm/third_party/flash_linear_attention/ops/utils.py
 // FLA_CHUNK_SIZE=64 for the Qwen3.5/3.6 GDN path. K and V default to 128.
 constexpr int GDN_BT = 64;
-constexpr int GDN_BV = 32;
+constexpr int GDN_BV = 64;
 constexpr int GDN_K = 128;
 constexpr int GDN_V = 128;
 constexpr int GDN_THREADS = 256;
 
 // Sub-block owned by one thread inside the [BT, BT] fp32 b_A tile and
-// the [BT, BV] fp32 b_o tile. 4 rows x 4 cols of A = 16 fp32; 4 rows x 2
-// cols of o = 8 fp32 (BV=32 -> col-block size halves vs A's 4).
+// the [BT, BV] fp32 b_o tile. 4 rows x 4 cols of A = 16 fp32; 4 rows x 4
+// cols of o = 16 fp32.
 constexpr int GDN_AROW = 4;
 constexpr int GDN_ACOL = 4;
-constexpr int GDN_OCOL = 2;
+constexpr int GDN_OCOL = 4;
 static_assert(GDN_BT / GDN_AROW * GDN_BT / GDN_ACOL == GDN_THREADS,
               "thread count must equal (BT/AROW)*(BT/ACOL)");
 static_assert(GDN_BT / GDN_AROW * GDN_BV / GDN_OCOL == GDN_THREADS,
               "thread count must also equal (BT/AROW)*(BV/OCOL)");
 
+// LDS row strides, padded. Every dot below reads a staged tile column-wise
+// with one lane per column group, so the lane-to-lane address stride is a
+// multiple of the row stride. The natural strides (K = 128 halves = 64
+// dwords, BT = 64 halves = 32 dwords) are multiples of the 32 LDS banks, so
+// all 16 column lanes of a row-tile land in ONE bank: a 16-way conflict on
+// every read of s_k, s_h and s_v. +2 halves makes the row stride an odd
+// number of dwords, which spreads the lanes over 8 (s_k, 2 rows apart x 4)
+// or 16 (s_h, s_v, 2 rows apart) banks.
+constexpr int GDN_QS = GDN_K + 2;   // 130: s_q / s_k / s_h row stride (halves)
+constexpr int GDN_VS = GDN_BT + 2;  //  66: s_v row stride (halves)
+
 // LDS byte sizes (fp16 = 2 bytes, fp32 = 4 bytes).
-constexpr int GDN_LDS_Q_BYTES = GDN_BT * GDN_K * 2;  // 16384 (s_q [BT,K] fp16)
-constexpr int GDN_LDS_K_BYTES = GDN_BT * GDN_K * 2;  // 16384 (s_k [BT,K] fp16)
-constexpr int GDN_LDS_H_BYTES = GDN_BV * GDN_K * 2;  //  8192 (s_h [BV,K] fp16)
+constexpr int GDN_LDS_Q_BYTES = GDN_BT * GDN_QS * 2;  // 16640 (s_q [BT,K] fp16)
+constexpr int GDN_LDS_K_BYTES = GDN_BT * GDN_QS * 2;  // 16640 (s_k [BT,K] fp16)
+constexpr int GDN_LDS_H_BYTES = GDN_BV * GDN_QS * 2;  // 16640 (s_h [BV,K] fp16)
 constexpr int GDN_LDS_V_BYTES =
-    GDN_BT * GDN_BV * 2;                  //  4096 (s_v_T [BV,BT] fp16)
+    GDN_BV * GDN_VS * 2;                  //  8448 (s_v_T [BV,BT] fp16)
 constexpr int GDN_LDS_G_FLOATS = GDN_BT;  // 64 * 4 = 256 bytes
-// s_bA [BT,BT] fp32 = 16384 bytes reuses s_q's former 16384-byte slot, so
-// the LDS budget never grows. We allocate s_q and s_bA at the same
-// offset and use them in sequence (separated by __syncthreads()).
+constexpr int GDN_LDS_BA_BYTES = GDN_BT * GDN_BT * 2;  //  8192 (s_bA fp16)
+// s_bA reuses s_k's slot. k is dead once dot 1 has consumed it, and a
+// __syncthreads() separates that read from the s_bA store, so the reuse is
+// safe. It MUST NOT alias s_q: the compiler cannot see that the __half* s_q
+// and __half* s_bA views of the extern LDS buffer overlap, and the resulting
+// alias-analysis failure would let the q @ h^T reads race the s_bA store.
 constexpr int GDN_LDS_TOTAL_BYTES = GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES +
                                     GDN_LDS_H_BYTES + GDN_LDS_V_BYTES +
                                     GDN_LDS_G_FLOATS * sizeof(float);
+static_assert(GDN_LDS_BA_BYTES <= GDN_LDS_K_BYTES,
+              "s_bA must fit in s_k's slot");
 
 // V_DOT2_F32_F16 helper: a.x*b.x + a.y*b.y + acc (native RDNA2).
 __device__ __forceinline__ float gdn_fdot2(half2 a, half2 b, float acc) {
@@ -93,7 +111,7 @@ __device__ __forceinline__ float gdn_fdot2(half2 a, half2 b, float acc) {
 // NOT read OOB from global). For q/k (T dimension), valid_rows =
 // max(0, T_local - i_t*BT). For h (V dimension), V==128==ROWS and
 // is always in-bounds.
-template <typename HT, int ROWS, int COLS>
+template <typename HT, int ROWS, int COLS, int LDS_COLS = COLS>
 __device__ __forceinline__ void gdn_lds_load(__half* dst, const HT* src,
                                              long src_stride, int valid_rows) {
   constexpr int TOTAL = ROWS * COLS;
@@ -103,15 +121,17 @@ __device__ __forceinline__ void gdn_lds_load(__half* dst, const HT* src,
                 "TOTAL/2 must be divisible by GDN_THREADS");
   static_assert(HALF2_TOTAL * 2 == TOTAL,
                 "TOTAL must be even for half2 vectorized loads");
-  // Zero-fill so OOB rows are already 0 even if we skip the store.
-  // For __half (vectorized) we init all lanes then overwrite valid rows;
-  // for float we only write the valid rows in the loop below.
-  if (std::is_same<HT, __half>::value) {
+  // Zero-fill only the rows the loop below skips, so the common case (a full
+  // chunk) pays nothing. Zeroing the whole tile first cost one extra LDS
+  // store per element on every chunk, full or not.
+  if (std::is_same<HT, __half>::value && valid_rows < ROWS) {
 #pragma unroll
     for (int s = 0; s < HALF2_PER_THREAD; ++s) {
       const int idx = s * GDN_THREADS + threadIdx.x;
       const int row = idx / (COLS / 2);
-      const long loff = (long)row * COLS;
+      if (row < valid_rows) continue;
+      const int col_v = (idx % (COLS / 2)) * 2;
+      const long loff = (long)row * LDS_COLS + col_v;
       dst[loff] = __float2half(0.0f);
       dst[loff + 1] = __float2half(0.0f);
     }
@@ -123,7 +143,7 @@ __device__ __forceinline__ void gdn_lds_load(__half* dst, const HT* src,
     const int col_v = (idx % (COLS / 2)) * 2;
     if (row >= valid_rows) continue;  // OOB rows: leave as zero (or skip store)
     const long goff = (long)row * src_stride + col_v;
-    const long loff = (long)row * COLS + col_v;
+    const long loff = (long)row * LDS_COLS + col_v;
     if constexpr (std::is_same<HT, float>::value) {
       dst[loff] = __float2half_rn(src[goff]);
       dst[loff + 1] = __float2half_rn(src[goff + 1]);
@@ -162,7 +182,7 @@ __device__ __forceinline__ void gdn_lds_load_v_transposed(
     const int c = idx / BV;
     const int oc = idx % BV;
     const long goff = (long)c * src_stride + oc;
-    const long loff = (long)oc * BT + c;
+    const long loff = (long)oc * GDN_VS + c;
     if (c < valid_rows) {
       dst[loff] = src[goff];
     } else {
@@ -175,7 +195,7 @@ __device__ __forceinline__ void gdn_lds_load_v_transposed(
 // major. Each thread writes 16 fp32 = 64 bytes; the full grid writes
 // the entire [BT, BT] tile (4096 fp32 = 16 KB).
 __device__ __forceinline__ void gdn_store_bA_to_lds(
-    float* dst,  // s_bA[BT * BT] fp32 row-major
+    __half* dst,  // s_bA[BT * BT] fp16 row-major
     const float bA[GDN_AROW][GDN_ACOL], int rb, int cb) {
   constexpr int COLS_TOTAL = GDN_BT;
 #pragma unroll
@@ -184,7 +204,7 @@ __device__ __forceinline__ void gdn_store_bA_to_lds(
     for (int dc = 0; dc < GDN_ACOL; ++dc) {
       const int r = rb * GDN_AROW + dr;
       const int c = cb * GDN_ACOL + dc;
-      dst[(long)r * COLS_TOTAL + c] = bA[dr][dc];
+      dst[(long)r * COLS_TOTAL + c] = __float2half_rn(bA[dr][dc]);
     }
   }
 }
@@ -252,8 +272,8 @@ gdn_prefill_o_rdna2_kernel(
   const float* p_g = g_cumsum + (long)bos * stride_g_tok + (long)i_h;
   const HT* p_h = h + (long)i_tg * stride_h_chunk + (long)i_h * V * GDN_K;
 
-  // LDS staging buffers. s_bA aliases s_q's slot; reused after q @ k^T
-  // and q @ h^T are done. s_v is the transposed [BV, BT] view of v.
+  // LDS staging buffers. s_v is the transposed [BV, BT] view of v; s_bA
+  // reuses s_k.
   extern __shared__ __half smem[];
   __half* s_q = smem;                                            // [BT, K]
   __half* s_k = smem + (GDN_LDS_Q_BYTES / 2);                    // [BT, K]
@@ -264,8 +284,10 @@ gdn_prefill_o_rdna2_kernel(
       reinterpret_cast<float*>(smem + (GDN_LDS_Q_BYTES + GDN_LDS_K_BYTES +
                                        GDN_LDS_H_BYTES + GDN_LDS_V_BYTES) /
                                           2);    // [BT] fp32 (per-row)
-  float* s_bA = reinterpret_cast<float*>(smem);  // [BT, BT] fp32 (s_q's slot)
-
+  // s_bA holds the gated/masked b_A already rounded to fp16: that is exactly
+  // what the final dot consumes, so storing it fp32 only bought 256
+  // __float2half_rn per thread in dot 3.
+  __half* s_bA = s_k;  // [BT, BT] fp16, reuses s_k (dead after dot 1)
   // Per-thread sub-block accumulators.
   float bA[GDN_AROW][GDN_ACOL];
 #pragma unroll
@@ -304,68 +326,29 @@ gdn_prefill_o_rdna2_kernel(
     const long chunk_off_qk = (long)i_t_local * GDN_BT * stride_q_tok;
     const long chunk_off_v = (long)i_t_local * GDN_BT * stride_v_tok;
     const int valid_rows = T_local - i_t_local * GDN_BT;
-    gdn_lds_load<__half, GDN_BT, GDN_K>(s_q, p_q + chunk_off_qk, stride_q_tok,
-                                        valid_rows);
-    gdn_lds_load<__half, GDN_BT, GDN_K>(s_k, p_k + chunk_off_qk, stride_k_tok,
-                                        valid_rows);
-    __syncthreads();
-
-    // ---- Dot 1: b_A += q @ k^T (V_DOT2_F32_F16, fp32 accum) ---------
-    constexpr int K_PAIRS = GDN_K / 2;
-#pragma unroll
-    for (int kp = 0; kp < K_PAIRS; ++kp) {
-      half2 q_pair[GDN_AROW];
-#pragma unroll
-      for (int dr = 0; dr < GDN_AROW; ++dr) {
-        const int row = rb * GDN_AROW + dr;
-        q_pair[dr] = *reinterpret_cast<half2*>(&s_q[row * GDN_K + kp * 2]);
-      }
-      half2 k_pair[GDN_ACOL];
-#pragma unroll
-      for (int dc = 0; dc < GDN_ACOL; ++dc) {
-        const int col = cb * GDN_ACOL + dc;
-        k_pair[dc] = *reinterpret_cast<half2*>(&s_k[col * GDN_K + kp * 2]);
-      }
-#pragma unroll
-      for (int dr = 0; dr < GDN_AROW; ++dr)
-#pragma unroll
-        for (int dc = 0; dc < GDN_ACOL; ++dc) {
-          bA[dr][dc] = gdn_fdot2(q_pair[dr], k_pair[dc], bA[dr][dc]);
-        }
-    }
-    __syncthreads();
-
+    gdn_lds_load<__half, GDN_BT, GDN_K, GDN_QS>(
+        s_q, p_q + chunk_off_qk, stride_q_tok, valid_rows);
+    gdn_lds_load<__half, GDN_BT, GDN_K, GDN_QS>(
+        s_k, p_k + chunk_off_qk, stride_k_tok, valid_rows);
     // ---- Stage 2: load h[BV, K] into LDS (templated on h dtype) -----
-    gdn_lds_load<HT, GDN_BV, GDN_K>(s_h, p_h + (long)i_v * GDN_BV * GDN_K,
-                                    GDN_K, GDN_BV);
-    __syncthreads();
-
-    // ---- Dot 2: b_o += q @ h^T (V_DOT2_F32_F16) ----------------------
-    // q is still resident in s_q; safe to read.
-#pragma unroll
-    for (int kp = 0; kp < K_PAIRS; ++kp) {
-      half2 q_pair[GDN_AROW];
-#pragma unroll
-      for (int dr = 0; dr < GDN_AROW; ++dr) {
-        const int row = rb * GDN_AROW + dr;
-        q_pair[dr] = *reinterpret_cast<half2*>(&s_q[row * GDN_K + kp * 2]);
-      }
-      half2 h_pair[GDN_OCOL];
-#pragma unroll
-      for (int do_ = 0; do_ < GDN_OCOL; ++do_) {
-        const int oc = cb * GDN_OCOL + do_;
-        h_pair[do_] = *reinterpret_cast<half2*>(&s_h[oc * GDN_K + kp * 2]);
-      }
-#pragma unroll
-      for (int dr = 0; dr < GDN_AROW; ++dr)
-#pragma unroll
-        for (int do_ = 0; do_ < GDN_OCOL; ++do_) {
-          bo[dr][do_] = gdn_fdot2(q_pair[dr], h_pair[do_], bo[dr][do_]);
-        }
-    }
-    __syncthreads();
-
-    // ---- Stage 3: load g_cumsum[BT] per row to s_bg ------------------
+    gdn_lds_load<HT, GDN_BV, GDN_K, GDN_QS>(
+        s_h, p_h + (long)i_v * GDN_BV * GDN_K, GDN_K, GDN_BV);
+    // ---- Stage 3: load v[BT, BV] transposed into s_v_T[BV, BT] -------
+    // valid_rows counts rows in [0, BT) that are in-bounds for this
+    // chunk; OOB rows are zero-filled so the dot's contributions vanish.
+    // p_v must include the chunk offset (i_t*BT*H*V) so v[c,oc] maps
+    // to v[bos+i_t*BT+c, i_h, i_v*BV+oc].
+    int valid_rows_v = T_local - i_t_local * GDN_BT;
+    if (valid_rows_v > GDN_BT) valid_rows_v = GDN_BT;
+    if (valid_rows_v < 0) valid_rows_v = 0;
+    gdn_lds_load_v_transposed<GDN_BT, GDN_BV>(
+        s_v, p_v + chunk_off_v + (long)i_v * GDN_BV, stride_v_tok,
+        valid_rows_v);  // stride_v_tok = H*V (row stride in global), NOT V
+    // ---- Stage 4: load g_cumsum[BT] per row to s_bg ------------------
+    // The single barrier below covers every staged tile: q/k, h, v and s_bg
+    // live in disjoint LDS slots, so one sync is enough. Issuing all global
+    // loads before it keeps one exposed memory round per chunk instead of
+    // four, which is what the long-context shapes are sensitive to.
 #pragma unroll
     for (int dr = 0; dr < GDN_AROW; ++dr) {
       const int row_local = i_t_local * GDN_BT + rb * GDN_AROW + dr;
@@ -374,6 +357,57 @@ gdn_prefill_o_rdna2_kernel(
       s_bg[rb * GDN_AROW + dr] = bg[dr];
     }
     __syncthreads();
+
+    // ---- Dot 1: b_A += q @ k^T (V_DOT2_F32_F16, fp32 accum) ---------
+    constexpr int K_PAIRS = GDN_K / 2;
+#pragma unroll 4
+    for (int kp = 0; kp < K_PAIRS; ++kp) {
+      half2 q_pair[GDN_AROW];
+#pragma unroll
+      for (int dr = 0; dr < GDN_AROW; ++dr) {
+        const int row = rb * GDN_AROW + dr;
+        q_pair[dr] = *reinterpret_cast<half2*>(&s_q[row * GDN_QS + kp * 2]);
+      }
+      half2 k_pair[GDN_ACOL];
+#pragma unroll
+      for (int dc = 0; dc < GDN_ACOL; ++dc) {
+        const int col = cb * GDN_ACOL + dc;
+        k_pair[dc] = *reinterpret_cast<half2*>(&s_k[col * GDN_QS + kp * 2]);
+      }
+#pragma unroll
+      for (int dr = 0; dr < GDN_AROW; ++dr)
+#pragma unroll
+        for (int dc = 0; dc < GDN_ACOL; ++dc) {
+          bA[dr][dc] = gdn_fdot2(q_pair[dr], k_pair[dc], bA[dr][dc]);
+        }
+    }
+    // s_bA reuses s_k, so every thread must be done reading k before any
+    // thread can store b_A there.
+    __syncthreads();
+
+    // ---- Dot 2: b_o += q @ h^T (V_DOT2_F32_F16) ----------------------
+    // q is still resident in s_q; safe to read.
+#pragma unroll 4
+    for (int kp = 0; kp < K_PAIRS; ++kp) {
+      half2 q_pair[GDN_AROW];
+#pragma unroll
+      for (int dr = 0; dr < GDN_AROW; ++dr) {
+        const int row = rb * GDN_AROW + dr;
+        q_pair[dr] = *reinterpret_cast<half2*>(&s_q[row * GDN_QS + kp * 2]);
+      }
+      half2 h_pair[GDN_OCOL];
+#pragma unroll
+      for (int do_ = 0; do_ < GDN_OCOL; ++do_) {
+        const int oc = cb * GDN_OCOL + do_;
+        h_pair[do_] = *reinterpret_cast<half2*>(&s_h[oc * GDN_QS + kp * 2]);
+      }
+#pragma unroll
+      for (int dr = 0; dr < GDN_AROW; ++dr)
+#pragma unroll
+        for (int do_ = 0; do_ < GDN_OCOL; ++do_) {
+          bo[dr][do_] = gdn_fdot2(q_pair[dr], h_pair[do_], bo[dr][do_]);
+        }
+    }
 
     // ---- Scale b_o (chunk_o.py:137) and apply exp(g) to b_o ---------
     // Mathematically (b_o*scale)*exp(g) == (b_o*exp(g))*scale (fp32 mul
@@ -428,18 +462,6 @@ gdn_prefill_o_rdna2_kernel(
     }
     __syncthreads();
 
-    // ---- Stage 4: load v[BT, BV] transposed into s_v_T[BV, BT] -------
-    // valid_rows counts rows in [0, BT) that are in-bounds for this
-    // chunk; OOB rows are zero-filled so the dot's contributions vanish.
-    // p_v must include the chunk offset (i_t*BT*H*V) so v[c,oc] maps
-    // to v[bos+i_t*BT+c, i_h, i_v*BV+oc].
-    int valid_rows_v = T_local - i_t_local * GDN_BT;
-    if (valid_rows_v > GDN_BT) valid_rows_v = GDN_BT;
-    if (valid_rows_v < 0) valid_rows_v = 0;
-    gdn_lds_load_v_transposed<GDN_BT, GDN_BV>(
-        s_v, p_v + chunk_off_v + (long)i_v * GDN_BV, stride_v_tok,
-        valid_rows_v);  // stride_v_tok = H*V (row stride in global), NOT V
-    __syncthreads();
 
     // ---- Dot 3: bo += (b_A.to(fp16) @ v) * scale (V_DOT2_F32_F16) ---
     // For each (r, oc) owned by this thread:
@@ -448,22 +470,21 @@ gdn_prefill_o_rdna2_kernel(
     // the c-axis, we can do V_DOT2 over c pairs (cp = 0..31).
     {
       constexpr int C_PAIRS = GDN_BT / 2;
-#pragma unroll
+#pragma unroll 4
       for (int cp = 0; cp < C_PAIRS; ++cp) {
         // 4 half2's: bA[r, cp*2..cp*2+1] for each row r in the sub-block.
         half2 bA_pair[GDN_AROW];
 #pragma unroll
         for (int dr = 0; dr < GDN_AROW; ++dr) {
           const long bA_off = (long)(rb * GDN_AROW + dr) * GDN_BT + cp * 2;
-          bA_pair[dr] = __halves2half2(__float2half_rn(s_bA[bA_off]),
-                                       __float2half_rn(s_bA[bA_off + 1]));
+          bA_pair[dr] = *reinterpret_cast<const half2*>(&s_bA[bA_off]);
         }
 #pragma unroll
         for (int dr = 0; dr < GDN_AROW; ++dr) {
 #pragma unroll
           for (int do_ = 0; do_ < GDN_OCOL; ++do_) {
             const int oc = cb * GDN_OCOL + do_;
-            const long v_off = (long)oc * GDN_BT + cp * 2;
+            const long v_off = (long)oc * GDN_VS + cp * 2;
             // s_v_T[oc, cp*2..cp*2+1] = (v[cp*2, oc], v[cp*2+1, oc])
             half2 v_pair = *reinterpret_cast<half2*>(&s_v[v_off]);
             // dot = bA[r, cp*2]*v[cp*2, oc] + bA[r, cp*2+1]*v[cp*2+1, oc]
@@ -473,7 +494,6 @@ gdn_prefill_o_rdna2_kernel(
         }
       }
     }
-    __syncthreads();
   }  // !chunk_fully_oob
 
   // ---- Store b_o[BT, BV] fp16 to global, zeroing rows >= T_local ----
@@ -482,16 +502,26 @@ gdn_prefill_o_rdna2_kernel(
     const int row = rb * GDN_AROW + dr;
     const int row_local = i_t_local * GDN_BT + row;
     if (row_local >= T_local) continue;
+    const int col0 = i_v * GDN_BV + cb * GDN_OCOL;
+    // p_o already includes the i_h*V offset (set at line ~253), so the store
+    // offset must NOT re-add i_h*V — that would double-count it and write
+    // head>0 output into the next token's head-0 slot.
+    // bo[dr][0..OCOL-1] cover one contiguous, OCOL-aligned column block, so a
+    // pair of half2 stores replaces four scalar 2-byte stores.
+    if constexpr (GDN_OCOL == 4) {
+      if (col0 + GDN_OCOL <= V) {
+        const long goff = (long)row_local * stride_o_tok + col0;
+        half2* dst = reinterpret_cast<half2*>(p_o + goff);
+        dst[0] = __floats2half2_rn(bo[dr][0], bo[dr][1]);
+        dst[1] = __floats2half2_rn(bo[dr][2], bo[dr][3]);
+        continue;
+      }
+    }
 #pragma unroll
     for (int do_ = 0; do_ < GDN_OCOL; ++do_) {
-      const int oc = cb * GDN_OCOL + do_;
-      const int col = i_v * GDN_BV + oc;
+      const int col = col0 + do_;
       if (col >= V) continue;
-      // p_o already includes the i_h*V offset (set at line ~253), so
-      // the store offset must NOT re-add i_h*V — that would double-count
-      // it and write head>0 output into the next token's head-0 slot.
-      const long goff = (long)row_local * stride_o_tok + col;
-      p_o[goff] = __float2half(bo[dr][do_]);
+      p_o[(long)row_local * stride_o_tok + col] = __float2half(bo[dr][do_]);
     }
   }
 }
@@ -597,7 +627,12 @@ void gdn_prefill_o_rdna2(
   dim3 grid((V + GDN_BV - 1) / GDN_BV, NT, B * H);
   const size_t smem_bytes = GDN_LDS_TOTAL_BYTES;
 
+// GDN_LDS_TOTAL_BYTES (61696) exceeds the default dynamic-LDS budget, so opt
+// in explicitly. Mirrors the pattern in fa_rdna2.cu.
 #define GDN_O_LAUNCH(HT)                                                     \
+  hipFuncSetAttribute(                                                       \
+      reinterpret_cast<const void*>(gdn_prefill_o_rdna2_kernel<HT>),          \
+      hipFuncAttributeMaxDynamicSharedMemorySize, (int)smem_bytes);           \
   gdn_prefill_o_rdna2_kernel<HT><<<grid, GDN_THREADS, smem_bytes, stream>>>( \
       reinterpret_cast<const __half*>(q.data_ptr()),                         \
       reinterpret_cast<const __half*>(k.data_ptr()),                         \

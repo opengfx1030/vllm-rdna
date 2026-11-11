@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+RUN=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$RUN")
+SRC=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -n 9
+"$VENV/bin/python" -S "$RUN/check_reserved_gpu.py" >"$RUN/production-inline-k1-gdn-tests-gpu-owners.txt" 2>&1
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES=6
+export VLLM_ROCM_USE_AITER=0 VLLM_RDNA2_MOE_FP32_ACCUM=0
+export PYTORCH_ROCM_ARCH=gfx1030 MAX_JOBS=4
+export ROCM_HOME=/opt/rocm/core-7.14 ROCM_PATH=/opt/rocm/core-7.14
+export HIP_PATH=/opt/rocm/core-7.14
+export PATH=/opt/rocm/core-7.14/bin:$VENV/bin:$PATH
+export PYTHONPATH="$SRC:$BASE/large-m-mono:$BASE/large-m-mono-validation"
+export MONO_FFN_VERBOSE=1
+export VLLM_SOURCE_ROOT="$SRC"
+export TORCH_EXTENSIONS_DIR="$BASE/torch-extensions"
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export PYTORCH_TUNABLEOP_TUNING=0
+export TUNEOP_REQUIRE_HASH_ROWS=1
+source "$SRC/tools/rdna2_028/tunableop_env.sh"
+configure_tunableop "$SDK_LIB/librocblas.so.5" "$SRC/tunableop"
+cat /proc/sys/kernel/random/boot_id >"$RUN/production-inline-k1-gdn-tests-diagnostic-boot.before"
+sha256sum "$SRC/vllm/_rocm_C.abi3.so" "$SRC/csrc/rocm/mono_k2_rdna2.cu" >"$RUN/production-inline-k1-gdn-tests-diagnostic-installed.before.sha256"
+sha256sum "$BASE/large-m-mono-barrier-inline-ordinary/mono_k2_barrier_inline.cu" "$BASE/large-m-mono-barrier-inline-ordinary/binding.cpp" >"$RUN/inline-ordinary-scratch.before.sha256"
+cd /tmp
+"$VENV/bin/python" -c 'import torch; p=torch.cuda.get_device_properties(0); print(p); print("multiprocessor_count",p.multi_processor_count)' >"$RUN/production-inline-k1-gdn-tests-diagnostic-device.txt" 2>&1
+set +e
+timeout 300 "$VENV/bin/python" -c 'import sys,hashlib, pathlib; import vllm, vllm._rocm_C; import pytest; p=pathlib.Path(vllm._rocm_C.__file__); print("LOADED CORE", p, hashlib.sha256(p.read_bytes()).hexdigest(),flush=True); assert hashlib.sha256(p.read_bytes()).hexdigest()=="25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f"; sys.exit(pytest.main([sys.argv[1],"-q","-p","no:cacheprovider","-k","test_k1_matches_today or test_mtp_k1_runs_when_dense_k2_is_unsupported or test_gdn_fused_matches_today"]))' "$SRC/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py" >"$RUN/production-inline-k1-gdn-tests.log" 2>&1
+status=$?
+set -e
+sha256sum "$SRC/vllm/_rocm_C.abi3.so" "$SRC/csrc/rocm/mono_k2_rdna2.cu" >"$RUN/production-inline-k1-gdn-tests-diagnostic-installed.after.sha256"
+cat /proc/sys/kernel/random/boot_id >"$RUN/production-inline-k1-gdn-tests-diagnostic-boot.after"
+diff -u "$RUN/production-inline-k1-gdn-tests-diagnostic-installed.before.sha256" "$RUN/production-inline-k1-gdn-tests-diagnostic-installed.after.sha256"
+diff -u "$RUN/production-inline-k1-gdn-tests-diagnostic-boot.before" "$RUN/production-inline-k1-gdn-tests-diagnostic-boot.after"
+printf '%s\n' "$status" >"$RUN/production-inline-k1-gdn-tests-diagnostic-exit-status.txt"
+exit "$status"

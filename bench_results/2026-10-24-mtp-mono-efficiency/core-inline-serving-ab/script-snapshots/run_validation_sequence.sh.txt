@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Continue a verified control with native shared-barrier tests, then C/C/O.
+# Each child acquires the same GPU lock and checks physical-mask owners.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+RUN="$BASE/serve-inline-ab"
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+CONTROL=/home/chenco_adm/vllm-rdna-mtp-mono
+CANDIDATE="$BASE/core-inline-serve-tree"
+OLD=6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3
+NEW=25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f
+CU=aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf
+[[ $(hostname) == par1-cs25 ]]
+exec 8>"$BASE/serving-sequence.lock"
+flock -n 8
+[[ ! -e $RUN/sequence.log ]] || { echo 'refusing sequence restart'; exit 2; }
+mkdir -p "$RUN"
+exec > >(tee "$RUN/sequence.log") 2>&1
+BOOT=$(cat /proc/sys/kernel/random/boot_id)
+echo "SEQUENCE START $(date -Is) boot=$BOOT"
+start=$SECONDS
+until [[ -f $RUN/01-control/ARM-PASS.txt ]]; do
+    [[ $(( SECONDS-start )) -lt 2400 ]] || { echo 'control completion timeout'; exit 1; }
+    if [[ -f $RUN/01-control/summary.txt ]] && grep -Eq '(BOOT FAILED|PROBE FAIL|PREFIX FAIL|CONCURRENCY FAIL|ROUTE FAIL|DISPATCH FAIL)' "$RUN/01-control/summary.txt"; then
+        echo 'control quality failure'; exit 1
+    fi
+    [[ $(cat /proc/sys/kernel/random/boot_id) == "$BOOT" ]]
+    sleep 10
+done
+[[ $(cat "$RUN/01-control/boot-id.after") == "$BOOT" ]]
+echo "CONTROL VERIFIED $(date -Is)"
+flock -w 60 /tmp/codex-mtp-mono-hip6-9.lock -c true
+# These paths share grid_barrier too; finish their existing tests before serving.
+bash "$BASE/large-m-mono-run/run_production_inline_k1_gdn_tests.sh"
+grep -Eq '[1-9][0-9]* passed' "$BASE/large-m-mono-run/production-inline-k1-gdn-tests.log"
+echo "SHARED-BARRIER TESTS VERIFIED $(date -Is)"
+for spec in '02-candidate:candidate:18872' '03-candidate:candidate:18873' '04-control:control:18874'; do
+    IFS=: read -r tag arm port <<< "$spec"
+    [[ $(cat /proc/sys/kernel/random/boot_id) == "$BOOT" ]]
+    if [[ $arm == candidate ]]; then tree=$CANDIDATE; sha=$NEW; else tree=$CONTROL; sha=$OLD; fi
+    out="$RUN/$tag"
+    # Read-only worker provenance snapshot after readiness, before timed cells.
+    (
+        for attempt in $(seq 1 180); do
+            if [[ -f $out/summary.txt ]] && grep -Fq 'READY in ' "$out/summary.txt"; then
+                "$VENV/bin/python" -S "$HERE/snapshot_workers.py" \
+                    --serve-log "$out/serve.log" --expected-tree "$tree" \
+                    --expected-core-sha "$sha" --output "$out/worker-provenance.json" \
+                    > "$out/worker-provenance.log" 2>&1
+                exit $?
+            fi
+            sleep 10
+        done
+        exit 1
+    ) &
+    watcher=$!
+    echo "ARM BEGIN $tag $(date -Is)"
+    set +e
+    env ARM="$arm" RUNS_ROOT="$out" PORT="$port" \
+        EXPECTED_CANDIDATE_SO="$NEW" EXPECTED_CANDIDATE_CU="$CU" \
+        GATE_SCRIPT="$HERE/serve_validate_mono_ab_gate.sh" \
+        timeout 2400 bash "$HERE/run_one_arm.sh"
+    status=$?
+    set -e
+    if [[ $status != 0 ]]; then
+        kill "$watcher" 2>/dev/null || true
+        wait "$watcher" 2>/dev/null || true
+        echo "ARM FAILED $tag status=$status"; exit "$status"
+    fi
+    wait "$watcher"
+    [[ -s $out/ARM-PASS.txt && -s $out/worker-provenance.json ]]
+    [[ $(cat "$out/boot-id.after") == "$BOOT" ]]
+    echo "ARM VERIFIED $tag $(date -Is)"
+done
+echo "SEQUENCE COMPLETE $(date -Is) boot=$BOOT" | tee "$RUN/SEQUENCE-COMPLETE.txt"

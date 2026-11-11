@@ -1,0 +1,10 @@
+{
+  "status": "PASS",
+  "scope": "CPU recheck of archived privileged snapshots; no fresh journal read",
+  "before_records": 9698,
+  "after_records": 9802,
+  "new_records": 104,
+  "new_faults": 0,
+  "append_only": true,
+  "kernel_record_metadata_present": true
+}

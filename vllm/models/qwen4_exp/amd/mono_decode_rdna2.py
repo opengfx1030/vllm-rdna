@@ -45,6 +45,20 @@ REQUIRED_OPS = (
     "mono_qsa_decode_rdna2_splits",
 )
 RDNA2_MOE_METHOD = "CompressedTensorsWNA16RDNA2MoEMethod"
+# W4A8 MoE prefill (VLLM_RDNA2_W4A8_SDOT4=1) runs next to K2: K2 serves <= 8
+# rows, the W4A8 GEMM only starts at W4A8_MOE_MIN_TOKENS (512) tokens, on the
+# same packed weights. The expert cache is the one thing that cannot take it.
+W4A8_CACHE_REFUSAL = (
+    "expert cache (rocm_mono_decode expert_cache_slots) cannot run with the "
+    "W4A8 MoE prefill (VLLM_RDNA2_W4A8_SDOT4=1): cached experts use the W4A16 "
+    "fixed-point kernel only; unset VLLM_RDNA2_W4A8_SDOT4 or drop "
+    "expert_cache_slots"
+)
+# The QSA owner reads the main KV cache as FP16/BF16 words. A packed or
+# otherwise quantized cache (int4_fp16_block, fp8, ...) has a different record
+# layout that these kernels do not read, so the switch refuses it here rather
+# than letting a later layer fail on it.
+FP16_KV_CACHE_DTYPES = ("auto", "float16", "bfloat16")
 _MAX_ROWS = 24  # K1 / K2 build width (mono/rdna2/layout.py MAX_ROWS)
 _GDN_MAX_ROWS = 64
 
@@ -68,6 +82,8 @@ def options(vllm_config) -> Options | None:
     opts = Options.from_dict(knobs)
     opts.k1_max_rows = min(_MAX_ROWS, opts.k1_max_rows)
     opts.k2_max_rows = min(_MAX_ROWS, opts.k2_max_rows)
+    opts.mtp_k1_max_rows = max(0, min(_MAX_ROWS, opts.mtp_k1_max_rows))
+    opts.mtp_k2_max_rows = max(0, min(_MAX_ROWS, opts.mtp_k2_max_rows))
     opts.gdn_max_rows = min(_GDN_MAX_ROWS, opts.gdn_max_rows)
     return opts
 
@@ -101,6 +117,11 @@ def config_refusal(vllm_config) -> str | None:
         return "needs Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1)"
     if vllm_config.parallel_config.pipeline_parallel_size > 1:
         return "does not support pipeline parallelism (PP > 1)"
+    cache_dtype = getattr(
+        getattr(vllm_config, "cache_config", None), "cache_dtype", None
+    )
+    if cache_dtype is not None and cache_dtype not in FP16_KV_CACHE_DTYPES:
+        return f"needs an FP16 or BF16 KV cache, got {cache_dtype}"
     return None
 
 
@@ -114,8 +135,36 @@ def ops_refusal() -> str | None:
     return None
 
 
+def _w4a8_moe() -> bool:
+    """VLLM_RDNA2_W4A8_SDOT4=1 with the op built, as the MoE method resolves it."""
+    from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+        resolve_w4a8_moe,
+    )
+
+    return resolve_w4a8_moe()
+
+
+def _w4a8_part() -> str:
+    """The boot-log note that says where W4A8 takes over from K2 and the
+    modules (empty without W4A8, so the line is unchanged then)."""
+    if not _w4a8_moe():
+        return ""
+    from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+        W4A8_MOE_MIN_TOKENS,
+    )
+
+    return f"W4A8 MoE prefill from {W4A8_MOE_MIN_TOKENS} tokens (modules, not K2)"
+
+
 def moe_refusal(layer) -> str | None:
-    """The FFN kernel serves symmetric W4A16 MoE on the RDNA2 method only."""
+    """The FFN kernel serves symmetric W4A16 MoE on the RDNA2 method only.
+
+    W4A8 (``VLLM_RDNA2_W4A8_SDOT4=1``) is that same method on the same packed
+    weights, scales and zeros, with one more GEMM that the modules run from
+    ``W4A8_MOE_MIN_TOKENS`` tokens: far above the rows K2 serves, so it is
+    accepted. The expert cache is not: cached experts run the W4A16
+    fixed-point kernel only.
+    """
     mlp = layer.mlp
     experts = getattr(mlp.experts, "routed_experts", mlp.experts)
     qm = getattr(experts, "quant_method", None) or getattr(
@@ -126,12 +175,8 @@ def moe_refusal(layer) -> str | None:
         return f"needs the MoE on symmetric W4A16 ({RDNA2_MOE_METHOD}), got {name}"
     if not getattr(qm, "symmetric", True):
         return f"needs the MoE on symmetric W4A16 ({RDNA2_MOE_METHOD}), got asymmetric"
-    from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
-        resolve_w4a8_moe,
-    )
-
-    if resolve_w4a8_moe():
-        return f"needs the MoE on symmetric W4A16 ({RDNA2_MOE_METHOD}), got W4A8"
+    if OPTS.expert_cache_slots and _w4a8_moe():
+        return W4A8_CACHE_REFUSAL
     return None
 
 
@@ -141,10 +186,68 @@ def check_config(vllm_config) -> None:
         return
     if not (_on_gfx10x() or is_qwen4exp(vllm_config)):
         return  # another model's MonoKernel on another GPU: not ours to judge
-    options(vllm_config)  # unknown knobs
+    opts = options(vllm_config)  # unknown knobs
     why = config_refusal(vllm_config)
     if why is not None:
         raise ValueError(f"--monokernel {why}.")
+    if opts is not None and opts.expert_cache_slots:
+        tp = vllm_config.parallel_config.tensor_parallel_size
+        if tp not in (2, 4):
+            raise ValueError("--monokernel expert cache requires TP=2 or TP=4")
+        if opts.expert_cache_slots > 512 // tp:
+            raise ValueError("--monokernel expert cache exceeds rank-local experts")
+        if not opts.k2 or opts.modules:
+            raise ValueError("--monokernel expert cache requires K2 enabled")
+        if os.environ.get("VLLM_RDNA2_W4A8_SDOT4") == "1":
+            raise ValueError(f"--monokernel {W4A8_CACHE_REFUSAL}.")
+        compilation = vllm_config.compilation_config
+        graph_mode = getattr(compilation, "cudagraph_mode", None)
+        if graph_mode is not None and graph_mode.has_piecewise_cudagraphs():
+            from vllm.compilation.breakable_cudagraph import (
+                is_breakable_cudagraph_enabled,
+            )
+
+            if not is_breakable_cudagraph_enabled():
+                raise ValueError(
+                    "--monokernel expert cache requires "
+                    "VLLM_USE_BREAKABLE_CUDAGRAPH=1 for piecewise graphs"
+                )
+        splitting = compilation.splitting_ops
+        if splitting is None:
+            splitting = list(compilation._attention_ops)
+        compilation.splitting_ops = list(
+            dict.fromkeys(
+                [
+                    *splitting,
+                    "vllm::qwen4_exp_mono_k2_rdna2",
+                    "vllm::moe_forward",
+                    "vllm::moe_forward_shared",
+                ]
+            )
+        )
+    if opts is not None and (opts.mtp_drafter or opts.k1 or opts.k2):
+        # Configure before env caching and worker spawn. Preserve explicit
+        # opt-outs so they fail early instead of being silently overridden.
+        raw = os.environ.get("VLLM_RAISE_ON_LOGIT_NANS")
+        if raw is None:
+            os.environ["VLLM_RAISE_ON_LOGIT_NANS"] = "1"
+            logger.info(
+                "--monokernel: enabling VLLM_RAISE_ON_LOGIT_NANS=1 for "
+                "timeout-poisoned output fail-stop"
+            )
+        else:
+            try:
+                enabled_nan_failstop = bool(int(raw))
+            except ValueError as exc:
+                raise ValueError(
+                    "--monokernel VLLM_RAISE_ON_LOGIT_NANS must be 0 or 1."
+                ) from exc
+            if not enabled_nan_failstop:
+                raise ValueError(
+                    "--monokernel requires VLLM_RAISE_ON_LOGIT_NANS=1; "
+                    "explicitly setting it to 0 disables fail-stop for "
+                    "timeout-poisoned NaN outputs."
+                )
 
 
 def install(vllm_config) -> Options | None:
@@ -153,9 +256,26 @@ def install(vllm_config) -> Options | None:
     opts = options(vllm_config)
     if opts is None:
         return None
+    if opts.mtp_drafter or opts.k1 or opts.k2:
+        from vllm import envs
+
+        if not envs.VLLM_RAISE_ON_LOGIT_NANS:
+            raise ValueError(
+                "--monokernel target or MTP drafter requires "
+                "VLLM_RAISE_ON_LOGIT_NANS=1 so timeout-poisoned NaN outputs "
+                "fail-stop before generated tokens are published"
+            )
     why = config_refusal(vllm_config) or ops_refusal()
     if why is not None:
         raise ValueError(f"--monokernel {why}.")
+    if opts.expert_cache_slots:
+        missing = [
+            name
+            for name in ("mono_k2_offload_rdna2", "moe_fixedpoint_to_half_rdna2")
+            if not hasattr(torch.ops._rocm_C, name)
+        ]
+        if missing:
+            raise ValueError(f"--monokernel expert cache needs {missing}; rebuild")
     from .mono.rdna2 import debug, k1, k2, layout  # noqa: F401  (register ops)
 
     OPTS.assign(opts)
@@ -172,7 +292,10 @@ def install(vllm_config) -> Options | None:
         from .mono.rdna2 import qsa
         from .ops import qsa as qsa_ops
 
-        qsa_ops.MONO_QSA = qsa
+        spec = getattr(vllm_config, "speculative_config", None)
+        width = 1 + (getattr(spec, "num_speculative_tokens", 0) or 0)
+        qsa.DECODE_WIDTH = width
+        qsa_ops.__dict__["MONO_QSA"] = qsa
     _log_parts(opts)
     return opts
 
@@ -194,6 +317,12 @@ def _log_parts(o: Options) -> None:
         "k2 in-kernel all-reduce" if o.k2_ar else "",
         "timing" if o.timing else "",
         "modules reference" if o.modules else "",
+        (
+            f"MTP drafter K1/K2 (<= {o.mtp_k1_max_rows}/{o.mtp_k2_max_rows} rows)"
+            if o.mtp_drafter
+            else ""
+        ),
+        _w4a8_part(),
     ]
     logger.info(
         "mono rdna2: --monokernel on TP rank %d: %s",
@@ -206,20 +335,34 @@ def layer_hook(
     layer, vllm_config, prefix: str, is_moe_layer: bool
 ) -> tuple[str | None, str | None]:
     """Qwen4ExpDecoderLayer: the forward-context names of its K1 and K2 ops
-    (None: today's modules). Main-model MoE layers only; the MTP drafter
-    keeps its modules."""
-    if not enabled(vllm_config) or not is_moe_layer or ".mtp." in f".{prefix}.":
+    (None: today's modules). MTP is a separate explicit opt-in; the regular
+    target-model route remains governed by the existing options."""
+    if not enabled(vllm_config) or not is_moe_layer:
+        return None, None
+    is_mtp = ".mtp." in f".{prefix}."
+    if is_mtp and not OPTS.mtp_drafter:
         return None, None
     k1_on, k2_on = OPTS.k1 or OPTS.timing, OPTS.k2 or OPTS.timing
     if not (k1_on or k2_on):
         return None, None
     why = moe_refusal(layer)
-    if why is not None:
+    if why is not None and not is_mtp:
         raise ValueError(f"--monokernel {why}.")
     from .mono.rdna2.layout import MonoLayer
 
     name = f"{prefix}.mono_rdna2"
-    vllm_config.compilation_config.static_forward_context[name] = MonoLayer(layer)
+    mono = MonoLayer(
+        layer,
+        is_mtp=is_mtp,
+        k1_max_rows=OPTS.mtp_k1_max_rows if is_mtp else OPTS.k1_max_rows,
+        k2_max_rows=OPTS.mtp_k2_max_rows if is_mtp else OPTS.k2_max_rows,
+    )
+    vllm_config.compilation_config.static_forward_context[name] = mono
+    if why is not None:
+        logger.warning_once(
+            "mono MTP drafter K2 stays on modules: %s; K1 is checked independently",
+            why,
+        )
     return (name if k1_on else None), (name if k2_on else None)
 
 

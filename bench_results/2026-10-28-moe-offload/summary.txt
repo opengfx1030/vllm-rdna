@@ -1,0 +1,52 @@
+[02:49:21] boot TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=6,7 PORT=18766 overrides=TP=2 PLE=int4 PLE_QUANT_DIR=/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4 GMEM=0.92 MAXLEN=32768 MAXBAT=4096 MTP=2 MAXLEN=32768 SEQS=8 MAXBAT=4096 bench_extra=--temperature 0
+[02:55:16] READY in 350s served=flash-next
+[02:55:26] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=' Berlin, which is also the largest city in the country. It is one of the 16 German federal states and is the third most populous city in the European Union. Berlin is a major cultural, political, and scientific center, and'
+RESULT PASS (3/3)
+[02:55:48] PREFIX PASS
+    cold TTFT 12.38 s, warm TTFT 2.33 s, speedup 5.3x -> PASS
+    cold text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be GPU/computing-related terms (barrier, ca'
+    warm text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be GPU/computing-related terms (barrier, ca'
+[02:56:20] warmup rc=0 in 32s (sizes default); slowest:
+    decode batch 7:   3.80 s
+    decode batch 8:   3.76 s
+    decode batch 6:   3.55 s
+[02:57:24] CONCURRENCY FAIL
+    WARN solo2    1        prompt 1: soft token 27/32: margin 0.336, continuation mean lp -0.26 vs solo -0.31
+    WARN together 1        prompt 1: near-tie token 19/32: margin 0.172, continuation mean lp -0.29 vs solo -0.29
+    WARN together 5        prompt 5: near-tie token 0/32: margin 0.047, continuation mean lp -0.24 vs solo -0.21
+    FAIL churn    (3, 1)   prompt 1: token 26/32: margin 1.273, continuation mean lp -0.21 vs solo -0.32
+    WARN churn    (5, 7)   prompt 7: soft token 3/32: margin 0.922, continuation mean lp -0.49 vs solo -0.23
+    FAIL churn    (11, 1)  prompt 1: token 26/32: margin 1.273, continuation mean lp -0.26 vs solo -0.32
+    WARN churn    (15, 5)  prompt 5: near-tie token 3/32: margin 0.078, continuation mean lp -0.18 vs solo -0.15
+    RESULT FAIL: 2 failing, 3 near-tie, 2 soft, 0 solo-noise, 37 identical of 44 checks (59.2s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[02:57:24] bench bench-1024x128-c1 (n=4)
+    bench-1024x128-c1            prefill    753.0 tok/s/req (agg   711.4) | decode  27.59 tok/s/req (agg out   21.47) | TTFT    1.36 s | ITL med    82.6 ms mean    80.7 ms | ok 4
+[02:58:08] bench bench-1024x64-c8 (n=8)
+    bench-1024x64-c8             prefill    173.6 tok/s/req (agg   921.4) | decode   6.66 tok/s/req (agg out   30.95) | TTFT    5.90 s | ITL med   230.1 ms mean   319.4 ms | ok 8
+[02:58:45] load hook: /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/probe_offload_kv.sh
+[02:59:07] LOAD HOOK rc=1 FAIL:
+    FAIL: native KV store/reload proof
+[02:59:17] PROBE-AFTER-LOAD PASS
+[02:59:17] markers:
+          2 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=Qwen4ExpPLEInt4EmbeddingMethod, we
+          1 WNA16 MoE backend.
+          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/2, devices [0, 1],
+          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x
+          1 qwen_gdn_full_forward (opaque to inductor; projecti
+          1 Model loading took 21.39 GiB memory and 211.489680 seconds
+          1 Model loading took 21.39 GiB memory and 209.914287 seconds
+          1 GPU KV cache size: 138,022 tokens, Maximum concurrency fo
+[02:59:17] fault markers in serve.log: 0
+[02:59:17] new amdgpu dmesg faults: 0
+n/a
+[02:59:17] done

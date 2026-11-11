@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Correctness-only validation of a prebuilt isolated candidate; never compiles.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+SRC=/home/chenco_adm/vllm-rdna-mtp-mono
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+MODULE=mono_k2_router_half_quantized_v2_scratch_20261024
+BUILD="$BASE/router-half-v2-cpu-build"
+TRACE_ROOT="$BASE/router-half-v2-trace-bootstrap"
+OUT="$BASE/router-half-v2-correctness-prebuilt"
+[[ $(hostname) == par1-cs25 && ! -e $OUT ]]
+[[ -x $VENV/bin/python && -s $BUILD/build-manifest.json ]]
+case "${HIP_VISIBLE_DEVICES:-}" in 6|7|8|9) ;; *) echo "HIP_VISIBLE_DEVICES must be exactly one physical device 6-9" >&2; exit 2 ;; esac
+[[ -z ${ROCR_VISIBLE_DEVICES:-} && -z ${GPU_DEVICE_ORDINAL:-} ]]
+[[ -z ${CUDA_VISIBLE_DEVICES:-} || ${CUDA_VISIBLE_DEVICES} == "$HIP_VISIBLE_DEVICES" ]]
+export VLLM_SOURCE_ROOT="$SRC" PYTHONPATH="$SRC"
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -w 90 9
+CORE="$SRC/vllm/_rocm_C.abi3.so"
+MONO="$SRC/csrc/rocm/mono_k2_rdna2.cu"
+MOE="$SRC/csrc/rocm/moe_unquantized_rdna2.cu"
+CANDIDATE_CU="$HERE/mono_k2_rdna2_router_half_quantized_v2.cu"
+CANDIDATE_BINDING="$HERE/binding.cpp"
+TRACE_ID="$TRACE_ROOT/trace-identity.json"
+BOOTSTRAP="$TRACE_ROOT/bootstrap.json"
+PIN_LINE=$("$VENV/bin/python" -S - "$BUILD/build-manifest.json" "$TRACE_ID" "$BOOTSTRAP" "$CORE" "$MONO" "$MOE" "$CANDIDATE_CU" "$CANDIDATE_BINDING" <<'PY'
+import hashlib, json, pathlib, sys
+build_path, trace_id_path, bootstrap_path, core_path, mono_path, moe_path, cu_path, binding_path = map(pathlib.Path, sys.argv[1:])
+def digest(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+build = json.loads(build_path.read_text())
+trace_id = json.loads(trace_id_path.read_text())
+bootstrap = json.loads(bootstrap_path.read_text())
+assert build.get("cpu_only") is True and build.get("visible_gpu_count") == 0
+assert build["module"] == "mono_k2_router_half_quantized_v2_scratch_20261024"
+binary = pathlib.Path(build["binary"]).resolve(strict=True)
+assert digest(binary) == build["binary_sha256"]
+assert pathlib.Path(build["native_core_path"]).resolve(strict=True) == core_path.resolve(strict=True)
+assert digest(core_path) == build["native_core_sha256"]
+assert digest(mono_path) == build["native_mono_source_sha256"]
+assert digest(moe_path) == build["native_moe_source_sha256"]
+assert digest(cu_path) == build["candidate_source_sha256"]
+assert digest(binding_path) == build["candidate_binding_sha256"]
+assert trace_id["binary_sha256"] == build["binary_sha256"]
+assert bootstrap["candidate_binary_sha256"] == build["binary_sha256"]
+assert pathlib.Path(bootstrap["native_core_path"]).resolve() == core_path.resolve()
+assert bootstrap["native_core_sha256"] == build["native_core_sha256"]
+assert bootstrap["source_hashes"]["production_cu"] == build["native_mono_source_sha256"]
+assert bootstrap["source_hashes"]["native_unquantized_moe_cu"] == build["native_moe_source_sha256"]
+traces = trace_id.get("traces", [])
+assert len(traces) == 1, f"expected one uniquely identified raw trace, got {len(traces)}"
+trace_path = pathlib.Path(traces[0]["path"]).resolve(strict=True)
+assert digest(trace_path) == traces[0]["sha256"]
+raw = trace_path.read_bytes().decode("utf-8")
+assert any("mono_ffn_router_half_quantized_v2" in line and "mono_ffn_kernel" in line for line in raw.splitlines())
+print("\t".join((str(binary), build["binary_sha256"], str(core_path), build["native_core_sha256"], build["native_mono_source_sha256"], build["native_moe_source_sha256"], str(trace_path), traces[0]["sha256"])))
+PY
+)
+IFS=$'\t' read -r BIN BIN_SHA CORE CORE_SHA MONO_SHA MOE_SHA TRACE TRACE_SHA <<< "$PIN_LINE"
+OWNER_REPORT=$("$VENV/bin/python" -S "$BASE/core-inline-serving-ab/check_reserved_gpu.py")
+mkdir "$OUT"
+printf '%s\n' "$OWNER_REPORT" > "$OUT/gpu-owners.txt"
+printf '%s\n' "$PIN_LINE" > "$OUT/pins.tsv"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.before"
+printf '%s\n' "$HIP_VISIBLE_DEVICES" > "$OUT/physical-gpu.txt"
+sha256sum "$BIN" "$CORE" "$MONO" "$MOE" "$CANDIDATE_CU" "$CANDIDATE_BINDING" "$TRACE" > "$OUT/inputs.before"
+printf '%s\n' "$BIN_SHA" > "$OUT/candidate-binary.sha256"
+printf '%s\n' "$TRACE_SHA" > "$OUT/kernel-trace.sha256"
+
+finish() {
+    rc=$?
+    set +e
+    sha256sum "$BIN" "$CORE" "$MONO" "$MOE" "$CANDIDATE_CU" "$CANDIDATE_BINDING" "$TRACE" > "$OUT/inputs.after"
+    cat /proc/sys/kernel/random/boot_id > "$OUT/boot.after"
+    cmp "$OUT/inputs.before" "$OUT/inputs.after" || rc=1
+    cmp "$OUT/boot.before" "$OUT/boot.after" || rc=1
+    printf '%s\n' "$rc" > "$OUT/exit-status.txt"
+    exit "$rc"
+}
+trap finish EXIT
+cd /tmp
+set +e
+timeout 900 "$VENV/bin/python" "$HERE/validate_quantized_router_half.py" run \
+    --repo-root "$SRC" \
+    --candidate-binary "$BIN" --candidate-binary-sha256 "$BIN_SHA" \
+    --native-core-path "$CORE" --native-core-sha256 "$CORE_SHA" \
+    --expected-native-mono-source-sha256 "$MONO_SHA" \
+    --expected-native-moe-source-sha256 "$MOE_SHA" \
+    --kernel-trace "$TRACE" --kernel-trace-sha256 "$TRACE_SHA" \
+    --trace-binary-sha256 "$BIN_SHA" \
+    --rows 1,2,3,4,5,6,7,8,12,16,24 \
+    --seed 50124 --output "$OUT/result.json" \
+    > "$OUT/runner.log" 2>&1
+rc=$?
+set -e
+(( rc == 0 )) || { cat "$OUT/runner.log"; exit "$rc"; }
+printf 'PREBUILT STRICT CORRECTNESS RUN COMPLETE; NO BUILD OR TIMING\n'

@@ -2,12 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gather rows out of an EXL3 n-gram table without materializing it.
 
-The table is stored as per-shard trellis/suh/svh. A lookup decodes only the
-16-column tiles that contain the requested rows. ``hadamard="in"`` matches
-the quantizer (Hadamard on the input axis). ``hadamard="both"`` matches
-exllamav3, which also mixes each 128-row group.
+Two layouts:
+
+- ``Exl3NgramTable``: per-shard trellis/suh/svh tiles. A lookup decodes only
+  the 16-column tiles that contain the requested rows. ``hadamard="in"``
+  matches the quantizer (Hadamard on the input axis). ``hadamard="both"``
+  matches exllamav3, which also mixes each 128-row group.
+- ``Exl3NgramRingTable``: exllamav3's ``exl3_ngram_trellis`` format
+  (``ngram_embedding.safetensors`` next to an exllamav3 >= 1.4.5 checkpoint).
+  Every row is one tail-biting trellis ring over the mul1 codebook plus an
+  fp16 scale, and ``row = mul1[state] * scale + head_bias[head]``.
 """
 
+import ctypes
+import logging
+import os
+import re
+
+import numpy as np
 import torch
 
 from vllm.model_executor.layers.quantization.exl3 import _exl3_hadamard
@@ -142,3 +154,191 @@ class Exl3NgramTable:
                 f"EXL3 n-gram row width {width} is narrower than head dim {self.width}"
             )
         return rows[:, : self.width].contiguous()
+
+
+_MUL1 = 0x83DCD12D
+_logger = logging.getLogger(__name__)
+
+
+def exl3_side_file(model_config, name: str, download_dir: str | None = None):
+    """Path of a file exllamav3 ships beside an EXL3 checkpoint, outside the
+    model index (``ngram_embedding.safetensors``,
+    ``mtp_hyper_connection_mixer_patch.safetensors``); None if absent."""
+    if getattr(model_config, "quantization", None) != "exl3":
+        return None
+    model = model_config.model
+    if os.path.isdir(model):
+        path = os.path.join(model, name)
+        return path if os.path.isfile(path) else None
+    try:
+        from huggingface_hub import hf_hub_download
+
+        return hf_hub_download(
+            model, name, revision=model_config.revision, cache_dir=download_dir
+        )
+    except Exception:
+        return None
+
+
+def exl3_side_weights(name: str):
+    """(name, tensor) pairs of an EXL3 side file, empty when there is none."""
+    from safetensors import safe_open
+
+    from vllm.config import get_current_vllm_config
+
+    config = get_current_vllm_config()
+    path = exl3_side_file(config.model_config, name, config.load_config.download_dir)
+    if path is None:
+        return
+    with safe_open(path, framework="pt") as f:
+        for key in f.keys():  # noqa: SIM118 - safe_open is not a dict
+            yield key, f.get_tensor(key)
+
+
+def mul1_codebook() -> torch.Tensor:
+    """All 65536 decoded mul1 values (fp16), bit-exact with decode_3inst<2>."""
+    s = torch.arange(65536, dtype=torch.int64)
+    prod = (s * _MUL1) & 0xFFFFFFFF
+    bsum = (
+        (prod & 255) + ((prod >> 8) & 255) + ((prod >> 16) & 255) + ((prod >> 24) & 255)
+    )
+    k_inv = torch.tensor([0x1EEE], dtype=torch.int32).to(torch.int16)
+    k_bias = torch.tensor([0xC931 - 0x10000], dtype=torch.int32).to(torch.int16)
+    k_inv = k_inv.view(torch.float16).float()
+    k_bias = k_bias.view(torch.float16).float()
+    return ((1024 + bsum).float() * k_inv + k_bias).to(torch.float16)
+
+
+class Exl3NgramRingTable:
+    """exllamav3 ``exl3_ngram_trellis`` n-gram table, mmapped from disk.
+
+    A row is ``1 + width * K / 16`` int16 words: word 0 holds the fp16 scale,
+    the rest a ``width * K``-bit stream where bits ``[i*K, (i+1)*K)`` are the
+    low K bits of position i's 16-bit trellis state. The state's higher bits
+    are the symbols of the preceding positions (mod width), K bits each.
+
+    Same sidecar interface as ``_PleQuantTable`` (vllm/v1/ple_offload).
+    """
+
+    ROWS_PER_SHARD = 2_500_012
+    layout = "exl3_ring"
+    is_fp8 = False
+
+    def __init__(
+        self,
+        path: str,
+        total_rows: int,
+        width: int,
+        head_offsets: torch.Tensor | None = None,
+        head_vocab_sizes: torch.Tensor | None = None,
+        layer_multipliers: torch.Tensor | None = None,
+    ) -> None:
+        from safetensors import safe_open
+
+        # Kept open: the shard tensors are mmap-backed views of the file.
+        self._file = safe_open(path, framework="pt")  # noqa: SIM115
+        shard_re = re.compile(r"\.shard_(\d+)\.trellis$")
+        shards: dict[int, str] = {}
+        aux: dict[str, str] = {}
+        for name in self._file.keys():  # noqa: SIM118 - safe_open is not a dict
+            m = shard_re.search(name)
+            if m:
+                shards[int(m.group(1))] = name
+            else:
+                aux[name.rsplit(".", 1)[-1]] = name
+        if not shards or sorted(shards) != list(range(len(shards))):
+            raise ValueError(f"{path}: no contiguous shard_N.trellis tensors")
+        self._q = [self._file.get_tensor(shards[n]) for n in range(len(shards))]
+        rows = sum(t.shape[0] for t in self._q)
+        if rows != total_rows:
+            raise ValueError(
+                f"{path}: table has {rows} rows, layer expects {total_rows}"
+            )
+        if any(t.shape[0] != self.ROWS_PER_SHARD for t in self._q):
+            raise ValueError(f"{path}: shards are not {self.ROWS_PER_SHARD} rows")
+        self.words = int(self._q[0].shape[1])
+        self.K = (self.words - 1) * 16 // width
+        if self.words != 1 + width * self.K // 16:
+            raise ValueError(f"{path}: {self.words} words is not a {width}-wide ring")
+        self.width = width
+        self.n_shards = len(self._q)
+        self.quant_dir = os.path.dirname(path)
+        self.path = path
+
+        self.head_offsets = self._file.get_tensor(aux["head_offsets"]).long()
+        self.head_vocab_sizes = self._file.get_tensor(aux["head_vocab_sizes"]).long()
+        self.layer_multipliers = self._file.get_tensor(aux["layer_multipliers"]).long()
+        self.head_bias = self._file.get_tensor(aux["head_bias"]).float()
+        expected = {
+            "head_offsets": head_offsets,
+            "head_vocab_sizes": head_vocab_sizes,
+            "layer_multipliers": layer_multipliers,
+        }
+        for key, want in expected.items():
+            if want is None:
+                continue
+            got = getattr(self, key)
+            if not torch.equal(got, torch.as_tensor(want).to("cpu", torch.long)):
+                raise ValueError(
+                    f"{path}: {key} does not match the layer's hash layout "
+                    f"(checkpoint {got.tolist()}, "
+                    f"layer {torch.as_tensor(want).tolist()})"
+                )
+
+        self.codebook = mul1_codebook().float()
+        bit = torch.arange(width) * self.K
+        self._w0 = bit >> 4
+        self._w1 = (self._w0 + 1) % (self.words - 1)
+        self._shift = bit & 15
+        self._q_np = [t.numpy().view(np.ndarray) for t in self._q]
+        self._s_np: list[np.ndarray] = []
+        _logger.info(
+            "EXL3 n-gram ring table: %d shards x %d rows, K=%d, mmapped from %s",
+            self.n_shards,
+            self.ROWS_PER_SHARD,
+            self.K,
+            path,
+        )
+
+    def populate_page_tables(self) -> bool:
+        """madvise(MADV_POPULATE_READ) every shard mapping (see _PleQuantTable)."""
+        try:
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        except OSError:
+            return False
+        for arr in self._q_np:
+            base = arr.ctypes.data
+            off = base & 4095
+            if libc.madvise(
+                ctypes.c_void_p(base - off), ctypes.c_size_t(arr.nbytes + off), 22
+            ):
+                return False
+        return True
+
+    def decode(self, raw: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+        """Packed rings ``raw`` [N, words] int16 of rows ``ids`` -> [N, width]."""
+        scales = raw[:, 0].contiguous().view(torch.float16).float()
+        stream = raw[:, 1:].to(torch.int64) & 0xFFFF
+        window = stream[:, self._w0] | (stream[:, self._w1] << 16)
+        symbols = (window >> self._shift) & ((1 << self.K) - 1)
+        states = torch.zeros_like(symbols)
+        for j in range((15 + self.K) // self.K):
+            states |= torch.roll(symbols, j, dims=1) << (j * self.K)
+        heads = torch.searchsorted(self.head_offsets, ids, right=True) - 1
+        heads = heads.clamp_(0, self.head_bias.shape[0] - 1)
+        return self.codebook[states & 0xFFFF] * scales[:, None] + self.head_bias[heads]
+
+    def gather_into(self, ids: torch.Tensor, out: torch.Tensor) -> None:
+        ids = ids.reshape(-1).long().cpu()
+        shard = ids // self.ROWS_PER_SHARD
+        local = ids - shard * self.ROWS_PER_SHARD
+        order = torch.argsort(shard)
+        s_sorted, l_sorted = shard[order], local[order]
+        uniq, counts = torch.unique_consecutive(s_sorted, return_counts=True)
+        raw = torch.empty(ids.shape[0], self.words, dtype=torch.int16)
+        pos = 0
+        for s, c in zip(uniq.tolist(), counts.tolist()):
+            raw[pos : pos + c] = self._q[s].index_select(0, l_sorted[pos : pos + c])
+            pos += c
+        rows = self.decode(raw, ids[order])
+        out[order.to(out.device)] = rows.to(device=out.device, dtype=out.dtype)

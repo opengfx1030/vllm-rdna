@@ -214,6 +214,8 @@ cython_debug/
 
 # Results
 *.csv
+# Shipped TunableOp rank files (tunableop_results0..N-1.csv, one per worker device ordinal)
+!tunableop/**/*.csv
 
 # Python pickle files
 *.pkl
@@ -236,9 +238,6 @@ benchmarks/**/*.json
 # Linting
 actionlint
 shellcheck*/
-
-# Ignore moe/marlin_moe gen code
-csrc/libtorch_stable/moe/marlin_moe_wna16/kernel_*
 
 # Ignore ep_kernels_workspace folder
 ep_kernels_workspace/

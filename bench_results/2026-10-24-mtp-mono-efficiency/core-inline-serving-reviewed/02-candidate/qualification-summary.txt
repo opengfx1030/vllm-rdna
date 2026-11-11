@@ -1,0 +1,64 @@
+Arm 02-candidate qualification evidence (generated text removed).
+
+[summary.txt]
+[07:12:40] READY in 231s served=flash-next
+[07:12:40] MONO ROUTE monokernel=1 ranks=4 mtp_ranks=0 requested_drafter=0 dense_calls=0
+[07:12:40] GDN ROUTE requested=1 opaque_marker_count=1
+[07:12:46] PROBE PASS
+RESULT PASS (3/3)
+[07:12:54] PPL PROBE PASS
+    PPL 4.84 (mean NLL 1.577 over 261 tokens) PASS
+    RESULT PASS
+[07:13:05] PREFIX PASS
+    cold TTFT 5.66 s, warm TTFT 0.65 s, speedup 8.7x -> PASS
+    decode batch 6:   1.07 s
+    decode batch 8:   0.99 s
+    prefill  2048 tok:   0.88 s
+[07:14:05] CONCURRENCY PASS
+    RESULT PASS: 0 failing, 17 near-tie, 1 soft, 0 solo-noise, 30 identical of 48 checks (41.7s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[07:14:05] MTP K2 DISPATCH dense_calls=0 mono_route_markers=36
+[07:14:10] PREFIX RESET PASS before bench-1024x512-c1
+    bench-1024x512-c1            prefill   2302.8 tok/s/req (agg  2245.9) | decode  92.02 tok/s/req (agg out   85.36) | TTFT    0.44 s | ITL med    24.3 ms mean    24.4 ms | ok 8
+[07:15:21] PREFIX RESET PASS before bench-1024x512-c8
+    bench-1024x512-c8            prefill   1042.3 tok/s/req (agg  2276.9) | decode  31.28 tok/s/req (agg out  224.87) | TTFT    0.98 s | ITL med    53.7 ms mean    63.2 ms | ok 32
+[07:16:58] PREFIX RESET PASS before bench-16384x1024-c1
+    bench-16384x1024-c1          prefill   2186.9 tok/s/req (agg  2168.1) | decode  83.34 tok/s/req (agg out   51.80) | TTFT    7.49 s | ITL med    24.8 ms mean    24.8 ms | ok 8
+[07:20:00] PREFIX RESET PASS before bench-16384x1024-c8
+    bench-16384x1024-c8          prefill    862.6 tok/s/req (agg  2124.3) | decode  15.63 tok/s/req (agg out   94.78) | TTFT   18.99 s | ITL med    56.5 ms mean   152.1 ms | ok 32
+[07:26:08] load hook: /home/chenco_adm/vllm-rdna-mtp-mono/tools/rdna/mono/parity_hook.sh
+[07:26:20] LOAD HOOK rc=0 PASS
+    PASS
+[07:26:26] PROBE-AFTER-LOAD PASS
+          1 Model loading took 20.62 GiB memory and 51.746202 seconds
+          1 Model loading took 20.62 GiB memory and 51.215470 seconds
+          1 Model loading took 20.62 GiB memory and 51.182454 seconds
+          1 Model loading took 20.62 GiB memory and 51.161886 seconds
+          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo
+[07:26:26] fault markers in serve.log: 0
+[07:26:26] new amdgpu dmesg faults: 0
+
+[probe.txt]
+RESULT PASS (3/3)
+
+[ppl.txt]
+PPL 4.84 (mean NLL 1.577 over 261 tokens) PASS
+RESULT PASS
+
+[prefix.txt]
+cold TTFT 5.66 s, warm TTFT 0.65 s, speedup 8.7x -> PASS
+
+[concurrency.txt]
+RESULT PASS: 0 failing, 17 near-tie, 1 soft, 0 solo-noise, 30 identical of 48 checks (41.7s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+
+[load_hook.txt]
+      4 mono gdn_rdna2: decode 1 rows -> fused kernel
+      4 mono gdn_rdna2: decode 2 rows -> fused kernel
+      4 mono gdn_rdna2: decode 3 rows -> fused kernel
+      4 mono gdn_rdna2: decode 6 rows -> fused kernel
+      4 mono gdn_rdna2: decode with prefill -> today's path
+      1 mono gdn_rdna2: fused GDN decode core enabled
+      4 mono gdn_rdna2: verify with prefill -> today's path
+PASS
+
+[probe-after.txt]
+RESULT PASS (3/3)

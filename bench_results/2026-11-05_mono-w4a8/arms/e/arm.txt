@@ -1,0 +1,7 @@
+arm=e try=1 desc=production at GPU_MAX_HW_QUEUES=4 (control)
+sha=5b8d1e55707476d8191b3c9308d25a54ef2ecaf4 tree=/home/chenco_adm/w4a8_runs/mono-w4a8/trees/tree-5b8d1e5570 ple=recipe
+extra_args= overrides=GPU_MAX_HW_QUEUES=4
+load=10.14 13.54 11.45 aer=3 date=2026-11-05T11:37:23+01:00
+top=1800 ps 96.4 tensorfold-nati 
+memlock=unlimited compact_unevictable=0
+rc=0 aer_end=3 end=2026-11-05T11:53:12+01:00

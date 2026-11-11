@@ -1,0 +1,36 @@
+{
+  "cooperative": {
+    "source_sha256": "eb7abd3000a08b669a664d945a797548ae4661247602e70707a378b88e1314d3",
+    "binary_sha256": "6844479a428dec81531e96d92541fac3a95f30aeff5e9a62c431f0c82db7fad1",
+    "boot": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48"
+  },
+  "immutable_params": {
+    "module": "mono_k2_global_quant_immutable_params_v1_20261024",
+    "source_sha256": "25ccb0ce897bf3734b9e03dbbf5057024dc5925d358a678b30c5f62c70f65e97",
+    "binding_sha256": "ea82f784ac0a65f821ae303261b025213d8fbe7572271cf9161b2793d5a59049",
+    "binary_sha256": "38a9b7710d30bfe93b8df384a8468b037f9376dffdbd788c037a586ff2e9a330",
+    "ninja_sha256": "57f46c0b065456dba7477e212d78633d5d0bf8ca5b0df3ffdba37876ece6486a",
+    "boot_before": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+    "boot_after": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48"
+  },
+  "strict_full_m": {
+    "boot": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+    "native_core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+    "candidate": {
+      "binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/full-m-router-half-pair-v1-build/torch-extensions/mono_k2_global_quant_router_half_v1_20261024/mono_k2_global_quant_router_half_v1_20261024.so",
+      "binary_sha256": "01b3710e9933feb63e86e25035e15b6726993c1f5171116440b8e45962b2dc54",
+      "manifest": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-router-half-v1/source_manifest.json",
+      "manifest_sha256": "820b0b4d16643a40e6584f1d80ed9e96a8afde9664b71c9c9e5e7a03f9af3479",
+      "source_sha256": "46ea5a8ccebdac7834dc84ed68863d9291008bc89d9b2d6b5ac15e13e3ff7ce8"
+    },
+    "trace": {
+      "binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/full-m-router-half-pair-v2-continue/torch-extensions/mono_k2_global_quant_router_half_trace_v1_20261024/mono_k2_global_quant_router_half_trace_v1_20261024.so",
+      "binary_sha256": "1e9b62e763980d545e6bccb44d18c947ac00cbb2a04bb3cdfc664486aba57c4f",
+      "manifest": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-router-half-trace-v1/source_manifest.json",
+      "manifest_sha256": "6f11b4c0888a9ccc213bf49e0b63f7446efbc6b16b9be635d58eb4c50c01eb88",
+      "source_sha256": "a03041f587a4837d28d56c25062c85635ecf422cf455020bf2307a8d10c5df1e"
+    },
+    "overlay_before": "PASS: healthy overlay, 11 source replacements and pinned core",
+    "overlay_after": "PASS: healthy overlay, 11 source replacements and pinned core"
+  }
+}

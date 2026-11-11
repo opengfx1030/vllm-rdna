@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Strict same-boot provenance gate for the cap-8 native-MTP2 serving pair."""
+
+# ruff: noqa: E501
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+EXPECTED = {
+    "01-old": {
+        "arm": "old25f3",
+        "so": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+        "cu": "aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf",
+    },
+    "02-new": {
+        "arm": "new3f688",
+        "so": "3f688006eec38adef6cf4d4546735f66b8892d8066387336a88ba6fe7b668bac",
+        "cu": "bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf",
+    },
+}
+GPU_ORDER = [8425, 5082, 11353, 47517, 45975, 33237, 56424, 18860, 17318, 29156]
+EXPECTED_GPU_IDS = GPU_ORDER[6:10]
+CORE_KEYS = {"vllm/_rocm_C.abi3.so", "csrc/rocm/mono_k2_rdna2.cu"}
+CELLS = ("1024x512-c1", "1024x512-c8", "16384x1024-c1", "16384x1024-c8")
+REQUIRED_SUMMARY = (
+    "MONO ROUTE",
+    "MTP K2 DISPATCH",
+    "PROBE PASS",
+    "PPL PROBE PASS",
+    "PREFIX PASS",
+    "CONCURRENCY PASS",
+    "PROBE-AFTER-LOAD PASS",
+    "LOAD HOOK rc=0 PASS",
+    "fault markers in serve.log: 0",
+    "new amdgpu dmesg faults: 0",
+)
+
+
+def fail(message: str) -> None:
+    raise ValueError(message)
+
+
+def stable_path(raw: str) -> str:
+    text = Path(raw).as_posix()
+    for anchor in ("/vllm/", "/csrc/", "/tools/", "/tunableop/"):
+        if anchor in text:
+            return anchor[1:] + text.split(anchor, 1)[1]
+    return text
+
+
+def read_manifest(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        match = re.fullmatch(r"([0-9a-fA-F]{64})\s+[* ](.+)", line)
+        if not match:
+            fail(f"invalid SHA256 manifest line in {path}: {line!r}")
+        digest, rawpath = match.groups()
+        key = stable_path(rawpath)
+        if key in result:
+            fail(f"duplicate normalized manifest key {key!r} in {path}")
+        result[key] = digest.lower()
+    if not result:
+        fail(f"empty SHA256 manifest: {path}")
+    return result
+
+
+def parse_kv(path: Path) -> dict[str, str]:
+    result = {}
+    for line in path.read_text().splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            result[key.strip()] = value.strip()
+    return result
+
+
+def validate_arm(root: Path, arm_id: str) -> dict:
+    expected = EXPECTED[arm_id]
+    d = root / arm_id
+    required = (
+        "ARM-PASS.txt",
+        "arm-provenance.txt",
+        "boot-id.before",
+        "boot-id.after",
+        "sha256.before",
+        "sha256.after",
+        "worker-provenance.json",
+        "config.env",
+        "summary.txt",
+        "serve.log",
+        "concurrency.json",
+        "parity.json",
+    )
+    missing = [name for name in required if not (d / name).is_file()]
+    if missing:
+        fail(f"{arm_id}: missing evidence: {missing}")
+
+    pass_text = (d / "ARM-PASS.txt").read_text().strip()
+    marker = re.fullmatch(
+        r"ARM PASS arm=([\w-]+) mode=([\w-]+) core=([0-9a-f]{64}) "
+        r"cu=([0-9a-f]{64}) boot=([0-9a-f-]+)",
+        pass_text,
+    )
+    if not marker:
+        fail(f"{arm_id}: missing or malformed ARM PASS marker: {pass_text!r}")
+    arm_name, mode, so_sha, cu_sha, marker_boot = marker.groups()
+    if (arm_name, so_sha, cu_sha) != (expected["arm"], expected["so"], expected["cu"]):
+        fail(f"{arm_id}: arm/core/source identity mismatch")
+    if mode != "target-MonoKernel-native-MTP2-cap8":
+        fail(f"{arm_id}: unexpected serving mode {mode!r}")
+
+    boot_before = (d / "boot-id.before").read_text().strip()
+    boot_after = (d / "boot-id.after").read_text().strip()
+    if not boot_before or boot_before != boot_after or boot_before != marker_boot:
+        fail(f"{arm_id}: boot ID mismatch")
+    before = (d / "sha256.before").read_bytes()
+    after = (d / "sha256.after").read_bytes()
+    if before != after:
+        fail(f"{arm_id}: before/after SHA manifests differ")
+    manifest = read_manifest(d / "sha256.before")
+    if manifest.get("vllm/_rocm_C.abi3.so") != expected["so"]:
+        fail(f"{arm_id}: core digest mismatch")
+    if manifest.get("csrc/rocm/mono_k2_rdna2.cu") != expected["cu"]:
+        fail(f"{arm_id}: K2 source digest mismatch")
+
+    provenance = parse_kv(d / "arm-provenance.txt")
+    for key, value in {
+        "arm": expected["arm"],
+        "expected_core_sha256": expected["so"],
+        "expected_mono_cu_sha256": expected["cu"],
+        "gpus": "6,7,8,9",
+        "boot_id": boot_before,
+    }.items():
+        if provenance.get(key) != value:
+            fail(f"{arm_id}: arm-provenance {key} mismatch: {provenance.get(key)!r}")
+
+    parity = json.loads((d / "parity.json").read_text())
+    for mode in ("solo", "c8"):
+        cases = parity.get(mode)
+        if not isinstance(cases, list) or len(cases) != 8:
+            fail(f"{arm_id}: parity {mode} must contain all eight fixed prompts")
+        for index, item in enumerate(cases):
+            if not isinstance(item, dict):
+                fail(f"{arm_id}: parity {mode}[{index}] is not an object")
+            tokens = item.get("tokens")
+            logprobs = item.get("token_logprobs")
+            top = item.get("top")
+            if (
+                not isinstance(item.get("text"), str)
+                or not isinstance(tokens, list)
+                or not tokens
+                or not isinstance(logprobs, list)
+                or len(logprobs) != len(tokens)
+                or not isinstance(top, list)
+                or len(top) != len(tokens)
+            ):
+                fail(f"{arm_id}: parity {mode}[{index}] is incomplete")
+
+    config = parse_kv(d / "config.env")
+    required_config = {
+        "RECIPE": "flashnext-mtp2",
+        "GPUS": "6,7,8,9",
+        "MTP_DRAFTER": "0",
+        "K2_MAX_ROWS": "8",
+        "PLE": "int4",
+        "KV": "4026531840",
+        "GMEM": "0.92",
+        "LPTH": "1024",
+        "PREFILL_INTERVAL": "2",
+        "SEQS": "8",
+        "CELLS": "1024:512:1:8 1024:512:8:32 16384:1024:1:8 16384:1024:8:32",
+        "BENCH_EXTRA": "--temperature 0 --save-detailed",
+        "RESET_PREFIX_CACHE": "1",
+        "VLLM_SERVER_DEV_MODE": "1",
+        "VLLM_RDNA_DYNAMIC_PREFILL": "0",
+        "VLLM_RDNA_PHASE_TIMING": "0",
+        "VLLM_RDNA_OP_TIMING": "0",
+        "VLLM_GDN_PREFILL_TIMING": "0",
+        "VLLM_RDNA_GDN_OPAQUE": "1",
+        "VLLM_RAISE_ON_LOGIT_NANS": "1",
+        "CONC_PROBE_ARGS": "--no-ignore-eos --max-tokens 128",
+        "VENV": "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final",
+    }
+    for key, value in required_config.items():
+        if config.get(key) != value:
+            fail(f"{arm_id}: config {key} expected {value!r}, got {config.get(key)!r}")
+    extra_args = config.get("EXTRA_ARGS", "")
+    if "--monokernel" not in extra_args or not re.search(
+        r'"mtp_drafter"\s*:\s*false', extra_args
+    ):
+        fail(f"{arm_id}: expected MonoKernel with native MTP2 drafter config")
+    expected_dynamic = {
+        "PORT": "18901" if arm_id == "01-old" else "18902",
+        "TAG": f"correctness-core-{expected['arm']}",
+        "SERVE_TREE": (
+            "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree"
+            if arm_id == "01-old"
+            else "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2"
+        ),
+    }
+    for key, value in expected_dynamic.items():
+        if config.get(key) != value:
+            fail(f"{arm_id}: {key} expected {value!r}, got {config.get(key)!r}")
+    if config.get("SERVE_SCRIPT") != config["SERVE_TREE"] + "/tools/rdna/serve_rdna.sh":
+        fail(f"{arm_id}: unexpected SERVE_SCRIPT")
+    if not config.get("OUT", "").endswith("/correctness-serving-ab/" + arm_id):
+        fail(f"{arm_id}: unexpected OUT path {config.get('OUT')!r}")
+    if "0939125b929543a783ce700c90e36dd1a575c00c" not in config.get("MODEL", ""):
+        fail(f"{arm_id}: model snapshot mismatch")
+    if "4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4" not in config.get(
+        "PLE_QUANT_DIR", ""
+    ):
+        fail(f"{arm_id}: PLE snapshot mismatch")
+
+    summary = (d / "summary.txt").read_text(errors="replace")
+    missing_markers = [s for s in REQUIRED_SUMMARY if s not in summary]
+    if missing_markers:
+        fail(f"{arm_id}: missing gate markers {missing_markers}")
+    if re.search(
+        r"(?:ROUTE|DISPATCH|PROBE|PREFIX|CONCURRENCY) FAIL|fault markers in serve.log: [1-9]|new amdgpu dmesg faults: [1-9]",
+        summary,
+    ):
+        fail(f"{arm_id}: summary contains a failure marker")
+    serve = (d / "serve.log").read_text(errors="replace")
+    if "monokernel=True" not in serve or "SpeculativeConfig(method='mtp'" not in serve:
+        fail(f"{arm_id}: target MonoKernel or native MTP2 did not initialize")
+    if "MTP drafter K1/K2" in serve or "dense MTP K2 call" in serve:
+        fail(f"{arm_id}: native MTP2 path unexpectedly changed")
+    for rank in range(4):
+        pattern = rf"Worker_TP{rank}_EP\d+.*mono k2_rdna2: 24 rows \(full\) -> modules"
+        if not re.search(pattern, serve):
+            fail(f"{arm_id}: cap8 fallback marker missing for TP{rank}")
+    for cell in CELLS:
+        if f"PREFIX RESET PASS before bench-{cell}" not in summary:
+            fail(f"{arm_id}: missing cache reset for {cell}")
+        if (
+            not (d / f"bench-{cell}.json").is_file()
+            or not (d / f"bench-{cell}.log").is_file()
+        ):
+            fail(f"{arm_id}: missing completed cell {cell}")
+
+    worker = json.loads((d / "worker-provenance.json").read_text())
+    if (
+        worker.get("boot") != boot_before
+        or worker.get("gpu_ids_in_unremapped_kfd_order") != GPU_ORDER
+    ):
+        fail(f"{arm_id}: worker boot or physical KFD topology mismatch")
+    if (
+        worker.get("all_four_core_mappings_verified") is not True
+        or worker.get("all_four_physical_queue_owners_verified") is not True
+    ):
+        fail(f"{arm_id}: four-worker provenance gate failed")
+    workers = worker.get("workers")
+    if not isinstance(workers, list) or len(workers) != 4:
+        fail(f"{arm_id}: expected exactly four worker records")
+    ranks = [w.get("tp_rank") for w in workers]
+    if sorted(ranks) != [0, 1, 2, 3]:
+        fail(f"{arm_id}: TP rank set is not exactly 0..3")
+    rank_gpu = {}
+    for w in workers:
+        rank = w["tp_rank"]
+        expected_gpu = EXPECTED_GPU_IDS[rank]
+        qids = w.get("physical_queue_gpu_ids")
+        if w.get("loaded_core_sha256") != expected["so"]:
+            fail(f"{arm_id}: TP{rank} mapped unexpected core")
+        if (
+            not isinstance(qids, list)
+            or not qids
+            or any(type(gpu_id) is not int for gpu_id in qids)
+            or set(qids) != {expected_gpu}
+            or w.get("expected_physical_gpu_id") != expected_gpu
+        ):
+            fail(f"{arm_id}: TP{rank} physical queue GPU mismatch: {qids!r}")
+        rank_gpu[str(rank)] = expected_gpu
+
+    return {
+        "arm_id": arm_id,
+        "arm": arm_name,
+        "mode": mode,
+        "boot": boot_before,
+        "core_sha256": so_sha,
+        "cu_sha256": cu_sha,
+        "gpu_ids_by_tp_rank": rank_gpu,
+        "manifest": manifest,
+        "config": config,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--root", type=Path, required=True, help="paired recovered run root"
+    )
+    ap.add_argument(
+        "--output", type=Path, help="new JSON output path; existing file is refused"
+    )
+    args = ap.parse_args()
+    try:
+        reports = [validate_arm(args.root.resolve(), arm) for arm in EXPECTED]
+        if reports[0]["boot"] != reports[1]["boot"]:
+            fail("old and new arms are from different boots")
+        for arm in reports:
+            if arm["config"] != reports[0]["config"]:
+                dynamic = {"PORT", "TAG", "OUT", "CACHE", "SERVE_TREE", "SERVE_SCRIPT"}
+                left = {k: v for k, v in arm["config"].items() if k not in dynamic}
+                ref = {
+                    k: v for k, v in reports[0]["config"].items() if k not in dynamic
+                }
+                if left != ref:
+                    fail(
+                        f"arm configuration differs outside per-arm paths/port/tag: {arm['arm_id']}"
+                    )
+        first = reports[0]["manifest"]
+        second = reports[1]["manifest"]
+        if (set(first) - CORE_KEYS) != (set(second) - CORE_KEYS):
+            fail(
+                "old/new SHA manifest paths differ outside the two expected core files"
+            )
+        differences = [
+            k for k in sorted(set(first) - CORE_KEYS) if first[k] != second[k]
+        ]
+        if differences:
+            fail(f"old/new non-core SHA values differ: {differences}")
+        summary = {
+            "status": "PASS",
+            "pair_complete": True,
+            "shared_boot": reports[0]["boot"],
+            "arms": [
+                {k: v for k, v in item.items() if k not in ("manifest", "config")}
+                for item in reports
+            ],
+            "non_core_hashes_match": True,
+            "same_config_except_arm_paths_port_tag": True,
+        }
+        text = json.dumps(summary, indent=2) + "\n"
+        print(text, end="")
+        if args.output:
+            if args.output.exists():
+                fail(f"refusing to overwrite {args.output}")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(text)
+        return 0
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        print(
+            json.dumps({"status": "FAIL", "error": str(exc)}, indent=2), file=sys.stderr
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

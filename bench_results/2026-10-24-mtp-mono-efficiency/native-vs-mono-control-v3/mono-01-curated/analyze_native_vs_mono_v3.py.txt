@@ -1,0 +1,897 @@
+#!/usr/bin/env python3
+"""Strictly compare native MTP2 with the healthy cleanup-v3 Mono arm.
+
+The analyzer imports the frozen metric extraction from correctness-core-serving-ab.
+It validates matched provenance and serving gates before creating derived CSVs.
+One pair is descriptive only: it does not establish statistical confidence.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib.util
+import json
+import math
+import re
+import statistics
+from pathlib import Path
+from typing import Any
+
+EXPECTED_CORE = "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed"
+EXPECTED_CU = "c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434"
+EXPECTED_CORE_PY = "d68e8983fa59059cdfa34be018aba291b7ffb0970cb4390fb3e6742b1e08228e"
+EXPECTED_MODEL = "0939125b929543a783ce700c90e36dd1a575c00c"
+EXPECTED_PLE = "4f861b63f69e61bfc2e22130ec91ec67f03ec43e"
+EXPECTED_GPUS = "6,7,8,9"
+ALLOWED_ARM_TOOL_HASH_DIFFERENCES = {
+    "run_healthy_v3.sh",
+    "run_native_no_mono_v3.sh",
+    "serve_validate_native_mtp2_gate.sh",
+    "serve_validate_mono_v3_gate.sh",
+    "check_reserved_gpu.py",
+    "snapshot_workers.py",
+}
+KNOWN_NATIVE_ONLY_SOURCE_HASHES = {
+    "vllm/models/qwen4_exp/amd/mono/rdna2/__init__.py",
+    "vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_rdna2.py",
+}
+CELLS = ((1024, 512, 1), (1024, 512, 8), (16384, 1024, 1), (16384, 1024, 8))
+COMMON_CONFIG = (
+    "RECIPE",
+    "MODEL",
+    "GPUS",
+    "VENV",
+    "PLE",
+    "PLE_QUANT_DIR",
+    "KV",
+    "GMEM",
+    "LPTH",
+    "PREFILL_INTERVAL",
+    "SEQS",
+    "CELLS",
+    "BENCH_EXTRA",
+    "RESET_PREFIX_CACHE",
+    "VLLM_SERVER_DEV_MODE",
+    "CONC_PROBE_ARGS",
+    "VLLM_RDNA_DYNAMIC_PREFILL",
+    "VLLM_RDNA_PHASE_TIMING",
+    "VLLM_RDNA_OP_TIMING",
+    "VLLM_GDN_PREFILL_TIMING",
+    "VLLM_RDNA_GDN_OPAQUE",
+    "VLLM_RAISE_ON_LOGIT_NANS",
+    "SERVE_TREE",
+    "SERVE_SCRIPT",
+)
+EXPECTED_CONFIG = {
+    "RECIPE": "flashnext-mtp2",
+    "GPUS": EXPECTED_GPUS,
+    "PLE": "int4",
+    "KV": "4026531840",
+    "GMEM": "0.92",
+    "LPTH": "1024",
+    "PREFILL_INTERVAL": "2",
+    "SEQS": "8",
+    "CELLS": "1024:512:1:8 1024:512:8:32 16384:1024:1:8 16384:1024:8:32",
+    "BENCH_EXTRA": "--temperature 0 --save-detailed",
+    "RESET_PREFIX_CACHE": "1",
+    "VLLM_SERVER_DEV_MODE": "1",
+    "CONC_PROBE_ARGS": "--no-ignore-eos --max-tokens 128",
+    "VLLM_RDNA_DYNAMIC_PREFILL": "0",
+    "VLLM_RDNA_PHASE_TIMING": "0",
+    "VLLM_RDNA_OP_TIMING": "0",
+    "VLLM_GDN_PREFILL_TIMING": "0",
+    "VLLM_RDNA_GDN_OPAQUE": "1",
+    "VLLM_RAISE_ON_LOGIT_NANS": "1",
+}
+SAME_SOURCE_KEYS = (
+    "vllm/_rocm_C.abi3.so",
+    "csrc/rocm/mono_k2_rdna2.cu",
+    "csrc/rocm/ops.h",
+    "csrc/rocm/torch_bindings.cpp",
+    "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py",
+    "vllm/models/qwen4_exp/amd/mono/rdna2/failstop.py",
+    "vllm/models/qwen4_exp/amd/mono/rdna2/k1.py",
+    "vllm/models/qwen4_exp/amd/mono_decode_rdna2.py",
+    "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py",
+    "vllm/models/qwen4_exp/amd/mono/rdna2/layout.py",
+    "vllm/v1/worker/gpu_model_runner.py",
+    "vllm/v1/worker/gpu/model_runner.py",
+    "vllm/v1/worker/gpu/async_utils.py",
+    "vllm/v1/engine/core.py",
+    "tools/rdna/serve_rdna.sh",
+    "tools/rdna/recipes/flashnext-mtp2.env",
+    "overlay_manifest.json",
+    "config.json",
+    "META.json",
+    "tunableop_results0.csv",
+    "tunableop_results1.csv",
+    "tunableop_results2.csv",
+    "tunableop_results3.csv",
+)
+
+REQUIRED_GATES = (
+    "PROBE PASS",
+    "PPL PROBE PASS",
+    "PREFIX PASS",
+    "CONCURRENCY PASS",
+    "PROBE-AFTER-LOAD PASS",
+    "LOAD HOOK rc=0 PASS",
+    "fault markers in serve.log: 0",
+    "new amdgpu dmesg faults: 0",
+)
+METRICS = (
+    "whole_run_input_tokps_true",
+    "whole_run_output_tokps_true",
+    "prefill_tokps_per_request_mean",
+    "prefill_tokps_wave_proxy_from_p99_ttft_NOT_TRUE_THROUGHPUT",
+    "decode_tokps_per_request_mean",
+    "decode_tokps_pooled_over_request_decode_windows",
+    "mean_ttft_ms",
+    "median_ttft_ms",
+    "p99_ttft_ms",
+    "mean_itl_ms",
+    "median_itl_ms",
+    "p99_itl_ms",
+    "pooled_stream_mean_itl_ms",
+    "pooled_stream_median_itl_ms",
+    "pooled_stream_p99_itl_ms",
+    "acceptance_rate_pct_json",
+    "acceptance_length_json",
+    "completed",
+    "failed",
+)
+
+
+def fail(message: str) -> None:
+    raise ValueError(message)
+
+
+def relative_delta_pct(reference: float, candidate: float) -> float:
+    """Return candidate-minus-reference as a percent of the reference."""
+    return 100.0 * (candidate - reference) / reference if reference else math.nan
+
+
+def validate_operational_arm(
+    kind: str, config: dict[str, str], expected_out: str, summary: str
+) -> None:
+    """Validate one arm's launch plumbing, separate from inference settings."""
+    expected_tag = (
+        "native-nomono-native_nomono_cleanup_v3"
+        if kind == "native"
+        else "dense-drafter-failstop_dense_mtp_cleanup_v3"
+    )
+    port = config.get("PORT", "")
+    if not re.fullmatch(r"[1-9][0-9]{1,4}", port) or int(port) > 65535:
+        fail(f"{kind} PORT must be a valid TCP port")
+    if config.get("TAG") != expected_tag:
+        fail(f"{kind} TAG does not match its v3 driver label")
+    out = config.get("OUT", "")
+    if not Path(out).is_absolute() or out.rstrip("/") != out:
+        fail(f"{kind} OUT must be a normalized absolute run directory")
+    if out != expected_out:
+        fail(f"{kind} OUT does not match the declared remote arm directory")
+    if config.get("CACHE") != f"{out}/cache":
+        fail(f"{kind} CACHE must be its run directory's cache subdirectory")
+    tree = config.get("SERVE_TREE", "")
+    if not Path(tree).is_absolute() or not tree.endswith(
+        "/dense-mtp-failstop-healthy-tree-v3"
+    ):
+        fail(f"{kind} SERVE_TREE is not the pinned healthy v3 tree")
+    if config.get("SERVE_SCRIPT") != f"{tree}/tools/rdna/serve_rdna.sh":
+        fail(f"{kind} SERVE_SCRIPT does not belong to its healthy v3 tree")
+    if not summary.splitlines() or not re.search(
+        rf"(?:^|\s)PORT={re.escape(port)}(?:\s|$)", summary.splitlines()[0]
+    ):
+        fail(f"{kind} configured PORT does not match the recorded driver start")
+
+
+def validate_operational_config(
+    native: dict[str, str],
+    mono: dict[str, str],
+    native_expected_out: str,
+    mono_expected_out: str,
+    native_summary: str,
+    mono_summary: str,
+) -> None:
+    validate_operational_arm("native", native, native_expected_out, native_summary)
+    validate_operational_arm("mono", mono, mono_expected_out, mono_summary)
+    if native["PORT"] == mono["PORT"]:
+        fail("native and Mono arms must use distinct server ports")
+    if native["OUT"] == mono["OUT"]:
+        fail("native and Mono arms must use fresh distinct output directories")
+    if native["CACHE"] == mono["CACHE"]:
+        fail("native and Mono arms must use distinct cache directories")
+    if native["SERVE_TREE"] != mono["SERVE_TREE"]:
+        fail("native and Mono arms must serve from the same healthy v3 tree")
+
+
+def validate_config_pair(
+    native: dict[str, str],
+    mono: dict[str, str],
+    native_expected_out: str,
+    mono_expected_out: str,
+    native_summary: str,
+    mono_summary: str,
+) -> None:
+    if native.keys() != mono.keys():
+        fail("native and Mono captured different runtime environment keys")
+    operational_keys = {"PORT", "TAG", "OUT", "CACHE"}
+    runtime_keys = {"EXTRA_ARGS", "MTP_DRAFTER"}
+    expected_keys = set(COMMON_CONFIG) | operational_keys | runtime_keys
+    if set(native) != expected_keys or set(mono) != expected_keys:
+        fail("native and Mono config contains missing or unknown environment keys")
+    validate_operational_config(
+        native,
+        mono,
+        native_expected_out,
+        mono_expected_out,
+        native_summary,
+        mono_summary,
+    )
+    for key, expected in EXPECTED_CONFIG.items():
+        if native.get(key) != expected or mono.get(key) != expected:
+            fail(f"arm configuration mismatch for {key}")
+    for key in COMMON_CONFIG:
+        if native[key] != mono[key]:
+            fail(f"common serving configuration mismatch for {key}")
+    for kind, config in (("native", native), ("mono", mono)):
+        if EXPECTED_MODEL not in config.get("MODEL", ""):
+            fail(f"{kind} model snapshot mismatch")
+        if EXPECTED_PLE not in config.get("PLE_QUANT_DIR", ""):
+            fail(f"{kind} PLE snapshot mismatch")
+    if native.get("MTP_DRAFTER") != "0" or mono.get("MTP_DRAFTER") != "1":
+        fail("the only drafter setting delta must be native 0 versus Mono 1")
+    for key in native:
+        if key in operational_keys | runtime_keys:
+            continue
+        if native[key] != mono[key]:
+            fail(f"unapproved runtime configuration difference at {key}")
+
+
+def parse_kv(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            out[key.strip()] = value.strip()
+    return out
+
+
+def stable_path(raw: str) -> str:
+    text = Path(raw).as_posix()
+    for anchor in ("/vllm/", "/csrc/", "/tools/", "/tunableop/"):
+        if anchor in text:
+            return anchor[1:] + text.split(anchor, 1)[1]
+    return Path(text).name
+
+
+def read_manifest(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        match = re.fullmatch(r"([0-9a-fA-F]{64})\s+[* ](.+)", line)
+        if not match:
+            fail(f"malformed SHA manifest row in {path}: {line!r}")
+        digest, raw_path = match.groups()
+        key = stable_path(raw_path)
+        if key in result:
+            fail(f"duplicate normalized SHA path {key!r} in {path}")
+        result[key] = digest.lower()
+    if not result:
+        fail(f"empty SHA manifest: {path}")
+    return result
+
+
+def manifest_digest(manifest: dict[str, str], suffix: str) -> str | None:
+    matches = [
+        value
+        for key, value in manifest.items()
+        if key == suffix or key.endswith("/" + suffix)
+    ]
+    if len(matches) > 1:
+        fail(f"manifest suffix {suffix!r} is ambiguous")
+    return matches[0] if matches else None
+
+
+def validate_arm(
+    directory: Path, kind: str, expected_remote_out: str | None = None
+) -> dict[str, Any]:
+    required = (
+        "ARM-PASS.txt",
+        "arm-provenance.txt",
+        "boot-id.before",
+        "boot-id.after",
+        "sha256.before",
+        "sha256.after",
+        "worker-provenance.json",
+        "config.env",
+        "summary.txt",
+        "serve.log",
+        "concurrency.json",
+        "parity.json",
+        "probe.txt",
+        "ppl.txt",
+        "prefix.txt",
+        "probe-after.txt",
+        "load_hook.txt",
+    )
+    missing = [name for name in required if not (directory / name).is_file()]
+    if missing:
+        fail(f"{kind} arm is incomplete; missing {missing}")
+
+    marker = (directory / "ARM-PASS.txt").read_text().strip()
+    match = re.fullmatch(
+        r"ARM PASS arm=([\w-]+) mode=([\w-]+) core=([0-9a-f]{64}) "
+        r"cu=([0-9a-f]{64}) engine_core_py=([0-9a-f]{64}) boot=([0-9a-f-]+)",
+        marker,
+    )
+    if not match:
+        fail(f"{kind} arm has malformed ARM-PASS marker")
+    arm_name, mode, core, cu, core_py, marker_boot = match.groups()
+    if (core, cu, core_py) != (EXPECTED_CORE, EXPECTED_CU, EXPECTED_CORE_PY):
+        fail(f"{kind} arm core/source identity mismatch: {core}/{cu}/{core_py}")
+
+    boot_before = (directory / "boot-id.before").read_text().strip()
+    boot_after = (directory / "boot-id.after").read_text().strip()
+    if not boot_before or (boot_before, boot_after, marker_boot) != (
+        boot_before,
+        boot_before,
+        boot_before,
+    ):
+        fail(
+            f"{kind} arm boot identity changed: "
+            f"{boot_before}/{boot_after}/{marker_boot}"
+        )
+    if (directory / "sha256.before").read_bytes() != (
+        directory / "sha256.after"
+    ).read_bytes():
+        fail(f"{kind} arm changed files during serving")
+    manifest = read_manifest(directory / "sha256.before")
+    if manifest_digest(manifest, "vllm/_rocm_C.abi3.so") != EXPECTED_CORE:
+        fail(f"{kind} manifest does not pin the expected core")
+    if manifest_digest(manifest, "csrc/rocm/mono_k2_rdna2.cu") != EXPECTED_CU:
+        fail(f"{kind} manifest does not pin the expected kernel source")
+    if manifest_digest(manifest, "vllm/v1/engine/core.py") != EXPECTED_CORE_PY:
+        fail(f"{kind} manifest does not pin the expected EngineCore source")
+
+    provenance = parse_kv(directory / "arm-provenance.txt")
+    if provenance.get("expected_core_sha256") != EXPECTED_CORE:
+        fail(f"{kind} arm-provenance core pin mismatch")
+    if provenance.get("expected_mono_cu_sha256") != EXPECTED_CU:
+        fail(f"{kind} arm-provenance source pin mismatch")
+    if (
+        provenance.get("gpus") != EXPECTED_GPUS
+        or provenance.get("boot_id") != boot_before
+    ):
+        fail(f"{kind} arm-provenance GPU or boot mismatch")
+    if provenance.get("expected_engine_core_py_sha256") != EXPECTED_CORE_PY:
+        fail(f"{kind} arm-provenance EngineCore source pin mismatch")
+    expected_mode = (
+        "MonoKernel-dense-MTP-failstop"
+        if kind == "mono"
+        else "native-MTP2-no-target-MonoKernel-cleanup-v3"
+    )
+    if mode != expected_mode:
+        fail(f"{kind} marker mode mismatch: {mode!r}")
+    if (kind == "mono" and arm_name != "failstop_dense_mtp_cleanup_v3") or (
+        kind == "native" and arm_name != "native_nomono_cleanup_v3"
+    ):
+        fail(f"unexpected {kind} arm name {arm_name!r}")
+
+    config = parse_kv(directory / "config.env")
+    for key, expected in EXPECTED_CONFIG.items():
+        if config.get(key) != expected:
+            fail(f"{kind} config {key}: expected {expected!r}, got {config.get(key)!r}")
+    if EXPECTED_MODEL not in config.get("MODEL", ""):
+        fail(f"{kind} model snapshot mismatch")
+    if EXPECTED_PLE not in config.get("PLE_QUANT_DIR", ""):
+        fail(f"{kind} PLE snapshot mismatch")
+    if config.get("MTP_DRAFTER") != ("1" if kind == "mono" else "0"):
+        fail(f"{kind} arm has wrong MTP_DRAFTER setting")
+    if kind == "mono":
+        if "--monokernel" not in config.get("EXTRA_ARGS", ""):
+            fail("Mono arm is missing --monokernel")
+        if not re.search(r'"k2_max_rows"\s*:\s*8', config["EXTRA_ARGS"]):
+            fail("Mono arm does not use the matched K2 cap 8")
+        if not re.search(r'"mtp_drafter"\s*:\s*true', config["EXTRA_ARGS"]):
+            fail("Mono arm must explicitly enable the dense MTP drafter")
+    else:
+        if "--monokernel" in config.get("EXTRA_ARGS", ""):
+            fail("native no-Mono arm unexpectedly enables MonoKernel")
+        if not re.search(r'"mtp_drafter"\s*:\s*false', config.get("EXTRA_ARGS", "")):
+            fail("native no-Mono arm must use the native MTP2 drafter")
+
+    summary = (directory / "summary.txt").read_text(errors="replace")
+    if expected_remote_out is not None:
+        validate_operational_arm(
+            kind, config, expected_remote_out, summary
+        )
+    missing_gates = [gate for gate in REQUIRED_GATES if gate not in summary]
+    if missing_gates:
+        fail(f"{kind} arm missing gate markers: {missing_gates}")
+    failure_pattern = (
+        r"(?:ROUTE|DISPATCH|PROBE|PREFIX|CONCURRENCY).* FAIL|"
+        r"fault markers in serve.log: [1-9]|new amdgpu dmesg faults: [1-9]"
+    )
+    if re.search(failure_pattern, summary):
+        fail(f"{kind} summary contains a failure marker")
+    if kind == "mono":
+        for marker_text in ("MONO ROUTE", "MTP K2 DISPATCH"):
+            if marker_text not in summary:
+                fail(f"Mono arm missing {marker_text}")
+        dispatch = re.search(
+            r"MTP K2 DISPATCH dense_calls=(\d+) mono_route_markers=(\d+)",
+            summary,
+        )
+        if dispatch is None or int(dispatch.group(1)) < 4:
+            fail("Mono arm lacks dense MTP K2 dispatches across all TP ranks")
+        route = re.search(
+            r"MONO ROUTE monokernel=1 ranks=(\d+) mtp_ranks=(\d+) "
+            r"requested_drafter=1 dense_calls=(\d+)",
+            summary,
+        )
+        if route is None or tuple(map(int, route.groups())) != (4, 4, 4):
+            fail("Mono arm route summary does not confirm all four MTP ranks")
+        serve = (directory / "serve.log").read_text(errors="replace")
+        if (
+            "monokernel=True" not in serve
+            or "SpeculativeConfig(method='mtp'" not in serve
+        ):
+            fail("Mono arm did not start MonoKernel with MTP drafting enabled")
+        capability_rows = re.findall(
+            r"MTP drafter K1/K2 \(<= 24/24 rows\)", serve
+        )
+        if len(capability_rows) < 4 or "num_spec_tokens=2" not in serve:
+            fail("Mono arm lacks four-rank K1/K2 capability or two-token MTP config")
+        audit_path = directory / "api-environment-audit.json"
+        if not audit_path.is_file():
+            fail("Mono arm is missing its API-server initial environment audit")
+        audit = json.loads(audit_path.read_text())
+        scope = audit.get("scope", "")
+        if "initial exec environment only" not in scope:
+            fail("Mono API environment audit has an unexpected scope")
+        rows = audit.get("rows")
+        if not isinstance(rows, list) or len(rows) != 1:
+            fail("Mono API environment audit must contain exactly one API server")
+        api_env = rows[0].get("initial_exec_environment")
+        api_pid = rows[0].get("pid")
+        if not isinstance(api_env, dict) or not isinstance(api_pid, int):
+            fail("Mono API environment audit row is malformed")
+        if api_env.get("VLLM_ROCM_MONO_DECODE") is not None:
+            fail("Mono API server inherited VLLM_ROCM_MONO_DECODE")
+        if api_env.get("VLLM_RAISE_ON_LOGIT_NANS") != "1":
+            fail("Mono API server did not enable the logit-NaN guard")
+        if api_env.get("VLLM_RDNA_PHASE_TIMING") != "0":
+            fail("Mono API server has phase timing enabled")
+        if api_env.get("VLLM_RDNA_OP_TIMING") != "0":
+            fail("Mono API server has op timing enabled")
+        if api_env.get("HIP_VISIBLE_DEVICES") != EXPECTED_GPUS:
+            fail("Mono API server did not select HIP6-9")
+        api_pids = {int(pid) for pid in re.findall(r"\(APIServer pid=(\d+)\)", serve)}
+        if api_pid not in api_pids:
+            fail("Mono API environment audit PID is absent from serve.log")
+    else:
+        for marker_text in ("NATIVE ROUTE", "NATIVE ROUTE-AFTER-LOAD PASS"):
+            if marker_text not in summary:
+                fail(f"native arm missing {marker_text}")
+        if "MONO ROUTE" in summary:
+            fail("native arm summary contains a Mono route marker")
+        serve = (directory / "serve.log").read_text(errors="replace")
+        if (
+            "monokernel=False" not in serve
+            or "SpeculativeConfig(method='mtp'" not in serve
+        ):
+            fail("native arm did not start modules target path with native MTP2")
+        if "num_spec_tokens=2" not in serve:
+            fail("native arm did not start two-token MTP drafting")
+        if (
+            "MTP drafter K1/K2" in serve
+            or "dense MTP K2 call" in serve
+            or re.search(r"mono k2_rdna2: .* -> mono kernel", serve)
+        ):
+            fail("native arm dispatched a Mono target/drafter kernel")
+
+    worker_data = json.loads((directory / "worker-provenance.json").read_text())
+    if worker_data.get("boot") != boot_before:
+        fail(f"{kind} worker provenance boot mismatch")
+    if worker_data.get("all_four_core_mappings_verified") is not True:
+        fail(f"{kind} worker core mappings not all verified")
+    if worker_data.get("all_four_physical_queue_owners_verified") is not True:
+        fail(f"{kind} physical GPU owners not all verified")
+    workers = worker_data.get("workers")
+    if not isinstance(workers, list) or len(workers) != 4:
+        fail(f"{kind} arm must have four worker provenance records")
+    kfd_gpu_ids = worker_data.get("gpu_ids_in_unremapped_kfd_order")
+    if (
+        not isinstance(kfd_gpu_ids, list)
+        or len(kfd_gpu_ids) != 10
+        or not all(isinstance(value, int) for value in kfd_gpu_ids)
+    ):
+        fail(f"{kind} arm lacks the 10-device KFD order needed to prove HIP6-9")
+    owners = set()
+    for rank, worker in enumerate(sorted(workers, key=lambda x: x.get("tp_rank", -1))):
+        if (
+            worker.get("tp_rank") != rank
+            or worker.get("loaded_core_sha256") != EXPECTED_CORE
+        ):
+            fail(f"{kind} worker rank/core mismatch at rank {rank}")
+        if worker.get("loaded_core_path", "").rsplit("/", 1)[-1] != "_rocm_C.abi3.so":
+            fail(f"{kind} worker {rank} loaded an unexpected core path")
+        queue_ids = worker.get("physical_queue_gpu_ids")
+        if (
+            not isinstance(queue_ids, list)
+            or not queue_ids
+            or set(queue_ids) != {worker.get("expected_physical_gpu_id")}
+        ):
+            fail(f"{kind} worker {rank} has invalid physical queue owner set")
+        expected_owner = kfd_gpu_ids[rank + 6]
+        if worker.get("expected_physical_gpu_id") != expected_owner:
+            fail(f"{kind} TP rank {rank} does not map to physical HIP{rank + 6}")
+        owners.add(expected_owner)
+    if owners != set(kfd_gpu_ids[6:10]):
+        fail(f"{kind} TP ranks do not map exactly to physical HIP6-9")
+
+    parity = json.loads((directory / "parity.json").read_text())
+    for phase in ("solo", "c8"):
+        observations = parity.get(phase)
+        if not isinstance(observations, list) or len(observations) != 8:
+            fail(f"{kind} parity data lacks all eight {phase} prompts")
+        for index, item in enumerate(observations):
+            tokens = item.get("tokens") if isinstance(item, dict) else None
+            if (
+                not isinstance(item.get("text"), str)
+                or not isinstance(tokens, list)
+                or not tokens
+                or len(item.get("token_logprobs", [])) != len(tokens)
+                or len(item.get("top", [])) != len(tokens)
+            ):
+                fail(f"{kind} parity observation {phase}[{index}] is incomplete")
+
+    required_windows = 0
+    for cell in CELLS:
+        cell_name = f"{cell[0]}x{cell[1]}-c{cell[2]}"
+        if f"PREFIX RESET PASS before bench-{cell_name}" not in summary:
+            fail(f"{kind} arm missing prefix reset for {cell_name}")
+        if (
+            not (directory / f"bench-{cell_name}.json").is_file()
+            or not (directory / f"bench-{cell_name}.log").is_file()
+        ):
+            fail(f"{kind} arm missing benchmark outputs for {cell_name}")
+        required_windows += 1
+    return {
+        "directory": directory,
+        "arm": arm_name,
+        "mode": mode,
+        "core": core,
+        "cu": cu,
+        "core_py": core_py,
+        "boot": boot_before,
+        "config": config,
+        "candidate_tree": provenance.get("candidate_tree", ""),
+        "manifest": manifest,
+        "summary": summary,
+        "required_windows": required_windows,
+    }
+
+
+def load_metric_module(repo: Path):
+    path = (
+        repo
+        / "bench_results"
+        / "2026-10-24-mtp-mono-efficiency"
+        / "correctness-core-serving-ab"
+        / "tools"
+        / "analyze_pair_v1.py"
+    )
+    if not path.is_file():
+        fail(f"cannot find frozen metric analyzer: {path}")
+    spec = importlib.util.spec_from_file_location("frozen_pair_metrics", path)
+    if spec is None or spec.loader is None:
+        fail(f"cannot import frozen metric analyzer: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        fail(f"no rows to write: {path}")
+    with path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--native-arm",
+        required=True,
+        type=Path,
+        help="completed no-Mono native MTP2 arm directory",
+    )
+    parser.add_argument(
+        "--mono-arm",
+        required=True,
+        type=Path,
+        help="completed target-MonoKernel arm directory",
+    )
+    parser.add_argument(
+        "--repo-root", required=True, type=Path, help="vLLM-Mono repository root"
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+        help="new output directory; existing paths are refused",
+    )
+    parser.add_argument(
+        "--native-remote-out",
+        required=True,
+        help="expected absolute remote RUNS_ROOT for the native arm",
+    )
+    parser.add_argument(
+        "--mono-remote-out",
+        required=True,
+        help="expected absolute remote RUNS_ROOT for the Mono arm",
+    )
+    args = parser.parse_args()
+    native_dir, mono_dir, repo, output = (
+        p.resolve()
+        for p in (args.native_arm, args.mono_arm, args.repo_root, args.output_dir)
+    )
+    if output.exists():
+        parser.error(f"refusing to overwrite output directory {output}")
+    native = validate_arm(native_dir, "native", args.native_remote_out)
+    mono = validate_arm(mono_dir, "mono", args.mono_remote_out)
+    if native["boot"] != mono["boot"]:
+        fail("native and Mono arms are not from the same boot")
+    if not native["candidate_tree"] or not mono["candidate_tree"]:
+        fail("arm provenance is missing its healthy v3 candidate tree")
+    if (
+        native["candidate_tree"] != mono["candidate_tree"]
+        or native["config"].get("SERVE_TREE") != native["candidate_tree"]
+    ):
+        fail("arm provenance/config do not pin the same healthy v3 tree")
+    validate_config_pair(
+        native["config"],
+        mono["config"],
+        args.native_remote_out,
+        args.mono_remote_out,
+        native["summary"],
+        mono["summary"],
+    )
+    for key in SAME_SOURCE_KEYS:
+        native_hash = manifest_digest(native["manifest"], key)
+        mono_hash = manifest_digest(mono["manifest"], key)
+        if not native_hash or native_hash != mono_hash:
+            fail(f"source/model/runtime provenance differs at {key}")
+    for key in native["manifest"].keys() | mono["manifest"].keys():
+        if key in ALLOWED_ARM_TOOL_HASH_DIFFERENCES:
+            continue
+        if (
+            key in KNOWN_NATIVE_ONLY_SOURCE_HASHES
+            and key in native["manifest"]
+            and key not in mono["manifest"]
+        ):
+            continue
+        if native["manifest"].get(key) != mono["manifest"].get(key):
+            fail(f"unapproved SHA manifest difference at {key}")
+
+    metric = load_metric_module(repo)
+    rollups: dict[str, list[dict[str, Any]]] = {"native": [], "mono": []}
+    requests: dict[str, list[dict[str, Any]]] = {"native": [], "mono": []}
+    raw: dict[tuple[str, tuple[int, int, int]], dict[str, Any]] = {}
+    for kind, arm in (("native", native), ("mono", mono)):
+        directory = arm["directory"]
+        for cell in CELLS:
+            data, _log, req_rows, rollup = metric.load_cell(
+                directory.parent, directory.name, kind, cell
+            )
+            raw[(kind, cell)] = data
+            rollups[kind].append(rollup)
+            requests[kind].extend(req_rows)
+
+    request_keys = (
+        "input_length_requested",
+        "output_length_requested",
+        "concurrency",
+        "request_index",
+    )
+    native_requests = {
+        tuple(row[k] for k in request_keys): row for row in requests["native"]
+    }
+    mono_requests = {
+        tuple(row[k] for k in request_keys): row for row in requests["mono"]
+    }
+    if native_requests.keys() != mono_requests.keys():
+        fail("native and Mono per-request workload keys differ")
+    req_metric_names = (
+        "input_tokens",
+        "output_tokens",
+        "ttft_ms",
+        "latency_ms",
+        "queue_ms",
+        "prefill_tokps_per_request_input_over_ttft",
+        "decode_tokps_per_request_output_over_decode_window",
+        "decode_tokps_per_request_stream_chunks",
+        "mean_itl_ms",
+        "median_itl_ms",
+    )
+    request_comparison = []
+    for key in sorted(native_requests):
+        left, right = native_requests[key], mono_requests[key]
+        row: dict[str, Any] = dict(zip(request_keys, key))
+        for name in req_metric_names:
+            nv, mv = float(left[name]), float(right[name])
+            row[f"native_{name}"] = nv
+            row[f"mono_{name}"] = mv
+            row[f"mono_minus_native_{name}"] = mv - nv
+            row[f"mono_relative_pct_{name}"] = relative_delta_pct(nv, mv)
+        request_comparison.append(row)
+
+    request_summary: list[dict[str, Any]] = []
+    summary_fields = (
+        ("prefill_tokps", "prefill_tokps_per_request_input_over_ttft"),
+        ("decode_tokps", "decode_tokps_per_request_output_over_decode_window"),
+        ("ttft_ms", "ttft_ms"),
+        ("mean_itl_ms", "mean_itl_ms"),
+        ("median_itl_ms", "median_itl_ms"),
+    )
+    for kind in ("native", "mono"):
+        for cell in (None, *CELLS):
+            selected = [
+                row
+                for row in requests[kind]
+                if cell is None
+                or (
+                    row["input_length_requested"],
+                    row["output_length_requested"],
+                    row["concurrency"],
+                )
+                == cell
+            ]
+            label = "all-cells" if cell is None else f"{cell[0]}x{cell[1]}-c{cell[2]}"
+            result: dict[str, Any] = {
+                "arm": kind,
+                "cell": label,
+                "request_count": len(selected),
+            }
+            for output_name, input_name in summary_fields:
+                values = [float(row[input_name]) for row in selected]
+                values = [value for value in values if math.isfinite(value)]
+                result[f"mean_{output_name}"] = (
+                    statistics.mean(values) if values else math.nan
+                )
+                result[f"median_{output_name}"] = (
+                    statistics.median(values) if values else math.nan
+                )
+            request_summary.append(result)
+
+    cell_keys = ("input_length_requested", "output_length_requested", "concurrency")
+    rollup_maps = {
+        kind: {tuple(row[k] for k in cell_keys): row for row in rows}
+        for kind, rows in rollups.items()
+    }
+    if rollup_maps["native"].keys() != rollup_maps["mono"].keys():
+        fail("native and Mono cell sets differ")
+    cell_comparison = []
+    for key in sorted(rollup_maps["native"]):
+        left, right = rollup_maps["native"][key], rollup_maps["mono"][key]
+        row = dict(zip(cell_keys, key))
+        for name in METRICS:
+            nv, mv = float(left[name]), float(right[name])
+            row[f"native_{name}"] = nv
+            row[f"mono_{name}"] = mv
+            row[f"mono_minus_native_{name}"] = mv - nv
+            row[f"mono_relative_pct_{name}"] = (
+                relative_delta_pct(nv, mv) if math.isfinite(nv) else math.nan
+            )
+        cell_comparison.append(row)
+
+    def pooled(rows: list[dict[str, Any]], label: str) -> dict[str, Any]:
+        duration = sum(float(r["duration_s"]) for r in rows)
+        ins = sum(int(r["total_input_tokens"]) for r in rows)
+        outs = sum(int(r["total_output_tokens"]) for r in rows)
+        return {
+            "arm": label,
+            "duration_s": duration,
+            "input_tokens": ins,
+            "output_tokens": outs,
+            "whole_run_input_tokps_true": ins / duration,
+            "whole_run_output_tokps_true": outs / duration,
+            "mean_cell_prefill_tokps_wave_proxy_NOT_TRUE_THROUGHPUT": statistics.mean(
+                float(r["prefill_tokps_wave_proxy_from_p99_ttft_NOT_TRUE_THROUGHPUT"])
+                for r in rows
+            ),
+            "mean_request_prefill_tokps": statistics.mean(
+                float(r["prefill_tokps_per_request_mean"]) for r in rows
+            ),
+            "mean_request_decode_tokps": statistics.mean(
+                float(r["decode_tokps_per_request_mean"]) for r in rows
+            ),
+            "mean_cell_ttft_ms": statistics.mean(
+                float(r["mean_ttft_ms"]) for r in rows
+            ),
+            "mean_cell_itl_ms": statistics.mean(float(r["mean_itl_ms"]) for r in rows),
+            "mean_cell_median_itl_ms": statistics.mean(
+                float(r["median_itl_ms"]) for r in rows
+            ),
+            "weighted_acceptance_rate_pct": 100
+            * sum(float(r["accepted_tokens_json"]) for r in rows)
+            / sum(float(r["draft_tokens_json"]) for r in rows)
+            if sum(float(r["draft_tokens_json"]) for r in rows)
+            else math.nan,
+            "completed": sum(int(r["completed"]) for r in rows),
+            "failed": sum(int(r["failed"]) for r in rows),
+        }
+
+    whole = [pooled(rollups[k], k) for k in ("native", "mono")]
+    whole_compare: dict[str, Any] = {"comparison": "mono_minus_native"}
+    for name in whole[0]:
+        if name == "arm":
+            continue
+        nv, mv = float(whole[0][name]), float(whole[1][name])
+        whole_compare[f"native_{name}"] = nv
+        whole_compare[f"mono_{name}"] = mv
+        whole_compare[f"mono_minus_native_{name}"] = mv - nv
+        whole_compare[f"mono_relative_pct_{name}"] = (
+            relative_delta_pct(nv, mv) if math.isfinite(nv) else math.nan
+        )
+
+    output.mkdir(parents=True)
+    write_csv(output / "per-request-native-vs-mono.csv", request_comparison)
+    write_csv(output / "per-request-rate-and-latency-summary.csv", request_summary)
+    write_csv(output / "per-cell-native-vs-mono.csv", cell_comparison)
+    write_csv(output / "whole-run-native-vs-mono.csv", [whole_compare])
+    write_csv(output / "per-cell-native.csv", rollups["native"])
+    write_csv(output / "per-cell-mono.csv", rollups["mono"])
+    provenance = {
+        "status": "PASS",
+        "native": {
+            k: native[k] for k in ("arm", "mode", "core", "cu", "core_py", "boot")
+        },
+        "mono": {k: mono[k] for k in ("arm", "mode", "core", "cu", "core_py", "boot")},
+        "same_boot": True,
+        "same_core_and_kernel_source": True,
+        "same_model_ple_tunableop_and_serving_config_except_explicit_flags": True,
+        "only_runtime_deltas": {
+            "EXTRA_ARGS": {
+                "native": native["config"].get("EXTRA_ARGS"),
+                "mono": mono["config"].get("EXTRA_ARGS"),
+            },
+            "MTP_DRAFTER": {"native": "0", "mono": "1"},
+        },
+        "interpretation": (
+            "single matched pair; descriptive only, no variance/significance claim"
+        ),
+    }
+    (output / "provenance-validation.json").write_text(
+        json.dumps(provenance, indent=2) + "\n"
+    )
+    (output / "README.txt").write_text(
+        "Native MTP2 without target MonoKernel versus target MonoKernel with "
+        "native MTP2 drafting.\n"
+        "Per-request rates are arithmetic per request. Aggregate whole-run "
+        "rates are summed tokens divided by summed timed-cell duration.\n"
+        "TTFT is kept per request/cell; prefill wave proxy is explicitly not "
+        "throughput. ITL is streamed chunk timing, not TPOT.\n"
+        "Acceptance columns preserve per-cell JSON values; the pooled field "
+        "uses summed accepted/draft tokens.\n"
+        "Per-request rate/latency summary reports arithmetic mean and median "
+        "per request, by cell and across all cells. Whole-run rates divide "
+        "total tokens by summed measured cell duration. Acceptance length "
+        "remains the detailed-JSON value per cell; pooled acceptance rate "
+        "uses total accepted tokens divided by total draft tokens.\n"
+        "The TTFT wave proxy is a proxy, not measured prefill throughput. "
+        "ITL values are streaming chunk intervals, not TPOT.\n"
+        "Only EXTRA_ARGS (target MonoKernel/drafter flags) and MTP_DRAFTER "
+        "may differ. A single pair is descriptive only; it does not establish "
+        "run variance or statistical confidence.\n"
+    )
+    print(json.dumps(provenance, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

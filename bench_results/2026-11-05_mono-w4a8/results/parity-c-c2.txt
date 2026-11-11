@@ -1,0 +1,17 @@
+solo p0: same tokens 8/64, max |dlogprob| 0.2376 (diverges at 8; top-2 logprob gap there 0.328)
+solo p1: same tokens 0/1, max |dlogprob| 0.0000 (diverges at 0; top-2 logprob gap there 0.609)
+solo p2: same tokens 0/1, max |dlogprob| 0.0000 (diverges at 0; top-2 logprob gap there 1.016)
+solo p3: same tokens 3/64, max |dlogprob| 0.2593 (diverges at 3; top-2 logprob gap there 0.203)
+solo p4: same tokens 64/64, max |dlogprob| 0.0000
+solo p5: same tokens 64/64, max |dlogprob| 0.2898
+solo p6: same tokens 64/64, max |dlogprob| 0.0265
+solo p7: same tokens 64/64, max |dlogprob| 0.0000
+c8 p0: same tokens 52/64, max |dlogprob| 0.6160 (diverges at 52; top-2 logprob gap there 0.203)
+c8 p1: same tokens 60/64, max |dlogprob| 0.4061 (diverges at 60; top-2 logprob gap there 0.109)
+c8 p2: same tokens 1/1, max |dlogprob| 0.6304
+c8 p3: same tokens 64/64, max |dlogprob| 0.1862
+c8 p4: same tokens 2/17, max |dlogprob| 0.0253 (diverges at 2; top-2 logprob gap there 0.141)
+c8 p5: same tokens 64/64, max |dlogprob| 0.1453
+c8 p6: same tokens 64/64, max |dlogprob| 0.0431
+c8 p7: same tokens 43/64, max |dlogprob| 0.0837 (diverges at 43; top-2 logprob gap there 0.078)
+identical-prefix tokens 617/788, worst |dlogprob| on shared prefix 0.6304

@@ -1,0 +1,30 @@
+{
+  "bundle": "failstop-current-cleanup-cpu-v1",
+  "files": [
+    {
+      "path": "README.md",
+      "size_bytes": 693,
+      "sha256": "e1c00175d0ee748f3a001010214ad04700b3ef242e8dba922894ea9d6ccfedfd"
+    },
+    {
+      "path": "ci-tethering-baseline.json",
+      "size_bytes": 960,
+      "sha256": "9df3fda5773e612a12017b58884a8004668bca9e9e379c8fbf922a9b7c1b719d"
+    },
+    {
+      "path": "cleanup-cpu-test.txt",
+      "size_bytes": 103,
+      "sha256": "f301adb5ceb5245a1563e33d3499b0c61d9630ab84531442f32e0ba9dd6351c2"
+    },
+    {
+      "path": "cleanup-mypy.txt",
+      "size_bytes": 43,
+      "sha256": "f9b031e5c45aa702cd4fef028d465551cb20a2c4698e0913c7b00766b20ac4d8"
+    },
+    {
+      "path": "enginecore-cleanup-tests.log",
+      "size_bytes": 744,
+      "sha256": "4cb21d7e168d72457eca2012641a77fc28328e908c04103ff9c6f938039a2db6"
+    }
+  ]
+}

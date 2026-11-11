@@ -86,7 +86,7 @@ FILES=(
 )
 
 SITE=$VENV/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
+export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib:$SITE/torch/lib
 export HIP_VISIBLE_DEVICES=$GPU
 export VLLM_ROCM_USE_AITER=0 TORCH_BLAS_PREFER_HIPBLASLT=0
 export PYTORCH_TUNABLEOP_ENABLED=0 PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0

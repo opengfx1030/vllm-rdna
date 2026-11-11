@@ -1,0 +1,51 @@
+{
+  "schema": "failstop-evidence-manifest-v1",
+  "scope": "CPU-only AST and SIGTERM ordering evidence; explicitly not live engine qualification",
+  "files": [
+    {
+      "path": "check_cpu.py.txt",
+      "bytes": 8014,
+      "sha256": "251b9d756cebeb33dc8020d0a16281956c5a3d0488ac978c4a944fe1cd833559"
+    },
+    {
+      "path": "core.py.baseline.txt",
+      "bytes": 111602,
+      "sha256": "9d1269b1e589325a45f715f43b5d731592681136bd247125e1e61005f749e2ac"
+    },
+    {
+      "path": "core.py.candidate.txt",
+      "bytes": 112337,
+      "sha256": "d68e8983fa59059cdfa34be018aba291b7ffb0970cb4390fb3e6742b1e08228e"
+    },
+    {
+      "path": "core.py.original.txt",
+      "bytes": 111602,
+      "sha256": "9d1269b1e589325a45f715f43b5d731592681136bd247125e1e61005f749e2ac"
+    },
+    {
+      "path": "cpu-test-results.txt",
+      "bytes": 870,
+      "sha256": "1e3d8dafe29964942487ce1062402af8c3e1c9eb3492b6052fa8cb6b756b4b55"
+    },
+    {
+      "path": "proposal-context.txt",
+      "bytes": 1722,
+      "sha256": "3de5fd6d30c0c800dbbc3f11ba83c00aeb4e6b6b632834bd19453dc45b74b58e"
+    },
+    {
+      "path": "reproduction.md",
+      "bytes": 1133,
+      "sha256": "62247d303b60b7367b118baee25747896adf9270d545ae0250e0c7c57d506aa5"
+    },
+    {
+      "path": "rocm-fatal-sigterm-cleanup.patch",
+      "bytes": 2524,
+      "sha256": "ffadcf57708a6d47cbeb61a2749d1a4609428145feddbcb0bfaa4efb8fea4d76"
+    },
+    {
+      "path": "source-identities.json",
+      "bytes": 836,
+      "sha256": "82d692d68b34b335f18b06e29521a6182fdae41e7a44081b03ec098a8c4db297"
+    }
+  ]
+}

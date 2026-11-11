@@ -1,0 +1,212 @@
+name: RDNA Docker image
+
+on:
+  push:
+    branches:
+      - rdna_extras
+  create:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the branch supersedes an in-flight image build; tags always finish.
+concurrency:
+  group: rdna-image-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  IMAGE_NAME: ghcr.io/opengfx1030/vllm-rdna
+  ROCM_VERSION: 7.14.0
+
+jobs:
+  build:
+    if: >-
+      github.repository == 'opengfx1030/vllm-rdna' &&
+      github.event.deleted != true &&
+      (github.event_name != 'create' || github.event.ref_type == 'tag') &&
+      (github.ref == 'refs/heads/rdna_extras' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ${{ vars.VLLM_RDNA_RUNNER || 'rdna-image-builder' }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      commit: ${{ steps.metadata.outputs.commit }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Mask runner infrastructure identifiers
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import ipaddress
+          import json
+          import socket
+          import subprocess
+
+          if socket.gethostname() != "rdna-image-builder":
+              raise SystemExit("Runner hostname isolation required")
+          addresses = json.loads(subprocess.check_output(
+              ["ip", "--json", "address", "show"], text=True,
+          ))
+          identifiers = {
+              address["local"]
+              for interface in addresses
+              for address in interface.get("addr_info", [])
+              if not ipaddress.ip_address(address["local"]).is_loopback
+          }
+          identifiers.add(subprocess.check_output(
+              ["docker", "info", "--format", "{{.Name}}"], text=True,
+          ).strip())
+          for value in sorted(identifiers):
+              if value:
+                  escaped = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::add-mask::{escaped}")
+          PY
+
+      - name: Check out triggering source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve source and image tags
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          case "$GITHUB_REF" in
+            refs/heads/rdna_extras)
+              image_tag="sha-$commit"
+              ;;
+            refs/tags/*)
+              image_tag=${GITHUB_REF#refs/tags/}
+              if [[ ! "$image_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || (( ${#image_tag} > 117 )); then
+                printf '::error::Release tag must be a valid Docker tag of at most 117 characters: %s\n' "$image_tag"
+                exit 1
+              fi
+              case "$image_tag" in
+                nightly|nightly-*|sha-*|latest)
+                  printf '::error::Release tag is reserved: %s\n' "$image_tag"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              printf '::error::Unsupported source ref: %s\n' "$GITHUB_REF"
+              exit 1
+              ;;
+          esac
+          {
+            printf 'commit=%s\n' "$commit"
+            printf 'image_tag=%s\n' "$image_tag"
+            printf 'tags<<EOF\n%s:%s\n%s:%s-rocm%s\nEOF\n' \
+              "$IMAGE_NAME" "$image_tag" "$IMAGE_NAME" "$image_tag" "$ROCM_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up version tooling
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned SCM version resolver
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv --python 3.12
+          uv pip install --python .venv/bin/python 'setuptools-scm==9.2.2'
+
+      - name: Resolve native source version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/python - <<'PY'
+          import os
+
+          from setuptools_scm import get_version
+
+          version = get_version(
+              git_describe_command=[
+                  "git", "describe", "--dirty", "--tags", "--long",
+                  "--abbrev=40", "--match", "v[0-9]*",
+              ],
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"version={version}", file=output)
+          print(f"VLLM_VERSION={version}")
+          PY
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish source image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.rdna
+          target: final
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          build-args: |
+            VLLM_VERSION=${{ steps.version.outputs.version }}
+            VLLM_COMMIT=${{ steps.metadata.outputs.commit }}
+            IMAGE_TAG=${{ steps.metadata.outputs.image_tag }}
+            MAX_JOBS=${{ vars.VLLM_RDNA_MAX_JOBS || '2' }}
+          cache-from: type=gha,scope=rdna-rocm7.14.0
+          cache-to: type=gha,mode=max,scope=rdna-rocm7.14.0
+
+  promote-nightly:
+    needs: build
+    if: github.ref == 'refs/heads/rdna_extras'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: rdna-nightly-promotion
+      cancel-in-progress: false
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote current branch digest to nightly
+        id: promote
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VLLM_COMMIT: ${{ needs.build.outputs.commit }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          branch_tip=$(gh api "repos/$GH_REPO/git/ref/heads/rdna_extras" --jq '.object.sha')
+          if [[ "$branch_tip" != "$VLLM_COMMIT" ]]; then
+            printf 'Skipping stale source %s; rdna_extras is now %s\n' "$VLLM_COMMIT" "$branch_tip"
+            printf 'promoted=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          docker buildx imagetools create \
+            --tag "$IMAGE_NAME:nightly" \
+            --tag "$IMAGE_NAME:nightly-rocm$ROCM_VERSION" \
+            "$IMAGE_NAME@$IMAGE_DIGEST"
+          printf 'promoted=true\n' >> "$GITHUB_OUTPUT"

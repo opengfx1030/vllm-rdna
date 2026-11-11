@@ -1,0 +1,73 @@
+{
+  "schema": "mtp-failstop-postformat-equivalence-v1",
+  "core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+  "candidate_mono_cu_sha256": "c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434",
+  "checks": [
+    {
+      "path": "csrc/rocm/mono_k2_rdna2.cu",
+      "candidate_sha256": "c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434",
+      "formatted_local_sha256": "f149b59952196ad3b7a4ef9079fde34d91e854bf912603629b594de30af4de61",
+      "equivalence": "C++ tokens identical after adjacent string-literal concatenation; comments/formatting only"
+    },
+    {
+      "path": "csrc/rocm/ops.h",
+      "candidate_sha256": "32dba52938936b317f2eb546e5db75e90ff4ec067eb8b395e47b6f2b7878b469",
+      "formatted_local_sha256": "7389d71b0e0ada916090b6e02e889a9eb6d8fe09715949834fa732f8349d495a",
+      "equivalence": "C++ tokens identical after adjacent string-literal concatenation; comments/formatting only"
+    },
+    {
+      "path": "csrc/rocm/torch_bindings.cpp",
+      "candidate_sha256": "14c0e4c76a3aea05e1611dff54096fe91c0ddb2832c14ecead1c26f9ee0287e1",
+      "formatted_local_sha256": "6fe8f05857f14f50278990bc5faf14913db4f91efecf19da60cc73a42407d8fa",
+      "equivalence": "C++ tokens identical after adjacent string-literal concatenation; comments/formatting only"
+    },
+    {
+      "path": "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py",
+      "candidate_sha256": "f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7",
+      "formatted_local_sha256": "b97324165e45e576f6c7d6dd164ae734b27acfda77a6b63fd1c92137af20beca",
+      "equivalence": "Python AST identical; formatting/comments only"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono/rdna2/failstop.py",
+      "candidate_sha256": "786c22ec3d33d3758f7c447f0c254a027d8785e40faa4f6e922937d7b943d83b",
+      "formatted_local_sha256": "68de5bf2489babe17749c5e27d346a0e321a1e8edf58eceb23c56418197a034a",
+      "equivalence": "Python AST identical; formatting/comments only"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono/rdna2/k1.py",
+      "candidate_sha256": "6318fc36513b664993a8feab4b37a63cd6366473842eaaaa58aec204d01c67d0",
+      "formatted_local_sha256": "6318fc36513b664993a8feab4b37a63cd6366473842eaaaa58aec204d01c67d0",
+      "equivalence": "Python AST identical; formatting/comments only"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py",
+      "candidate_sha256": "64cc1b2a22737b59f2e6113ceeaa551509a63e4a307abe44c286849a426788dc",
+      "formatted_local_sha256": "64cc1b2a22737b59f2e6113ceeaa551509a63e4a307abe44c286849a426788dc",
+      "equivalence": "Python AST identical; formatting/comments only"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono/rdna2/layout.py",
+      "candidate_sha256": "00e730f8d40b5ec9966ff096040e872be2547068e60e4af87d93b8bb17a575c1",
+      "formatted_local_sha256": "00e730f8d40b5ec9966ff096040e872be2547068e60e4af87d93b8bb17a575c1",
+      "equivalence": "Python AST identical; formatting/comments only"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/async_utils.py",
+      "candidate_sha256": "49a454592c80f4813d47ebf811e543ba53c7fbdeed30b1350f0f2ea422478095",
+      "formatted_local_sha256": "ca806dfa81375f1122b29a0a412bb9b1273ec88a46e5a7b8b8121007f4d9db4d",
+      "equivalence": "Python AST identical; formatting/comments only"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/model_runner.py",
+      "candidate_sha256": "20e84bda462a19991e955fb20977b9829bea1b6785299c9a5ff7744fed409927",
+      "formatted_local_sha256": "20e84bda462a19991e955fb20977b9829bea1b6785299c9a5ff7744fed409927",
+      "equivalence": "Python AST identical; formatting/comments only"
+    },
+    {
+      "path": "vllm/v1/worker/gpu_model_runner.py",
+      "candidate_sha256": "43792477dab6fcd1abdbb143d47b37a27a65d571e073b65c0167c14693116966",
+      "formatted_local_sha256": "43792477dab6fcd1abdbb143d47b37a27a65d571e073b65c0167c14693116966",
+      "equivalence": "Python AST identical; formatting/comments only"
+    }
+  ]
+}

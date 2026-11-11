@@ -1,0 +1,2 @@
+/private/tmp/mono-mypy-baseline/vllm/v1/worker/gpu/model_runner.py:934: error: Item "None" of "Any | None" has no attribute "shape"  [union-attr]
+Found 1 error in 1 file (checked 1 source file)

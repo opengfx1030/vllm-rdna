@@ -1,0 +1,12 @@
+{
+  "status": "PASS",
+  "start": "2026-10-24T09:41:43+02:00",
+  "end": "2026-10-24T09:45:37+02:00",
+  "source": "sudo -n journalctl -k -b -o json",
+  "readable_real_kernel_records": true,
+  "record_count": 133,
+  "matching_fault_count": 0,
+  "raw_sha256": "19532957e916186c4b76642c421b51f821f9166c112405ba3ec021c9f15f74e4",
+  "boot_id": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "scope": "Independent full eager lifecycle audit; original v1 permission-limited journal is not used as fault evidence."
+}

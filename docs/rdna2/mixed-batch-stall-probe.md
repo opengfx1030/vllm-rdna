@@ -48,7 +48,7 @@ exact with MTP's multi-token chunks. Timestamps use `time.monotonic()`.
 Scenarios (`--scenarios`, run in this order, each `--repeats` times):
 
 | scenario | what happens | what it exposes |
-|---|---|---|
+| --- | --- | --- |
 | `solo` | every prefill length alone | reference TTFT per length |
 | `inject` | N decoders reach steady decode (every one has `--warmup-tokens`), then a `--baseline-s` window, then each `--prefill-lens` prompt is injected one at a time. After each one the probe waits for its first token plus `--recover-s`. | decoder freeze during a one-shot long prefill |
 | `periodic` | N steady decoders. One `--periodic-len` prompt every `--period-s`, `--period-count` times; the prompts may overlap. | repeated or overlapping prefills, recovery between them |
@@ -154,7 +154,7 @@ median across repeats; `worst` compares the worst repeat. Exit code: 0 pass
 or no gates, 1 a gate failed, 2 request errors or no steady state.
 
 | flag | checks | windows |
-|---|---|---|
+| --- | --- | --- |
 | `--max-stall-ms` | max decoder gap | inject, periodic (+ reverse with `--gate-reverse`) |
 | `--max-stalled-s` | worst decoder's stalled time | same |
 | `--min-decode-tokens-during-prefill` | min tokens per decoder during a prefill | inject, periodic slots |
@@ -195,7 +195,7 @@ arm. "x solo" is the injected request's TTFT divided by its solo TTFT.
 ### Flash-Next MTP0 (`flashnext-mtp0`), 16k injection into 6 decoders
 
 | arm | max gap ms | gap p50 ms | frozen | dec tok (min/dec) | dec rate vs base | TTFT s (x solo) | reverse: decoders blocked s (tok) |
-|---|---:|---:|---:|---:|---:|---:|---:|
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | v0.31 default | 515 | 508 | 0.99 | 114 (19) | 0.08 | 8.25 (1.11) | 7.13 (0) |
 | v0.31 `PREFILL_INTERVAL=4` | 517 | 34 | 0.82 | 419 (69) | 0.24 | 9.97 (1.35) | 7.18 (0) |
 | v0.31 `LPTH=256` | 252 | 247 | 0.99 | 404 (67) | 0.14 | 15.95 (2.13) | 2.69 (236) |
@@ -218,7 +218,7 @@ arm (for example default: 510-513 ms max gap, 40-48 tokens).
 ### Qwen3.8-27B AWQ (`27b-awq`), 16k injection into 6 decoders
 
 | arm | max gap ms | gap p50 ms | frozen | dec tok (min/dec) | dec rate vs base | TTFT s (x solo) | reverse: decoders blocked s (tok) |
-|---|---:|---:|---:|---:|---:|---:|---:|
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | v0.31 default | 2672 | 1978 | 0.99 | 70 (11) | 0.02 | 18.38 (1.03) | 17.84 (0) |
 | v0.31 interval 4 + LPTH 256 | 396 | 36 | 0.75 | 1548 (258) | 0.33 | 27.54 (1.51) | 3.80 (1129) |
 
@@ -248,13 +248,13 @@ arm (for example default: 510-513 ms max gap, 40-48 tokens).
   down to the 1024-token mamba block (`mamba-align`). Solo prefill runs
   2048-token chunks.
 - **Knob sensitivity.** The probe separates the knobs cleanly:
-  - `PREFILL_INTERVAL=4` gives decoders pure-decode steps between
+    - `PREFILL_INTERVAL=4` gives decoders pure-decode steps between
     prefill-carrying steps. Gap p50 drops to the baseline, decode tokens
     rise 3.7x and prefill TTFT rises 1.35x, but the max gap stays at
     ~515 ms (the release steps).
-  - `LPTH=256` halves the max gap and fixes the reverse case, but prefill
+    - `LPTH=256` halves the max gap and fixes the reverse case, but prefill
     takes 2.1x as long and gap p50 stays at the ~240 ms floor.
-  - The combination gives the most decode service: 0.40x the baseline rate,
+    - The combination gives the most decode service: 0.40x the baseline rate,
     13.7x the tokens, max gap 247 ms. Prefill takes 3x as long (Flash-Next)
     or 1.5x (27B).
 - **Rare outlier caught in passing.** In the Flash-Next `PREFILL_INTERVAL=4`
@@ -276,7 +276,7 @@ Use the Flash-Next MTP0 recipe, `--decoders 6 --prefill-lens 4096,16384
 --repeats 3`, and `--gate-stat median`:
 
 | gate | default today | target for a fix | rationale |
-|---|---:|---:|---|
+| --- | ---: | ---: | --- |
 | `--max-stall-ms` | 515 (27B 2672) | 300 | below one 1024-token mixed step; the LPTH arm already reaches 250 |
 | `--min-decode-tokens-during-prefill` (per decoder, 16k) | 19 (27B 11) | 100 | ~0.4x baseline service over a ~8 s prefill; the combo reaches 260 |
 | `--max-starved` | 0 | 0 | any decoder at zero tokens during a prefill is a regression |
@@ -296,8 +296,8 @@ the cap also reserves a share of wall time for pure decode steps. A lone
 prefill (no decoders) is never capped.
 
 | Env | Default | Meaning |
-|---|---|---|
-| `VLLM_RDNA_DECODE_STALL_MS` | `0` (off) | step-duration budget in ms; 250 in the dense recipes |
+| --- | --- | --- |
+| `VLLM_RDNA_DECODE_STALL_MS` | `0` (off) | step-duration budget in ms; 250 in `27b-exl3` |
 | `VLLM_RDNA_DECODE_SHARE` | `0` | fraction of wall time owed to pure decode steps after a mixed step |
 | `VLLM_DECODE_STALL_MAX_OVERHEAD` | `0.25` | efficiency floor: largest fixed-cost / step ratio the cap accepts before it gives up shrinking the chunk |
 | `VLLM_DECODE_STALL_FIT_ALL` | auto | which steps feed the fit: unset = all prefill steps on dense models, mixed steps only on MoE; `1` / `0` force either |
@@ -316,17 +316,26 @@ With one bucket of samples the cap can also drop below its initial 512 tokens.
 
 ### Where it is on
 
-**Dense 27B at TP=4 (`27b-awq`, `27b-exl3`): on, budget 250 ms.** Off in `full` (27B at TP=2): steps are ~2x slower there, and the cap cut 16k/1k c=8 aggregate output 22.7 -> 19.6 tok/s (TTFT 135 -> 200 s). 16k injection
-into 6 decoders, TP=4 F&P:
+**Dense 27B at TP=4 (`27b-exl3`): on, budget 250 ms.** Off in `full` (27B at TP=2): steps are ~2x slower there, and the cap cut 16k/1k c=8 aggregate output 22.7 -> 19.6 tok/s (TTFT 135 -> 200 s). 16k injection
+into 6 decoders, TP=4 F&P (measured on v0.31, 2026-10-10):
 
 | Metric | off | cap 250 ms |
-|---|---:|---:|
+| --- | ---: | ---: |
 | Longest decode gap during a 16k prefill | 2672 ms | **394 ms** |
 | Decode tokens per decoder during that prefill | 11 | 81 |
 | Decoders blocked in the reverse case | 17.8 s | 4.8 s |
 | 1k/512 c=8 TTFT | 3.88 s | 2.68 s |
 | 16k/1k c=8 aggregate output | 41.2 tok/s | 37.5 tok/s (−9 %) |
 | c=1 cells | — | unchanged |
+
+`27b-awq` now runs with the cap off. Once the prefill budget is derived from
+the mamba state block, the cap only chunks the prefill below that boundary.
+Measured 2026-10-25 on the INT4 KV + fp16 SSM state tree (4x V620 TP=4 F&P,
+HIP 6-9, one boot, raw PASS), the cap cost 12-19 % TTFT at c=8 (1k FP16 KV
+1.96 -> 1.62 s, 16k INT4 KV 39.53 -> 34.89 s) for 0-2.5 % output, with the
+c=1 cells within noise. The bound it buys is the decode gap during a long
+prefill: on the INT4 KV cache the worst-request mean ITL at 16k c=8 grows
+415 -> 503 ms with the cap off.
 
 **Flash-Next (`flashnext-mtp0`, `flashnext-mtp2`): opt-in.** The trade-off is
 worse than on the dense model. Flash-Next mixed steps are GPU-bound, at about
@@ -335,7 +344,7 @@ chunks cost prefill and c=8 throughput. MTP0 measurements (16k injection into
 6 decoders, fused HC prefill on, capture sizes up to 1032 via `CG_SIZES`):
 
 | Arm | Longest gap | Decode tok (worst decoder) | Prefill TTFT × solo | Reverse blocked | Mixed chunk | 16k/1k c=8 agg. output | 16k/1k c=8 TTFT |
-|---|---:|---:|---:|---:|---:|---:|---:|
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | off | 505 ms | 115 (19) | 1.13 | 6.8 s | 1024 | 85.1 tok/s | 15.9 s |
 | budget 280 ms, floor 0.6, old fit | 528 ms | 111 (18) | 1.18 | 3.1 s | 1024 | — | — |
 | budget 250 ms, floor 1.0, old fit | 516 ms | 115 (19) | 1.16 | 3.0 s | 1024 | — | — |

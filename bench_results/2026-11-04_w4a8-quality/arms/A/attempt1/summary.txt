@@ -1,0 +1,26 @@
+[08:29:04] boot TREE=/home/chenco_adm/vllm-w4a8q-4a3d RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=2,3,4,5 PORT=18460 overrides=VLLM_RDNA2_W4A8_MOE_DEBUG=1 VLLM_RDNA2_W4A8_SDOT4=0 bench_extra=
+[08:29:04] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock
+[08:43:59] READY in 792s served=flash-next
+[08:44:05] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=' Berlin, which is also the largest city in the country. It is a city-state and one of the 16 federal states of Germany. Berlin is located in the northeastern part of Germany and is surrounded by the state of Brandenburg. The'
+RESULT PASS (3/3)
+[08:44:13] PPL PROBE PASS
+    PPL 4.81 (mean NLL 1.570 over 261 tokens) PASS
+    ok      'The history of the printing press begins' -> ' with the invention of movable type in China during the Song Dynasty (960-1279 AD). Bi Sheng, a Chinese artisan, is credited with creating the first movable type printing system around 1040 AD. This innovation allowed for the mass production of texts, significantly impacting the spread of'
+    ok      'Here is a short recipe for vegetable soup:' -> '\n\n<think>\nThe user seems to be starting a message about a vegetable soup recipe but hasn\'t actually asked a question or made a complete request. They\'ve said "Here is a short recipe for vegetable soup:" but then the message ends without providing the recipe or asking me to do anything with it.\n\nI should respond'
+    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'
+    RESULT PASS
+[08:44:24] PREFIX PASS
+    cold TTFT 5.64 s, warm TTFT 0.29 s, speedup 19.3x -> PASS
+    cold text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "bar'
+    warm text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "bar'
+[08:44:38] warmup rc=0 in 14s (sizes default); slowest:
+    decode batch 3:   1.66 s
+    prefill  2048 tok:   0.91 s
+    decode batch 8:   0.90 s
+[08:44:38] load hook: /home/chenco_adm/w4a8_runs/w4a8-quality-2026-11-04/scripts/hook.sh

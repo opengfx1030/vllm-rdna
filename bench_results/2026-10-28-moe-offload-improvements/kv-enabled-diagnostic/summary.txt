@@ -1,0 +1,37 @@
+[20:33:28] boot TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=6,7 PORT=18766 overrides=TP=2 PLE=int4 PLE_QUANT_DIR=/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4 GMEM=0.92 MAXLEN=32768 MAXBAT=4096 SEQS=8 bench_extra=
+[20:40:14] READY in 401s served=flash-next
+[20:40:26] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=' Berlin, which is also the largest city in the country. It is one of the 16 German federal states and is the third most populous city in the European Union. Berlin is a major cultural, political, and scientific center, and'
+RESULT PASS (3/3)
+[20:41:12] warmup rc=0 in 46s (sizes default); slowest:
+    decode batch 8:   5.13 s
+    decode batch 7:   4.46 s
+    decode batch 6:   4.43 s
+[20:41:12] load hook: /home/chenco_adm/w4a8_runs/moe-offload/native-nan-joint-hook.sh
+[20:48:13] LOAD HOOK rc=0 PASS expert-copy A/B; i
+    PASS expert-copy A/B; inspect timings and separate quality gates
+    PASS per-layer finite checks disabled; post-step fail-stop remains enabled
+    PASS expert-copy A/B; inspect timings and separate quality gates
+[20:48:23] PROBE-AFTER-LOAD PASS
+[20:48:23] markers:
+          2 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=Qwen4ExpPLEInt4EmbeddingMethod, we
+          1 WNA16 MoE backend.
+          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/2, devices [0, 1],
+          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x
+          1 qwen_gdn_full_forward (opaque to inductor; projecti
+          1 Model loading took 20.98 GiB memory and 293.495846 seconds
+          1 Model loading took 20.98 GiB memory and 292.018204 seconds
+          1 GPU KV cache size: 138,022 tokens, Maximum concurrency fo
+[20:48:23] fault markers in serve.log: 0
+[20:48:23] new amdgpu dmesg faults: 0
+n/a
+[20:48:23] done

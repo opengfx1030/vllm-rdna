@@ -1,0 +1,7 @@
+Native concurrency gate numeric details:
+hard_failures=0
+near_ties=14
+soft_differences=2
+solo_noise=0
+identical=32
+total_checks=48

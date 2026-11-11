@@ -1,0 +1,58 @@
+Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/triton/language/target_info.py)
+Could not derive device capability from GCN arch '', falling back to torch.cuda (this will initialize CUDA).
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/v1/worker/gpu_model_runner.py", line 61, in <module>
+    from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/lora/layers/__init__.py", line 4, in <module>
+    from vllm.lora.layers.classifier import ClassificationHeadWithLoRA
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/lora/layers/classifier.py", line 11, in <module>
+    from .replicated_linear import ReplicatedLinearWithLoRA
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/lora/layers/replicated_linear.py", line 13, in <module>
+    from .base_linear import BaseLinearLayerWithLoRA
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/lora/layers/base_linear.py", line 29, in <module>
+    from .utils import _get_lora_aux_cuda_stream, _get_lora_device
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/lora/layers/utils.py", line 11, in <module>
+    from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/layers/fused_moe/__init__.py", line 19, in <module>
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/layers/fused_moe/fused_moe_method_base.py", line 9, in <module>
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/layers/fused_moe/modular_kernel.py", line 30, in <module>
+    from vllm.model_executor.layers.fused_moe.utils import (
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/layers/fused_moe/utils.py", line 43, in <module>
+    from vllm.model_executor.models.utils import PPMissingLayer
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/models/utils.py", line 22, in <module>
+    from vllm.model_executor.model_loader.reload import (
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/model_loader/__init__.py", line 11, in <module>
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/model_loader/base_loader.py", line 12, in <module>
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/model_loader/reload/__init__.py", line 28, in <module>
+    from .layerwise import (
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/model_loader/reload/layerwise.py", line 12, in <module>
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/layers/attention/__init__.py", line 15, in <module>
+    from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/model_executor/layers/attention/mm_encoder_attention.py", line 11, in <module>
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/kernels/__init__.py", line 5, in <module>
+    from . import aiter_ops, oink_ops, triton, vllm_c
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/kernels/oink_ops.py", line 18, in <module>
+    OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/platforms/interface.py", line 460, in has_device_capability
+    current_capability = cls.get_device_capability(device_id=device_id)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v1/tree/vllm/platforms/rocm.py", line 947, in get_device_capability
+    major, minor = torch.cuda.get_device_capability(device_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py", line 682, in get_device_capability
+    prop = get_device_properties(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py", line 699, in get_device_properties
+    _lazy_init()  # will define _get_device_properties
+    ^^^^^^^^^^^^
+  File "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py", line 491, in _lazy_init
+    torch._C._cuda_init()
+RuntimeError: No CUDA GPUs are available

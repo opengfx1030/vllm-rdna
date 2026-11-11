@@ -1,0 +1,11 @@
+3f688006eec38adef6cf4d4546735f66b8892d8066387336a88ba6fe7b668bac  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/vllm/_rocm_C.abi3.so
+bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/csrc/rocm/mono_k2_rdna2.cu
+b2cdb9b6a4e5886749ad0530b76f26072f9e38d93c34f8743111160afc09de77  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/csrc/rocm/moe_unquantized_rdna2.cu
+788fe4744672f2c7a776caa59897487a84a632b650f87b7bb379a29d920ac703  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/tunableop/rocm7.14-rocblas5.5/tunableop_results0.csv
+5915b3ae2fd41ab882f9a8c6884ba48057a824109726a7a7b6053323b760e2bb  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/tunableop/rocm7.14-rocblas5.5/tunableop_results1.csv
+4a56858972be35bc8538e44d6793729305c2c5d7abb6d0e34d7ec3532b708a84  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/tunableop/rocm7.14-rocblas5.5/tunableop_results2.csv
+267436d3bd2da71e8dc5e4f3b6937ad9b529f6af4ccf583aa356974a859834ae  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/tunableop/rocm7.14-rocblas5.5/tunableop_results3.csv
+4d334bc5f64b6542695ef452789bc1cc56d375a84d022d6ece7a7f5095788f25  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-validation/validate_global_m_fixture.py
+ace918aa41073ea8a0a3fd9aabfc13f6a6a85aa0cb06429b2971b0bc3fc9ba56  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py
+741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-native-reference/validate_actual_rdna_dense_v2.py
+90cac25205d220b15db99b6d9affa4801904d66b37e3e7736c2395c51ebf4980  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/run_dense_native_reference.sh

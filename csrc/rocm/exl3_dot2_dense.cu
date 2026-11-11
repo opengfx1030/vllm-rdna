@@ -640,6 +640,8 @@ void launch_v3_m(const half* a, const int16_t* trellis, half* c, int sm, int sn,
     launch_v3_mb<M_PER, 3>(a, trellis, c, sm, sn, sk, cb, block_k, stream);
   else if (bits == 4)
     launch_v3_mb<M_PER, 4>(a, trellis, c, sm, sn, sk, cb, block_k, stream);
+  else if (bits == 5)
+    launch_v3_mb<M_PER, 5>(a, trellis, c, sm, sn, sk, cb, block_k, stream);
   else
     launch_v3_mb<M_PER, 6>(a, trellis, c, sm, sn, sk, cb, block_k, stream);
 }
@@ -680,8 +682,8 @@ void launch_tile(const half* a, const int16_t* trellis, half* c, int sm, int sn,
                  int sk, int bits, int cb, cudaStream_t stream) {
   // Decode-once kernel for decode and MTP-verify batches (M <= 64, the
   // CG-path buffer size; larger M goes through decode + rocBLAS in Python).
-  // bits 3: body, 4: MTP draft layer, 6: lm_head.
-  if ((bits == 3 || bits == 4 || bits == 6) && sm <= 64 && exl3_v3_enabled()) {
+  // bits 3: body, 4: MTP draft layer, 5: Flash-Next dense/head, 6: lm_head.
+  if ((bits >= 3 && bits <= 6) && sm <= 64 && exl3_v3_enabled()) {
     const int block_k = exl3_v3_block_k(sn, sk);
     if (sm <= 8)
       launch_v3_m<8>(a, trellis, c, sm, sn, sk, bits, cb, block_k, stream);

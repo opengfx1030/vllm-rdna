@@ -1,0 +1,30 @@
+[08:45:22] READY in 270s served=flash-next
+[08:45:22] MONO ROUTE monokernel=1 ranks=4 mtp_ranks=0 requested_drafter=0 dense_calls=0
+[08:45:22] GDN ROUTE requested=1 opaque_marker_count=1
+[08:45:28] PROBE PASS
+RESULT PASS (3/3)
+[08:45:36] PPL PROBE PASS
+    PPL 4.84 (mean NLL 1.576 over 261 tokens) PASS
+    cold TTFT 5.61 s, warm TTFT 0.63 s, speedup 8.9x -> PASS
+    prefill  2048 tok:   0.88 s
+    decode batch 6:   0.86 s
+    decode batch 8:   0.79 s
+    RESULT PASS: 0 failing, 19 near-tie, 0 soft, 0 solo-noise, 29 identical of 48 checks (42.4s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[08:46:47] MTP K2 DISPATCH dense_calls=0 mono_route_markers=36
+[08:46:53] PREFIX RESET PASS before bench-1024x512-c1
+[08:46:53] bench bench-1024x512-c1 (n=8)
+    bench-1024x512-c1            prefill   2301.4 tok/s/req (agg  2250.0) | decode  79.15 tok/s/req (agg out   74.18) | TTFT    0.44 s | ITL med    24.3 ms mean    24.4 ms | ok 8
+[08:48:11] PREFIX RESET PASS before bench-1024x512-c8
+[08:48:11] bench bench-1024x512-c8 (n=32)
+    bench-1024x512-c8            prefill   1045.0 tok/s/req (agg  2269.7) | decode  31.18 tok/s/req (agg out  224.05) | TTFT    0.98 s | ITL med    53.6 ms mean    63.0 ms | ok 32
+[08:49:47] PREFIX RESET PASS before bench-16384x1024-c1
+[08:49:47] bench bench-16384x1024-c1 (n=8)
+    bench-16384x1024-c1          prefill   2190.2 tok/s/req (agg  2172.1) | decode 101.39 tok/s/req (agg out   58.28) | TTFT    7.48 s | ITL med    24.8 ms mean    24.9 ms | ok 8
+[08:52:32] PREFIX RESET PASS before bench-16384x1024-c8
+[08:52:32] bench bench-16384x1024-c8 (n=32)
+    bench-16384x1024-c8          prefill    951.9 tok/s/req (agg  2129.2) | decode  14.62 tok/s/req (agg out   92.08) | TTFT   17.21 s | ITL med    55.5 ms mean   143.8 ms | ok 32
+[08:59:01] LOAD HOOK rc=0 PASS
+[08:59:07] PROBE-AFTER-LOAD PASS
+[08:59:07] fault markers in serve.log: 0
+[08:59:07] new amdgpu dmesg faults: 0
+[08:59:07] done

@@ -1,0 +1,7 @@
+Serving AB analysis complete.
+Prefill wave values are TTFT-derived proxies, not measured throughput.
+Whole-run input/output tok/s are total timed-cell tokens divided by the sum of timed-cell durations.
+Per-request decode tok/s uses output tokens / (latency - TTFT); the stream-chunk estimate is exported separately.
+ITL reports are stream inter-token chunk gaps, not TPOT.
+Generated-text differences are diagnostic only; consult cross-arm-logprob-parity.txt for fixed-prompt greedy/top-logprob comparisons.
+Generated files: per-request-analysis.csv, per-cell-analysis.csv, whole-run-analysis.csv, response-text-comparisons.csv, arm-gates.csv, cross-arm-logprob-parity.txt

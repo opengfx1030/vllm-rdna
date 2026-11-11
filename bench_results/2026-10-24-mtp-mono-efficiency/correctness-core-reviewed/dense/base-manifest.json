@@ -1,0 +1,16 @@
+{
+  "v1_source_sha256": "dc92441d0ed68766de636c987ab34ab12e0a4997febdc0f949aea437fbbcb266",
+  "v1_binding_sha256": "69fc9498d8b1c2432f68cd892f29aaad0e3cc948f3d3a1291bce2d951e1ef059",
+  "v1_manifest": {
+    "base": {
+      "commit": "9576cf5be22776cab883f648601c779f46ea2bca",
+      "source_sha256": "10a4b0d8b7197224808dc749932cfbd07544a022f838561390710f2f5b29d91b"
+    },
+    "source_sha256": "dc92441d0ed68766de636c987ab34ab12e0a4997febdc0f949aea437fbbcb266",
+    "binding_sha256": "69fc9498d8b1c2432f68cd892f29aaad0e3cc948f3d3a1291bce2d951e1ef059",
+    "module": "mono_k2_dense_native_rounding_scratch_20261024",
+    "gate": "dense_mtp && H2560 && I640",
+    "unqualified": true,
+    "dot_association": "existing Mono dense helpers unchanged; native chunk association not matched by this first experiment"
+  }
+}

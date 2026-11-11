@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that compute logits from hidden_stats."""
 
+import os
 from collections.abc import Callable
 from functools import cache
 
@@ -10,7 +11,10 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
+    get_tp_group,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_gather_via_all_reduce,
+    tensor_model_parallel_argmax_pair,
     tensor_model_parallel_gather,
 )
 from vllm.logger import init_logger
@@ -52,6 +56,30 @@ def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     if impl is None or not scores.is_cuda:
         return torch.topk(scores, k, dim=-1)
     return impl(scores, k, sorted=True, deterministic=True)
+
+
+def _top_tokens_allreduce_argmax(
+    local_max_vals: torch.Tensor, global_indices: torch.Tensor
+) -> torch.Tensor:
+    """Global vocab argmax via a MAX then a MIN all-reduce.
+
+    Replaces the (value, index) pair ``all_gather`` that ``get_top_tokens``
+    uses (the MTP drafter samples through it) on hosts where that gather is
+    corrupt. MAX on the values, then MIN over the global indices of the ranks
+    that hold the max: ties break to the lowest global vocab index, so every
+    rank agrees. GPU-resident, CUDA-graph legal. Float32 indices are exact
+    below 2**24 (the vocab is ~2.5e5).
+    """
+    import torch.distributed as dist
+
+    group = get_tp_group()
+    local_vals = local_max_vals.float()
+    global_max = local_vals.clone()
+    dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group.device_group)
+    sentinel = torch.full_like(local_vals, 1e9)
+    candidates = torch.where(local_vals == global_max, global_indices.float(), sentinel)
+    dist.all_reduce(candidates, op=dist.ReduceOp.MIN, group=group.device_group)
+    return candidates.to(torch.int64)
 
 
 # --8<-- [start:logits_processor]
@@ -122,6 +150,13 @@ class LogitsProcessor(PluggableLayer):
 
     def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """gather/all-gather the logits tensor across model parallel group."""
+        # P2P-less gfx1030 hosts corrupt ``all_gather_into_tensor`` on the full
+        # logit row; an all-reduce of a zero-padded buffer is exact there.
+        # Opt-in; the default path is the upstream gather.
+        if os.environ.get("VLLM_RDNA_HEAD_ALLREDUCE") == "1":
+            if not self.use_all_gather:
+                raise RuntimeError("VLLM_RDNA_HEAD_ALLREDUCE requires all-gather")
+            return tensor_model_parallel_all_gather_via_all_reduce(logits)
         if self.use_all_gather:
             # Gather is not supported for some devices such as TPUs.
             # Use all-gather instead.
@@ -242,6 +277,15 @@ class LogitsProcessor(PluggableLayer):
         if tp_size == 1:
             return global_indices
 
+        top_tokens = tensor_model_parallel_argmax_pair(local_max_vals, global_indices)
+        if top_tokens is not None:
+            return top_tokens
+
+        if os.environ.get("VLLM_RDNA_HEAD_ALLREDUCE") == "1":
+            # gfx1030 without working all_gather_into_tensor: the (value, index)
+            # pair gather below is corrupted too; use two tiny reductions.
+            return _top_tokens_allreduce_argmax(local_max_vals, global_indices)
+
         # All-gather (value, index) pairs, then reduce to global argmax.
         # Use float32 to avoid bf16 precision loss on large vocab indices.
         local_pair = torch.stack(
@@ -276,13 +320,25 @@ class LogitsProcessor(PluggableLayer):
         the whole vocabulary; both are monotonic, so the selection is the same
         and only k entries are touched.
         """
+        timer = (
+            phase_timer
+            if phase_timer is not None
+            and not torch.compiler.is_compiling()
+            and phase_timer.cur is not None
+            and not torch.cuda.is_current_stream_capturing()
+            else None
+        )
         if self.scale <= 0.0 and self.scale != 1.0:
             raise ValueError(
                 "The local top-k reduction optimization is not supported for "
                 "non-positive logit scaling factors."
             )
 
+        if timer is not None:
+            timer.mark("dflash_head_prep")
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if timer is not None:
+            timer.mark("dflash_head_gemm")
         if return_log_probs:
             if self.soft_cap is not None:
                 logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
@@ -304,6 +360,8 @@ class LogitsProcessor(PluggableLayer):
                 )
 
         values, ids = _topk(logits, k)
+        if timer is not None:
+            timer.mark("dflash_head_local_topk")
         # Convert shard-local indices to global vocab indices.
         ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
 
@@ -312,6 +370,8 @@ class LogitsProcessor(PluggableLayer):
             ids = tensor_model_parallel_all_gather(ids, dim=-1)
             values, selected = _topk(values, k)
             ids = ids.gather(-1, selected)
+        if timer is not None:
+            timer.mark("dflash_head_gather")
 
         values = values.float()
         if return_log_probs:

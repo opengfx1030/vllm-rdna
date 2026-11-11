@@ -1,0 +1,177 @@
+{
+ "arm": "/tmp/t10b/arms/F2",
+ "files": [
+  {
+   "file": "expert_stats-dp0-pid227877.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 41,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1888540
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1969635
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1551.541,
+   "final_time": 1794304909.1893084,
+   "prev_elapsed_s": 1550.234,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid227878.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 41,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1888540
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1969635
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1551.544,
+   "final_time": 1794304909.189013,
+   "prev_elapsed_s": 1550.237,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid227879.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 41,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1888540
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1969635
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1551.511,
+   "final_time": 1794304909.1895273,
+   "prev_elapsed_s": 1550.204,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid227880.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 41,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1888540
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1969635
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1551.797,
+   "final_time": 1794304909.1890142,
+   "prev_elapsed_s": 1550.49,
+   "final_newer_than_last_periodic": true
+  }
+ ],
+ "target_rows_vs_server_final": {
+  "collector_final_minus_seq1": 1888540,
+  "server_last_poll": 1887103.0,
+  "diff": 1437.0,
+  "rel": 0.0007614846672386192,
+  "seconds_final_snapshot_before_last_poll": 12.810691595077515
+ },
+ "target_rows_vs_server_aligned": {
+  "snapshots_compared": 40,
+  "median_rel": 0.0036715697346822495,
+  "max_abs_rel": 0.476516300467313,
+  "last_rel": 0.0007912966667528796
+ },
+ "rank_agreement": {
+  "expert_stats-dp0-pid227878.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    12287,
+    12287
+   ],
+   "final_elapsed_s": [
+    1551.544,
+    1551.541
+   ],
+   "layers_differing": 0,
+   "max_abs_count_diff": 0,
+   "max_rel_to_layer_decode_total": 0.0,
+   "snapshots": [
+    41,
+    41
+   ]
+  },
+  "expert_stats-dp0-pid227879.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    12287,
+    12287
+   ],
+   "final_elapsed_s": [
+    1551.511,
+    1551.541
+   ],
+   "layers_differing": 26,
+   "max_abs_count_diff": 1,
+   "max_rel_to_layer_decode_total": 6.165912370053397e-07,
+   "snapshots": [
+    41,
+    41
+   ]
+  },
+  "expert_stats-dp0-pid227880.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    12287,
+    12287
+   ],
+   "final_elapsed_s": [
+    1551.797,
+    1551.541
+   ],
+   "layers_differing": 0,
+   "max_abs_count_diff": 0,
+   "max_rel_to_layer_decode_total": 0.0,
+   "snapshots": [
+    41,
+    41
+   ]
+  }
+ }
+}

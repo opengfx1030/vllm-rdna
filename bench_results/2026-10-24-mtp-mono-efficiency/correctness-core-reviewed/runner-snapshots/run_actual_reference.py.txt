@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Delegate to the independently updated actual-native harness with pinned adapter."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from dense_round_adapter import HERE
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--harness", type=Path, required=True)
+    parser.add_argument("--harness-sha256", required=True)
+    parser.add_argument("--kernel-trace", type=Path, required=True)
+    parser.add_argument("--kernel-trace-sha256", required=True)
+    parser.add_argument("--trace-binary-sha256", required=True)
+    args, forwarded = parser.parse_known_args()
+    import hashlib
+
+    if (
+        args.harness_sha256
+        != "741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca"
+    ):
+        raise SystemExit("use the reviewed actual-native harness SHA 741f988f")
+    harness = args.harness.resolve(strict=True)
+    if hashlib.sha256(harness.read_bytes()).hexdigest() != args.harness_sha256:
+        raise SystemExit("actual native harness hash mismatch")
+    if any(
+        value.startswith("--candidate") or value.startswith("--expected-candidate")
+        for value in forwarded
+    ):
+        raise SystemExit("candidate provenance is fixed by this launcher")
+    binary = Path(os.environ["DENSE_ROUND_V2_BINARY"]).resolve(strict=True)
+    if (
+        hashlib.sha256(binary.read_bytes()).hexdigest()
+        != os.environ["DENSE_ROUND_V2_BINARY_SHA256"]
+    ):
+        raise SystemExit("prebuilt binary hash mismatch")
+    trace = args.kernel_trace.resolve(strict=True)
+    raw_trace = trace.read_bytes()
+    if hashlib.sha256(raw_trace).hexdigest() != args.kernel_trace_sha256:
+        raise SystemExit("kernel trace hash mismatch")
+    if args.trace_binary_sha256 != os.environ["DENSE_ROUND_V2_BINARY_SHA256"]:
+        raise SystemExit("trace binary attribution differs from loaded binary pin")
+    if not any(
+        "mono_ffn_dense_native_round_v2" in line and "mono_ffn_kernel" in line
+        for line in raw_trace.decode("utf-8").splitlines()
+    ):
+        raise SystemExit("trace lacks uniquely named v2 FFN kernel")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(HERE) + os.pathsep + env.get("PYTHONPATH", "")
+    command = [
+        sys.executable,
+        str(harness),
+        *forwarded,
+        "--candidate",
+        "dense_round_adapter:run",
+        "--candidate-source",
+        str(HERE / "mono_k2_dense_native_rounding.cu"),
+        "--expected-candidate-source-sha256",
+        "28356022f2ca23c667c70fc0712cef300fcdfa16b0dc1c8a23626b2cc413efa8",
+        "--candidate-binary",
+        env["DENSE_ROUND_V2_BINARY"],
+        "--expected-candidate-binary-sha256",
+        env["DENSE_ROUND_V2_BINARY_SHA256"],
+    ]
+    print(
+        json.dumps(
+            {
+                "launcher": "dense-native-round-v2",
+                "reviewed_harness_sha256": args.harness_sha256,
+                "kernel_trace": str(trace),
+                "kernel_trace_sha256": args.kernel_trace_sha256,
+                "trace_binary_sha256": args.trace_binary_sha256,
+                "unique_kernel_trace_name_present": True,
+                "command": command,
+            }
+        ),
+        flush=True,
+    )
+    raise SystemExit(subprocess.call(command, env=env))
+
+
+if __name__ == "__main__":
+    main()

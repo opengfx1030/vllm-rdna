@@ -7,13 +7,21 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
 
+# Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
+_ON_RDNA2 = on_rdna2_hip()
+
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.pcp_manager import PCPBatchMetadata
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        AdmittedDraftCounts,
+    )
 
 
 class InputBuffers:
@@ -115,13 +123,17 @@ class InputBatch:
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
     fast_prefill: "FastPrefillBatchMetadata | None" = None
 
-    # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
-    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    # Set only on a PCP rank-local batch.
+    pcp: "PCPBatchMetadata | None" = None
 
     # [num_reqs] prefilling rows that schedule one new prompt token (excluding
     # drafts) over existing context and so compute exactly like decodes.
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
+
+    # [num_reqs] admitted draft counts in flight to the host. Set only under
+    # adaptive verification with batch-sharded sampling, when the budget binds.
+    num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
 
     @classmethod
     def make_dummy(
@@ -137,7 +149,13 @@ class InputBatch:
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+        # Upstream uses int64 index mappings (row-offset overflow fix, #60736).
+        # The RDNA HIP kernels index int32, so keep int32 on RDNA.
+        idx_mapping = torch.arange(
+            num_reqs,
+            dtype=torch.int32 if _ON_RDNA2 else torch.int64,
+            device=device,
+        )
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
@@ -228,7 +246,8 @@ def set_dummy_context(
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
-    """Give each dummy request context_len of context, used when profiling step cost."""
+    """Give each dummy request context_len of context, for profiling step cost
+    and for DCP FULL cudagraph capture."""
     if input_block_tables is None:
         input_block_tables = block_tables.input_block_tables
     if not input_block_tables:
@@ -252,17 +271,18 @@ def set_dummy_context(
     input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
 
     seq_len = context_len + query_len
-    for block_table, block_size, bpk in zip(
-        input_block_tables,
-        block_tables.kernel_block_sizes,
-        block_tables.blocks_per_kv_block,
-    ):
+    for block_table, block_size in zip(input_block_tables, block_tables.block_sizes):
         num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
-        block_ids = torch.arange(
-            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
-        ) % (num_kv_blocks * bpk)
+        block_ids = (
+            torch.arange(
+                num_reqs * num_blocks,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            % num_kv_blocks
+        )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
 
@@ -327,6 +347,20 @@ def prepare_prefill_inputs(
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     num_lookahead = next_prefill_tokens.shape[0]
+    if _ON_RDNA2:
+        torch.ops._rocm_C.prepare_prefill_inputs_rdna2(
+            input_ids,
+            next_prefill_tokens,
+            next_prefill_tokens.stride(0),
+            num_lookahead,
+            idx_mapping,
+            query_start_loc,
+            all_token_ids,
+            all_token_ids.stride(0),
+            prefill_len,
+            num_computed_tokens,
+        )
+        return
     _prepare_prefill_inputs_kernel[(num_reqs,)](
         input_ids,
         next_prefill_tokens,
@@ -388,6 +422,16 @@ def prepare_pos_seq_lens(
     seq_lens: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    if _ON_RDNA2:
+        torch.ops._rocm_C.prepare_pos_seq_lens_rdna2(
+            pos,
+            seq_lens,
+            idx_mapping,
+            query_start_loc,
+            num_computed_tokens,
+            seq_lens.shape[0],
+        )
+        return
     # NOTE(woosuk): We do +1 because the last thread block is used
     # to pad unused seq_lens as 0 for full CUDA graphs.
     _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
@@ -482,6 +526,21 @@ def combine_sampled_and_draft_tokens(
     num_speculative_steps = draft_tokens.shape[-1]
 
     logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
+    if _ON_RDNA2:
+        torch.ops._rocm_C.combine_sampled_and_draft_tokens_rdna2(
+            input_ids,
+            idx_mapping,
+            last_sampled_tokens,
+            query_start_loc,
+            seq_lens,
+            prefill_len,
+            draft_tokens,
+            draft_tokens.stride(0),
+            cu_num_logits,
+            logits_indices,
+            num_new_sampled_tokens,
+        )
+        return logits_indices
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
@@ -541,6 +600,16 @@ def get_num_sampled_and_rejected(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
     num_rejected = torch.empty_like(num_sampled)
+    if _ON_RDNA2:
+        torch.ops._rocm_C.get_num_sampled_and_rejected_rdna2(
+            num_sampled,
+            num_rejected,
+            seq_lens,
+            cu_num_logits,
+            idx_mapping,
+            prefill_len,
+        )
+        return num_sampled, num_rejected
     _get_num_sampled_and_rejected_kernel[(num_reqs,)](
         num_sampled,
         num_rejected,
@@ -567,12 +636,22 @@ def _post_update_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
+    draft_tokens_ptr,
+    draft_tokens_out_ptr,
+    num_draft_tokens,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     if req_state_idx < 0:
         # Filter rows with negative index entries.
         return
+
+    if draft_tokens_ptr is not None:
+        for i in range(num_draft_tokens):
+            token_id = tl.load(draft_tokens_ptr + req_id * num_draft_tokens + i)
+            tl.store(
+                draft_tokens_out_ptr + req_state_idx * num_draft_tokens + i, token_id
+            )
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -634,8 +713,49 @@ def post_update(
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
     total_len: torch.Tensor,
+    # [num_reqs, num_speculative_steps], contiguous
+    draft_tokens: torch.Tensor | None = None,
+    # [max_num_reqs, num_speculative_steps], contiguous; required with draft_tokens
+    draft_tokens_out: torch.Tensor | None = None,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    if _ON_RDNA2:
+        num_draft_tokens = 0
+        if draft_tokens is not None and draft_tokens.shape[1] > 0:
+            # The kernel uses num_speculative_steps as the row stride of both.
+            assert draft_tokens_out is not None
+            assert draft_tokens.shape[1] == draft_tokens_out.shape[1]
+            assert draft_tokens.is_contiguous() and draft_tokens_out.is_contiguous()
+            num_draft_tokens = draft_tokens.shape[1]
+        else:
+            # Zero-width drafts have nothing to scatter; the HIP op treats a
+            # missing pair as "no scatter".
+            draft_tokens = None
+            draft_tokens_out = None
+        torch.ops._rocm_C.post_update_rdna2(
+            idx_mapping,
+            num_computed_tokens,
+            last_sampled_tokens,
+            output_bin_counts,
+            output_bin_counts.stride(0) if output_bin_counts is not None else 0,
+            sampled_tokens,
+            sampled_tokens.stride(0),
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+            all_token_ids,
+            all_token_ids.stride(0),
+            total_len,
+            draft_tokens,
+            draft_tokens_out,
+            num_draft_tokens,
+        )
+        return
+    if draft_tokens is not None:
+        # The kernel uses num_speculative_steps as the row stride of both.
+        assert draft_tokens_out is not None
+        assert draft_tokens.shape[1] == draft_tokens_out.shape[1]
+        assert draft_tokens.is_contiguous() and draft_tokens_out.is_contiguous()
     _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
@@ -650,6 +770,9 @@ def post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
+        draft_tokens,
+        draft_tokens_out,
+        draft_tokens.shape[1] if draft_tokens is not None else 0,
         num_warps=1,
     )
 
@@ -714,7 +837,28 @@ def expand_idx_mapping(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
     expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = idx_mapping.new_empty(total_num_logits)
+    expanded_local_pos = torch.empty(
+        total_num_logits, dtype=torch.int32, device=idx_mapping.device
+    )
+    if _ON_RDNA2:
+        # The HIP kernel reads/writes int32; v0.32 made the mappings int64.
+        idx_i32 = (
+            idx_mapping
+            if idx_mapping.dtype == torch.int32
+            else idx_mapping.to(torch.int32)
+        )
+        expanded_i32 = torch.empty(
+            total_num_logits, dtype=torch.int32, device=idx_mapping.device
+        )
+        torch.ops._rocm_C.expand_idx_mapping_rdna2(
+            idx_i32,
+            expanded_i32,
+            expanded_local_pos,
+            cu_num_logits,
+        )
+        if idx_mapping.dtype == torch.int32:
+            return expanded_i32, expanded_local_pos
+        return expanded_i32.to(torch.int64), expanded_local_pos
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,

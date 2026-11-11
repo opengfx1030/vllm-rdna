@@ -1,0 +1,8 @@
+.........ssss........................................                    [100%]
+=============================== warnings summary ===============================
+tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py: 14 warnings
+  /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/lib64/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+49 passed, 4 skipped, 304 deselected, 14 warnings in 8.39s

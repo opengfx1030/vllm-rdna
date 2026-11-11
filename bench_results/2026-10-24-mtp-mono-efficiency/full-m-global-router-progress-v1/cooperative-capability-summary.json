@@ -1,0 +1,59 @@
+{
+  "status": "PASS",
+  "boot_before": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "boot_after": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "gpu_visibility": "HIP_VISIBLE_DEVICES=6\nSDK=/opt/rocm/core-7.14\nVENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final\nBOOT=1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "device": {
+    "device_name": "AMD Radeon Pro V620",
+    "gcn_arch": "gfx1030",
+    "warp_size": 32,
+    "cooperative_launch_reported": true
+  },
+  "ordinary": {
+    "launch": 0,
+    "sync": 0,
+    "output": [
+      1017,
+      1018
+    ],
+    "ok": true
+  },
+  "cooperative": {
+    "attempted": true,
+    "launch": 0,
+    "sync": 0,
+    "output": [
+      1017,
+      1018
+    ],
+    "ok": true
+  },
+  "changed_input_graph": {
+    "attempted": true,
+    "begin": 0,
+    "capture_launch": 0,
+    "end": 0,
+    "instantiate": 0,
+    "replay": [
+      0,
+      0
+    ],
+    "outputs": [
+      [
+        1017,
+        1018
+      ],
+      [
+        1029,
+        1030
+      ]
+    ],
+    "changed_input_ok": true
+  },
+  "source_sha256": "eb7abd3000a08b669a664d945a797548ae4661247602e70707a378b88e1314d3",
+  "source_unchanged": true,
+  "binary_sha256": "6844479a428dec81531e96d92541fac3a95f30aeff5e9a62c431f0c82db7fad1",
+  "kernel_audit": "PASS privileged kernel journal: 0 new records, no GPU fault",
+  "exit_status": "probe_exit=0 owners=0 journal=0 boot=0 source=0",
+  "scope": "isolated cooperative-launch capability and changed-input graph replay probe; no full-grid admission, timeout safety, integration, or performance claim"
+}

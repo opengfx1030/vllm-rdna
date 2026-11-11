@@ -1,0 +1,78 @@
+{
+  "scope": "V1 speculative NaN accounting; no V2 drafter qualification",
+  "source_sha256": "f5a3f1a24b5e4e0dad1fba63062a0071fda358c4e039be5616419502b672f8a7",
+  "files": {
+    "README.md": {
+      "sha256": "ddc4bbcc0f628c815e0c85226aaea59a1165bca834b5563e6aab3e887aa0a322",
+      "bytes": 2612
+    },
+    "cpu-ast-result.json": {
+      "sha256": "f26a3fb17e215192be2e35860e03805570730d47768fc8a2393b4b31af3f0b08",
+      "bytes": 710
+    },
+    "create_test_overlay.py.txt": {
+      "sha256": "8def532951c9772c84e2fc95dc1194cca7164a7077468cc016dd2e4e65474e80",
+      "bytes": 2564
+    },
+    "frozen-pytest-v1/boot.after": {
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a",
+      "bytes": 37
+    },
+    "frozen-pytest-v1/boot.before": {
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a",
+      "bytes": 37
+    },
+    "frozen-pytest-v1/exit-status.txt": {
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "bytes": 2
+    },
+    "frozen-pytest-v1/sha256.after": {
+      "sha256": "4eb1a8703215e50c4dcce6b8c7833b35fac36211a2820e605b0418f203d8861b",
+      "bytes": 703
+    },
+    "frozen-pytest-v1/sha256.before": {
+      "sha256": "4eb1a8703215e50c4dcce6b8c7833b35fac36211a2820e605b0418f203d8861b",
+      "bytes": 703
+    },
+    "frozen-pytest-v1/tests.log": {
+      "sha256": "bab2f56330f75d26fdc32070eda29f40cdcff866895fa4f8268447112d2cd545",
+      "bytes": 5993
+    },
+    "frozen-pytest-v2/boot.after": {
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a",
+      "bytes": 37
+    },
+    "frozen-pytest-v2/boot.before": {
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a",
+      "bytes": 37
+    },
+    "frozen-pytest-v2/exit-status.txt": {
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "bytes": 2
+    },
+    "frozen-pytest-v2/sha256.after": {
+      "sha256": "4eb1a8703215e50c4dcce6b8c7833b35fac36211a2820e605b0418f203d8861b",
+      "bytes": 703
+    },
+    "frozen-pytest-v2/sha256.before": {
+      "sha256": "4eb1a8703215e50c4dcce6b8c7833b35fac36211a2820e605b0418f203d8861b",
+      "bytes": 703
+    },
+    "frozen-pytest-v2/tests.log": {
+      "sha256": "831c3cf885e1c517ada50b4bbce04c1e8599121f282b1e860048e477b68a72cc",
+      "bytes": 1281
+    },
+    "run_cpu_ast.py.txt": {
+      "sha256": "865843067b1adf7cbed37d7213b40dcaf44f97fbacb135dfc63c982a0359bf3d",
+      "bytes": 4834
+    },
+    "run_frozen_tests.sh.txt": {
+      "sha256": "2656c4b3ec4a4150be79d9251383225cef25b16f0812a04c2e28e5ba0a68c3cc",
+      "bytes": 2328
+    },
+    "run_frozen_tests_v2.sh.txt": {
+      "sha256": "cb262d302f16f7599b549adde1abe8cd8367a916512a8d640d1e8296730ed1bd",
+      "bytes": 2312
+    }
+  }
+}

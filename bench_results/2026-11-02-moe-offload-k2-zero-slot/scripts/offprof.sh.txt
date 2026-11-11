@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Offload GPU-side profile of any tree (rocprofv3), same procedure as OFFR (off.sh) but with tree/GPU/port overrides.
+#   bash offprof.sh LABEL
+# env: OTREE (default ~/vllm-rdna-0.32.0-off), GPUSET (6,7), SMI_IDX ("0 1"), PORT (18421), MONO_CFG, PERIOD (395:20:1),
+#      TRACE_OPTS (default: --kernel-trace --memory-copy-trace; add --hip-runtime-trace for host-call attribution),
+#      CDEC (1), DEC_NUM (6), INJECT (0: decode load only, as OFFR; 1 adds the 16k injector whose prefill fills the window), LOAD_S (105), EXTRA_ENV ("K=V ...")
+# Output: $LANE/prof/LABEL/{serve.log,trace/*.csv}, $LANE/off-results/LABEL.proc{0,1}.gaps.txt (detached post-processing).
+# A watchdog kills this script's own server session (port $PORT) 50 s after "load done": offload workers do not exit under
+# rocprofv3 after their CSVs are flushed.
+set -uo pipefail
+source "$(dirname "$0")/env.sh"
+LABEL=${1:?label}
+OTREE=${OTREE:-$HOME/vllm-rdna-0.32.0-off}
+GPUSET=${GPUSET:-6,7}
+SMI_IDX=${SMI_IDX:-"0 1"}
+PORT=${PORT:-18421}
+for g in $SMI_IDX; do
+    used=$(rocm-smi --showmeminfo vram -d "$g" 2> /dev/null | awk '/Total Used Memory/ {print $NF}')
+    if [[ -z $used || $used -gt 1000000000 ]]; then
+        echo "rocm-smi GPU $g not idle (used=${used:-?}); abort"
+        exit 3
+    fi
+done
+# The launcher's rdna_kill_stale kills every vLLM process that shares VLLM_CACHE_ROOT: one cache root per concurrently running pair.
+CD=${CACHE_DIR:-$LANE/cache-off}
+export VLLM_CACHE_ROOT=$CD/vllm
+export TRITON_CACHE_DIR=$CD/triton
+export TORCHINDUCTOR_CACHE_DIR=$CD/inductor
+mkdir -p "$VLLM_CACHE_ROOT" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" "$LANE/q"
+rm -f "$VLLM_CACHE_ROOT/rdna_ar_wedged"
+for kv in ${EXTRA_ENV:-}; do export "${kv?}"; done
+LOG=$LANE/q/offprof-$LABEL.log
+(
+    for _ in $(seq 1 400); do
+        grep -q "load done" "$LOG" 2> /dev/null && break
+        sleep 5
+    done
+    sleep 50
+    p=$(pgrep -f "[-]-port $PORT" | head -1)
+    [[ -n $p ]] && pkill -9 -s "$(ps -o sid= -p "$p" | tr -d ' ')"
+) &
+cd "$OTREE" || exit 1
+export PROFILER=rocprof
+PERIOD=${PERIOD:-395:20:1}
+export PERIOD
+TRACE_OPTS=${TRACE_OPTS:---kernel-trace --memory-copy-trace}
+export TRACE_OPTS
+echo "$(date +%T) offprof $LABEL tree=$OTREE gpus=$GPUSET port=$PORT MONO_CFG=${MONO_CFG:-} TRACE_OPTS=$TRACE_OPTS PERIOD=$PERIOD" >> "$LOG"
+export MONO_CFG="${MONO_CFG:-}"
+OUT_ROOT=$LANE/prof CDEC=${CDEC:-1} DEC_NUM=${DEC_NUM:-6} INJECT=${INJECT:-0} LOAD_S=${LOAD_S:-105} PLE_QUANT_DIR=$P \
+    BOOT_LOCK=$BOOT_LOCK bash tools/rdna/prof/serve_profile.sh "$LABEL" "$GPUSET" "$PORT" offload >> "$LOG" 2>&1
+rc=$?
+setsid nohup bash "$LANE/off_post_csv.sh" "$LABEL" > /dev/null 2>&1 < /dev/null &
+exit "$rc"

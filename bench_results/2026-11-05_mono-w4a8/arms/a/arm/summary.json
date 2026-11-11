@@ -1,0 +1,139 @@
+{
+ "phases": [
+  "perf",
+  "parity",
+  "topk"
+ ],
+ "env_start": {
+  "t": 1793871391.6165388,
+  "loadavg": [
+   "7.79",
+   "8.34",
+   "9.90"
+  ],
+  "top_cpu": [
+   "517 python",
+   "500 ps"
+  ],
+  "aer": 3
+ },
+ "worker_env": {
+  "598091": {
+   "comm": "Worker_TP3_EP3",
+   "GPU_MAX_HW_QUEUES": null,
+   "VLLM_RDNA2_W4A8_SDOT4": null,
+   "HIP_VISIBLE_DEVICES": null
+  },
+  "598090": {
+   "comm": "Worker_TP2_EP2",
+   "GPU_MAX_HW_QUEUES": null,
+   "VLLM_RDNA2_W4A8_SDOT4": null,
+   "HIP_VISIBLE_DEVICES": null
+  },
+  "598089": {
+   "comm": "Worker_TP1_EP1",
+   "GPU_MAX_HW_QUEUES": null,
+   "VLLM_RDNA2_W4A8_SDOT4": null,
+   "HIP_VISIBLE_DEVICES": null
+  },
+  "598088": {
+   "comm": "Worker_TP0_EP0",
+   "GPU_MAX_HW_QUEUES": null,
+   "VLLM_RDNA2_W4A8_SDOT4": null,
+   "HIP_VISIBLE_DEVICES": null
+  }
+ },
+ "worker_mem": {
+  "598091": {
+   "comm": "Worker_TP3_EP3",
+   "vmlck_kb": 25000120,
+   "memlock_soft": "unlimited",
+   "memlock_hard": "unlimited"
+  },
+  "598090": {
+   "comm": "Worker_TP2_EP2",
+   "vmlck_kb": 25000120,
+   "memlock_soft": "unlimited",
+   "memlock_hard": "unlimited"
+  },
+  "598089": {
+   "comm": "Worker_TP1_EP1",
+   "vmlck_kb": 25000120,
+   "memlock_soft": "unlimited",
+   "memlock_hard": "unlimited"
+  },
+  "598088": {
+   "comm": "Worker_TP0_EP0",
+   "vmlck_kb": 25000120,
+   "memlock_soft": "unlimited",
+   "memlock_hard": "unlimited"
+  }
+ },
+ "rc": {
+  "perf": 0,
+  "parity": 0,
+  "topk": 0
+ },
+ "perf": {
+  "ttft4k": "valid",
+  "ttft16k": "valid",
+  "c1": "valid",
+  "c6": "valid",
+  "c8": "valid",
+  "agg16k": "valid"
+ },
+ "env_end": {
+  "t": 1793872068.0652602,
+  "loadavg": [
+   "8.79",
+   "9.13",
+   "9.49"
+  ],
+  "top_cpu": [
+   "300 python3",
+   "185 VLLM::Worker_TP"
+  ],
+  "aer": 3
+ },
+ "worker_mem_end": {
+  "598091": {
+   "comm": "Worker_TP3_EP3",
+   "vmlck_kb": 25000120,
+   "memlock_soft": "unlimited",
+   "memlock_hard": "unlimited"
+  },
+  "598090": {
+   "comm": "Worker_TP2_EP2",
+   "vmlck_kb": 25000120,
+   "memlock_soft": "unlimited",
+   "memlock_hard": "unlimited"
+  },
+  "598089": {
+   "comm": "Worker_TP1_EP1",
+   "vmlck_kb": 25000120,
+   "memlock_soft": "unlimited",
+   "memlock_hard": "unlimited"
+  },
+  "598088": {
+   "comm": "Worker_TP0_EP0",
+   "vmlck_kb": 25000120,
+   "memlock_soft": "unlimited",
+   "memlock_hard": "unlimited"
+  }
+ },
+ "evict_whole_hook": {
+  "ok": true,
+  "reasons": [],
+  "delta_ms": {
+   "Worker_TP0_EP0": 0,
+   "Worker_TP1_EP1": 0,
+   "Worker_TP2_EP2": 0,
+   "Worker_TP3_EP3": 0
+  },
+  "gone": [],
+  "workers": 4,
+  "window_s": 676.144,
+  "total_delta_ms": 0
+ },
+ "server_alive": true
+}

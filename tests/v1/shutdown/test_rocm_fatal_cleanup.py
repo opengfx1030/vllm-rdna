@@ -1,0 +1,221 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""CPU-only signal-ordering checks for ROCm EngineCore fatal cleanup.
+
+Loads run_engine_core from the current source AST; no GPU import occurs.
+The fake SIGTERM dispatcher makes a default disposition interrupt cleanup.
+"""
+
+import ast
+import os
+import signal as real_signal
+import subprocess
+import sys
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import Mock
+
+SOURCE = Path(__file__).resolve().parents[3] / "vllm/v1/engine/core.py"
+
+
+class TerminatedDuringCleanup(BaseException):
+    pass
+
+
+class FakeSignal:
+    SIGTERM = real_signal.SIGTERM
+    SIGINT = real_signal.SIGINT
+    SIG_DFL = real_signal.SIG_DFL
+    SIG_IGN = real_signal.SIG_IGN
+
+    def __init__(self):
+        self.handlers = {self.SIGTERM: self.SIG_DFL, self.SIGINT: self.SIG_DFL}
+        self.seen = []
+
+    def signal(self, signum, handler):
+        old = self.handlers[signum]
+        self.handlers[signum] = handler
+        return old
+
+    def emit_term(self, where):
+        handler = self.handlers[self.SIGTERM]
+        self.seen.append((where, handler))
+        if handler == self.SIG_DFL:
+            raise TerminatedDuringCleanup(where)
+        if callable(handler):
+            handler(self.SIGTERM, None)
+
+
+class ActualSignal(FakeSignal):
+    """Send an actual OS signal, only in the isolated child process."""
+
+    def signal(self, signum, handler):
+        super().signal(signum, handler)
+        return real_signal.signal(signum, handler)
+
+    def emit_term(self, where):
+        self.seen.append((where, self.handlers[self.SIGTERM]))
+        os.kill(os.getpid(), self.SIGTERM)
+
+
+def load_function(namespace):
+    tree = ast.parse(SOURCE.read_text())
+    node = next(
+        n
+        for c in tree.body
+        if isinstance(c, ast.ClassDef)
+        for n in c.body
+        if isinstance(n, ast.FunctionDef) and n.name == "run_engine_core"
+    )
+    node.decorator_list = []
+    mod = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
+    exec(compile(mod, str(SOURCE), "exec"), namespace)
+    return namespace[node.name]
+
+
+class SignalCleanupTest(unittest.TestCase):
+    def run_case(
+        self, *, rocm, fail=True, cleanup_raises=False, signal_type=FakeSignal
+    ):
+        fake_signal = signal_type()
+        events = []
+
+        class Proc:
+            def __init__(self, *args, **kwargs):
+                self.input_queue = Mock()
+
+            def run_busy_loop(self):
+                if fail:
+                    raise RuntimeError("injected engine fault")
+                raise SystemExit(0)
+
+            def _send_engine_dead(self):
+                events.append("dead notification")
+                if rocm:
+                    fake_signal.emit_term("on notification")
+
+            def shutdown(self):
+                events.append("cleanup started")
+                fake_signal.emit_term("during cleanup")
+                events.append("cleanup finished")
+                if cleanup_raises:
+                    raise RuntimeError("cleanup failed")
+
+        class Callback:
+            def __init__(self, *args):
+                pass
+
+            def stop(self):
+                events.append("callback stopped")
+
+        platform = types.ModuleType("vllm.platforms")
+        platform.__dict__["current_platform"] = types.SimpleNamespace(
+            is_rocm=lambda: rocm
+        )
+        old_vllm = sys.modules.get("vllm")
+        old_platforms = sys.modules.get("vllm.platforms")
+        sys.modules["vllm"] = types.ModuleType("vllm")
+        sys.modules["vllm.platforms"] = platform
+        try:
+            ns = {
+                "signal": fake_signal,
+                "logger": Mock(),
+                "EngineCoreProc": Proc,
+                "SignalCallback": Callback,
+                "maybe_register_config_serialize_by_value": lambda: None,
+                "set_process_title": lambda *a: None,
+                "maybe_init_worker_tracer": lambda *a: None,
+                "decorate_logs": lambda: None,
+                "gc": Mock(),
+            }
+            fn = load_function(ns)
+            config = types.SimpleNamespace(
+                parallel_config=types.SimpleNamespace(
+                    data_parallel_size=1,
+                    reconfigure_for_independent_dp_rank=lambda: None,
+                    numa_bind=False,
+                ),
+                logging_config=None,
+                kv_transfer_config=None,
+            )
+            try:
+                fn(vllm_config=config)
+            except (RuntimeError, SystemExit, TerminatedDuringCleanup) as exc:
+                outcome = exc
+            else:
+                self.fail("engine run unexpectedly returned")
+        finally:
+            if old_vllm is None:
+                sys.modules.pop("vllm", None)
+            else:
+                sys.modules["vllm"] = old_vllm
+            if old_platforms is None:
+                sys.modules.pop("vllm.platforms", None)
+            else:
+                sys.modules["vllm.platforms"] = old_platforms
+        return outcome, events, fake_signal
+
+    def test_rocm_fatal_waits_for_cleanup_despite_term(self):
+        outcome, events, signals = self.run_case(rocm=True)
+        self.assertEqual(str(outcome), "injected engine fault")
+        self.assertEqual(
+            events,
+            [
+                "dead notification",
+                "callback stopped",
+                "cleanup started",
+                "cleanup finished",
+            ],
+        )
+        self.assertEqual([h for _, h in signals.seen], [signals.SIG_IGN] * 2)
+        self.assertEqual(signals.handlers[signals.SIGTERM], signals.SIG_DFL)
+        self.assertEqual(signals.handlers[signals.SIGINT], signals.SIG_DFL)
+
+    def test_rocm_restores_term_even_if_cleanup_raises(self):
+        outcome, events, signals = self.run_case(rocm=True, cleanup_raises=True)
+        self.assertEqual(str(outcome), "cleanup failed")
+        self.assertIn("cleanup finished", events)
+        self.assertEqual(signals.handlers[signals.SIGTERM], signals.SIG_DFL)
+
+    def test_non_rocm_keeps_default_term_semantics(self):
+        outcome, events, signals = self.run_case(rocm=False)
+        self.assertIsInstance(outcome, TerminatedDuringCleanup)
+        self.assertEqual(
+            events, ["dead notification", "callback stopped", "cleanup started"]
+        )
+        self.assertEqual(signals.handlers[signals.SIGTERM], signals.SIG_DFL)
+
+    def test_real_sigterm_does_not_interrupt_rocm_cleanup(self):
+        child = subprocess.run(
+            [sys.executable, str(Path(__file__)), "--actual-child", "rocm"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertIn("cleanup finished", child.stdout)
+
+    def test_real_sigterm_interrupts_non_rocm_cleanup(self):
+        child = subprocess.run(
+            [sys.executable, str(Path(__file__)), "--actual-child", "other"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(child.returncode, -real_signal.SIGTERM, child.stderr)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--actual-child":
+        outcome, events, signals = SignalCleanupTest().run_case(
+            rocm=sys.argv[2] == "rocm",
+            signal_type=ActualSignal,
+        )
+        assert str(outcome) == "injected engine fault"
+        assert signals.handlers[signals.SIGTERM] == signals.SIG_DFL
+        print("; ".join(events), flush=True)
+    else:
+        unittest.main()

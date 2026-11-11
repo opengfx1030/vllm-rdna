@@ -123,6 +123,10 @@ def _rdna2_w4a16_select_kernel(
 # branch on x.size(0) there would follow the trace-time M for every batch. The
 # custom op makes the choice at run time instead (per call eager, per size
 # under graph capture). Opt-in until docs/explore/w4a16-compile-dispatch says.
+_DETERMINISTIC_DENSE = (
+    os.environ.get("VLLM_RDNA2_W4A16_DETERMINISTIC_DENSE", "0") == "1"
+)
+
 _RUNTIME_DISPATCH = os.environ.get("VLLM_RDNA2_W4A16_RUNTIME_DISPATCH", "0") == "1"
 
 
@@ -144,6 +148,15 @@ def _rdna2_w4a16_gemm(
         m, k, n, is_awq=is_awq, w4a8=w4a8, group_size=group_size
     )
 
+    if _DETERMINISTIC_DENSE:
+        if w4a8:
+            raise ValueError("Deterministic RDNA2 dense GEMM requires W4A8 disabled")
+        # Symmetric compressed-tensors checkpoints use GPTQ packing and the
+        # normal large-M selector chooses exllama's unordered FP16 atomics.
+        # Keep every prefill shape on the guarded RDNA2 reduction as well.
+        if kernel_name == "exllama":
+            kernel_name = "prefill"
+
     # AWQ stores literal zeros → kernel must NOT add 1 (use_v2_format=True,
     # q_gemm_rdna2.cu:219 picks zero_offset=0). GPTQv1 stores zero-1 →
     # kernel adds 1 to recover the original zero (use_v2_format=False,
@@ -158,21 +171,49 @@ def _rdna2_w4a16_gemm(
         output = ops.w4a8_gemm_rdna2(x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
     elif kernel_name == "prefill" and hasattr(ops, "gptq_gemm_rdna2_prefill"):
         output = ops.gptq_gemm_rdna2_prefill(
-            x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format
+            x_2d,
+            w_q,
+            w_zp,
+            w_s,
+            w_g_idx,
+            use_v2_format,
+            _DETERMINISTIC_DENSE,
         )
     elif kernel_name == "exllama" and hasattr(ops, "gptq_gemm"):
         output = ops.gptq_gemm(x_2d, w_q, w_zp, w_s, True, use_v2_format, size_bits)
     elif kernel_name == "rdna2_decode" and hasattr(ops, "gptq_gemm_rdna2"):
-        output = ops.gptq_gemm_rdna2(x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+        output = ops.gptq_gemm_rdna2(
+            x_2d,
+            w_q,
+            w_zp,
+            w_s,
+            w_g_idx,
+            use_v2_format,
+            _DETERMINISTIC_DENSE,
+        )
     else:
         if hasattr(ops, "gptq_gemm_rdna2_prefill"):
             output = ops.gptq_gemm_rdna2_prefill(
-                x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format
+                x_2d,
+                w_q,
+                w_zp,
+                w_s,
+                w_g_idx,
+                use_v2_format,
+                _DETERMINISTIC_DENSE,
             )
         elif hasattr(ops, "gptq_gemm"):
             output = ops.gptq_gemm(x_2d, w_q, w_zp, w_s, True, use_v2_format, size_bits)
         elif hasattr(ops, "gptq_gemm_rdna2"):
-            output = ops.gptq_gemm_rdna2(x_2d, w_q, w_zp, w_s, w_g_idx, use_v2_format)
+            output = ops.gptq_gemm_rdna2(
+                x_2d,
+                w_q,
+                w_zp,
+                w_s,
+                w_g_idx,
+                use_v2_format,
+                _DETERMINISTIC_DENSE,
+            )
         else:
             raise RuntimeError(
                 f"RDNA2 W4A16 dispatcher: kernel_name={kernel_name!r} but "
@@ -243,8 +284,10 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                f"RDNA2 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    f"RDNA2 W4A16 kernel; supported: {cls.SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.group_size <= 0:
@@ -256,8 +299,10 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) does not evenly divide K "
-                f"({c.full_weight_shape[0]})",
+                (
+                    f"Group size ({c.group_size}) does not evenly divide K "
+                    f"({c.full_weight_shape[0]})"
+                ),
             )
 
         # Output features must be a multiple of the pack factor (8 nibbles per
@@ -266,8 +311,10 @@ class RDNA2W4A16LinearKernel(MPLinearKernel):
         if c.partition_weight_shape[1] % 8 != 0:
             return (
                 False,
-                "Output features must be a multiple of 8 for the RDNA2 "
-                "W4A16 kernel (qzeros packing)",
+                (
+                    "Output features must be a multiple of 8 for the RDNA2 "
+                    "W4A16 kernel (qzeros packing)"
+                ),
             )
 
         return True, None

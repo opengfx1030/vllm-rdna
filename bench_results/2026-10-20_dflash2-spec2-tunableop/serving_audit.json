@@ -1,0 +1,162 @@
+{
+  "status": "complete_postboot_same_boot_ab",
+  "scope": "DFlash2 spec2 BF16 TunableOp old1824 versus new1860",
+  "paired_cells": 4,
+  "rows": "/private/tmp/dflash2-2026-10-20-evidence/serving_ab_rollup.csv",
+  "conditions": {
+    "gpus": "HIP 6,7,8,9 Radeon PRO V620 TP4/EP4",
+    "boot_id": "d100f920-0655-4319-bddd-a430b7d2d282",
+    "model_snapshot": "0939125b929543a783ce700c90e36dd1a575c00c",
+    "target": "Flash-Next AWQ W4A16 FP16",
+    "drafter": "DFlash2 BF16 spec2",
+    "bench_temperature": 0,
+    "bench_seed": 12345,
+    "bench_ignore_eos": true,
+    "normal_eos_probe_ignore_eos": false
+  },
+  "metric_definitions": {
+    "prefill_tok_s_per_request": "mean input tokens / mean TTFT seconds",
+    "prefill_tok_s_wave_proxy": "min(concurrency,completed) * mean input tokens / p99 TTFT seconds; not true prefill throughput in multi-wave cells",
+    "decode_tok_s_per_request": "1000 / mean TPOT ms",
+    "output_tok_s_aggregate": "total output tokens / full benchmark duration",
+    "draft_verifications_per_s_full_run": "spec_decode_num_drafts / full benchmark duration; contextual only because it includes prefill and queueing",
+    "change_percent_vs_old1824": "100 * (new / old - 1); negative latency change is improvement"
+  },
+  "profile_sha256_rank0_to_3": {
+    "old1824": [
+      "3815fd781d4384333f2fbd3826e67d9bc6cf0aa2a2c5b613c3c17ed381b1798a",
+      "42dde7afda853a1b9c80ab085bd4c6359ddb387149a942ab55956680eb7ae1fe",
+      "8f18ba209f0ab15186a3f01c13872aa7745112e92e578635c393b98ec696562d",
+      "ecfc7db8e765e12f1099181302b23195e586da17820c789316e9b2795d1473dd"
+    ],
+    "new1860": [
+      "788fe4744672f2c7a776caa59897487a84a632b650f87b7bb379a29d920ac703",
+      "5915b3ae2fd41ab882f9a8c6884ba48057a824109726a7a7b6053323b760e2bb",
+      "4a56858972be35bc8538e44d6793729305c2c5d7abb6d0e34d7ec3532b708a84",
+      "267436d3bd2da71e8dc5e4f3b6937ad9b529f6af4ccf583aa356974a859834ae"
+    ]
+  },
+  "profile_additivity": [
+    {
+      "rank": 0,
+      "old_rows": 1824,
+      "new_rows": 1860,
+      "old_prefix_byte_preserved": true,
+      "added_bf16_tn_rows": 36,
+      "added_keys_and_solver_ids_match_measured_tune": true
+    },
+    {
+      "rank": 1,
+      "old_rows": 1824,
+      "new_rows": 1860,
+      "old_prefix_byte_preserved": true,
+      "added_bf16_tn_rows": 36,
+      "added_keys_and_solver_ids_match_measured_tune": true
+    },
+    {
+      "rank": 2,
+      "old_rows": 1824,
+      "new_rows": 1860,
+      "old_prefix_byte_preserved": true,
+      "added_bf16_tn_rows": 36,
+      "added_keys_and_solver_ids_match_measured_tune": true
+    },
+    {
+      "rank": 3,
+      "old_rows": 1824,
+      "new_rows": 1860,
+      "old_prefix_byte_preserved": true,
+      "added_bf16_tn_rows": 36,
+      "added_keys_and_solver_ids_match_measured_tune": true
+    }
+  ],
+  "api_nondefault_args_equal_except_port": true,
+  "profile_activation_evidence": "Startup launcher/helper selected the named rank registry; TP worker /proc snapshots show the expected PYTORCH_TUNABLEOP_FILENAME base. setproctitle can overwrite original /proc environment storage, so this is filename/provenance evidence, not direct Torch worker lookup-state RPC inspection.",
+  "gates": {
+    "old1824": {
+      "probe_pass": true,
+      "ppl_probe_pass": true,
+      "ppl_value": 4.81,
+      "prefix_pass": true,
+      "concurrency_pass": true,
+      "concurrency_failing": 0,
+      "near_ties": 22,
+      "soft": 4,
+      "solo_noise": 0,
+      "identical_within_arm": 22,
+      "checks": 48,
+      "prefix_reset_pass_count": 4,
+      "probe_after_load_pass": true,
+      "serve_log_fault_markers": 0,
+      "new_amdgpu_dmesg_faults": 0,
+      "serve_log_present": true,
+      "worker_env_present": true,
+      "within_arm_stopping": {
+        "stopping_differences": 6,
+        "same_prefix_premature_stops": 0
+      }
+    },
+    "new1860": {
+      "probe_pass": true,
+      "ppl_probe_pass": true,
+      "ppl_value": 4.87,
+      "prefix_pass": true,
+      "concurrency_pass": true,
+      "concurrency_failing": 0,
+      "near_ties": 17,
+      "soft": 1,
+      "solo_noise": 0,
+      "identical_within_arm": 30,
+      "checks": 48,
+      "prefix_reset_pass_count": 4,
+      "probe_after_load_pass": true,
+      "serve_log_fault_markers": 0,
+      "new_amdgpu_dmesg_faults": 0,
+      "serve_log_present": true,
+      "worker_env_present": true,
+      "within_arm_stopping": {
+        "stopping_differences": 3,
+        "same_prefix_premature_stops": 0
+      }
+    }
+  },
+  "normal_eos_cross_arm": {
+    "total": 48,
+    "exact_tokens": 14,
+    "stopping_differences": 7,
+    "same_prefix_premature_stops": 0,
+    "first_divergence_margin_at_most_0_2": 29,
+    "first_divergence_margin_gt_1_or_not_top5": 0
+  },
+  "normal_eos_old_same_profile_cross_run_control": {
+    "total": 48,
+    "exact_tokens": 18,
+    "stopping_differences": 6,
+    "same_prefix_premature_stops": 0,
+    "first_divergence_margin_at_most_0_2": 24,
+    "first_divergence_margin_gt_1_or_not_top5": 0
+  },
+  "normal_eos_target_only_preboot_reference_note": "Different boot; descriptive correctness comparison, not same-boot performance A/B",
+  "normal_eos_target_only_to_old": {
+    "total": 48,
+    "exact_tokens": 15,
+    "stopping_differences": 6,
+    "same_prefix_premature_stops": 0,
+    "first_divergence_margin_at_most_0_2": 27,
+    "first_divergence_margin_gt_1_or_not_top5": 1
+  },
+  "normal_eos_target_only_to_new": {
+    "total": 48,
+    "exact_tokens": 14,
+    "stopping_differences": 4,
+    "same_prefix_premature_stops": 0,
+    "first_divergence_margin_at_most_0_2": 31,
+    "first_divergence_margin_gt_1_or_not_top5": 0
+  },
+  "interpretation_notes": [
+    "Paired speed gains use same boot, same model/code/API flags except port, and exact old/new profile registries; one run per cell.",
+    "Speculative acceptance varies by cell and affects output throughput. The rollup includes acceptance length and draft verifications per full-run second; this latter metric still includes prefill and queueing.",
+    "The 16k/1k c8 gain is modest relative to the other cells. A targeted repeat would strengthen precision before making a strong percentage claim for that cell.",
+    "Normal-EOS output differences are descriptive; each arm passes its own 48-check probe, and same-profile cross-run outputs also differ substantially at near-tie tokens."
+  ]
+}

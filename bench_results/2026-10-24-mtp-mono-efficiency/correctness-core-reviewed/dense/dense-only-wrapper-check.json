@@ -1,0 +1,13 @@
+{
+  "original_safety_sha256": "4a0251814657284cb301cf5b57645517e93eef70f4afd7333444388ce7146e30",
+  "original_safety_byte_unchanged": true,
+  "dense_only_safety_sha256": "e2914e83313b63fa812f6da074aba57a4da7626f61b8682787cc56acd5d622c6",
+  "changes": "only dense loop +explicit dense-only/ordinary-untested payload labels",
+  "exact_reverse_normalization": true,
+  "original_unprofiled_wrapper_sha256": "82137c141440f75d9ae244fe8142c23990dab06517b1b2317680fa439cf4bb7f",
+  "original_wrapper_byte_unchanged": true,
+  "dense_only_wrapper_sha256": "52898d9f3cea980bd1f3128cf30bfd3c28ad4325077aecd6b4b67f7226737781",
+  "fresh_output": "dense-native-round-v2-safety-dense-only",
+  "strict_actual_native_reference_gates_unchanged": true,
+  "no_GPU_SSH_compile": true
+}

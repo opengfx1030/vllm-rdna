@@ -1,0 +1,3 @@
+cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2
+enforce_eager=False
+cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2

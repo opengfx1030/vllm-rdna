@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging as _logging
 import math
 import os as _os
+from typing import Any
 
 import torch
 
@@ -14,7 +15,7 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
-# Opt-in HIP port of the simpler QSA kernels (store_cache_rows +
+# HIP port of the simpler QSA kernels (store_cache_rows +
 # compress_groups). When ``VLLM_RDNA_QSA_HIP=1`` AND ``on_gfx10x()`` is
 # true, the helpers below route through the HIP bindings; otherwise they
 # fall through to the Triton kernels unchanged. The splitk attention
@@ -23,7 +24,8 @@ from . import qsa_rdna2
 
 # Qwen4Exp RDNA2 MonoKernel QSA part (--monokernel): the module
 # vllm/models/qwen4_exp/amd/mono/rdna2/qsa.py once installed, else None.
-MONO_QSA = None
+# The module is installed at runtime, so the type is only known there.
+MONO_QSA: Any = None
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 
@@ -649,6 +651,14 @@ _logging.getLogger(__name__).info(
 )
 
 
+def _hip_scorer():
+    """The MonoKernel's HIP scoring module, for the HIP QSA path without
+    --monokernel (one kernel and one shape policy on both paths)."""
+    from ..mono.rdna2 import qsa as mono_qsa
+
+    return mono_qsa
+
+
 def _validate_mqa(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
@@ -693,9 +703,30 @@ def qsa_mqa_paged(
     columns = capacity if num_columns is None else num_columns
     if columns < 0:
         raise ValueError("QSA score width must be non-negative")
+
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
+        return logits, visible_blocks
+    # gfx10x HIP scoring with the early exit (mono_qsa_mqa_rdna2, its own shape
+    # policy) under --monokernel, and on the HIP QSA path without it; where
+    # the policy keeps Triton, the Triton kernel below runs with the early
+    # exit too. Valid for every call here: the ROCm top-k reads [0, visible).
+    hip_path = MONO_QSA is None and qsa_rdna2.qsa_use_rdna2(q.dtype)
+    early_exit = (MONO_QSA is not None or hip_path) and not current_platform.is_cuda()
+    scorer = MONO_QSA if MONO_QSA is not None else _hip_scorer() if hip_path else None
+    if scorer is not None and scorer.mqa_paged(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        compress_ratio,
+        score_divisor,
+        logits,
+        visible_blocks,
+    ):
         return logits, visible_blocks
     block_n = _QSA_MQA_BLOCK_N
     _qsa_mqa_extra = {} if _QSA_MQA_STAGES is None else {"num_stages": _QSA_MQA_STAGES}
@@ -729,7 +760,7 @@ def qsa_mqa_paged(
         BLOCK_N=block_n,
         BLOCK_D=triton.next_power_of_2(q.shape[2]),
         COMPRESS_RATIO=compress_ratio,
-        EARLY_EXIT=1 if MONO_QSA and not current_platform.is_cuda() else 0,
+        EARLY_EXIT=1 if early_exit else 0,
         num_warps=_QSA_MQA_WARPS,
         **_qsa_mqa_extra,
     )
@@ -744,6 +775,7 @@ def expand_qsa_block_indices_cuda(
     compress_ratio: int,
     token_topk: int,
     out: torch.Tensor | None = None,
+    canonical_order: bool = False,
 ) -> torch.Tensor:
     """Expand compressed blocks and compact the causal tail of the open group."""
     if not block_indices.is_cuda or not HAS_TRITON:
@@ -768,6 +800,19 @@ def expand_qsa_block_indices_cuda(
         raise ValueError("QSA expansion output has an invalid shape")
     if not block_indices.shape[0]:
         return out
+    # Integer op, so the plain gate applies: the fp16 dtype restriction that
+    # guards the other QSA ops does not apply to index expansion.
+    if qsa_rdna2.qsa_use_rdna2():
+        return qsa_rdna2.qsa_expand_indices(
+            block_indices,
+            query_positions,
+            sequence_lengths,
+            token_to_req,
+            compress_ratio,
+            token_topk,
+            out,
+            canonical_order,
+        )
     column_block = 256
     _expand_qsa_indices_kernel[
         (block_indices.shape[0], triton.cdiv(output_width, column_block))
@@ -891,8 +936,75 @@ def qsa_select_paged_tokens(
             compress_ratio,
             token_topk,
             out[row_slice],
+            canonical_order=qsa_rdna2.qsa_use_rdna2() and 0 < block_topk <= 512,
         )
     return out
+
+
+def _qsa_sparse_paged_attention_int4(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    int4_scales: tuple[torch.Tensor, torch.Tensor],
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor | None,
+) -> torch.Tensor:
+    """Sparse GQA over a packed INT4 + FP16 block-scale KV cache.
+
+    The packed record layout has no Triton counterpart, so this path needs
+    the native INT4 HIP kernel and refuses loudly otherwise. Reading the
+    packed record as the wrong format would be silent corruption rather than
+    a crash, so there is no fallback.
+    """
+    if not qsa_rdna2.qsa_use_rdna2_int4():
+        raise NotImplementedError(
+            "Qwen4Exp QSA packed INT4 KV cache needs the native INT4 HIP "
+            "kernel; the Triton path cannot read the packed record layout"
+        )
+    k_scale, v_scale = int4_scales
+    if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
+        raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
+    if k_scale.shape != v_scale.shape:
+        raise ValueError("QSA sparse attention scale views must share a shape")
+    if q.shape[2] != k_cache.shape[3] * 2:
+        raise ValueError(
+            "QSA INT4 sparse attention expects D/2 payload bytes per record"
+        )
+    if q.dtype != torch.float16:
+        raise ValueError("QSA INT4 sparse attention requires an FP16 query")
+    if logical_indices.ndim != 2 or logical_indices.shape[0] != q.shape[0]:
+        raise ValueError("QSA indices must have one row per query")
+    if token_to_req.shape != (q.shape[0],) or block_table.ndim != 2:
+        raise ValueError("QSA sparse attention metadata has invalid shapes")
+    if not all(k_cache.shape[:3]) or not all(block_table.shape):
+        raise ValueError("QSA sparse attention cache and block table must be nonempty")
+    if logical_indices.shape[1] <= 0:
+        raise ValueError("QSA sparse attention requires a positive selection width")
+    if q.shape[1] % k_cache.shape[1]:
+        raise ValueError("QSA sparse attention requires valid grouped-query heads")
+    assert logical_indices.dtype == block_table.dtype == torch.int32
+    assert token_to_req.dtype == torch.int32
+    if out is None:
+        out = torch.empty_like(q)
+    if out.shape != q.shape:
+        raise ValueError("QSA sparse output must match its query")
+    assert out.dtype == q.dtype and out.device == q.device
+    assert out.stride(2) == 1
+    if not q.shape[0]:
+        return out
+    return qsa_rdna2.qsa_sparse_paged_attention_int4(
+        q,
+        k_cache,
+        v_cache,
+        k_scale,
+        v_scale,
+        logical_indices,
+        block_table,
+        token_to_req,
+        out,
+    )
 
 
 def qsa_sparse_paged_attention(
@@ -903,10 +1015,28 @@ def qsa_sparse_paged_attention(
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     out: torch.Tensor | None = None,
+    int4_scales: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged BF16 K/V caches."""
+    """Run sparse GQA directly over paged K/V caches.
+
+    ``int4_scales`` selects the packed ``int4_fp16_block`` layout: the
+    payload views in ``k_cache``/``v_cache`` are uint8 and the matching
+    scale views are given here. Only the native INT4 kernel can read that
+    layout, so the request is refused rather than read as the wrong format.
+    """
     if not q.is_cuda or not HAS_TRITON:
         raise RuntimeError("paged QSA sparse attention requires a GPU and Triton")
+    if int4_scales is not None:
+        return _qsa_sparse_paged_attention_int4(
+            q,
+            k_cache,
+            v_cache,
+            int4_scales,
+            logical_indices,
+            block_table,
+            token_to_req,
+            out,
+        )
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
     if logical_indices.ndim != 2 or logical_indices.shape[0] != q.shape[0]:
@@ -941,12 +1071,18 @@ def qsa_sparse_paged_attention(
     assert out.stride(2) == 1
     if not q.shape[0]:
         return out
-
+    # --monokernel's fused decode is HIP too and is the kernel its decode graph
+    # is built around, so an installed mono part takes the case ahead of the
+    # generic HIP kernel; a mono refusal still falls through to it.
     group_size = q.shape[1] // k_cache.shape[2]
     if MONO_QSA and MONO_QSA.sparse_decode(
         q, k_cache, v_cache, group_size, logical_indices, block_table, token_to_req, out
     ):
         return out
+    if qsa_rdna2.qsa_use_rdna2(q.dtype):
+        return qsa_rdna2.qsa_sparse_paged_attention(
+            q, k_cache, v_cache, logical_indices, block_table, token_to_req, out
+        )
     block_m = triton.next_power_of_2(group_size)
     base_programs = q.shape[0] * k_cache.shape[2]
     small_profile_limit = 8 if block_m <= 8 else 4
@@ -1109,7 +1245,7 @@ def qsa_compress_groups_with_ratio(
     rope_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups from the compressor-state ring and raw token rows."""
-    if qsa_rdna2.qsa_use_rdna2():
+    if qsa_rdna2.qsa_use_rdna2(raw_keys.dtype):
         return qsa_rdna2.qsa_compress_groups_with_ratio_compat(
             raw_keys,
             raw_positions,

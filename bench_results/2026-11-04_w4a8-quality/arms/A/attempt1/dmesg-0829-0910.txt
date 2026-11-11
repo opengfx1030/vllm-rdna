@@ -1,0 +1,12 @@
+[Wed Nov  4 08:51:03 2026] {80}[Hardware Error]:   section_type: PCIe error
+[Wed Nov  4 08:51:03 2026] pcieport 0000:40:03.1: aer_status: 0x00000040, aer_mask: 0x00000000
+[Wed Nov  4 08:51:03 2026] pcieport 0000:40:03.1:    [ 6] BadTLP                
+[Wed Nov  4 09:07:06 2026] {81}[Hardware Error]:   section_type: PCIe error
+[Wed Nov  4 09:07:06 2026] pcieport 0000:40:03.1: aer_status: 0x00000040, aer_mask: 0x00000000
+[Wed Nov  4 09:07:06 2026] pcieport 0000:40:03.1:    [ 6] BadTLP                
+[Wed Nov  4 09:07:34 2026] {82}[Hardware Error]:   section_type: PCIe error
+[Wed Nov  4 09:07:34 2026] pcieport 0000:40:03.1: aer_status: 0x00000040, aer_mask: 0x00000000
+[Wed Nov  4 09:07:34 2026] pcieport 0000:40:03.1:    [ 6] BadTLP                
+[Wed Nov  4 09:08:19 2026] {83}[Hardware Error]:   section_type: PCIe error
+[Wed Nov  4 09:08:19 2026] pcieport 0000:40:03.1: aer_status: 0x00000040, aer_mask: 0x00000000
+[Wed Nov  4 09:08:19 2026] pcieport 0000:40:03.1:    [ 6] BadTLP                

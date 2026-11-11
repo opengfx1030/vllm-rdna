@@ -1,0 +1,97 @@
+"""CPU-only curation of completed diagnostics; no raw replies or binaries."""
+import hashlib
+import importlib.util
+import json
+import re
+from pathlib import Path
+
+HERE=Path(__file__).resolve().parent
+BASE=HERE.parent
+RECORDS=[]
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def copy(source,target=None,compact=False):
+    source=BASE/source
+    target=HERE/(target or str(source.relative_to(BASE)))
+    target.parent.mkdir(parents=True,exist_ok=True)
+    if compact:
+        data=json.loads(source.read_text())
+        target.write_text(json.dumps(data,separators=(',',':'),allow_nan=False)+'\n')
+        assert json.loads(target.read_text())==data
+    else:target.write_bytes(source.read_bytes())
+    RECORDS.append({'source':str(source.relative_to(BASE)),'source_sha256':sha(source),'curated_path':str(target.relative_to(HERE)),'curated_sha256':sha(target),'transform':'JSON whitespace compacted; parsed payload identical' if compact else 'exact bytes'})
+
+
+def derived(path,data,sources):
+    output=HERE/path;output.parent.mkdir(parents=True,exist_ok=True)
+    output.write_text(json.dumps(data,indent=2,allow_nan=False)+'\n')
+    RECORDS.append({'curated_path':path,'curated_sha256':sha(output),'transform':'derived response-free subset/summary','sources':{s:sha(BASE/s) for s in sources}})
+
+
+def journal(directory,target):
+    before=json.loads((BASE/directory/'kernel.before.json').read_text())
+    after=json.loads((BASE/directory/'kernel.after.json').read_text())
+    spec=importlib.util.spec_from_file_location('curation_journal',BASE/'dense-mtp-failstop-serving-stage-v3/kernel_journal_v2.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    additions=module.check_append_only(before,after)
+    assert all(r.get('_TRANSPORT')=='kernel' and isinstance(r.get('__CURSOR'),str) and isinstance(r.get('MESSAGE'),str) for r in before+after)
+    derived(target,{'status':'PASS','scope':'CPU recheck of archived privileged snapshots; no fresh journal read','before_records':len(before),'after_records':len(after),'new_records':additions,'new_faults':0,'append_only':True,'kernel_record_metadata_present':True},[directory+'/kernel.before.json',directory+'/kernel.after.json'])
+
+
+for version in (1,2):
+    directory=f'p1-boundary-trace-v{version}-results'
+    for name in ('result.json','exit-status.txt','boot.before','boot.after','inputs.before','inputs.after','overlay.before','overlay.after','kernel.check.txt','gpu-owners.before.json','gpu-owners.after.json'):
+        copy(directory+'/'+name,f'p1/v{version}/'+name)
+    journal(directory,f'p1/v{version}/journal-summary.json')
+    copy(f'p1-boundary-trace-v{version}/source_manifest.json',f'p1/v{version}/source-manifest.json')
+    build_path=f'p1-boundary-trace-v{version}-build/compiled/build_manifest.json'
+    if (BASE/build_path).is_file():copy(build_path,f'p1/v{version}/build-manifest.json')
+    else:derived(f'p1/v{version}/unrecovered-build-manifest.json',{'status':'NOT_LOCALLY_RECOVERED','remote_manifest_SHA_recorded_in':f'p1/v{version}/result.json','no_build_manifest_contents_claimed':True},[directory+'/result.json'])
+    for name in ('generate.py','check_runtime.py','compile_cpu_only.py','run_cpu_build.sh','run_trace.sh'):
+        copy(f'p1-boundary-trace-v{version}/'+name,f'tools/p1-boundary-trace-v{version}/'+name+'.txt')
+    for name in ('native_trace.cu','global_trace.cu','native_binding.cpp','global_binding.cpp'):
+        copy(f'p1-boundary-trace-v{version}/generated/'+name,f'tools/p1-boundary-trace-v{version}/generated/'+name+'.txt')
+
+failure=(BASE/'p1-boundary-trace-v1-results/runtime.log').read_text()
+assert 'P1 trace requires native aligned onepass K1/320 threads' in failure
+copy('p1-boundary-trace-v1-results/runtime.log','p1/v1/runtime-failure.log')
+derived('p1/v1/status-disclosure.json',{'status':'FAIL','wrapper_exit':1,'result_json_remains':'RUNNING/complete=false; not a pass','reason':'Diagnostic guard incorrectly required native onepass K1/320 threads. Actual native dispatch is K2/160. Fixed v2 preserves this failed run.','GPU_faults':0},['p1-boundary-trace-v1-results/runtime.log','p1-boundary-trace-v1-results/result.json'])
+copy('p1-boundary-trace-analysis-v3/result.json','p1/analysis-v3-result.json')
+copy('native-m128-repeat-v1-results/result.json','p1/native-repeat-result.json',True)
+for directory,names in [('p1-boundary-trace-analysis-v3',('analyze.py','test_cpu.py')),('native-m128-repeat-v1',('analyze_p1.py',))]:
+    for name in names:copy(directory+'/'+name,'tools/'+directory+'/'+name+'.txt')
+snapshot_path='full-m-m128-route-diagnostic-v2-results/snapshot-seed250252.json'
+snapshot=json.loads((BASE/snapshot_path).read_text())
+subset={'seed':snapshot['seed'],'M':snapshot['M'],'curation':'Only row104 stream0 (2560 values) needed by exact analysis-v3; other rows omitted','original_snapshot_sha256':sha(BASE/snapshot_path),'snapshots':{key:{'xn':{'values':[[] for _ in range(104)]+[snapshot['snapshots'][key]['xn']['values'][104][:2560]]}} for key in ('native','candidate')}}
+derived('p1/snapshot-row104-stream0-subset.json',subset,[snapshot_path])
+
+for label,directory in [('cap24','mtp-body-profile-cap24-c8-v4-results'),('cap8','mtp-body-profile-cap8-c8-v2-results')]:
+    for name in ('profile-extracted.json','arm-provenance.txt','config.env','worker-provenance.json','boot-id.before','boot-id.after','sha256.before','sha256.after','ARM-PASS.txt','reset-prefix-bench-16384x1024-c8.json'):
+        copy(directory+'/'+name,f'profiles/{label}/'+name,compact=name=='profile-extracted.json')
+    journal(directory,f'profiles/{label}/journal-summary.json')
+    assert (BASE/directory/'boot-id.before').read_bytes()==(BASE/directory/'boot-id.after').read_bytes()
+    assert (BASE/directory/'sha256.before').read_bytes()==(BASE/directory/'sha256.after').read_bytes()
+    bench_path=directory+'/bench-16384x1024-c8.json';bench=json.loads((BASE/bench_path).read_text())
+    numeric_keys=('duration','completed','failed','total_input_tokens','total_output_tokens','request_throughput','output_throughput','total_token_throughput','input_lens','output_lens','ttfts','itls','latencies','queue_times','spec_decode_acceptance_rate','spec_decode_acceptance_length','spec_decode_num_drafts','spec_decode_draft_tokens','spec_decode_accepted_tokens','spec_decode_per_position_acceptance_rates','mean_ttft_ms','median_ttft_ms','mean_itl_ms','median_itl_ms','mean_tpot_ms','median_tpot_ms')
+    derived(f'profiles/{label}/response-free-cell-metrics.json',{'scope':'Single instrumented diagnostic cell; not unprofiled qualification','source_json_sha256':sha(BASE/bench_path),'omitted_fields':['generated_texts','errors','prompt/response content'],'metrics':{key:bench[key] for key in numeric_keys if key in bench}},[bench_path])
+    summary_path=directory+'/summary.txt';summary=(BASE/summary_path).read_text()
+    gate_names=('PROBE PASS','PPL PROBE PASS','PREFIX PASS','CONCURRENCY PASS','LOAD HOOK rc=0 PASS','PROBE-AFTER-LOAD PASS','fault markers in serve.log: 0','new amdgpu dmesg faults: 0')
+    gates={key:key in summary for key in gate_names}
+    assert all(gates.values())
+    concurrency=re.search(r'RESULT PASS: (\d+) failing, (\d+) near-tie, (\d+) soft, (\d+) solo-noise, (\d+) identical of (\d+) checks',summary)
+    derived(f'profiles/{label}/response-free-gates.json',{'status':'PASS','gates':gates,'source_and_boot_before_after_equal':True,'all8cell_requests_succeeded':bench['completed']==8 and bench['failed']==0,'concurrency_counts':dict(zip(('failing','near_tie','soft','solo_noise','identical','total'),map(int,concurrency.groups()),strict=True)),'caveat':'Normal-EOS concurrency gate has stated near-tie policy; this is not strict token identity.'},[summary_path,directory+'/concurrency.json',directory+'/parity.json'])
+copy('mtp-body-profile-cap8-vs-cap24-c8-comparison/PROFILE_COMPARISON.md','profiles/PROFILE_COMPARISON.md')
+comparison=HERE/'profiles/PROFILE_COMPARISON.md'
+comparison.write_text(comparison.read_text().replace('|---|---:|---:|---:|','| --- | ---: | ---: | ---: |'))
+RECORDS[-1]['curated_sha256']=sha(comparison)
+RECORDS[-1]['transform']='Markdown table separator spacing only (MD060); original source unchanged'
+for directory,names in [('mtp-body-phase-profile-v3',('profile_one_cell.sh',)),('mtp-body-phase-profile-v1',('profile_one_cell.sh','extract_profile.py')),('core-inline-phase-profile-v3',('extract_profile.py',)),('mtp-body-timing-overlay-v2',('generate.py','stage_verify.py')),('mtp-body-timing-overlay-v1',('generate.py',)),('dense-mtp-failstop-serving-stage-v3',('kernel_journal_v2.py','serve_validate_mono_v3_gate.sh')),('reserved-gpu-owner-v2',('check_reserved_gpu_v2.py',))]:
+    for name in names:copy(directory+'/'+name,'tools/'+directory+'/'+name+'.txt')
+copy('mtp-body-timing-overlay-v2/source-manifest.json','profiles/timing-source-manifest.json')
+copy('mtp-body-timing-overlay-v2/diagnostic-only.patch','profiles/timing-diagnostic-only.patch.txt')
+manifest={'scope':'Completed response-free diagnostic evidence; no throughput qualification claim','excluded':['all binaries and objects','raw serve.log','generated replies and prompt/token dumps','raw kernel journals','full35MB M128 snapshot (only exact required numeric subset retained)'],'records':RECORDS}
+(HERE/'source-and-curation-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+print('curated',len(RECORDS),'artifacts')

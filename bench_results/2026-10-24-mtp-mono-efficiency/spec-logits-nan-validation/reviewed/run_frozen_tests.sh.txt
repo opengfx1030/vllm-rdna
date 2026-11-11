@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+SOURCE=$BASE/correctness-core-v1-serve-tree-v2
+OUT=${OUT:?fresh absolute output path required}
+[[ $(hostname) == par1-cs25 && $OUT == /* && ! -e $OUT ]]
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -n 9
+mkdir "$OUT"
+unset GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES='' CUDA_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES=''
+export VLLM_ROCM_USE_AITER=0
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+"$VENV/bin/python" -S "$HERE/create_test_overlay.py" --source "$SOURCE" \
+    --patched-runner "$HERE/gpu_model_runner.py" --output "$OUT/tree" \
+    --expected-patch-sha256 f5a3f1a24b5e4e0dad1fba63062a0071fda358c4e039be5616419502b672f8a7
+export PYTHONPATH="$OUT/tree" VLLM_SOURCE_ROOT="$OUT/tree"
+sha256sum "$SOURCE/vllm/v1/worker/gpu_model_runner.py" "$SOURCE/vllm/_rocm_C.abi3.so" "$HERE/gpu_model_runner.py" "$HERE/test_gpu_model_runner_nan_mapping.py" > "$OUT/sha256.before"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.before"
+set +e
+cd /tmp
+timeout -k 10 180 "$VENV/bin/python" -c 'import pathlib,sys,torch; import vllm.v1.worker.gpu_model_runner as m; import pytest; print("LOADED",m.__file__,flush=True); assert pathlib.Path(m.__file__).resolve()==pathlib.Path(sys.argv[1]).resolve(); assert not torch.cuda.is_initialized(); rc=pytest.main([sys.argv[2],"-c","/dev/null","--confcutdir",sys.argv[3],"-q","-p","no:cacheprovider"]); assert not torch.cuda.is_initialized(); raise SystemExit(rc)' "$OUT/tree/vllm/v1/worker/gpu_model_runner.py" "$HERE/test_gpu_model_runner_nan_mapping.py" "$HERE" > "$OUT/tests.log" 2>&1
+rc=$?
+set -e
+sha256sum "$SOURCE/vllm/v1/worker/gpu_model_runner.py" "$SOURCE/vllm/_rocm_C.abi3.so" "$HERE/gpu_model_runner.py" "$HERE/test_gpu_model_runner_nan_mapping.py" > "$OUT/sha256.after"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.after"
+cmp "$OUT/sha256.before" "$OUT/sha256.after"
+cmp "$OUT/boot.before" "$OUT/boot.after"
+printf '%s\n' "$rc" > "$OUT/exit-status.txt"
+cat "$OUT/tests.log"
+exit "$rc"

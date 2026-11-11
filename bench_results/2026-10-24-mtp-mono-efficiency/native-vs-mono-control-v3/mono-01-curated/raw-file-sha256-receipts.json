@@ -1,0 +1,205 @@
+{
+  "source_directory": "/Users/kletorch/Projects/infrastructure/gfx1030_optimized/vllm-rdna-mtp-mono/bench_results/2026-10-24-mtp-mono-efficiency/dense-mtp-failstop-healthy-v3-results",
+  "scope": "Hashes and sizes only; raw response-bearing files are not copied.",
+  "files": [
+    {
+      "path": "ARM-PASS.txt",
+      "size_bytes": 338,
+      "sha256": "0f09056e5984620a44e48749341c85128ffa9f1ba148c4cde5e204ec35983b91"
+    },
+    {
+      "path": "api-environment-audit.json",
+      "size_bytes": 517,
+      "sha256": "0410a1309c9d6a9b754e87aa42b209a9240a5ed9bad5b032148597d55af53796"
+    },
+    {
+      "path": "arm-provenance.txt",
+      "size_bytes": 660,
+      "sha256": "717d2076c5035f5de5764ed7931f760d80d05710d6c04fde8f8f79bbca421d47"
+    },
+    {
+      "path": "bench-1024x512-c1.json",
+      "size_bytes": 58089,
+      "sha256": "65179215242975315b982ce16e2a125ae080d9e952132a074f3ac60123b9cf1b"
+    },
+    {
+      "path": "bench-1024x512-c1.log",
+      "size_bytes": 6603,
+      "sha256": "3ee3dcf422075cbc712a43c72f95d42670730ff0b5af8b46748d8ddea5a9b4ac"
+    },
+    {
+      "path": "bench-1024x512-c8.json",
+      "size_bytes": 241229,
+      "sha256": "679cde696a14a86873e814f7e97c2759b615512813c98685f508f7f3fd1bfd9b"
+    },
+    {
+      "path": "bench-1024x512-c8.log",
+      "size_bytes": 7735,
+      "sha256": "7ee009c37aab18c9cd74e18e6234ed9096078ef0075be3e440e22dfd1c2f6fdb"
+    },
+    {
+      "path": "bench-16384x1024-c1.json",
+      "size_bytes": 109632,
+      "sha256": "106dec21afb7efd1dce5add6527e36edb3445a9763a535edf0bd9056ae80fdbd"
+    },
+    {
+      "path": "bench-16384x1024-c1.log",
+      "size_bytes": 6611,
+      "sha256": "c1872a9ba38efed5c8f0eb06393b95227cbbbb76cef06fdc22e998153b3438d1"
+    },
+    {
+      "path": "bench-16384x1024-c8.json",
+      "size_bytes": 432820,
+      "sha256": "b8a6378fe6cb87c15e4545f08e1b4c98d0f19e55c1afce9d4a69e2ecef0a1bf0"
+    },
+    {
+      "path": "bench-16384x1024-c8.log",
+      "size_bytes": 8034,
+      "sha256": "c15b553a44ed6b394a8fb1ec810a91c6209e33a80a1bc41ad82a759020e574cc"
+    },
+    {
+      "path": "boot-id.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "boot-id.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "concurrency.json",
+      "size_bytes": 1073586,
+      "sha256": "936452bbc3eab1d2b0385180d29f96bc6378b0a0249b6ea9e34ca1e1e6ba8b3f"
+    },
+    {
+      "path": "concurrency.txt",
+      "size_bytes": 3897,
+      "sha256": "413d2247455b506e792f10e85d6e1acfb9bcdf5f0fe320896712fd16d94e30cf"
+    },
+    {
+      "path": "config.env",
+      "size_bytes": 1412,
+      "sha256": "06efc3a22446638df474aff3eb81d3e07077987084ab3fbfcd327ff058e316f7"
+    },
+    {
+      "path": "driver.log",
+      "size_bytes": 7410,
+      "sha256": "7c7e0cb608c49c925d445d93aef08d7ca51ff302872490787327718e3fba4746"
+    },
+    {
+      "path": "kernel.after.json",
+      "size_bytes": 7888847,
+      "sha256": "532d302844b1ea3d6d823a380881ffb13f554c4405c22fff68cd4ecf74f8e71a"
+    },
+    {
+      "path": "kernel.before.json",
+      "size_bytes": 7693212,
+      "sha256": "e6dc1ac9a988a2c60ce9db8b4ccc00f3a4db85961c87eb219131af39747989d0"
+    },
+    {
+      "path": "load_hook.txt",
+      "size_bytes": 3239,
+      "sha256": "1b5f68ddbca372f0c95425d2227b274437aaba0142cac6a8f7024e1a41a88349"
+    },
+    {
+      "path": "models.json",
+      "size_bytes": 582,
+      "sha256": "394e7e2526c1cb66078540943290dc3f0e501c02688059d17cdba50a11b57e27"
+    },
+    {
+      "path": "parity.json",
+      "size_bytes": 186345,
+      "sha256": "930b14a95600c52b76b661812822d1378221a4b444afca5ec220906d623899ea"
+    },
+    {
+      "path": "ppl.txt",
+      "size_bytes": 1116,
+      "sha256": "7b031208fd9fdf35e520ceb42024ca3c503f7d5c96423ac1787afaad2e4b485b"
+    },
+    {
+      "path": "prefix.txt",
+      "size_bytes": 331,
+      "sha256": "404f3da21fe9b728ca3a9258327defb3f7e2913c233aded4384132169d243eb9"
+    },
+    {
+      "path": "probe-after.txt",
+      "size_bytes": 654,
+      "sha256": "b158287167b3bdd91fac84148ecfb90fe4bc8ea2220460e71d03e599aff2e416"
+    },
+    {
+      "path": "probe.txt",
+      "size_bytes": 668,
+      "sha256": "64f87651092e0add47261f74d6b6b8ea0bb945b674211505d433d90da64d6a20"
+    },
+    {
+      "path": "reset-prefix-bench-1024x512-c1.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "path": "reset-prefix-bench-1024x512-c8.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "path": "reset-prefix-bench-16384x1024-c1.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "path": "reset-prefix-bench-16384x1024-c8.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "path": "serve.log",
+      "size_bytes": 285021,
+      "sha256": "bcc5d0a227a3a9f5a93e7b80a497c44a2fcc53d886d69381595642063336ab31"
+    },
+    {
+      "path": "serve.pid",
+      "size_bytes": 6,
+      "sha256": "44ae1cd789bfcd471783c528e5a191371a02e6eb1c4d228ceb559646a24459ec"
+    },
+    {
+      "path": "sha256.after",
+      "size_bytes": 5778,
+      "sha256": "87171c451d52c70c9ae64abc26f5c257ef1a61580bc0f30da79022fe91584350"
+    },
+    {
+      "path": "sha256.before",
+      "size_bytes": 5778,
+      "sha256": "87171c451d52c70c9ae64abc26f5c257ef1a61580bc0f30da79022fe91584350"
+    },
+    {
+      "path": "summary.txt",
+      "size_bytes": 7426,
+      "sha256": "e396d92592ea825c8a5c29163679088225c0c09aca54490545e251665ab1d105"
+    },
+    {
+      "path": "warmup.txt",
+      "size_bytes": 536,
+      "sha256": "cbaf4f2728ac7051aacf42586d19c98e9bcc0cd8251ee3a0782e93df53d96f54"
+    },
+    {
+      "path": "worker-environment-audit.json",
+      "size_bytes": 1526,
+      "sha256": "fd7c624b77b346ef47e1d31e61b17cb5b244e15d2cc1b75d2222c129e0a36642"
+    },
+    {
+      "path": "worker-provenance.json",
+      "size_bytes": 3813,
+      "sha256": "10f38cde0787029e7c16151f2bc916f0059db86c91c056673705da436109e17f"
+    },
+    {
+      "path": "worker-provenance.log",
+      "size_bytes": 3813,
+      "sha256": "10f38cde0787029e7c16151f2bc916f0059db86c91c056673705da436109e17f"
+    }
+  ],
+  "excluded": [
+    "cache/ subtree",
+    "serve.pid"
+  ]
+}

@@ -1,0 +1,7 @@
+arm=d try=1 desc=--monokernel + W4A8, hw_queues 0 (2 HW queues)
+sha=5b8d1e55707476d8191b3c9308d25a54ef2ecaf4 tree=/home/chenco_adm/w4a8_runs/mono-w4a8/trees/tree-5b8d1e5570 ple=recipe
+extra_args=--monokernel --additional-config {"rocm_mono_decode":{"hw_queues":0}} overrides=
+load=7.67 8.94 9.42 aer=3 date=2026-11-05T11:20:25+01:00
+top= 163 python3 94.0 tensorfold-nati 
+memlock=unlimited compact_unevictable=0
+rc=0 aer_end=3 end=2026-11-05T11:37:13+01:00
