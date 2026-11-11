@@ -846,7 +846,9 @@ at::Tensor rdna_gemm_smallm(const at::Tensor& x, const at::Tensor& w) {
   return y;
 }
 
-// Shared-expert gate_up for MTP verify batches (8 < M <= 32):
+// Shared-expert gate_up for MTP verify batches (8 < M <= 64; the narrow decode
+// tile is 32 rows, so 33..64 rows are two row tiles that both stream the
+// weights):
 //   act[m, i] = silu(w[i] . x[m]) * (w[I + i] . x[m])     [M, I] fp16
 //   gate[m]   = sigmoid(w_gate . x[m])                     [M] fp32
 // One launch of the split-K GEMM above. rdna_se_gate_up_silu gives every output
@@ -863,12 +865,12 @@ std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_tile(
               "be contiguous fp16");
   const int64_t M = x.size(0), K = x.size(1), I = w.size(0) / 2;
   TORCH_CHECK(
-      M <= 32 && K % kKT == 0 && K >= kKT && w.size(0) % 32 == 0 &&
+      M <= 64 && K % kKT == 0 && K >= kKT && w.size(0) % 32 == 0 &&
           I / 16 + 1 <= kHcTickets &&
           reinterpret_cast<uintptr_t>(x.const_data_ptr()) % 16 == 0 &&
           reinterpret_cast<uintptr_t>(w.const_data_ptr()) % 16 == 0 &&
           reinterpret_cast<uintptr_t>(w_gate.const_data_ptr()) % 16 == 0,
-      "rdna_se_gate_up_tile: M <= 32, K % 32 == 0, I % 16 == 0, I <= ",
+      "rdna_se_gate_up_tile: M <= 64, K % 32 == 0, I % 16 == 0, I <= ",
       (kHcTickets - 1) * 16, ", 16-byte aligned operands");
   const at::cuda::OptionalCUDAGuard guard(x.device());
   auto act = at::empty({M, I}, x.options());
@@ -884,7 +886,7 @@ std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_tile(
   return {act, gate};
 }
 
-// Shared-expert down projection for MTP verify batches (8 < M <= 32):
+// Shared-expert down projection for MTP verify batches (8 < M <= 64):
 //   out[m, h] = gate[m] * (act[m] . w[h])                      [M, H] fp16
 // The same split-K GEMM with the expert-gate multiply as its epilogue.
 // rdna_se_down_gated runs a wave per output row and reduces K = I (160 at TP4)
@@ -900,10 +902,10 @@ at::Tensor rdna_se_down_tile(const at::Tensor& act, const at::Tensor& w,
       "rdna_se_down_tile: act [M, I], w [H, I] fp16 and gate [M] fp32 "
       "must be contiguous");
   const int64_t M = act.size(0), I = act.size(1), H = w.size(0);
-  TORCH_CHECK(M <= 32 && I % kKT == 0 && I >= kKT && H % 4 == 0 &&
+  TORCH_CHECK(M <= 64 && I % kKT == 0 && I >= kKT && H % 4 == 0 &&
                   reinterpret_cast<uintptr_t>(act.const_data_ptr()) % 16 == 0 &&
                   reinterpret_cast<uintptr_t>(w.const_data_ptr()) % 16 == 0,
-              "rdna_se_down_tile: M <= 32, I % 32 == 0, H % 4 == 0, 16-byte "
+              "rdna_se_down_tile: M <= 64, I % 32 == 0, H % 4 == 0, 16-byte "
               "aligned operands");
   const at::cuda::OptionalCUDAGuard guard(act.device());
   auto out = at::empty({M, H}, act.options());

@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused HC prefill mix on gfx1030 (csrc/rocm/hc_prefill_rdna2.cu) against the
-torch prefill path of ``rdna_hc_mix`` (rocBLAS + Triton silu/gate mix).
+"""Fused HC prefill mix on gfx1030 and gfx1100 (csrc/rocm/hc_prefill_rdna2.cu)
+against the torch prefill path of ``rdna_hc_mix`` (rocBLAS + Triton silu/gate
+mix).
 
 The split-K down GEMM reduces its K slices with per-tile arrival tickets
 (zero between launches, one pool slot per stream) instead of a zero-filled
 atomic accumulator, so a call is exactly two kernels and bitwise repeatable.
+
+gfx1100: the product entries (``rdna_ops._rdna_hc_mix``, the dense dispatch) only
+reach the HIP ops with the ``hc`` / ``dense`` families opted in, which the
+autouse fixture below does per test (same as ``VLLM_RDNA3_HIP_OPS=hc,dense``).
+The torch reference leg (mode 0) runs with ``hc`` opted out so its Triton
+silu / gate-mix are not routed through the HIP HC kernels.
 """
 
 import subprocess
@@ -18,15 +25,40 @@ import torch
 from vllm.platforms import current_platform
 
 
-def _gfx10x() -> bool:
+def _supported() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx10x
+    from vllm.platforms.rocm import on_gfx10x, on_gfx1100
 
-    return on_gfx10x()
+    if on_gfx10x():
+        return True
+    return on_gfx1100() and all(
+        hasattr(torch.ops._rocm_C, op)
+        for op in (
+            "rdna_hc_mix_prefill",
+            "rdna_hc_up_gate_mix_prefill",
+            "rdna_gemm_smallm",
+        )
+    )
 
 
-pytestmark = pytest.mark.skipif(not _gfx10x(), reason="gfx1030 HIP kernels")
+pytestmark = pytest.mark.skipif(
+    not _supported(), reason="gfx10x, or gfx1100 with the gfx1030-block HIP ops"
+)
+
+
+@pytest.fixture(autouse=True)
+def _rdna3_family_opt_in(monkeypatch):
+    """gfx1100: opt ``hc`` and ``dense`` in and re-evaluate the cached fused-HC
+    availability. A no-op on gfx10x, where the HIP routes are on by default."""
+    from vllm.platforms import rdna
+
+    if rdna.on_rdna3():
+        from vllm.model_executor.layers import rdna_ops
+
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"hc", "dense"}))
+        monkeypatch.setattr(rdna_ops, "_HC_FUSED_AVAILABLE", None)
+
 
 HC = 4
 HIDDEN = 2560
@@ -48,8 +80,15 @@ def weights():
 
 def _mix(xn, w_down, w_up, mode, monkeypatch):
     from vllm.model_executor.layers import rdna_ops
+    from vllm.platforms import rdna
 
     monkeypatch.setattr(rdna_ops, "_HC_PREFILL_FUSED", mode)
+    if rdna.on_rdna3():
+        # mode 0 is the torch reference: keep its Triton silu / gate-mix off the
+        # HIP HC kernels (no-op on gfx10x, where this leg never reaches them).
+        monkeypatch.setattr(
+            rdna, "_RDNA3_HIP_FAMILIES", frozenset({"hc"}) if mode else frozenset()
+        )
     return rdna_ops._rdna_hc_mix(xn, w_down, None, None, w_up, None, None, LORA, HC)
 
 

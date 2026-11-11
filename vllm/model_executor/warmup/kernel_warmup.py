@@ -177,9 +177,12 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     # gfx10x serves every kernel these warmups pre-JIT from _rocm_C, so the
     # registry only compiles Triton kernels nothing will launch. Keep the
-    # warmup on every other platform.
+    # warmup on every other platform (gfx1100 included: its HIP opt-in
+    # families replace only some of the Triton kernels, so it keeps the full
+    # warmup whatever VLLM_RDNA3_HIP_OPS says).
     enable_jit_warmup = (
-        worker.vllm_config.kernel_config.enable_jit_warmup and not on_rdna2_hip()
+        worker.vllm_config.kernel_config.enable_jit_warmup
+        and not on_rdna2_hip(family=None)
     )
     if enable_jit_warmup:
         logger.info("JIT kernel warmup starting.")
@@ -202,7 +205,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     # gfx10x serves every kernel this warms from _rocm_C now, so warming the
     # Triton copies only compiles kernels nothing will launch.
-    if not on_rdna2_hip():
+    if not on_rdna2_hip(family=None):
         qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
     mamba_triton_warmup(worker.model_runner)

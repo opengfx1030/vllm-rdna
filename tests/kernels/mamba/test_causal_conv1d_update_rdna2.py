@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stride tests for the gfx1030 HIP ``causal_conv1d_update_rdna2`` kernel.
+"""Stride tests for the HIP ``causal_conv1d_update_rdna2`` kernel (gfx10x and
+gfx1100).
 
 The GDN layer passes ``kv_cache[0].transpose(-1, -2)`` as the conv state with
 the default SD layout: storage is ``[lines, state_len, dim]`` and the view is
@@ -8,6 +9,11 @@ the default SD layout: storage is ``[lines, state_len, dim]`` and the view is
 index the state as packed ``slot*dim*state_len + c*state_len + k`` and read
 another channel (NaN tokens in eager mode and in oversize decode batches,
 which bypass the contiguous cudagraph state arenas).
+
+On gfx1100 the product dispatch only reaches the HIP ops when the ``gdn`` family
+is opted in (``VLLM_RDNA3_HIP_OPS=gdn``); the autouse fixture below does that
+per test, so no env is needed. Every Triton reference leg is selected with
+``VLLM_CAUSAL_CONV1D_RDNA2_UPDATE=0`` and is unaffected by the opt-in.
 
 Run ``pytest tests/kernels/mamba/test_causal_conv1d_update_rdna2.py``.
 """
@@ -20,10 +26,14 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA2 conv1d update kernel is ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rdna import on_rdna2  # noqa: E402
+from vllm.platforms import rdna  # noqa: E402
+from vllm.platforms.rdna import on_rdna2, on_rdna3  # noqa: E402
 
-if not on_rdna2():
-    pytest.skip("RDNA2 conv1d update kernel is gfx10x-only", allow_module_level=True)
+if not (on_rdna2() or on_rdna3()):
+    pytest.skip(
+        "RDNA2 (gfx10x) or RDNA3 (gfx1100) conv1d update kernel only",
+        allow_module_level=True,
+    )
 
 import vllm._custom_ops  # noqa: E402, F401
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (  # noqa: E402
@@ -34,6 +44,14 @@ if not hasattr(torch.ops._rocm_C, "causal_conv1d_update_rdna2"):
     pytest.skip("causal_conv1d_update_rdna2 not built", allow_module_level=True)
 
 DEVICE = "cuda"
+
+
+@pytest.fixture(autouse=True)
+def _gdn_family_opt_in(monkeypatch):
+    """gfx1100: opt the ``gdn`` HIP family in (what VLLM_RDNA3_HIP_OPS=gdn does);
+    a no-op on gfx10x, where the HIP ops are on by default."""
+    if on_rdna3():
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"gdn"}))
 
 
 def _reference(x, state, weight, bias, indices, silu):
@@ -103,7 +121,7 @@ def _run_hip(x, state, weight, bias, indices, silu, monkeypatch):
 
 
 @pytest.mark.parametrize("batch", [1, 7, 64])
-@pytest.mark.parametrize("dim", [256, 2048])
+@pytest.mark.parametrize("dim", [256, 2048, 5120, 10240])  # 5120/10240: TP2/TP1 GDN
 @pytest.mark.parametrize("silu", [True, False])
 @pytest.mark.parametrize("transposed", [False, True])
 def test_update_matches_reference(batch, dim, silu, transposed, monkeypatch):

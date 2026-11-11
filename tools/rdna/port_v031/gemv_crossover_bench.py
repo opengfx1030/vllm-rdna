@@ -89,10 +89,9 @@ def main() -> None:
         row = shp.ljust(14)
         for m in ms:
             x = torch.randn(m, k, dtype=torch.half, device="cuda")
-            cands = [
-                ("b", lambda v, x=x: F.linear(x, v)),
-                ("g", lambda v, x=x: rc.gemv_f16_rdna2(x, v, None)),
-            ]
+            cands = [("b", lambda v, x=x: F.linear(x, v))]
+            if m <= 32:  # gemv_f16_rdna2 takes M = 1..32
+                cands.append(("g", lambda v, x=x: rc.gemv_f16_rdna2(x, v, None)))
             if has_smallm and m <= 32 and k % 32 == 0 and n % 4 == 0 and n <= 6144:
                 cands.append(("s", lambda v, x=x: rc.rdna_gemm_smallm(x, v)))
             times = {}

@@ -26,6 +26,7 @@ from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
     supports_fused_pre_indexer,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna3
 from vllm.platforms.rocm import on_gfx10x
 from vllm.triton_utils import HAS_TRITON
 
@@ -579,9 +580,19 @@ def test_qsa_sparse_paged_attention_matches_reference(
 def test_qsa_rope_multimodal_uses_hip_mrope(
     is_neox_style: bool, default_vllm_config, monkeypatch
 ) -> None:
-    """2-D (multimodal) positions must match ``triton_mrope`` on gfx1030."""
-    if not on_gfx10x():
-        pytest.skip("HIP M-RoPE kernel is gfx1030-only")
+    """2-D (multimodal) positions must match ``triton_mrope`` on gfx1030/gfx1100.
+
+    gfx1100: ``mrope_forward_rdna2`` gates on ``on_rdna2_hip()`` (the ``v1``
+    family) per call, so the test opts that family in.
+    """
+    if on_rdna3():
+        if not hasattr(torch.ops._rocm_C, "mrope_forward_rdna2"):
+            pytest.skip("mrope_forward_rdna2 not built (gfx1030 block)")
+        from vllm.platforms import rdna
+
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"v1"}))
+    elif not on_gfx10x():
+        pytest.skip("HIP M-RoPE kernel is gfx10x/gfx1100-only")
     from vllm.model_executor.layers.rotary_embedding.mrope import (
         MRotaryEmbedding,
         triton_mrope,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 Aron Hsiao
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Push-based one-shot all-reduce for small TP messages on gfx1030 (2..8 ranks).
+"""Push-based one-shot all-reduce for small TP messages on RDNA (2..8 ranks).
 
 Ported from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao). The VRAM-flag
 protocol, abort-record decode, wedge marker, and rdna_ar_check() are the same
@@ -12,6 +12,17 @@ Opt-in via VLLM_RDNA_AR=1. Default is off. VLLM_FORCE_CUSTOM_ALL_REDUCE does
 not enable this path. When enabled, eligible tensors dispatch ahead of stock
 CUSTOM / PYNCCL. fp16, bf16, and fp32 are accepted, including the flat
 non-contiguous spans custom all-reduce already allows.
+
+Architectures: gfx10x (gfx1030, V620) runs it with VLLM_RDNA_AR=1 alone; gfx1100
+(W7800) also needs the "ar" family in VLLM_RDNA3_HIP_OPS (the gate in
+cuda_communicator is on_gfx10x() or on_rdna3_hip("ar")). The exchange is
+symmetric, so every rank of a group must take the same branch: the first
+collective of the constructor shares each rank's GPU architecture, whether
+rdna_ar is allowed for it, and its wedge marker. A group that is mixed,
+unsupported, not enabled on every rank, or under a marker on any rank stays on
+RCCL on all ranks (one warning, from rank 0). gfx10x keeps the original marker
+file (rdna_ar_wedged); gfx1100 has its own (rdna_ar_wedged_gfx1100), so a wedge
+on one architecture never keeps the other's boots on RCCL.
 
 Staging and flags are uncached device memory (peer announce is a posted P2P
 store; we poll locally). Sequence numbers live on device (graph-capture
@@ -45,7 +56,8 @@ peers move on), so a CUDA-graph step finishes instead of re-spinning to the
 engine's execute timeout. rdna_ar_check() reads every live instance's record
 once per engine step (the TP and the EP group each get their own instance)
 and fails the step -- the engine stops with "rdna_ar wedged". A lost P2P write
-also writes a marker under VLLM_CACHE_ROOT so the next boot stays on RCCL.
+also writes a marker under VLLM_CACHE_ROOT (one file per GPU architecture) so
+the next boot stays on RCCL.
 Results of the failing step are wrong by construction; nothing reroutes it
 live.
 
@@ -88,6 +100,9 @@ logger = init_logger(__name__)
 
 _instances = 0
 _MARKER_NAME = "rdna_ar_wedged"
+# GPU architecture classes the protocol runs on (see arch_class_of).
+ARCH_GFX10X = "gfx10x"  # RDNA2 (gfx1030, V620): the original target
+ARCH_GFX1100 = "gfx1100"  # RDNA3 (W7800): opt-in with VLLM_RDNA3_HIP_OPS=ar
 # Matches RDNA_AR_ONESHOT_MAX in csrc/rocm/rdna_allreduce.cuh.
 _ONESHOT_DEFAULT_KB = 64
 # Algorithm ids of rdna_ar_all_reduce_algo, as RDNA_AR_ALGO_* in
@@ -269,10 +284,92 @@ def parse_island_override(spec: str, world_size: int) -> list[int]:
     return island_of_rank
 
 
-def marker_path() -> str:
+def marker_path(arch: str | None = None) -> str:
+    """Wedge marker of an architecture class under VLLM_CACHE_ROOT.
+
+    gfx10x (and no argument) is the original file. Every other class has its
+    own: the cache root is shared by every server on the machine, so a wedge
+    measured on W7800s must not keep V620 boots on RCCL, or the other way round.
+    """
     from vllm import envs
 
-    return os.path.join(envs.VLLM_CACHE_ROOT, _MARKER_NAME)
+    name = _MARKER_NAME if arch in (None, ARCH_GFX10X) else f"{_MARKER_NAME}_{arch}"
+    return os.path.join(envs.VLLM_CACHE_ROOT, name)
+
+
+def arch_class_of(gcn_arch: str | None) -> str | None:
+    """Architecture class of a gcnArchName; None where rdna_ar does not run.
+
+    The same tests as the platform flags: "gfx10" in the name is gfx10x
+    (_ON_GFX10X), "gfx1100" is gfx1100 (_ON_GFX1100). Feature suffixes
+    ("gfx1100:xnack-") are ignored.
+    """
+    name = (gcn_arch or "").split(":")[0].strip().lower()
+    if "gfx10" in name:
+        return ARCH_GFX10X
+    if "gfx1100" in name:
+        return ARCH_GFX1100
+    return None
+
+
+def process_arch_class() -> str | None:
+    """Architecture class of this process by the platform flags (device 0)."""
+    from vllm.platforms.rocm import on_gfx10x, on_gfx1100
+
+    if on_gfx10x():
+        return ARCH_GFX10X
+    return ARCH_GFX1100 if on_gfx1100() else None
+
+
+def device_arch_class(dev_idx: int) -> str | None:
+    """Architecture class of the GPU with torch index dev_idx.
+
+    The platform flags describe device 0 of the process; a group spans devices
+    and each rank reports its own. Falls back to the process's flags when the
+    device cannot be queried.
+    """
+    try:
+        name = torch.cuda.get_device_properties(dev_idx).gcnArchName
+    except Exception as e:  # noqa: BLE001
+        logger.debug("rdna_ar: GPU architecture of device %s unknown (%s)", dev_idx, e)
+        return process_arch_class()
+    return arch_class_of(name)
+
+
+def arch_allowed(arch: str | None) -> bool:
+    """Whether rdna_ar may run on a GPU of this class in this process.
+
+    gfx10x: always (VLLM_RDNA_AR=1 is the only switch, as before). gfx1100: only
+    with the "ar" family of VLLM_RDNA3_HIP_OPS.
+    """
+    if arch == ARCH_GFX10X:
+        return True
+    if arch == ARCH_GFX1100:
+        from vllm.platforms.rdna import on_rdna3_hip
+
+        return on_rdna3_hip("ar")
+    return False
+
+
+def check_arch_votes(votes: list[tuple[str | None, bool]]) -> str | None:
+    """Why the group cannot use rdna_ar (None: every rank agrees to).
+
+    votes[r] is (architecture class of rank r's GPU, rdna_ar allowed there). The
+    exchange is symmetric: a rank on another branch (another architecture, or
+    rdna_ar not enabled for it) would wait for flags nobody writes.
+    """
+    classes = [c for c, _ in votes]
+    if any(c is None for c in classes):
+        return f"a rank's GPU architecture is not supported by rdna_ar: {classes}"
+    if len(set(classes)) > 1:
+        return f"the ranks' GPUs are not all one architecture: {classes}"
+    off = [r for r, (_, ok) in enumerate(votes) if not ok]
+    if off:
+        return (
+            f"rdna_ar is not enabled on ranks {off} (gfx1100 needs "
+            'VLLM_RDNA3_HIP_OPS to include "ar")'
+        )
+    return None
 
 
 def _fields(code: int) -> tuple[int, int, int, int]:
@@ -448,6 +545,8 @@ class RdnaOneShotAllReduce:
     # Island (0/1) of every rank while the hierarchical all-reduce is on.
     hier_islands: list[int] | None = None
     _hier_cfg: HierConfig | None = None
+    # Architecture class the group agreed on; its wedge marker is per class.
+    arch_class: str = ARCH_GFX10X
 
     def __init__(self, group: ProcessGroup, device: torch.device) -> None:
         global _instances
@@ -469,25 +568,6 @@ class RdnaOneShotAllReduce:
             return
         if dropped is not None and self.rank == 0:
             logger.warning("rdna_ar: %s.", dropped)
-        # T44b: a previous run on this machine wedged -- stay on RCCL
-        # until the marker is removed.
-        marker = marker_path()
-        if os.path.exists(marker):
-            try:
-                with open(marker, encoding="utf-8") as f:
-                    why = f.read().strip().replace("\n", " ")[:400]
-            except OSError:
-                why = "unreadable marker"
-            logger.warning(
-                "rdna_ar: disabled -- a previous run wedged on this machine "
-                "(%s). Using RCCL for the small collectives. Delete %s to try "
-                "the one-shot path again (a slow or ACS-redirected GPU P2P "
-                "path is the usual cause), or set VLLM_RDNA_AR=0 to keep RCCL "
-                "without this warning.",
-                why,
-                marker,
-            )
-            return
         # Integer index: some Torch APIs reject torch.device objects and
         # previously silently disabled this backend (PR #5).
         dev_idx = (
@@ -495,8 +575,12 @@ class RdnaOneShotAllReduce:
             if device.index is not None
             else torch.accelerator.current_device_index()
         )
-        gathered: list = [None] * self.world_size
-        dist.all_gather_object(gathered, int(dev_idx), group=group)
+        # One exchange decides for the whole group before anything else runs: a
+        # rank that returned early (wedge marker, other GPU architecture) would
+        # leave its peers waiting in the next collective.
+        gathered = self._agree_arch(dev_idx, group)
+        if gathered is None:
+            return
         pix = False
         try:
             physical = [
@@ -602,6 +686,8 @@ class RdnaOneShotAllReduce:
                 f"{cfg.min_kb} KB, owners {cfg.owners or len(groups[0])}, "
                 f"blocks {cfg.blocks or 'auto'}"
             )
+        if self.arch_class != ARCH_GFX10X:
+            hier += f"; arch {self.arch_class}"
         logger.info(
             "rdna_ar: one-shot all-reduce active (handle %d, rank %d/%d, "
             "devices %s, pix=%s, up to %d KB, RCCL above; "
@@ -617,6 +703,58 @@ class RdnaOneShotAllReduce:
             os.getenv("VLLM_RDNA_AR_VEC", "1"),
             hier,
         )
+
+    def _agree_arch(self, dev_idx: int, group: ProcessGroup) -> list[int] | None:
+        """First collective: device, GPU architecture and wedge marker per rank.
+
+        Returns the device index of every rank, or None when the group stays on
+        RCCL: some rank is under a wedge marker, or the ranks do not all run the
+        same supported architecture with rdna_ar enabled for it. Every rank
+        receives the same votes and returns the same answer, so no rank is left
+        waiting in a collective its peers skipped.
+        """
+        arch = device_arch_class(dev_idx)
+        # T44b: a previous run on this machine wedged -- stay on RCCL until the
+        # marker is removed (the marker of this GPU's architecture).
+        marker = marker_path(arch)
+        why: str | None = None
+        if os.path.exists(marker):
+            try:
+                with open(marker, encoding="utf-8") as f:
+                    why = f.read().strip().replace("\n", " ")[:400]
+            except OSError:
+                why = "unreadable marker"
+        allowed = False
+        try:
+            allowed = arch_allowed(arch)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("rdna_ar: opt-in query failed (%s); not enabled", e)
+        votes: list = [None] * self.world_size
+        dist.all_gather_object(votes, (int(dev_idx), arch, allowed, why), group=group)
+        if why is not None:
+            logger.warning(
+                "rdna_ar: disabled -- a previous run wedged on this machine "
+                "(%s). Using RCCL for the small collectives. Delete %s to try "
+                "the one-shot path again (a slow or ACS-redirected GPU P2P "
+                "path is the usual cause), or set VLLM_RDNA_AR=0 to keep RCCL "
+                "without this warning.",
+                why,
+                marker,
+            )
+        if any(v[3] is not None for v in votes):
+            return None
+        reason = check_arch_votes([(v[1], v[2]) for v in votes])
+        if reason is not None:
+            if self.rank == 0:
+                logger.warning(
+                    "rdna_ar: disabled for this group -- %s. Using RCCL for the "
+                    "small collectives.",
+                    reason,
+                )
+            return None
+        assert arch is not None  # check_arch_votes rejects an unknown class
+        self.arch_class = arch
+        return [int(v[0]) for v in votes]
 
     def _plan_hier(
         self, dev_idx: int, group: ProcessGroup
@@ -878,7 +1016,7 @@ class RdnaOneShotAllReduce:
         return (not self.disabled) and self._ops.rdna_ar_timed_out(self.handle)
 
     def _write_marker(self, msg: str) -> str | None:
-        path = marker_path()
+        path = marker_path(self.arch_class)
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:

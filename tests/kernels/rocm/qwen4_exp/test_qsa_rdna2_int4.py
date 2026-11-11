@@ -12,6 +12,10 @@ back to fp16 in PyTorch and the fp16 fused decode is run over that. The two
 must agree, because reading a packed record as the wrong format does not
 fault -- it produces finite, plausible, silently wrong numbers.
 
+The kernel and the packed-cache writer are called directly, so gfx1100 needs no
+VLLM_RDNA3_HIP_OPS (that opt-in only moves the product dispatch onto the HIP
+ops); the test skips on gfx1100 when the gfx1030-block ops are not built.
+
 Run `pytest tests/kernels/rocm/qwen4_exp/test_qsa_rdna2_int4.py`.
 """
 
@@ -23,10 +27,12 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA2 QSA kernels are ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
-if not on_gfx10x():
-    pytest.skip("RDNA2 QSA kernels are gfx1030-only", allow_module_level=True)
+if not (on_gfx10x() or on_gfx1100()):
+    pytest.skip(
+        "RDNA2 (gfx10x) or RDNA3 (gfx1100) QSA kernels only", allow_module_level=True
+    )
 
 # The Qwen4Exp AMD modules import each other: `qsa` pulls in `model` and
 # `model` pulls in `qsa`. The model registry loads `model` first, so the
@@ -34,6 +40,19 @@ if not on_gfx10x():
 import vllm.models.qwen4_exp.amd.model  # noqa: E402, F401
 from vllm.models.qwen4_exp.amd.ops import qsa_rdna2  # noqa: E402
 from vllm.v1.attention.ops import fa_rdna2_backend  # noqa: E402
+
+if on_gfx1100() and not all(
+    hasattr(torch.ops._rocm_C, op)
+    for op in (
+        "qsa_sparse_paged_attention_rdna2",
+        "qsa_sparse_paged_attention_int4_rdna2",
+        "reshape_and_cache_int4_fp16_rdna2",
+    )
+):
+    pytest.skip(
+        "QSA/FA-RDNA2 int4 ops not built (gfx1030 block of torch_bindings.cpp)",
+        allow_module_level=True,
+    )
 
 device = "cuda"
 ATOL = 2e-2

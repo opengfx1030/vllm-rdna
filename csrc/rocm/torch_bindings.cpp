@@ -18,6 +18,14 @@ void mono_k2_offload_rdna2(
     torch::Tensor&, torch::Tensor&, torch::Tensor&, const torch::Tensor&,
     int64_t, int64_t, int64_t, int64_t, double, double);
 
+// rdna_fused_glue.cu is compiled for exactly these arch lists (CMakeLists.txt,
+// "Fused decode glue"). The four glue ops registered outside the gfx1030
+// block are guarded by this macro: a build without the TU must not register
+// ops whose symbols it does not define (the .so would fail to load).
+#if defined(VLLM_ROCM_GFX1030) || defined(VLLM_ROCM_GFX1100)
+  #define VLLM_ROCM_RDNA_GLUE
+#endif
+
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
@@ -88,7 +96,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor");
   rocm_ops.impl("gemv_i8_rdna2", torch::kCUDA, &gemv_i8_rdna2);
 
-  // T46 fused decode glue (hyper-connection mix, shared expert).
+  // T46 fused decode glue (hyper-connection mix, shared expert). The TU
+  // (rdna_fused_glue.cu) is built for gfx1030 and gfx1100 only: see the
+  // VLLM_ROCM_HAS_RDNA_GLUE comment in CMakeLists.txt.
+  #ifdef VLLM_ROCM_RDNA_GLUE
   rocm_ops.def(
       "rdna_gemv_act(Tensor x, Tensor w, Tensor? scale, int act_cols, "
       "float act_scale, int inj_cols) -> (Tensor, Tensor)");
@@ -97,6 +108,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "rdna_hc_up_gate_mix(Tensor lora, Tensor w, Tensor? scale, Tensor xn, "
       "int hc_count) -> Tensor");
   rocm_ops.impl("rdna_hc_up_gate_mix", torch::kCUDA, &rdna_hc_up_gate_mix);
+  #endif
   #ifdef VLLM_ROCM_GFX1030
   // HC prefill (M > 8): fused silu/up/sigmoid/mix, optional split-K down.
   rocm_ops.def(
@@ -235,6 +247,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("mono_qsa_epilogue_rdna2", torch::kCUDA,
                 &mono_qsa_epilogue_rdna2);
   #endif
+  #ifdef VLLM_ROCM_RDNA_GLUE
   rocm_ops.def(
       "rdna_se_gate_up_silu(Tensor x, Tensor w, Tensor? scale, Tensor w_gate) "
       "-> (Tensor, Tensor)");
@@ -243,6 +256,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "rdna_se_down_gated(Tensor act, Tensor w, Tensor? scale, Tensor gate) "
       "-> Tensor");
   rocm_ops.impl("rdna_se_down_gated", torch::kCUDA, &rdna_se_down_gated);
+  #endif
 
   // T44: push-based one-shot all-reduce for small TP messages on gfx1030
   rocm_ops.def(
@@ -1310,6 +1324,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int top_k, int block_size_m, bool mul_topk_weight, "
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
+
+  // WMMA grouped GEMM for the prefill of the same contract: block_size_m 16,
+  // 32 or 64. With output_topk == 0 each scheduled pair row is stored once; a
+  // positive output_topk reduces into the int64 Q32 c.
+  rocm_ops.def(
+      "moe_gptq_gemm_rdna3_wmma(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk=0) -> ()");
+  rocm_ops.impl("moe_gptq_gemm_rdna3_wmma", torch::kCUDA,
+                &moe_gptq_gemm_rdna3_wmma);
+
+  // Q32 fixed-point -> fp16 finalize for moe_gptq_gemm_rdna3 (int64 c).
+  rocm_ops.def(
+      "moe_fixedpoint_to_half_rdna3(Tensor accumulator, Tensor! output) -> ()");
+  rocm_ops.impl("moe_fixedpoint_to_half_rdna3", torch::kCUDA,
+                &moe_fixedpoint_to_half_rdna3);
 #endif
 
   // Custom attention op

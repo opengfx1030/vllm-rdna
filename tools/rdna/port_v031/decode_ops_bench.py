@@ -15,12 +15,17 @@ included. ``--kernels`` also lists the kernels one eager call launches.
 
 The hc case copes with both op contracts: when the op returns the full down
 projection (old contract) the caller's injection slice copy is timed too.
+
+The se case times the fused op, which does not look at VLLM_RDNA3_HIP_OPS (the
+model-level gate does); ``--torch`` times the plain torch composition instead,
+the route the model takes when the se family is off.
 """
 
 import argparse
 import collections
 
 import torch
+import torch.nn.functional as F
 
 import vllm.model_executor.layers.rdna_ops  # noqa: F401  (registers the ops)
 
@@ -108,7 +113,7 @@ def bench_hc(ms, nw, reps, kernels):
     run("hc", make, ms, kernels)
 
 
-def bench_se(ms, nw, reps, kernels):
+def bench_se(ms, nw, reps, kernels, torch_route=False):
     w1 = [(torch.randn(2 * I_SE, H, device="cuda") * 0.02).half() for _ in range(nw)]
     w2 = [(torch.randn(H, I_SE, device="cuda") * 0.05).half() for _ in range(nw)]
     wg = [(torch.randn(H, device="cuda") * 0.05).half() for _ in range(nw)]
@@ -118,6 +123,12 @@ def bench_se(ms, nw, reps, kernels):
 
         def mk(i):
             def f():
+                if torch_route:
+                    gu = F.linear(x, w1[i % nw])
+                    act = F.silu(gu[..., :I_SE]) * gu[..., I_SE:]
+                    out = F.linear(act, w2[i % nw])
+                    gate = F.linear(x, wg[i % nw].reshape(1, -1))
+                    return torch.sigmoid(gate) * out
                 return torch.ops.vllm.rdna_shared_expert(
                     x, w1[i % nw], None, None, w2[i % nw], None, None, wg[i % nw]
                 )
@@ -126,10 +137,11 @@ def bench_se(ms, nw, reps, kernels):
 
         return [mk(i) for i in range(reps)]
 
-    run("se", make, ms, kernels)
+    run("se-torch" if torch_route else "se", make, ms, kernels)
 
 
 def main():
+    global I_SE
     ap = argparse.ArgumentParser()
     ap.add_argument("case", choices=["hc", "se"])
     ap.add_argument("--m", default="1,3,6,8,9,12,16,18,24,32")
@@ -138,12 +150,24 @@ def main():
     )
     ap.add_argument("--reps", type=int, default=48)
     ap.add_argument("--kernels", action="store_true")
+    ap.add_argument(
+        "--torch",
+        action="store_true",
+        help="se only: time the torch composition instead of the fused op",
+    )
+    ap.add_argument(
+        "--i-se",
+        type=int,
+        default=I_SE,
+        help="shared-expert intermediate per rank (TP4: 160, TP2: 320)",
+    )
     args = ap.parse_args()
+    I_SE = args.i_se
     ms = [int(v) for v in args.m.split(",")]
     if args.case == "hc":
         bench_hc(ms, args.nw or 16, args.reps, args.kernels)
     else:
-        bench_se(ms, args.nw or 64, args.reps, args.kernels)
+        bench_se(ms, args.nw or 64, args.reps, args.kernels, args.torch)
 
 
 if __name__ == "__main__":

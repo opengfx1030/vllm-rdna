@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Parity tests for the gfx1030 HIP M-RoPE kernel.
+"""Parity tests for the gfx1030/gfx1100 HIP M-RoPE kernel.
 
 The HIP op is compared against ``triton_mrope``, the kernel it replaces, over
 decode- and prefill-shaped token counts. The comparison guards the per-token
@@ -22,11 +22,27 @@ from vllm.model_executor.layers.rotary_embedding.mrope import (
     mrope_forward_rdna2,
     triton_mrope,
 )
+from vllm.platforms.rdna import on_rdna3
 from vllm.platforms.rocm import on_gfx10x
 
 pytestmark = pytest.mark.skipif(
-    not on_gfx10x(), reason="RDNA2 HIP mrope requires gfx10x"
+    not (
+        on_gfx10x()
+        or (on_rdna3() and hasattr(torch.ops._rocm_C, "mrope_forward_rdna2"))
+    ),
+    reason="RDNA2 HIP mrope requires gfx10x or gfx1100 (op built)",
 )
+
+
+@pytest.fixture(autouse=True)
+def _v1_hip_opt_in(monkeypatch):
+    """gfx1100: ``mrope_forward_rdna2`` gates on ``on_rdna2_hip()`` (the ``v1``
+    family) per call; opt it in. No-op on gfx10x."""
+    if on_rdna3():
+        from vllm.platforms import rdna
+
+        monkeypatch.setattr(rdna, "_RDNA3_HIP_FAMILIES", frozenset({"v1"}))
+
 
 # (head_size, rotary_dim, num_q_heads, num_kv_heads, mrope_section)
 SHAPES = [
