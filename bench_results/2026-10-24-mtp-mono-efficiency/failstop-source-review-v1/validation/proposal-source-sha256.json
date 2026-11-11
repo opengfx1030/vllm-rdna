@@ -1,0 +1,46 @@
+{
+  "csrc/rocm/mono_k2_rdna2.cu": {
+    "original": "bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf",
+    "candidate": "c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434"
+  },
+  "csrc/rocm/ops.h": {
+    "original": "fbb59f23d7c2696c1aa595e546cfa3d5c1fa9890a30d62482da32aa6ff7f9725",
+    "candidate": "32dba52938936b317f2eb546e5db75e90ff4ec067eb8b395e47b6f2b7878b469"
+  },
+  "csrc/rocm/torch_bindings.cpp": {
+    "original": "8b968912063c75182847836b955743eff660889cef58a096effcbf97db248547",
+    "candidate": "14c0e4c76a3aea05e1611dff54096fe91c0ddb2832c14ecead1c26f9ee0287e1"
+  },
+  "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py": {
+    "original": "2e37d05cab3b47b8535ca7e274b71212b1f94a690bb23644071c4bcd0c55d9a8",
+    "candidate": "f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7"
+  },
+  "vllm/models/qwen4_exp/amd/mono/rdna2/failstop.py": {
+    "original": null,
+    "candidate": "786c22ec3d33d3758f7c447f0c254a027d8785e40faa4f6e922937d7b943d83b"
+  },
+  "vllm/models/qwen4_exp/amd/mono/rdna2/k1.py": {
+    "original": "477b2d648b2f4ffb31c634fd7961f74ae4ea9b5009d0db5d484b15b1d4f54c39",
+    "candidate": "6318fc36513b664993a8feab4b37a63cd6366473842eaaaa58aec204d01c67d0"
+  },
+  "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py": {
+    "original": "5b6bd653902936b19bd559cefe46aa3fb4bc94cc1c352baf58077a582eb64c09",
+    "candidate": "64cc1b2a22737b59f2e6113ceeaa551509a63e4a307abe44c286849a426788dc"
+  },
+  "vllm/models/qwen4_exp/amd/mono/rdna2/layout.py": {
+    "original": "422aca3b8e4313a4fb55698461c626b4dd2ab15311f284e675fd12536da1349c",
+    "candidate": "00e730f8d40b5ec9966ff096040e872be2547068e60e4af87d93b8bb17a575c1"
+  },
+  "vllm/v1/worker/gpu/async_utils.py": {
+    "original": "10875f3e7ab28fea5b6ec0dfa1a840ae69675882468cb90f9f3ca0a66db1598f",
+    "candidate": "49a454592c80f4813d47ebf811e543ba53c7fbdeed30b1350f0f2ea422478095"
+  },
+  "vllm/v1/worker/gpu/model_runner.py": {
+    "original": "d8581ccf2b9099dccf9e8028312ea785a4f63697a7fee1e8887097b20c5dc343",
+    "candidate": "20e84bda462a19991e955fb20977b9829bea1b6785299c9a5ff7744fed409927"
+  },
+  "vllm/v1/worker/gpu_model_runner.py": {
+    "original": "f5a3f1a24b5e4e0dad1fba63062a0071fda358c4e039be5616419502b672f8a7",
+    "candidate": "43792477dab6fcd1abdbb143d47b37a27a65d571e073b65c0167c14693116966"
+  }
+}

@@ -1,0 +1,6 @@
+P0 perf-16384x256-c1: kfd INVALID (KFD evicted a worker's GPU queues during this window; rerun it); acceptance length 2.179 (552/936); output tokens 1024; TTFT mean 11.88 s; ITL med 24.2 mean 24.0 ms; TPOT mean 11.00 ms; step estimate 24.0 ms
+P0 perf-1024x512-c8: kfd ok; acceptance length 2.158 (8787/15180); output tokens 16384; TTFT mean 0.93 s; ITL med 45.3 mean 53.0 ms; TPOT mean 24.59 ms; step estimate 53.1 ms
+P0r perf-16384x256-c1: kfd ok; acceptance length 2.132 (542/958); output tokens 1024; TTFT mean 5.62 s; ITL med 24.8 mean 24.6 ms; TPOT mean 11.55 ms; step estimate 24.6 ms
+P0r perf-1024x512-c8: kfd ok; acceptance length 2.097 (8568/15618); output tokens 16384; TTFT mean 0.94 s; ITL med 46.4 mean 53.5 ms; TPOT mean 25.56 ms; step estimate 53.6 ms
+P1 perf-16384x256-c1: kfd ok; acceptance length 2.243 (567/912); output tokens 1024; TTFT mean 5.63 s; ITL med 25.0 mean 24.8 ms; TPOT mean 11.08 ms; step estimate 24.9 ms
+P1 perf-1024x512-c8: kfd ok; acceptance length 2.021 (8341/16332); output tokens 16384; TTFT mean 0.91 s; ITL med 46.8 mean 53.7 ms; TPOT mean 26.63 ms; step estimate 53.8 ms

@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Require candidate serve tree to vary only at the kernel CU and built .so."""
+
+import argparse
+import hashlib
+import os
+from pathlib import Path
+
+ALLOWED = {
+    "vllm/_rocm_C.abi3.so",
+    "csrc/rocm/mono_k2_rdna2.cu",
+}
+SCAN_ROOTS = ("vllm", "csrc/rocm", "tools/rdna")
+SKIP_DIRS = {"__pycache__", ".git", "build"}
+
+
+def file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def collect(root: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for rel_root in SCAN_ROOTS:
+        start = root / rel_root
+        if not start.exists():
+            raise SystemExit(f"missing tree component: {start}")
+        for current, dirs, files in os.walk(start, followlinks=True):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for name in files:
+                p = Path(current) / name
+                rel = p.relative_to(root).as_posix()
+                if p.is_file():
+                    result[rel] = file_hash(p)
+    return result
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--control", type=Path, required=True)
+    ap.add_argument("--candidate", type=Path, required=True)
+    args = ap.parse_args()
+    base, candidate = collect(args.control), collect(args.candidate)
+    differences = sorted(
+        key for key in set(base) | set(candidate) if base.get(key) != candidate.get(key)
+    )
+    if differences != sorted(ALLOWED):
+        raise SystemExit(f"candidate tree must differ only at {sorted(ALLOWED)}; got {differences}")
+    print("PASS candidate source tree differs only at: " + ", ".join(differences))
+
+
+if __name__ == "__main__":
+    main()

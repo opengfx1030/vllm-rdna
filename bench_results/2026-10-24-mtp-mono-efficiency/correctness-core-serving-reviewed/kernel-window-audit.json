@@ -1,0 +1,11 @@
+{
+  "journal_command_exit_status": 0,
+  "readable": true,
+  "since": "2026-10-24T08:40:45+02:00",
+  "until": "2026-10-24T09:19:30+02:00",
+  "line_count": 831,
+  "raw_sha256": "16722763789f986928ef9d2bfc7cb3428674addc51c57db863ff27bb5eb03129",
+  "fault_pattern_matches": [],
+  "count": 0,
+  "scope": "Independent readable same-boot journal recovery; no serving rerun. Original shell zero-match count appends n/a due grep exit status."
+}

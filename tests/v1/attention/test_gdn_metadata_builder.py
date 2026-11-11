@@ -20,6 +20,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -27,6 +28,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     gather_gdn_state_arenas,
     gdn_arenas_ready_for_capture,
     gdn_decode_arena_max_bs,
+    plan_flashinfer_checkpoints,
     scatter_gdn_state_arenas,
     static_gdn_cache_slots,
 )
@@ -88,6 +90,17 @@ GDN_BUILD_TEST_CASES = {
         seq_lens=[50, 30],
         query_lens=[3, 3],
         num_decode_draft_tokens=[2, 2],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=0,
+        expected_num_prefill_tokens=0,
+        expected_num_spec_decodes=2,
+    ),
+    # Padded (CUDA graph) sequences trail the spec decodes
+    "pure_spec_decode_with_padding": GDNBuildTestCase(
+        seq_lens=[50, 30, 16],
+        query_lens=[3, 3, 0],
+        num_decode_draft_tokens=[2, 2, -1],
         num_speculative_tokens=2,
         expected_num_decodes=0,
         expected_num_prefills=0,
@@ -180,6 +193,8 @@ def _create_gdn_builder(
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
     elif piecewise_cuda_graph:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+    else:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     if max_cudagraph_capture_size is not None:
         vllm_config.compilation_config.max_cudagraph_capture_size = (
             max_cudagraph_capture_size
@@ -236,6 +251,8 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_prefills == test_case.expected_num_prefills
     assert meta.num_prefill_tokens == test_case.expected_num_prefill_tokens
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
+    if meta.spec_state_indices_tensor is not None:
+        assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
@@ -293,6 +310,7 @@ def test_update_block_table_matches_build(
                     meta.cache_slot_indices.data_ptr()
                     == dst.cache_slot_indices_buf.data_ptr()
                 )
+                assert expected.cache_slot_indices is not None
                 torch.testing.assert_close(
                     meta.cache_slot_indices[: meta.num_decodes],
                     expected.cache_slot_indices[: meta.num_decodes],
@@ -312,6 +330,43 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state is not None
     # req0 has context_lens = 65 - 1 = 64 > 0, so has_initial_state[0] = True
     assert meta.has_initial_state[0].item() is True
+
+
+@pytest.mark.parametrize(
+    "seq_lens,query_lens,draft,expected",
+    [
+        # spec decodes ahead of a prefill chunk: two row ranges
+        ([40, 50, 300], [3, 3, 200], [2, 2, -1], (0, 6)),
+        # the prefill chunk ahead of the spec decodes
+        ([300, 40, 50], [200, 3, 3], [-1, 2, 2], (200, 0)),
+        # interleaved groups still gather through the index tensors
+        ([40, 300, 50], [3, 200, 3], [2, -1, 2], None),
+        # spec decodes only: nothing to split off
+        ([40, 50], [3, 3], [2, 2], None),
+    ],
+    ids=["spec_first", "prefill_first", "interleaved", "spec_only"],
+)
+def test_spec_non_spec_token_ranges(seq_lens, query_lens, draft, expected):
+    """Contiguous groups are row ranges that equal the index tensors."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    meta = _build(builder, batch, num_decode_draft_tokens=draft)
+    if expected is None:
+        assert meta.spec_token_start is None
+        assert meta.non_spec_token_start is None
+        return
+    assert (meta.spec_token_start, meta.non_spec_token_start) == expected
+    assert meta.spec_token_indx is not None
+    assert meta.non_spec_token_indx is not None
+    spec_start, non_spec_start = expected
+    num_spec = meta.num_spec_decode_tokens
+    num_non_spec = meta.num_prefill_tokens + meta.num_decode_tokens
+    assert meta.spec_token_indx.tolist() == list(
+        range(spec_start, spec_start + num_spec)
+    )
+    assert meta.non_spec_token_indx.tolist() == list(
+        range(non_spec_start, non_spec_start + num_non_spec)
+    )
 
 
 def test_full_cudagraph_spec_metadata_uses_request_count():
@@ -544,3 +599,126 @@ def test_gather_rejects_ephemeral_block_table_view():
         static_gdn_cache_slots(torch.tensor([1, 2], dtype=torch.int32), is_static=False)
     slots = torch.tensor([3, 7], dtype=torch.int32)
     assert static_gdn_cache_slots(slots, is_static=True) is slots
+
+
+def _create_checkpoint_builder_and_batch(
+    num_spec: int, prefix_match_unit: int | None = 16
+) -> tuple[GDNAttentionMetadataBuilder, CommonAttentionMetadata, dict]:
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B",
+        block_size=BLOCK_SIZE,
+    )
+    if num_spec > 0:
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=num_spec,
+        )
+    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    mamba_spec = MambaSpec(
+        block_size=64,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_spec,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+    vllm_config.cache_config.hash_block_size = prefix_match_unit or 64
+    vllm_config.cache_config.cache_hit_alignment_tokens = prefix_match_unit or 64
+    batch = BatchSpec(
+        seq_lens=[65, 100, 100], query_lens=[3 if num_spec else 1, 100, 99]
+    )
+    common = create_common_attn_metadata(batch, 64, DEVICE, arange_block_indices=True)
+    table = common.block_table_tensor + 1
+    if num_spec:
+        table = torch.cat([table, torch.zeros(3, num_spec, dtype=table.dtype)], dim=1)
+    common = common.replace(block_table_tensor=table)
+    kwargs = {}
+    if num_spec:
+        kwargs = dict(
+            num_decode_draft_tokens_cpu=torch.tensor([2, -1, -1], dtype=torch.int32),
+            num_accepted_tokens=torch.ones(3, dtype=torch.int32),
+        )
+    return builder, common, kwargs
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize(
+    "prefix_match_unit, expected_offset", [(None, 64), (16, 96), (8, 96)]
+)
+def test_checkpoint_metadata_preserves_non_spec_order(
+    num_spec, prefix_match_unit, expected_offset
+):
+    """Only eligible non-spec rows get a checkpoint in their reserved page."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    builder, common, kwargs = _create_checkpoint_builder_and_batch(
+        num_spec, prefix_match_unit
+    )
+    actual = builder.build(0, common, **kwargs)
+    assert actual.checkpoint is not None
+    offsets = [expected_offset, 0] if num_spec else [0, expected_offset, 0]
+    slots = [common.block_table_tensor[1, 0].item(), NULL_BLOCK_ID]
+    if not num_spec:
+        slots.insert(0, NULL_BLOCK_ID)
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets, torch.tensor(offsets, dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices, torch.tensor(slots, dtype=torch.int32)
+    )
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_update_block_table_regathers_checkpoint(num_spec):
+    """Checkpoint pages come from the target group's block table, not the
+    source group's (otherwise the target group's checkpoint page is never
+    written while the prefix cache treats it as valid)."""
+    src, common, kwargs = _create_checkpoint_builder_and_batch(num_spec)
+    dst, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    ref, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    other_table = common.block_table_tensor + 100
+    other = common.replace(block_table_tensor=other_table)
+    dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        other_table, other.seq_lens, dst.kv_cache_spec, "align"
+    )
+
+    source = src.build(0, common, **kwargs)
+    expected = ref.build(0, other, **kwargs)
+    actual = dst.update_block_table(source, other_table, other.slot_mapping)
+
+    assert source.checkpoint is not None and expected.checkpoint is not None
+    assert actual.checkpoint is not None
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices, expected.checkpoint.state_indices
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets, expected.checkpoint.checkpoint_offsets
+    )
+    assert not torch.equal(
+        actual.checkpoint.state_indices, source.checkpoint.state_indices
+    )
+
+
+def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
+    """Each checkpoint row maps to the state FlashInfer emits at its offset.
+
+    The leading decode row is not in the prefill kernel and never checkpoints;
+    the 50-token prefill is shorter than the stride and emits no states.
+    """
+    every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
+        offsets=[0, 128, 0, 192], query_lens=[200, 50, 300]
+    )
+
+    assert every_n_tokens == 64
+    assert cu_starts == [0, 3, 3, 7]
+    # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
+    # tokens of the third prefill, whose states start at index 3.
+    assert rows == [0, 1, 0, 5]

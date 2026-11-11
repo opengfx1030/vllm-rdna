@@ -1,0 +1,41 @@
+[14:05:14] ident start
+    [ 16] rep 1 mix: 24 nll 1.1277   1.42s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 17] rep 1 mix: 25 nll 0.9955   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 18] rep 1 mix: 26 nll 1.5070   1.37s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 19] rep 1 mix: 27 nll 0.9876   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 20] rep 1 mix: 28 nll 1.3999   1.40s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 21] rep 1 mix: 29 nll 0.8515   1.41s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 22] rep 1 mix: 30 nll 0.9509   1.39s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 23] rep 1 mix: 31 nll 0.8140   1.40s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 24] rep 1 docs:  0 nll 1.9455   1.34s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 25] rep 1 docs:  1 nll 1.5692   1.37s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 26] rep 1 docs:  2 nll 0.8793   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 27] rep 1 docs:  3 nll 1.7339   1.39s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 28] rep 1 docs:  4 nll 1.1752   1.53s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 29] rep 1 docs:  5 nll 1.6740   1.37s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 30] rep 1 docs:  6 nll 0.7717   1.39s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 31] rep 1 docs:  7 nll 1.4765   1.37s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 32] rep 2 mix: 24 nll 1.1277   1.39s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 33] rep 2 mix: 25 nll 0.9955   1.37s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 34] rep 2 mix: 26 nll 1.5070   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 35] rep 2 mix: 27 nll 0.9876   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 36] rep 2 mix: 28 nll 1.3999   1.40s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 37] rep 2 mix: 29 nll 0.8515   1.41s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 38] rep 2 mix: 30 nll 0.9509   1.39s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 39] rep 2 mix: 31 nll 0.8140   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 40] rep 2 docs:  0 nll 1.9455   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 41] rep 2 docs:  1 nll 1.5692   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 42] rep 2 docs:  2 nll 0.8793   1.40s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 43] rep 2 docs:  3 nll 1.7339   1.40s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 44] rep 2 docs:  4 nll 1.1752   1.39s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 45] rep 2 docs:  5 nll 1.6740   1.38s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 46] rep 2 docs:  6 nll 0.7717   1.40s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+    [ 47] rep 2 docs:  7 nll 1.4765   1.41s  vs pass0: ident 100.0%  top1 100.0%  max|d|  0.000 @0  first>=0.1 -1  >=1 -1  n>=1 0  n>=5 0
+[14:06:27] ident done rc=0
+[14:06:27] perf start
+[14:07:29] perf-16384x256-c1 kfd: evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+    perf-16384x256-c1            prefill   2912.0 tok/s/req (agg  2898.5) | decode  90.24 tok/s/req (agg out   30.29) | TTFT    5.63 s | ITL med    25.0 ms mean    24.8 ms | ok 4
+[14:09:01] perf-1024x512-c8 kfd: evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+    perf-1024x512-c8             prefill   1125.1 tok/s/req (agg  2735.7) | decode  37.55 tok/s/req (agg out  256.17) | TTFT    0.91 s | ITL med    46.8 ms mean    53.7 ms | ok 32
+[14:09:01] perf done rc=0
+PASS det_hook P1

@@ -12,3 +12,9 @@ MD033: false
 MD046: false
 MD052: false
 MD059: false
+# The docs write tables in a readable mixed style (`| a | b |` cells with a
+# `|---|---|` delimiter row), which MD060 rejects because the two styles do
+# not match. The rule was added in markdownlint v0.40, after these tables
+# were written, and the pre-commit hook only lints changed files - so the
+# debt stayed latent and blocked any edit to the file it lived in.
+MD060: false

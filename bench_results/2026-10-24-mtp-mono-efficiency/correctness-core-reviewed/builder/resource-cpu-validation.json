@@ -1,0 +1,11 @@
+{
+  "scope": "CPU-only mocked SDK commands; no SDK/build/GPU/SSH executed",
+  "unittest_tests_passed": 2,
+  "ruff_check": "PASS",
+  "original_extractor_sha256": "e7b0c2524f05b3e1eb6472f4dd255332ac245caf3ed360c733b8e713f49e94d2",
+  "files": {
+    "extract_object_resources.py": "c3b9b47c7848f514f4d5c4f8d4504e488eff578098dc0925bd1d920664f536ab",
+    "test_resources.py": "b19d2f7b5c8fa1305ed5003207fce19dba0230c7c40f508fdb6fb29c7eabc6bc",
+    "resource-inspection.md": "0294cb5057c667f0957c7d32b4b1cb946f87470f0329d01b645c42b38513cb63"
+  }
+}

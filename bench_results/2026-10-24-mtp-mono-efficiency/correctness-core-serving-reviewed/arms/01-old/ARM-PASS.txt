@@ -1,0 +1,1 @@
+ARM PASS arm=old25f3 mode=target-MonoKernel-native-MTP2-cap8 core=25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f cu=aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf boot=1e8b5da1-759f-4dbb-ae87-e58c2faaff48

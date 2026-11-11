@@ -1,0 +1,5 @@
+PPL 4.81 (mean NLL 1.571 over 261 tokens) PASS
+ok      'The history of the printing press begins' -> ' with the invention of the movable type printing press in China, where the first printed book was published in 868. This early form of printing, known as woodblock printing, was used in China as early as the 7th century and spread to other East Asian countries. The first dated printed book, the'
+ok      'Here is a short recipe for vegetable soup:' -> '\n\n<think>\nThe user seems to be starting a message about a vegetable soup recipe but hasn\'t actually asked a question or made a complete request. They\'ve written "Here is a short recipe for vegetable soup:" which suggests they might be about to share a recipe, or they might want me to provide one. Since the'
+ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational concept necessary for understanding primality. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive'
+RESULT PASS

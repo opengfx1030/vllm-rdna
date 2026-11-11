@@ -1,0 +1,10 @@
+fwd   0  group 0  entries   2368     5.5s  
+fwd   1  group 1  entries   2434     1.4s  
+fwd   2  group 2  entries   2434     1.4s  
+fwd   3  group 3  entries   2434     1.5s  
+fwd   4  group 4  entries   2434     3.1s  
+fwd   5  group 1  entries   2434     1.4s  
+fwd   6  group 2  entries   2434    63.6s  
+fwd   7  group 3  entries   2434     1.4s  
+fwd   8  group 4  entries   2434     1.4s  
+5 groups

@@ -12,6 +12,7 @@ import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
+    KVConnectorOutput,
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
@@ -133,6 +134,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
+        self._mtp_fault_cpu: torch.Tensor | None = None
+        self._mtp_fault_gpu: torch.Tensor | None = None
+        self._mtp_fault_event: torch.cuda.Event | None = None
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -170,8 +174,31 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
+    def enqueue_mtp_fault(
+        self,
+        fault: torch.Tensor,
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+    ) -> None:
+        # Called after speculator.propose(); the earlier copy_event cannot
+        # cover kernels/collectives enqueued by the drafter.
+        self._mtp_fault_gpu = fault
+        self._mtp_fault_event = torch.cuda.Event(blocking=True)
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            self._mtp_fault_cpu = fault.to("cpu", non_blocking=True)
+            fault.record_stream(copy_stream)
+            self._mtp_fault_event.record(copy_stream)
+
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self._mtp_fault_event is not None:
+            self._mtp_fault_event.synchronize()
+            from vllm.models.qwen4_exp.amd.mono.rdna2.failstop import raise_if_error
+
+            assert self._mtp_fault_cpu is not None
+            assert self._mtp_fault_gpu is not None
+            raise_if_error(self._mtp_fault_cpu, self._mtp_fault_gpu.device)
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -185,7 +212,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
-                self.sampling_mask_tensors.tolists()
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
             )
 
         if self.num_nans is not None:
@@ -215,6 +242,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
             )
 
         return self.model_runner_output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self.model_runner_output.kv_connector_output
 
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):
@@ -260,9 +291,13 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self.model_runner_output.kv_connector_output
+
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
-    return x.to("cpu", non_blocking=True).numpy()
+    return x.to("cpu", non_blocking=True, copy=True).numpy()
 
 
 @contextlib.contextmanager

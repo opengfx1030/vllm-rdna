@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
@@ -16,6 +17,9 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+# gfx10x (RDNA2) HIP port of _bad_words_kernel.
+_ON_RDNA2 = on_rdna2_hip()
 
 
 class BadWordsState(LogitsProcessor):
@@ -179,6 +183,25 @@ def apply_bad_words(
     max_num_bad_words: int,
 ) -> None:
     num_tokens = logits.shape[0]
+    if _ON_RDNA2:
+        torch.ops._rocm_C.bad_words_rdna2(
+            logits,
+            logits.stride(0),
+            expanded_idx_mapping,
+            bad_word_token_ids,
+            bad_word_token_ids.stride(0),
+            bad_word_offsets,
+            bad_word_offsets.stride(0),
+            num_bad_words,
+            all_token_ids,
+            all_token_ids.stride(0),
+            prompt_len,
+            total_len,
+            input_ids,
+            expanded_local_pos,
+            max_num_bad_words,
+        )
+        return
     _bad_words_kernel[(num_tokens, max_num_bad_words)](
         logits,
         logits.stride(0),

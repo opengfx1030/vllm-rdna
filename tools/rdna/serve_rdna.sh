@@ -112,7 +112,7 @@ if ((${#rdse_keys[@]})); then
     for _key in "${rdse_keys[@]}"; do
         case $_key in
             VLLM_* | NCCL_* | RCCL_* | HSA_* | TORCH_* | PYTORCH_* | OMP_* | PYTHON* | \
-                TOKENIZERS_* | FLASH_* | HIP_* | ROCM_* | GPU_* | TRITON_* | HF_* | TRANSFORMERS_*)
+                TOKENIZERS_* | FLASH_* | HIP_* | ROCM_* | RDNA_* | GPU_* | TRITON_* | HF_* | TRANSFORMERS_*)
                 if [[ -v $_key ]]; then export "${_key?}"; fi
                 ;;
         esac
@@ -122,7 +122,29 @@ fi
 MODEL=${MODEL:-${MODEL_PATH:-}}
 SERVED_NAME=${SERVED_NAME:-}
 SEQS=${SEQS:-${MAX_NUM_SEQS:-8}}
-MAXBAT=${MAXBAT:-${MAX_BATCHED_TOKENS:-2048}}
+MAXBAT=${MAXBAT:-${MAX_BATCHED_TOKENS:-}}
+if [[ -z $MAXBAT ]]; then
+    # The hybrid mamba/attention page alignment raises the attention block
+    # size until the attention page covers the mamba state page: 1024 tokens
+    # for an FP16 KV cache, 2048 for a packed KV cache with an FP16 SSM
+    # state, 3072 for a packed KV cache with the model's own FP32 SSM state.
+    # A prefill chunk ends on a mamba state block boundary, so the per-step
+    # token budget must cover two blocks for two requests to be prefilled per
+    # step. At one block per step a long prompt at concurrency drains at half
+    # the rate (gfx1030, 27B AWQ, 16k x c=8: 42.2 -> 37.4 tok/s and 50.7 ->
+    # 103.3 s TTFT at block 2048, per-token prefill cost unchanged). Two
+    # blocks per step restores parity, so scale the budget with the block.
+    case ${EXTRA_ARGS:-} in
+        *int4_fp16_block*)
+            if [[ ${EXTRA_ARGS:-} == *"--mamba-ssm-cache-dtype float16"* ]]; then
+                MAXBAT=4096   # block 2048
+            else
+                MAXBAT=6144   # block 3072
+            fi
+            ;;
+        *) MAXBAT=2048 ;;  # block 1024
+    esac
+fi
 MAXLEN=${MAXLEN:-${MAX_MODEL_LEN:-}}
 MIN_MAXLEN=${MIN_MAXLEN:-}
 KV=${KV:-${KVCAP:-${KV_CACHE_MEMORY:-}}}
@@ -130,6 +152,8 @@ GMEM=${GMEM:-${GPU_MEM:-}}
 HOST=${HOST-127.0.0.1}
 PORT=${PORT:-18094}
 TP=${TP:-4}
+PP=${PP:-1}                      # pipeline-parallel stages (3x V620: PP=3 TP=1)
+PP_PARTITION=${PP_PARTITION:-}  # layers per stage, e.g. 16,16,16 -> VLLM_PP_LAYER_PARTITION
 BLOCK_SIZE=${BLOCK_SIZE:-}
 LPTH=${LPTH:-}
 PREFILL_INTERVAL=${PREFILL_INTERVAL:-}
@@ -143,11 +167,19 @@ COMPILATION_CONFIG=${COMPILATION_CONFIG:-}
 EAGER=${EAGER:-0}
 ALLOC_CONF=${ALLOC_CONF:-}
 TUNED_CONFIG=${TUNED_CONFIG:-0}
+# PCI_BUSES="ce d3 d8 db 0a 0f 14 17": hex PCI bus numbers of the GPUs to serve on, in rank
+# order (TP rank 0 / pipeline stage 0 first), resolved to HIP_VISIBLE_DEVICES at launch by
+# torch's device properties. A HIP index is enumeration order and moves when cards, risers or
+# switches change; a bus does not, and a missing bus (or a count different from TP*PP)
+# refuses the launch instead of putting a TP group on the wrong cards. An explicit
+# HIP_VISIBLE_DEVICES / GPUIDS from the caller or the recipe wins.
+PCI_BUSES=${PCI_BUSES:-}
 # PLE n-gram table (Qwen4Exp / Flash-Next): bf16 = upstream pinned BF16 table
 # (~95 GB host RAM); int4 = INT4 table from PLE_QUANT_DIR in pinned RAM (~30 GB);
 # int4-disk = same INT4 table memory-mapped from disk, served by the CPU sidecar
 # (page cache only). PLE_QUANT_DIR is a ples_int4 directory from
-# primitive-ai/Qwen3.8-Flash-Next-PLE-quant.
+# primitive-ai/Qwen3.8-Flash-Next-PLE-quant. exl3 = the exllamav3 table shipped
+# with an EXL3 checkpoint (ngram_embedding.safetensors), served by the sidecar.
 PLE_QUANT_DIR=${PLE_QUANT_DIR:-${VLLM_PLE_QUANT_DIR:-}}
 if [[ -z ${PLE:-} ]]; then
     # Default follows the raw env vars when set the old way.
@@ -172,15 +204,40 @@ if [[ -n $REQUIRED_VARS ]]; then
         rdna_require "$_rv"
     done
 fi
-[[ -n $KV ]] || rdna_die "no KV budget set; add KV=<bytes> (or KVCAP=) to recipe '$rdse_recipe'."
+[[ -n $KV ]] || rdna_die "no KV budget set; add KV=<bytes> (or KV=auto with GMEM=) to recipe '$rdse_recipe'."
+[[ $KV != auto || -n $GMEM ]] || rdna_die "KV=auto sizes the cache from free memory; set GMEM=<fraction> too."
 if [[ -n $MIN_MAXLEN && -n $MAXLEN ]] && ((MAXLEN < MIN_MAXLEN)); then
     rdna_die "MAXLEN=$MAXLEN is below the $MIN_MAXLEN floor required by recipe '$rdse_recipe'."
 fi
 
+# An explicit device list (caller or recipe) wins over PCI_BUSES; rdna_init() would otherwise
+# fill in its 0,1,2,3 default, so look before it runs.
+rdse_hip_explicit=0
+if [[ -n ${HIP_VISIBLE_DEVICES:-} || -n ${GPUIDS:-} ]]; then
+    rdse_hip_explicit=1
+fi
 if ((rdse_print)); then
-    RDNA_DRY_RUN=1
+    # Read by rdna_init() in rdna_launcher_common.sh (RDNA_DRY_RUN).
+    export RDNA_DRY_RUN=1
 fi
 rdna_init
+
+rdse_gpu_line=""
+if [[ -n $PCI_BUSES && $rdse_hip_explicit == 0 ]]; then
+    read -r -a rdse_buses <<<"${PCI_BUSES//,/ }"
+    ((${#rdse_buses[@]} == TP * PP)) ||
+        rdna_die "PCI_BUSES lists ${#rdse_buses[@]} GPUs but TP*PP is $((TP * PP))."
+    if [[ -x $VENV/bin/python ]] && rdse_hip=$(rdna_resolve_pci_buses "${rdse_buses[@]}"); then
+        export HIP_VISIBLE_DEVICES=$rdse_hip
+        rdse_gpu_line="PCI_BUSES='${rdse_buses[*]}' -> HIP_VISIBLE_DEVICES=$rdse_hip"
+    elif ((rdse_print)); then
+        rdse_gpu_line="PCI_BUSES='${rdse_buses[*]}' (not resolvable on this host; resolved at launch)"
+    else
+        rdna_die "PCI_BUSES='${rdse_buses[*]}' did not resolve to GPUs (see above)."
+    fi
+elif [[ -n $PCI_BUSES ]]; then
+    rdse_gpu_line="HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$GPUIDS} (PCI_BUSES='$PCI_BUSES' ignored: an explicit device list wins)"
+fi
 
 case $PLE in
     bf16)
@@ -198,7 +255,15 @@ case $PLE in
             unset VLLM_PLE_CPU_OFFLOAD
         fi
         ;;
-    *) rdna_die "PLE must be bf16, int4 or int4-disk (got '$PLE')." ;;
+    exl3)
+        # exllamav3 checkpoints ship the table as ngram_embedding.safetensors;
+        # the CPU sidecar mmaps and decodes it (no PLE_QUANT_DIR).
+        unset VLLM_PLE_QUANT_DIR
+        PLE_QUANT_DIR=
+        export VLLM_PLE_CPU_OFFLOAD=1
+        export VLLM_PLE_OFFLOAD_READY_TIMEOUT=${VLLM_PLE_OFFLOAD_READY_TIMEOUT:-3600}
+        ;;
+    *) rdna_die "PLE must be bf16, int4, int4-disk or exl3 (got '$PLE')." ;;
 esac
 
 if [[ $TUNED_CONFIG == 1 ]]; then
@@ -210,6 +275,15 @@ fi
 if [[ -v RDNA_AR ]]; then
     export VLLM_RDNA_AR=${VLLM_RDNA_AR:-$RDNA_AR}
 fi
+# P2P=0: no PCIe peer-to-peer at all, for hosts where P2P is broken or
+# unsupported (and to bisect wrong output): the RDNA one-shot all-reduce is
+# off (overrides the recipe) and RCCL goes through host shared memory.
+P2P=${P2P:-1}
+case $P2P in
+    1) ;;
+    0) export VLLM_RDNA_AR=0 NCCL_P2P_DISABLE=1 ;;
+    *) rdna_die "P2P must be 1 or 0 (got '$P2P')." ;;
+esac
 
 case $ALLOC_CONF in
     false) export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False} ;;
@@ -234,8 +308,9 @@ rdse_tunableop_report() {
     # shellcheck source=tools/rdna2_028/tunableop_env.sh
     source "$source_dir/tools/rdna2_028/tunableop_env.sh"
     local lib=$ROCM_SDK_LIB/librocblas.so.5 requested=${TUNABLEOP_PROFILE:-}
+    local rows_root=${TUNABLEOP_ROOT:-$source_dir/tunableop}
     if [[ -n $requested ]]; then
-        if _tunableop_profiles "$source_dir/tunableop/profiles.json" |
+        if _tunableop_profiles "$rows_root/profiles.json" |
             awk -F'\t' -v n="$requested" '$1 == n { found = 1 } END { exit !found }'; then
             rdse_profile_line="$requested (requested; validated against the loaded library at launch)"
         else
@@ -247,7 +322,7 @@ rdse_tunableop_report() {
         local sha match
         sha=$(sha256sum -- "$lib")
         sha=${sha:0:12}
-        match=$(_tunableop_profiles "$source_dir/tunableop/profiles.json" |
+        match=$(_tunableop_profiles "$rows_root/profiles.json" |
             awk -F'\t' -v h="$sha" 'substr($3, 1, 12) == h { print $1; exit }')
         if [[ -n $match ]]; then
             rdse_profile_line="$match (auto-selected for librocblas.so.5 $sha)"
@@ -273,6 +348,9 @@ case $ATTN in
 esac
 
 rdna_mtp_args "${MTP:-0}"
+if [[ -n ${SPEC_CONFIG:-} ]]; then
+    spec_args=(--speculative-config "$SPEC_CONFIG")
+fi
 
 if [[ $EAGER == 1 ]]; then
     comp_config=""
@@ -282,6 +360,8 @@ else
     comp_config="{"
     [[ -n $COMPILE_MODE ]] && comp_config+="\"mode\":$COMPILE_MODE,"
     comp_config+="\"cudagraph_mode\":\"$CG_MODE\""
+    # capture_sizes is set by rdna_mtp_args() in rdna_launcher_common.sh.
+    # shellcheck disable=SC2154
     [[ $CG_CAPTURE_SIZES == 1 ]] && comp_config+=",\"cudagraph_capture_sizes\":$capture_sizes"
     comp_config+="$CG_EXTRA}"
 fi
@@ -298,6 +378,8 @@ cmd+=(--model "$MODEL")
 cmd+=(--port "$PORT")
 [[ -n $attention_backend ]] && cmd+=(--attention-backend "$attention_backend")
 cmd+=(--tensor-parallel-size "$TP" --dtype float16)
+(( PP > 1 )) && cmd+=(--pipeline-parallel-size "$PP")
+[[ -n $PP_PARTITION ]] && export VLLM_PP_LAYER_PARTITION=$PP_PARTITION
 [[ -n $BLOCK_SIZE ]] && cmd+=(--block-size "$BLOCK_SIZE")
 [[ -n $MAXLEN ]] && cmd+=(--max-model-len "$MAXLEN")
 cmd+=(--max-num-seqs "$SEQS" --max-num-batched-tokens "$MAXBAT")
@@ -305,7 +387,8 @@ cmd+=(--max-num-seqs "$SEQS" --max-num-batched-tokens "$MAXBAT")
 [[ -n $PREFILL_INTERVAL ]] && cmd+=(--prefill-schedule-interval "$PREFILL_INTERVAL")
 [[ -n $DIST_TIMEOUT ]] && cmd+=(--distributed-timeout-seconds "$DIST_TIMEOUT")
 [[ -n $GMEM ]] && cmd+=(--gpu-memory-utilization "$GMEM")
-cmd+=(--kv-cache-memory-bytes "$KV")
+# KV=auto: let vLLM size the cache from --gpu-memory-utilization after profiling.
+[[ $KV != auto ]] && cmd+=(--kv-cache-memory-bytes "$KV")
 if [[ $EAGER == 1 ]]; then
     cmd+=(--enforce-eager)
 elif [[ -n $comp_config ]]; then
@@ -317,7 +400,12 @@ for feat in $FEATURES; do
     case $feat in
         trust-remote-code) cmd+=(--trust-remote-code) ;;
         prefix-caching)
-            [[ $ENABLE_PREFIX_CACHING != 0 ]] && cmd+=(--enable-prefix-caching)
+            # vLLM enables prefix caching by default, so off must be explicit.
+            if [[ $ENABLE_PREFIX_CACHING != 0 ]]; then
+                cmd+=(--enable-prefix-caching)
+            else
+                cmd+=(--no-enable-prefix-caching)
+            fi
             ;;
         prompt-tokens-details) cmd+=(--enable-prompt-tokens-details) ;;
         auto-tool) cmd+=(--enable-auto-tool-choice --tool-call-parser qwen3_coder) ;;
@@ -347,8 +435,9 @@ rdse_quote() {
 RDSE_ENV_KEYS=(
     LD_LIBRARY_PATH ROCM_HOME ROCM_PATH HIP_PATH HIP_ROOT_DIR
     PYTHONPATH HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
-    HIP_VISIBLE_DEVICES VLLM_WORKER_MULTIPROC_METHOD GPU_MAX_HW_QUEUES
-    VLLM_ROCM_USE_AITER VLLM_ROCM_USE_AITER_MOE VLLM_RDNA_FORCE_FP16
+    HIP_VISIBLE_DEVICES VLLM_WORKER_MULTIPROC_METHOD GPU_MAX_HW_QUEUES ROCPROFILER_REGISTER_ENABLED
+    VLLM_ROCM_USE_AITER VLLM_ROCM_USE_AITER_MOE VLLM_ROCM_MONO_DECODE
+    VLLM_RAISE_ON_LOGIT_NANS VLLM_SERVER_DEV_MODE
     TORCH_BLAS_PREFER_HIPBLASLT VLLM_BATCH_INVARIANT
     VLLM_CACHE_ROOT TRITON_CACHE_DIR TORCHINDUCTOR_CACHE_DIR TORCH_EXTENSIONS_DIR
     PYTORCH_TUNABLEOP_ENABLED PYTORCH_TUNABLEOP_TUNING
@@ -357,19 +446,26 @@ RDSE_ENV_KEYS=(
     VLLM_USE_RDNA2_FA VLLM_FA_RDNA2_GQA_DECODE VLLM_FA_RDNA2_GQA_MODE
     FLASH_ATTENTION_TRITON_AMD_ENABLE
     VLLM_USE_V2_MODEL_RUNNER VLLM_USE_AOT_COMPILE VLLM_DISABLE_COMPILE_CACHE
+    RDNA_DFLASH2_DRAFT_BF16
     VLLM_USE_BREAKABLE_CUDAGRAPH VLLM_RDNA_FUSED_HC VLLM_RDNA_HC_PREFILL_FUSED
-    VLLM_ROCM_MOE_PREFILL VLLM_GDN_HIP_PREFILL VLLM_RDNA_FUSED_SE
+    VLLM_GDN_HIP_PREFILL VLLM_RDNA_FUSED_SE
     VLLM_RDNA_DENSE_INT8 VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_DENSE_GEMV
     VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA2_W4A8_DEBUG
+    VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA_W4A8_KBLOCK
     VLLM_FORCE_CUSTOM_ALL_REDUCE VLLM_RDNA_AR VLLM_RDNA_AR_MAX_KB
     VLLM_RDNA_AR_ONESHOT_KB VLLM_RDNA_AR_BLOCKS VLLM_RDNA_AR_PACE
     VLLM_CAUSAL_CONV1D_RDNA2_FWD VLLM_CAUSAL_CONV1D_RDNA2_UPDATE
+    VLLM_RDNA2_MOE_TILE8_MIN_TOKENS VLLM_RDNA_QSA_BLOCK_N VLLM_RDNA_QSA_SPLITS
+    VLLM_RDNA_HC_DOWN_TARGET VLLM_RDNA_HC_DOWN_SPLITS
+    VLLM_RDNA_MOE_HIST_DIR VLLM_RDNA_MOE_HIST_MIN_TOKENS
+    VLLM_EXPERT_STATS_DIR VLLM_EXPERT_STATS_INTERVAL_S VLLM_EXPERT_STATS_PAIRS
+    VLLM_EXPERT_STATS_PAIRS_EVERY VLLM_EXPERT_STATS_DECODE_MAX_TOKENS
     VLLM_ENABLE_STARTUP_PLAN VLLM_TUNED_CONFIG_FOLDER
-    VLLM_ROCM_SKIP_LIVE_TAIL_HASH
+    VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
     VLLM_PLE_CPU_OFFLOAD VLLM_PLE_OFFLOAD_READY_TIMEOUT VLLM_PLE_QUANT_DIR
     VLLM_EXL3_DEBUG
     VLLM_RDNA_DECODE_STALL_MS VLLM_RDNA_DECODE_SHARE VLLM_DECODE_STALL_MAX_OVERHEAD VLLM_DECODE_STALL_FIT_ALL
-    NCCL_P2P_LEVEL RCCL_P2P_NET_DISABLE RCCL_P2P_BATCH_ENABLE NCCL_PROTO
+    NCCL_P2P_LEVEL NCCL_P2P_DISABLE RCCL_P2P_NET_DISABLE RCCL_P2P_BATCH_ENABLE NCCL_PROTO
     RCCL_MSCCL_ENABLE
     HSA_FORCE_FINE_GRAIN_PCIE HSA_ENABLE_SDMA OMP_NUM_THREADS
     TOKENIZERS_PARALLELISM PYTHONFAULTHANDLER PYTORCH_CUDA_ALLOC_CONF
@@ -380,6 +476,8 @@ rdse_print_plan() {
     printf '# tunableop: %s\n' "$rdse_profile_line"
     printf '# entry:     %s\n' "$SERVE_ENTRY"
     printf '# ple:       %s%s\n' "$PLE" "${PLE_QUANT_DIR:+ ($PLE_QUANT_DIR)}"
+    printf '# p2p:       %s\n' "$([[ $P2P == 0 ]] && echo 'off (no rdna_ar, RCCL over SHM)' || echo on)"
+    printf '# gpus:      %s\n' "${rdse_gpu_line:-HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-}}"
     printf '\n# --- environment ---\n'
     for _key in "${RDSE_ENV_KEYS[@]}"; do
         if [[ -v $_key ]]; then
@@ -401,4 +499,8 @@ fi
 
 rdna_kill_stale
 rdna_run_cwd
-exec "${cmd[@]}"
+# LAUNCH_WRAPPER prefixes only the server process (e.g. a rocprofv3 command
+# line ending in "--"); wrapping this script instead breaks rocprofv3, whose
+# tool cannot re-initialise across this exec.
+# shellcheck disable=SC2086 # deliberately word-split
+exec ${LAUNCH_WRAPPER:-} "${cmd[@]}"

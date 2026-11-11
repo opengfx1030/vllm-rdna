@@ -1,0 +1,10 @@
+test_non_rocm_keeps_default_term_semantics (__main__.SignalCleanupTest.test_non_rocm_keeps_default_term_semantics) ... ok
+test_real_sigterm_does_not_interrupt_rocm_cleanup (__main__.SignalCleanupTest.test_real_sigterm_does_not_interrupt_rocm_cleanup) ... ok
+test_real_sigterm_interrupts_non_rocm_cleanup (__main__.SignalCleanupTest.test_real_sigterm_interrupts_non_rocm_cleanup) ... ok
+test_rocm_fatal_waits_for_cleanup_despite_term (__main__.SignalCleanupTest.test_rocm_fatal_waits_for_cleanup_despite_term) ... ok
+test_rocm_restores_term_even_if_cleanup_raises (__main__.SignalCleanupTest.test_rocm_restores_term_even_if_cleanup_raises) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.138s
+
+OK

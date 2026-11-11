@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""Build a compact response-free package for the matched native/Mono v3 pair."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import analyze_native_vs_mono_v4 as validation
+from curate_mono_arm_v3 import SAFE_FILES, sha256
+
+PAIR_FILES = (
+    "per-request-native-vs-mono.csv",
+    "per-request-rate-and-latency-summary.csv",
+    "per-cell-native-vs-mono.csv",
+    "whole-run-native-vs-mono.csv",
+    "per-cell-native.csv",
+    "per-cell-mono.csv",
+    "provenance-validation.json",
+    "README.txt",
+)
+CONCURRENCY_PATTERN = re.compile(
+    r"RESULT PASS: (\d+) failing, (\d+) near-tie, (\d+) soft, "
+    r"(\d+) solo-noise, (\d+) identical of (\d+) checks"
+)
+
+
+def concurrency_gate(summary: str) -> dict[str, int]:
+    matches = CONCURRENCY_PATTERN.findall(summary)
+    if len(matches) != 1:
+        raise ValueError(
+            f"expected one numeric concurrency summary, found {len(matches)}"
+        )
+    fields = (
+        "hard_failures",
+        "near_ties",
+        "soft_differences",
+        "solo_noise",
+        "identical",
+        "total_checks",
+    )
+    result = dict(zip(fields, map(int, matches[0])))
+    if result["hard_failures"] != 0 or (
+        result["identical"]
+        + result["near_ties"]
+        + result["soft_differences"]
+        + result["solo_noise"]
+        != result["total_checks"]
+    ):
+        raise ValueError(f"native concurrency gate counts are inconsistent: {result}")
+    return result
+
+
+def filtered_native_gates(summary: str) -> str:
+    patterns = (
+        r"^\[[^]]+\] NATIVE ROUTE .*PASS$",
+        r"^\[[^]]+\] READY in .* served=flash-next$",
+        r"^\s*RESULT PASS \(3/3\)$",
+        r"^\s*PPL [0-9.]+ \(mean NLL [0-9.]+ over \d+ tokens\) PASS$",
+        r"^\s*cold TTFT [0-9.]+ s, warm TTFT [0-9.]+ s, speedup [0-9.]+x -> PASS$",
+        (
+            r"^\s*RESULT PASS: 0 failing, \d+ near-tie, \d+ soft, "
+            r"\d+ solo-noise, \d+ identical of \d+ checks \(.*\)$"
+        ),
+        r"^\[[^]]+\] PREFIX RESET PASS before bench-\S+$",
+        r"^\[[^]]+\] NATIVE ROUTE-AFTER-LOAD PASS$",
+        r"^\[[^]]+\] PROBE-AFTER-LOAD PASS$",
+        r"^\[[^]]+\] fault markers in serve\.log: 0$",
+        r"^\[[^]]+\] new amdgpu dmesg faults: 0$",
+        r"^\[[^]]+\] done$",
+    )
+    selected = [
+        line
+        for line in summary.splitlines()
+        if any(re.fullmatch(pattern, line) for pattern in patterns)
+    ]
+    if not any("RESULT PASS:" in line for line in selected):
+        raise ValueError("filtered native gate summary omitted concurrency counts")
+    return "\n".join(selected) + "\n"
+
+
+def write_native_metrics(arm_dir: Path, repo: Path, output: Path) -> int:
+    metric = validation.load_metric_module(repo)
+    cells: list[dict[str, Any]] = []
+    requests: list[dict[str, Any]] = []
+    cell_fields = (
+        "arm",
+        "variant",
+        "input_length_requested",
+        "output_length_requested",
+        "concurrency",
+        "completed",
+        "failed",
+        "duration_s",
+        "total_input_tokens",
+        "total_output_tokens",
+        "whole_run_input_tokps_true",
+        "whole_run_output_tokps_true",
+        "prefill_tokps_per_request_mean",
+        "prefill_tokps_wave_proxy_from_p99_ttft_NOT_TRUE_THROUGHPUT",
+        "decode_tokps_per_request_mean",
+        "decode_tokps_pooled_over_request_decode_windows",
+        "mean_ttft_ms",
+        "median_ttft_ms",
+        "p99_ttft_ms",
+        "mean_itl_ms",
+        "median_itl_ms",
+        "p99_itl_ms",
+        "acceptance_rate_pct_json",
+        "acceptance_length_json",
+        "acceptance_rate_pct_log_exact_cell_window",
+        "acceptance_length_log_exact_cell_window",
+        "drafts_json",
+        "draft_tokens_json",
+        "accepted_tokens_json",
+        "position0_acceptance_pct_json",
+        "position1_acceptance_pct_json",
+    )
+    request_fields = (
+        "arm",
+        "variant",
+        "input_length_requested",
+        "output_length_requested",
+        "concurrency",
+        "request_index",
+        "input_tokens",
+        "output_tokens",
+        "ttft_ms",
+        "latency_ms",
+        "queue_ms",
+        "prefill_tokps_per_request_input_over_ttft",
+        "decode_tokps_per_request_output_over_decode_window",
+        "decode_tokps_per_request_stream_chunks",
+        "itl_chunk_count",
+        "mean_itl_ms",
+        "median_itl_ms",
+        "p99_itl_ms",
+    )
+    for input_len, output_len, concurrency in validation.CELLS:
+        data, _log, rows, rollup = metric.load_cell(
+            arm_dir.parent,
+            arm_dir.name,
+            "native-v3",
+            (input_len, output_len, concurrency),
+        )
+        cells.append({key: rollup.get(key) for key in cell_fields})
+        requests.extend({key: row.get(key) for key in request_fields} for row in rows)
+        if int(data["completed"]) != (8 if concurrency == 1 else 32):
+            raise ValueError(
+                f"unexpected native request count at {input_len}/c{concurrency}"
+            )
+    metric.write_csv(output / "native-per-cell-metrics.csv", cells)
+    metric.write_csv(output / "native-per-request-metrics.csv", requests)
+    return len(requests)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--native-arm", type=Path, required=True)
+    parser.add_argument("--mono-arm", type=Path, required=True)
+    parser.add_argument("--mono-curated", type=Path, required=True)
+    parser.add_argument("--native-remote-out", required=True)
+    parser.add_argument("--mono-remote-out", required=True)
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+    native_dir = args.native_arm.resolve()
+    mono_dir = args.mono_arm.resolve()
+    mono_package = args.mono_curated.resolve()
+    repo = args.repo_root.resolve()
+    output = args.output_dir.resolve()
+    if output.exists():
+        parser.error(f"refusing to overwrite {output}")
+
+    native = validation.validate_arm(native_dir, "native", args.native_remote_out)
+    mono_package_manifest = json.loads(
+        (mono_package / "curation-manifest.json").read_text()
+    )
+    if mono_package_manifest.get("validation") != "PASS":
+        raise ValueError("Mono curated arm manifest is not validated")
+    if mono_package_manifest.get("completed_request_count") != 80:
+        raise ValueError("Mono curated arm does not contain all 80 requests")
+    if mono_package_manifest.get("boot") != native["boot"]:
+        raise ValueError("native arm boot differs from curated Mono arm")
+    if (
+        mono_package_manifest.get("source_core_sha256") != native["core"]
+        or mono_package_manifest.get("kernel_source_sha256") != native["cu"]
+        or mono_package_manifest.get("engine_core_py_sha256") != native["core_py"]
+    ):
+        raise ValueError("native and Mono curated source/core identity differs")
+    counts = concurrency_gate(native["summary"])
+    with tempfile.TemporaryDirectory(prefix="mono-v3-pair-") as temporary:
+        pair_output = Path(temporary) / "analysis"
+        analyzer = (
+            repo / "bench_results/2026-10-24-mtp-mono-efficiency/"
+            "native-vs-mono-control-v3/analyze_native_vs_mono_v4.py"
+        )
+        command = [
+            "/private/tmp/mono-local-validation-venv/bin/python",
+            str(analyzer),
+            "--native-arm",
+            str(native_dir),
+            "--mono-arm",
+            str(mono_dir),
+            "--repo-root",
+            str(repo),
+            "--native-remote-out",
+            args.native_remote_out,
+            "--mono-remote-out",
+            args.mono_remote_out,
+            "--output-dir",
+            str(pair_output),
+        ]
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        output.mkdir(parents=True)
+        copied_native_safe_files = []
+        for name in SAFE_FILES:
+            source = native_dir / name
+            if not source.is_file():
+                # Environment audit snapshots are optional evidence. The
+                # strict serving validator checks startup config, worker
+                # provenance and route markers independently.
+                continue
+            shutil.copyfile(source, output / f"native-{name}")
+            copied_native_safe_files.append(name)
+        for name in PAIR_FILES:
+            shutil.copyfile(pair_output / name, output / name)
+        pair_readme = output / "README.txt"
+        pair_readme_text = pair_readme.read_text()
+        pair_readme_text = pair_readme_text.replace(
+            "Native MTP2 without target MonoKernel versus target MonoKernel with "
+            "native MTP2 drafting.",
+            "Native MTP2 modules without target MonoKernel versus target "
+            "MonoKernel with dense Mono MTP2 drafting.",
+        )
+        pair_readme.write_text(pair_readme_text)
+        with pair_readme.open("a") as stream:
+            stream.write(
+                "\nNative worker/API initial-environment audit snapshots were "
+                "not present in the native raw arm. This does not weaken the "
+                "startup-config, route, rank, source, or serving gates. The "
+                "Mono worker environment snapshot reflects initial process "
+                "exec state only; it cannot prove later runtime os.environ "
+                "updates. Its paired API initial-exec audit is included and "
+                "has a narrower scope.\n"
+            )
+        native_request_count = write_native_metrics(native_dir, repo, output)
+        summary = (
+            "Native concurrency gate numeric details:\n"
+            f"hard_failures={counts['hard_failures']}\n"
+            f"near_ties={counts['near_ties']}\n"
+            f"soft_differences={counts['soft_differences']}\n"
+            f"solo_noise={counts['solo_noise']}\n"
+            f"identical={counts['identical']}\n"
+            f"total_checks={counts['total_checks']}\n"
+        )
+        (output / "native-concurrency-details.txt").write_text(summary)
+        (output / "native-quality-and-gates.txt").write_text(
+            filtered_native_gates(native["summary"])
+        )
+        inputs = []
+        for root in (native_dir, mono_dir):
+            for path in sorted(root.iterdir()):
+                if path.is_file():
+                    inputs.append(
+                        {
+                            "arm_dir": root.name,
+                            "path": path.name,
+                            "size_bytes": path.stat().st_size,
+                            "sha256": sha256(path),
+                        }
+                    )
+        provenance = json.loads((output / "provenance-validation.json").read_text())
+        provenance["native_concurrency_counts"] = counts
+        provenance["native_request_count_exported"] = native_request_count
+        provenance["curation_scope"] = (
+            "Native raw response-bearing files and journals were not copied; "
+            "hash receipts are retained. Pair outputs are derived response-free CSVs."
+        )
+        (output / "provenance-validation.json").write_text(
+            json.dumps(provenance, indent=2) + "\n"
+        )
+        metric_source = (
+            repo / "bench_results/2026-10-24-mtp-mono-efficiency/"
+            "correctness-core-serving-ab/tools/analyze_pair_v1.py"
+        )
+        receipts = {
+            "native_arm_files": inputs,
+            "native_safe_evidence_copied": copied_native_safe_files,
+            "mono_curated_manifest_sha256": sha256(
+                mono_package / "curation-manifest.json"
+            ),
+            "analyzer_sha256": sha256(analyzer),
+            "metric_extractor_sha256": sha256(metric_source),
+            "curator_sha256": sha256(Path(__file__).resolve()),
+            "excluded": [
+                "raw response-bearing benchmark JSON/text/log bodies",
+                "raw kernel journals",
+                "binary artifacts",
+                "cache subtrees",
+            ],
+        }
+        (output / "evidence-receipts.json").write_text(
+            json.dumps(receipts, indent=2) + "\n"
+        )
+        (output / "README.md").write_text(
+            "# Curated native versus Mono v3 pair\n\n"
+            "This package is produced only after both arms pass the frozen "
+            "v3 provenance and serving validators. It contains response-free "
+            "per-request and per-cell metrics, pair deltas, provenance, and "
+            "native concurrency counts.\n\n"
+            "The native concurrency gate passed with all numeric outcomes "
+            "retained, including near-ties and soft differences. Soft "
+            "differences are reported and are not silently counted as "
+            "identical. Review native-concurrency-details.txt and the "
+            "concurrency gate summary before interpreting the pair.\n\n"
+            "The output represents one matched pair and does not establish "
+            "repeatability or statistical confidence. Prefill wave proxy is "
+            "not true throughput; whole-run throughput is separately defined "
+            "as total measured tokens divided by summed timed-cell duration. "
+            "ITL values are streamed chunk intervals, not TPOT.\n\n"
+            "Raw response-bearing files, raw kernel journals, binaries, and "
+            "cache trees are excluded. evidence-receipts.json pins input and "
+            "tool hashes.\n"
+        )
+    print(
+        json.dumps(
+            {
+                "output": str(output),
+                "validation": "PASS",
+                "native_concurrency": counts,
+                "native_requests_exported": native_request_count,
+            }
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -7,15 +7,18 @@
       "rocm": "7.14.60850",
       "torch": "2.12.0+rocm7.14.0",
       "lib_sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
-      "rows_per_rank": 1601,
-      "venv": "venv-7.14.0_0.28.0",
+      "rows_per_rank": 3330,
+      "venv": "venv-7.14.0_0.28.0; venv-7.14.0_0.31.0",
       "status": "canonical",
       "covers": [
-        "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2; mixed prefill/decode steps and padded HC GEMMs since 2026-10-10)",
+        "Qwen3.8-Flash-Next-AWQ-W4A16 (MTP=0/2; mixed prefill/decode steps and padded HC GEMMs since 2026-10-10; --max-num-batched-tokens 8192 chunks since 2026-10-11)",
         "Qwen3.8-27B-AWQ-INT4 dense (W4A8=0/1)",
         "Qwen3.8-27B-exl3-3.00bpw (MTP=0/2)",
         "Qwen3.6-35B-A3B-GPTQ-Int4 (MTP=0/2)",
-        "DeepSeek-V4-Flash-0731-K128-v2"
+        "DeepSeek-V4-Flash-0731-K128-v2",
+        "Qwen3.8-Flash-Next-DFlash2 BF16 draft regular GEMMs (94 measured shapes; includes 36 two-token graph shapes)",
+        "Qwen3.5-4B rdna_hint_flex 3.0 bpw and dense fp16 (TP=1/2/4), Qwen2.5-0.5B-Instruct rdna_hint_flex / dense / AWQ (TP=1): prefill, mixed and decode shapes from the four bench cells (2026-10-25)",
+        "OLMoE-1B-7B-0924 rdna_hint_flex (r4, b3.0) and dense fp16, TP=1: attention/router/lm_head shapes from the four bench cells (2026-10-26)"
       ]
     },
     "rocm10-rocblas5.6": {
@@ -23,12 +26,12 @@
       "rocblas": "5.6.0.8d1ae90e",
       "rocm": "7.15.26333",
       "torch": "2.13.0+rocm10.0.0",
-      "lib_sha256": "c27e2252cc7a4b6e174601a180a169822dcf15a29e634046daecb61498e3bd2a",
-      "rows_per_rank": 70,
+      "lib_sha256": "d05939967b5f1bd184a4b8c1c77509c87a0abae3f0b3d079ba9d68ed1ddc50a5",
+      "rows_per_rank": 139,
       "venv": "v620-vllm-testing (George)",
-      "status": "thin, needs its own capture campaign",
+      "status": "qualified for build d05939967b5f (prefill + decode/MTP grids; full-grid re-measure 2026-10-14)",
       "covers": [
-        "imported reference table only; not exercised on the fork's serving build"
+        "Qwen3.8-Flash-Next dense projection shapes: prefill grid (M=800..8192, 70 TN keys -> 44 curated rows) and decode/MTP grid (M=1..8,12,16,24,32, 84 keys) on the system rocm/core-10.0 build"
       ]
     }
   }

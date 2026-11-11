@@ -1,0 +1,106 @@
+{
+  "schema": "failstop-evidence-manifest-v1",
+  "scope": "curated, response-free and binary-free evidence bundle",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 2747,
+      "sha256": "bc8806095b29ca50334ddcd2b2b8fdff82aab7efe5baf80056e19ae2e8e07ce4"
+    },
+    {
+      "path": "cpu-test-source.json",
+      "bytes": 458,
+      "sha256": "20c06eb5c747794239ebb254d335b3ffa6815a2ce552b3718e336d50e76cfe0a"
+    },
+    {
+      "path": "postformat-equivalence-current.json",
+      "bytes": 4036,
+      "sha256": "7cbadcfb4d5e9061c4dd17b3a7173056901b16bdb3d16b5c7459a06424ead6ba"
+    },
+    {
+      "path": "raw-candidate/async_utils.py.txt",
+      "bytes": 12195,
+      "sha256": "49a454592c80f4813d47ebf811e543ba53c7fbdeed30b1350f0f2ea422478095"
+    },
+    {
+      "path": "raw-candidate/csrc-rocm-mono_k2_rdna2.cu.txt",
+      "bytes": 105724,
+      "sha256": "c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434"
+    },
+    {
+      "path": "raw-candidate/csrc-rocm-ops.h.txt",
+      "bytes": 71311,
+      "sha256": "32dba52938936b317f2eb546e5db75e90ff4ec067eb8b395e47b6f2b7878b469"
+    },
+    {
+      "path": "raw-candidate/csrc-rocm-torch_bindings.cpp.txt",
+      "bytes": 57230,
+      "sha256": "14c0e4c76a3aea05e1611dff54096fe91c0ddb2832c14ecead1c26f9ee0287e1"
+    },
+    {
+      "path": "raw-candidate/failstop.py.txt",
+      "bytes": 2093,
+      "sha256": "786c22ec3d33d3758f7c447f0c254a027d8785e40faa4f6e922937d7b943d83b"
+    },
+    {
+      "path": "raw-candidate/gpu_model_runner.py.txt",
+      "bytes": 351311,
+      "sha256": "43792477dab6fcd1abdbb143d47b37a27a65d571e073b65c0167c14693116966"
+    },
+    {
+      "path": "raw-candidate/k1.py.txt",
+      "bytes": 4065,
+      "sha256": "6318fc36513b664993a8feab4b37a63cd6366473842eaaaa58aec204d01c67d0"
+    },
+    {
+      "path": "raw-candidate/k2.py.txt",
+      "bytes": 6028,
+      "sha256": "64cc1b2a22737b59f2e6113ceeaa551509a63e4a307abe44c286849a426788dc"
+    },
+    {
+      "path": "raw-candidate/layout.py.txt",
+      "bytes": 20833,
+      "sha256": "00e730f8d40b5ec9966ff096040e872be2547068e60e4af87d93b8bb17a575c1"
+    },
+    {
+      "path": "raw-candidate/model_runner.py.txt",
+      "bytes": 113388,
+      "sha256": "20e84bda462a19991e955fb20977b9829bea1b6785299c9a5ff7744fed409927"
+    },
+    {
+      "path": "raw-candidate/tests-models-qwen4_exp-test_amd_mono_rdna2_kernels.py.txt",
+      "bytes": 50298,
+      "sha256": "f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7"
+    },
+    {
+      "path": "validation/applied-validation.md",
+      "bytes": 1109,
+      "sha256": "65b37e3e833bd3e05a0836781fccf68cc69c3b449b0cc7dbfbbd2724a666c45e"
+    },
+    {
+      "path": "validation/mypy-baseline.log",
+      "bytes": 194,
+      "sha256": "b61140e2a6a6d8d7f74ca031f5b708bcaea541e34c33bdbc005f2f039342efb7"
+    },
+    {
+      "path": "validation/postformat-equivalence-original.json",
+      "bytes": 3663,
+      "sha256": "13a44bd001bba64169a590c1d3712a7baec5a5fbf890307f79971a35746191ac"
+    },
+    {
+      "path": "validation/precommit-current.log",
+      "bytes": 4099,
+      "sha256": "6bf7ccce6d70f97f10e981a438f22040efb4dbac4bf71ab2af2b207a37893528"
+    },
+    {
+      "path": "validation/proposal-source-sha256.json",
+      "bytes": 2333,
+      "sha256": "fb7c579a1c33fabe7a39e90b70e149f0294dc54b11efe6d926e16ce897707eba"
+    },
+    {
+      "path": "verify_postformat_source.py.txt",
+      "bytes": 6731,
+      "sha256": "988ef8da56787c48061c5ff2f077d06e376cd228ad1ecf19c69feb21c34c0548"
+    }
+  ]
+}

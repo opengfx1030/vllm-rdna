@@ -1,0 +1,192 @@
+=== rank 0: fwd 2 (2434 entries) vs fwd 6 (2434 entries)
+  [   12] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   13] SOURCE L 0 language_model.model.layers.0.mlp.experts: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   14] parent L 0 language_model.model.layers.0.mlp: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   15] parent L 0 language_model.model.layers.0: out1 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   16] prop   L 1 language_model.model.layers.1.attn_hyper_connection.combine: out0 (1023, 10240) torch.float16: 627/1023 rows differ (first row 0)
+  [   20] prop   L 1 language_model.model.layers.1.ple: out0 (1023, 10240) torch.float16: 638/1023 rows differ (first row 0)
+  [   21] prop   L 1 language_model.model.layers.1.attn_hyper_connection.mix: out0 (1023, 10240) torch.float16: 638/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 638/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 18/1023 rows differ (first row 0)
+  [   22] prop   L 1 language_model.model.layers.1.linear_attn.in_proj_qkvz: out0 (1023, 4096) torch.float16: 638/1023 rows differ (first row 0)
+  [   23] prop   L 1 language_model.model.layers.1.linear_attn.in_proj_ba: out0 (1023, 24) torch.float16: 618/1023 rows differ (first row 0)
+  [   24] prop   L 1 language_model.model.layers.1.linear_attn.norm: out0 (1023, 12, 128) torch.float16: 1023/1023 rows differ (first row 0)
+  [   25] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   26] prop   L 1 language_model.model.layers.1.linear_attn.out_proj: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   27] prop   L 1 language_model.model.layers.1.linear_attn: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   28] prop   L 1 language_model.model.layers.1.mlp_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 377/1023 rows differ (first row 5)
+  [   29] prop   L 1 language_model.model.layers.1.mlp.gate: out0 (1023, 512) torch.float16: 1023/1023 rows differ (first row 0)
+  [   30] prop   L 1 language_model.model.layers.1.mlp.shared_expert: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   32] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   33] prop   L 1 language_model.model.layers.1.mlp.experts: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   34] prop   L 1 language_model.model.layers.1.mlp: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   35] prop   L 1 language_model.model.layers.1: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 377/1023 rows differ (first row 5)
+  [   36] prop   L 2 language_model.model.layers.2.attn_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 511/1023 rows differ (first row 0)
+  [   37] prop   L 2 language_model.model.layers.2.linear_attn.in_proj_qkvz: out0 (1023, 4096) torch.float16: 1023/1023 rows differ (first row 0)
+  [   38] prop   L 2 language_model.model.layers.2.linear_attn.in_proj_ba: out0 (1023, 24) torch.float16: 1023/1023 rows differ (first row 0)
+  [   39] prop   L 2 language_model.model.layers.2.linear_attn.norm: out0 (1023, 12, 128) torch.float16: 1023/1023 rows differ (first row 0)
+  [   40] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   41] prop   L 2 language_model.model.layers.2.linear_attn.out_proj: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   42] prop   L 2 language_model.model.layers.2.linear_attn: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   43] prop   L 2 language_model.model.layers.2.mlp_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 902/1023 rows differ (first row 0)
+  [   44] prop   L 2 language_model.model.layers.2.mlp.gate: out0 (1023, 512) torch.float16: 1023/1023 rows differ (first row 0)
+  [   45] prop   L 2 language_model.model.layers.2.mlp.shared_expert: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  divergent calls: 696 / 774; first SOURCE: (13, 'language_model.model.layers.0.mlp.experts')
+  divergent call count by module kind (top 15):
+       95  all_reduce#tp:0
+       48  language_model.model.layers.N.mlp.experts
+       48  language_model.model.layers.N.mlp
+       47  language_model.model.layers.N.mlp_hyper_connection.combine_and_mix
+       47  language_model.model.layers.N.mlp.gate
+       47  language_model.model.layers.N.mlp.shared_expert
+       46  language_model.model.layers.N.attn_hyper_connection.combine_and_mix
+       35  language_model.model.layers.N.linear_attn.in_proj_qkvz
+       35  language_model.model.layers.N.linear_attn.in_proj_ba
+       35  language_model.model.layers.N.linear_attn.norm
+       35  language_model.model.layers.N.linear_attn.out_proj
+       35  language_model.model.layers.N.linear_attn
+       12  language_model.model.layers.N.self_attn.qkv_proj
+       12  language_model.model.layers.N.self_attn.q_norm
+       12  language_model.model.layers.N.self_attn.k_norm
+=== rank 1: fwd 2 (2434 entries) vs fwd 6 (2434 entries)
+  [   12] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   13] SOURCE L 0 language_model.model.layers.0.mlp.experts: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   14] parent L 0 language_model.model.layers.0.mlp: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   15] parent L 0 language_model.model.layers.0: out1 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   16] prop   L 1 language_model.model.layers.1.attn_hyper_connection.combine: out0 (1023, 10240) torch.float16: 627/1023 rows differ (first row 0)
+  [   20] prop   L 1 language_model.model.layers.1.ple: out0 (1023, 10240) torch.float16: 638/1023 rows differ (first row 0)
+  [   21] prop   L 1 language_model.model.layers.1.attn_hyper_connection.mix: out0 (1023, 10240) torch.float16: 638/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 638/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 18/1023 rows differ (first row 0)
+  [   22] prop   L 1 language_model.model.layers.1.linear_attn.in_proj_qkvz: out0 (1023, 4096) torch.float16: 638/1023 rows differ (first row 0)
+  [   23] prop   L 1 language_model.model.layers.1.linear_attn.in_proj_ba: out0 (1023, 24) torch.float16: 620/1023 rows differ (first row 0)
+  [   24] prop   L 1 language_model.model.layers.1.linear_attn.norm: out0 (1023, 12, 128) torch.float16: 1023/1023 rows differ (first row 0)
+  [   25] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   26] prop   L 1 language_model.model.layers.1.linear_attn.out_proj: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   27] prop   L 1 language_model.model.layers.1.linear_attn: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   28] prop   L 1 language_model.model.layers.1.mlp_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 377/1023 rows differ (first row 5)
+  [   29] prop   L 1 language_model.model.layers.1.mlp.gate: out0 (1023, 512) torch.float16: 1023/1023 rows differ (first row 0)
+  [   30] prop   L 1 language_model.model.layers.1.mlp.shared_expert: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   32] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   33] prop   L 1 language_model.model.layers.1.mlp.experts: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   34] prop   L 1 language_model.model.layers.1.mlp: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   35] prop   L 1 language_model.model.layers.1: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 377/1023 rows differ (first row 5)
+  [   36] prop   L 2 language_model.model.layers.2.attn_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 511/1023 rows differ (first row 0)
+  [   37] prop   L 2 language_model.model.layers.2.linear_attn.in_proj_qkvz: out0 (1023, 4096) torch.float16: 1023/1023 rows differ (first row 0)
+  [   38] prop   L 2 language_model.model.layers.2.linear_attn.in_proj_ba: out0 (1023, 24) torch.float16: 1023/1023 rows differ (first row 0)
+  [   39] prop   L 2 language_model.model.layers.2.linear_attn.norm: out0 (1023, 12, 128) torch.float16: 1023/1023 rows differ (first row 0)
+  [   40] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   41] prop   L 2 language_model.model.layers.2.linear_attn.out_proj: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   42] prop   L 2 language_model.model.layers.2.linear_attn: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   43] prop   L 2 language_model.model.layers.2.mlp_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 902/1023 rows differ (first row 0)
+  [   44] prop   L 2 language_model.model.layers.2.mlp.gate: out0 (1023, 512) torch.float16: 1023/1023 rows differ (first row 0)
+  [   45] prop   L 2 language_model.model.layers.2.mlp.shared_expert: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  divergent calls: 696 / 774; first SOURCE: (13, 'language_model.model.layers.0.mlp.experts')
+  divergent call count by module kind (top 15):
+       95  all_reduce#tp:0
+       48  language_model.model.layers.N.mlp.experts
+       48  language_model.model.layers.N.mlp
+       47  language_model.model.layers.N.mlp_hyper_connection.combine_and_mix
+       47  language_model.model.layers.N.mlp.gate
+       47  language_model.model.layers.N.mlp.shared_expert
+       46  language_model.model.layers.N.attn_hyper_connection.combine_and_mix
+       35  language_model.model.layers.N.linear_attn.in_proj_qkvz
+       35  language_model.model.layers.N.linear_attn.in_proj_ba
+       35  language_model.model.layers.N.linear_attn.norm
+       35  language_model.model.layers.N.linear_attn.out_proj
+       35  language_model.model.layers.N.linear_attn
+       12  language_model.model.layers.N.self_attn.qkv_proj
+       12  language_model.model.layers.N.self_attn.q_norm
+       12  language_model.model.layers.N.self_attn.k_norm
+=== rank 2: fwd 2 (2434 entries) vs fwd 6 (2434 entries)
+  [   12] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   13] SOURCE L 0 language_model.model.layers.0.mlp.experts: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   14] parent L 0 language_model.model.layers.0.mlp: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   15] parent L 0 language_model.model.layers.0: out1 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   16] prop   L 1 language_model.model.layers.1.attn_hyper_connection.combine: out0 (1023, 10240) torch.float16: 627/1023 rows differ (first row 0)
+  [   20] prop   L 1 language_model.model.layers.1.ple: out0 (1023, 10240) torch.float16: 638/1023 rows differ (first row 0)
+  [   21] prop   L 1 language_model.model.layers.1.attn_hyper_connection.mix: out0 (1023, 10240) torch.float16: 638/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 638/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 18/1023 rows differ (first row 0)
+  [   22] prop   L 1 language_model.model.layers.1.linear_attn.in_proj_qkvz: out0 (1023, 4096) torch.float16: 638/1023 rows differ (first row 0)
+  [   23] prop   L 1 language_model.model.layers.1.linear_attn.in_proj_ba: out0 (1023, 24) torch.float16: 598/1023 rows differ (first row 0)
+  [   24] prop   L 1 language_model.model.layers.1.linear_attn.norm: out0 (1023, 12, 128) torch.float16: 1023/1023 rows differ (first row 0)
+  [   25] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   26] prop   L 1 language_model.model.layers.1.linear_attn.out_proj: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   27] prop   L 1 language_model.model.layers.1.linear_attn: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   28] prop   L 1 language_model.model.layers.1.mlp_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 377/1023 rows differ (first row 5)
+  [   29] prop   L 1 language_model.model.layers.1.mlp.gate: out0 (1023, 512) torch.float16: 1023/1023 rows differ (first row 0)
+  [   30] prop   L 1 language_model.model.layers.1.mlp.shared_expert: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   32] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   33] prop   L 1 language_model.model.layers.1.mlp.experts: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   34] prop   L 1 language_model.model.layers.1.mlp: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   35] prop   L 1 language_model.model.layers.1: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 377/1023 rows differ (first row 5)
+  [   36] prop   L 2 language_model.model.layers.2.attn_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 511/1023 rows differ (first row 0)
+  [   37] prop   L 2 language_model.model.layers.2.linear_attn.in_proj_qkvz: out0 (1023, 4096) torch.float16: 1023/1023 rows differ (first row 0)
+  [   38] prop   L 2 language_model.model.layers.2.linear_attn.in_proj_ba: out0 (1023, 24) torch.float16: 1023/1023 rows differ (first row 0)
+  [   39] prop   L 2 language_model.model.layers.2.linear_attn.norm: out0 (1023, 12, 128) torch.float16: 1023/1023 rows differ (first row 0)
+  [   40] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   41] prop   L 2 language_model.model.layers.2.linear_attn.out_proj: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   42] prop   L 2 language_model.model.layers.2.linear_attn: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   43] prop   L 2 language_model.model.layers.2.mlp_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 902/1023 rows differ (first row 0)
+  [   44] prop   L 2 language_model.model.layers.2.mlp.gate: out0 (1023, 512) torch.float16: 1023/1023 rows differ (first row 0)
+  [   45] prop   L 2 language_model.model.layers.2.mlp.shared_expert: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  divergent calls: 696 / 774; first SOURCE: (13, 'language_model.model.layers.0.mlp.experts')
+  divergent call count by module kind (top 15):
+       95  all_reduce#tp:0
+       48  language_model.model.layers.N.mlp.experts
+       48  language_model.model.layers.N.mlp
+       47  language_model.model.layers.N.mlp_hyper_connection.combine_and_mix
+       47  language_model.model.layers.N.mlp.gate
+       47  language_model.model.layers.N.mlp.shared_expert
+       46  language_model.model.layers.N.attn_hyper_connection.combine_and_mix
+       35  language_model.model.layers.N.linear_attn.in_proj_qkvz
+       35  language_model.model.layers.N.linear_attn.in_proj_ba
+       35  language_model.model.layers.N.linear_attn.norm
+       35  language_model.model.layers.N.linear_attn.out_proj
+       35  language_model.model.layers.N.linear_attn
+       12  language_model.model.layers.N.self_attn.qkv_proj
+       12  language_model.model.layers.N.self_attn.q_norm
+       12  language_model.model.layers.N.self_attn.k_norm
+=== rank 3: fwd 2 (2434 entries) vs fwd 6 (2434 entries)
+  [   12] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   13] SOURCE L 0 language_model.model.layers.0.mlp.experts: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   14] parent L 0 language_model.model.layers.0.mlp: out0 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   15] parent L 0 language_model.model.layers.0: out1 (1023, 2560) torch.float16: 627/1023 rows differ (first row 0)
+  [   16] prop   L 1 language_model.model.layers.1.attn_hyper_connection.combine: out0 (1023, 10240) torch.float16: 627/1023 rows differ (first row 0)
+  [   20] prop   L 1 language_model.model.layers.1.ple: out0 (1023, 10240) torch.float16: 638/1023 rows differ (first row 0)
+  [   21] prop   L 1 language_model.model.layers.1.attn_hyper_connection.mix: out0 (1023, 10240) torch.float16: 638/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 638/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 18/1023 rows differ (first row 0)
+  [   22] prop   L 1 language_model.model.layers.1.linear_attn.in_proj_qkvz: out0 (1023, 4096) torch.float16: 638/1023 rows differ (first row 0)
+  [   23] prop   L 1 language_model.model.layers.1.linear_attn.in_proj_ba: out0 (1023, 24) torch.float16: 573/1023 rows differ (first row 0)
+  [   24] prop   L 1 language_model.model.layers.1.linear_attn.norm: out0 (1023, 12, 128) torch.float16: 1023/1023 rows differ (first row 0)
+  [   25] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   26] prop   L 1 language_model.model.layers.1.linear_attn.out_proj: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   27] prop   L 1 language_model.model.layers.1.linear_attn: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   28] prop   L 1 language_model.model.layers.1.mlp_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 377/1023 rows differ (first row 5)
+  [   29] prop   L 1 language_model.model.layers.1.mlp.gate: out0 (1023, 512) torch.float16: 1023/1023 rows differ (first row 0)
+  [   30] prop   L 1 language_model.model.layers.1.mlp.shared_expert: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   32] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   33] prop   L 1 language_model.model.layers.1.mlp.experts: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   34] prop   L 1 language_model.model.layers.1.mlp: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   35] prop   L 1 language_model.model.layers.1: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 377/1023 rows differ (first row 5)
+  [   36] prop   L 2 language_model.model.layers.2.attn_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 511/1023 rows differ (first row 0)
+  [   37] prop   L 2 language_model.model.layers.2.linear_attn.in_proj_qkvz: out0 (1023, 4096) torch.float16: 1023/1023 rows differ (first row 0)
+  [   38] prop   L 2 language_model.model.layers.2.linear_attn.in_proj_ba: out0 (1023, 24) torch.float16: 1023/1023 rows differ (first row 0)
+  [   39] prop   L 2 language_model.model.layers.2.linear_attn.norm: out0 (1023, 12, 128) torch.float16: 1023/1023 rows differ (first row 0)
+  [   40] prop   L-1 all_reduce#tp:0: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   41] prop   L 2 language_model.model.layers.2.linear_attn.out_proj: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   42] prop   L 2 language_model.model.layers.2.linear_attn: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  [   43] prop   L 2 language_model.model.layers.2.mlp_hyper_connection.combine_and_mix: out0 (1023, 10240) torch.float16: 1023/1023 rows differ (first row 0); out1 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0); out2 (1023, 4) torch.float16: 902/1023 rows differ (first row 0)
+  [   44] prop   L 2 language_model.model.layers.2.mlp.gate: out0 (1023, 512) torch.float16: 1023/1023 rows differ (first row 0)
+  [   45] prop   L 2 language_model.model.layers.2.mlp.shared_expert: out0 (1023, 2560) torch.float16: 1023/1023 rows differ (first row 0)
+  divergent calls: 696 / 774; first SOURCE: (13, 'language_model.model.layers.0.mlp.experts')
+  divergent call count by module kind (top 15):
+       95  all_reduce#tp:0
+       48  language_model.model.layers.N.mlp.experts
+       48  language_model.model.layers.N.mlp
+       47  language_model.model.layers.N.mlp_hyper_connection.combine_and_mix
+       47  language_model.model.layers.N.mlp.gate
+       47  language_model.model.layers.N.mlp.shared_expert
+       46  language_model.model.layers.N.attn_hyper_connection.combine_and_mix
+       35  language_model.model.layers.N.linear_attn.in_proj_qkvz
+       35  language_model.model.layers.N.linear_attn.in_proj_ba
+       35  language_model.model.layers.N.linear_attn.norm
+       35  language_model.model.layers.N.linear_attn.out_proj
+       35  language_model.model.layers.N.linear_attn
+       12  language_model.model.layers.N.self_attn.qkv_proj
+       12  language_model.model.layers.N.self_attn.q_norm
+       12  language_model.model.layers.N.self_attn.k_norm

@@ -1,0 +1,1715 @@
+{
+  "torch": "2.12.0+rocm7.14.0",
+  "hip": "7.14.60850",
+  "device": "AMD Radeon Pro V620",
+  "env": {
+    "HIP_VISIBLE_DEVICES": "8",
+    "HSA_ENABLE_SDMA": "0",
+    "HSA_FORCE_FINE_GRAIN_PCIE": "1",
+    "GPU_MAX_HW_QUEUES": "4"
+  },
+  "cache_sha256": "33f512a7a748f1ceeda809880843e1cac02689c202687ebf91090832f7ceb28d",
+  "native_library": "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/vllm/_rocm_C.abi3.so",
+  "native_so_sha256": "4c8f039ad7db9bcfe11fc8959099049d2bb16c80572243ae4cdd257d512a9bf2",
+  "method": "actual PackedExpertCache._copy including Python arguments and C++ descriptor construction",
+  "order": [
+    "tensor",
+    "native",
+    "native",
+    "tensor"
+  ],
+  "warmup_cycles": 3,
+  "measured_cycles": 15,
+  "payload_row_bytes": [
+    1638400,
+    51200,
+    12800,
+    819200,
+    25600,
+    6400
+  ],
+  "host_plus_gpu_bytes": 81715328,
+  "event_caveat": "GPU-event interval includes CPU submission gaps; wall starts immediately before _copy and includes event recording/wait.",
+  "cells": [
+    {
+      "misses": 1,
+      "bytes": 2553600,
+      "bindings": [
+        [
+          3,
+          1,
+          true
+        ]
+      ],
+      "exact_bytes": true,
+      "samples": [
+        {
+          "cpu_enqueue_us": 105.625,
+          "gpu_event_interval_us": 287.96300292015076,
+          "wall_completion_us": 318.91,
+          "mode": "tensor",
+          "cycle": 0,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 88.654,
+          "gpu_event_interval_us": 249.0829974412918,
+          "wall_completion_us": 264.208,
+          "mode": "native",
+          "cycle": 0,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 38.461,
+          "gpu_event_interval_us": 205.86200058460236,
+          "wall_completion_us": 219.426,
+          "mode": "native",
+          "cycle": 0,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 121.705,
+          "gpu_event_interval_us": 232.4330061674118,
+          "wall_completion_us": 246.496,
+          "mode": "tensor",
+          "cycle": 0,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 104.363,
+          "gpu_event_interval_us": 224.821999669075,
+          "wall_completion_us": 238.15,
+          "mode": "tensor",
+          "cycle": 1,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 44.703,
+          "gpu_event_interval_us": 209.37199890613556,
+          "wall_completion_us": 222.812,
+          "mode": "native",
+          "cycle": 1,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 36.046,
+          "gpu_event_interval_us": 202.1619975566864,
+          "wall_completion_us": 216.039,
+          "mode": "native",
+          "cycle": 1,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 124.35,
+          "gpu_event_interval_us": 221.57199680805206,
+          "wall_completion_us": 235.645,
+          "mode": "tensor",
+          "cycle": 1,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 103.321,
+          "gpu_event_interval_us": 180.12100458145142,
+          "wall_completion_us": 192.807,
+          "mode": "tensor",
+          "cycle": 2,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 43.33,
+          "gpu_event_interval_us": 165.89100658893585,
+          "wall_completion_us": 178.831,
+          "mode": "native",
+          "cycle": 2,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 36.047,
+          "gpu_event_interval_us": 160.62100231647491,
+          "wall_completion_us": 173.22,
+          "mode": "native",
+          "cycle": 2,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 107.779,
+          "gpu_event_interval_us": 184.80099737644196,
+          "wall_completion_us": 198.567,
+          "mode": "tensor",
+          "cycle": 2,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 105.254,
+          "gpu_event_interval_us": 182.61200189590454,
+          "wall_completion_us": 195.16,
+          "mode": "tensor",
+          "cycle": 3,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 44.512,
+          "gpu_event_interval_us": 165.77200591564178,
+          "wall_completion_us": 178.64,
+          "mode": "native",
+          "cycle": 3,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 36.077,
+          "gpu_event_interval_us": 190.30199944972992,
+          "wall_completion_us": 202.765,
+          "mode": "native",
+          "cycle": 3,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 110.184,
+          "gpu_event_interval_us": 187.47200071811676,
+          "wall_completion_us": 200.311,
+          "mode": "tensor",
+          "cycle": 3,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 114.642,
+          "gpu_event_interval_us": 178.60199511051178,
+          "wall_completion_us": 191.204,
+          "mode": "tensor",
+          "cycle": 4,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 45.363,
+          "gpu_event_interval_us": 166.0510003566742,
+          "wall_completion_us": 178.53,
+          "mode": "native",
+          "cycle": 4,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 35.766,
+          "gpu_event_interval_us": 160.58099269866943,
+          "wall_completion_us": 172.949,
+          "mode": "native",
+          "cycle": 4,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 124.23,
+          "gpu_event_interval_us": 179.54200506210327,
+          "wall_completion_us": 196.053,
+          "mode": "tensor",
+          "cycle": 4,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 105.795,
+          "gpu_event_interval_us": 173.12100529670715,
+          "wall_completion_us": 190.211,
+          "mode": "tensor",
+          "cycle": 5,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 46.195,
+          "gpu_event_interval_us": 168.1710034608841,
+          "wall_completion_us": 180.754,
+          "mode": "native",
+          "cycle": 5,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 36.448,
+          "gpu_event_interval_us": 159.28100049495697,
+          "wall_completion_us": 171.898,
+          "mode": "native",
+          "cycle": 5,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 111.557,
+          "gpu_event_interval_us": 182.77199566364288,
+          "wall_completion_us": 195.953,
+          "mode": "tensor",
+          "cycle": 5,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 101.978,
+          "gpu_event_interval_us": 175.9909987449646,
+          "wall_completion_us": 188.668,
+          "mode": "tensor",
+          "cycle": 6,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 43.601,
+          "gpu_event_interval_us": 165.45100510120392,
+          "wall_completion_us": 178.73,
+          "mode": "native",
+          "cycle": 6,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 36.077,
+          "gpu_event_interval_us": 159.4409942626953,
+          "wall_completion_us": 172.87,
+          "mode": "native",
+          "cycle": 6,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 101.858,
+          "gpu_event_interval_us": 184.7810000181198,
+          "wall_completion_us": 197.705,
+          "mode": "tensor",
+          "cycle": 6,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 91.47,
+          "gpu_event_interval_us": 177.92099714279175,
+          "wall_completion_us": 190.843,
+          "mode": "tensor",
+          "cycle": 7,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 40.525,
+          "gpu_event_interval_us": 164.82099890708923,
+          "wall_completion_us": 177.618,
+          "mode": "native",
+          "cycle": 7,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 31.448,
+          "gpu_event_interval_us": 154.84100580215454,
+          "wall_completion_us": 168.051,
+          "mode": "native",
+          "cycle": 7,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 97.741,
+          "gpu_event_interval_us": 184.1209977865219,
+          "wall_completion_us": 197.345,
+          "mode": "tensor",
+          "cycle": 7,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 90.157,
+          "gpu_event_interval_us": 177.04099416732788,
+          "wall_completion_us": 190.121,
+          "mode": "tensor",
+          "cycle": 8,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 51.265,
+          "gpu_event_interval_us": 173.6910045146942,
+          "wall_completion_us": 186.435,
+          "mode": "native",
+          "cycle": 8,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 31.699,
+          "gpu_event_interval_us": 155.08100390434265,
+          "wall_completion_us": 167.88,
+          "mode": "native",
+          "cycle": 8,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 113.149,
+          "gpu_event_interval_us": 183.27100574970245,
+          "wall_completion_us": 196.644,
+          "mode": "tensor",
+          "cycle": 8,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 90.427,
+          "gpu_event_interval_us": 176.64100229740143,
+          "wall_completion_us": 189.46,
+          "mode": "tensor",
+          "cycle": 9,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 39.273,
+          "gpu_event_interval_us": 162.66100108623505,
+          "wall_completion_us": 175.365,
+          "mode": "native",
+          "cycle": 9,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 30.978,
+          "gpu_event_interval_us": 156.3110053539276,
+          "wall_completion_us": 168.983,
+          "mode": "native",
+          "cycle": 9,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 105.686,
+          "gpu_event_interval_us": 183.3219975233078,
+          "wall_completion_us": 196.764,
+          "mode": "tensor",
+          "cycle": 9,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 111.115,
+          "gpu_event_interval_us": 176.84100568294525,
+          "wall_completion_us": 189.721,
+          "mode": "tensor",
+          "cycle": 10,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 39.613,
+          "gpu_event_interval_us": 162.37099468708038,
+          "wall_completion_us": 175.214,
+          "mode": "native",
+          "cycle": 10,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 31.018,
+          "gpu_event_interval_us": 153.9909988641739,
+          "wall_completion_us": 166.819,
+          "mode": "native",
+          "cycle": 10,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 95.346,
+          "gpu_event_interval_us": 183.95200371742249,
+          "wall_completion_us": 196.984,
+          "mode": "tensor",
+          "cycle": 10,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 92.561,
+          "gpu_event_interval_us": 176.9219934940338,
+          "wall_completion_us": 189.891,
+          "mode": "tensor",
+          "cycle": 11,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 46.596,
+          "gpu_event_interval_us": 169.4220006465912,
+          "wall_completion_us": 182.548,
+          "mode": "native",
+          "cycle": 11,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 31.94,
+          "gpu_event_interval_us": 154.11199629306793,
+          "wall_completion_us": 167.069,
+          "mode": "native",
+          "cycle": 11,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 109.172,
+          "gpu_event_interval_us": 185.46199798583984,
+          "wall_completion_us": 198.517,
+          "mode": "tensor",
+          "cycle": 11,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 90.607,
+          "gpu_event_interval_us": 176.12199485301971,
+          "wall_completion_us": 189.079,
+          "mode": "tensor",
+          "cycle": 12,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 41.878,
+          "gpu_event_interval_us": 164.25199806690216,
+          "wall_completion_us": 177.108,
+          "mode": "native",
+          "cycle": 12,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 32.64,
+          "gpu_event_interval_us": 155.43200075626373,
+          "wall_completion_us": 168.552,
+          "mode": "native",
+          "cycle": 12,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 97.25,
+          "gpu_event_interval_us": 183.2820028066635,
+          "wall_completion_us": 196.253,
+          "mode": "tensor",
+          "cycle": 12,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 89.075,
+          "gpu_event_interval_us": 175.92200636863708,
+          "wall_completion_us": 188.81,
+          "mode": "tensor",
+          "cycle": 13,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 37.639,
+          "gpu_event_interval_us": 161.1820012331009,
+          "wall_completion_us": 174.182,
+          "mode": "native",
+          "cycle": 13,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 32.691,
+          "gpu_event_interval_us": 155.47199547290802,
+          "wall_completion_us": 168.803,
+          "mode": "native",
+          "cycle": 13,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 107.659,
+          "gpu_event_interval_us": 191.44199788570404,
+          "wall_completion_us": 204.819,
+          "mode": "tensor",
+          "cycle": 13,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 88.033,
+          "gpu_event_interval_us": 176.4419972896576,
+          "wall_completion_us": 189.891,
+          "mode": "tensor",
+          "cycle": 14,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 39.503,
+          "gpu_event_interval_us": 162.10199892520905,
+          "wall_completion_us": 174.984,
+          "mode": "native",
+          "cycle": 14,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 32.811,
+          "gpu_event_interval_us": 156.59199655056,
+          "wall_completion_us": 169.694,
+          "mode": "native",
+          "cycle": 14,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 96.188,
+          "gpu_event_interval_us": 180.5720031261444,
+          "wall_completion_us": 194.28,
+          "mode": "tensor",
+          "cycle": 14,
+          "arm": 3
+        }
+      ],
+      "summary": {
+        "tensor": {
+          "cpu_enqueue_us": {
+            "median": 104.80850000000001,
+            "p10": 90.4,
+            "p90": 115.34830000000001
+          },
+          "gpu_event_interval_us": {
+            "median": 182.6919987797737,
+            "p10": 176.1088952422142,
+            "p90": 221.89699709415436
+          },
+          "wall_completion_us": {
+            "median": 196.003,
+            "p10": 189.42190000000002,
+            "p90": 235.89550000000003
+          }
+        },
+        "native": {
+          "cpu_enqueue_us": {
+            "median": 38.05,
+            "p10": 31.673900000000003,
+            "p90": 46.2351
+          },
+          "gpu_event_interval_us": {
+            "median": 162.51599788665771,
+            "p10": 155.05700409412384,
+            "p90": 202.531997859478
+          },
+          "wall_completion_us": {
+            "median": 175.2895,
+            "p10": 168.0339,
+            "p90": 216.3777
+          }
+        }
+      }
+    },
+    {
+      "misses": 4,
+      "bytes": 10214400,
+      "bindings": [
+        [
+          3,
+          1,
+          true
+        ],
+        [
+          8,
+          8,
+          true
+        ],
+        [
+          13,
+          15,
+          true
+        ],
+        [
+          2,
+          6,
+          true
+        ]
+      ],
+      "exact_bytes": true,
+      "samples": [
+        {
+          "cpu_enqueue_us": 402.554,
+          "gpu_event_interval_us": 886.1179947853088,
+          "wall_completion_us": 899.143,
+          "mode": "tensor",
+          "cycle": 0,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 133.076,
+          "gpu_event_interval_us": 691.3560032844543,
+          "wall_completion_us": 704.653,
+          "mode": "native",
+          "cycle": 0,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 48.489,
+          "gpu_event_interval_us": 446.4240074157715,
+          "wall_completion_us": 459.95,
+          "mode": "native",
+          "cycle": 0,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 385.162,
+          "gpu_event_interval_us": 704.2170166969299,
+          "wall_completion_us": 717.477,
+          "mode": "tensor",
+          "cycle": 0,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 372.8,
+          "gpu_event_interval_us": 705.1460146903992,
+          "wall_completion_us": 717.808,
+          "mode": "tensor",
+          "cycle": 1,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 55.212,
+          "gpu_event_interval_us": 452.0240128040314,
+          "wall_completion_us": 468.807,
+          "mode": "native",
+          "cycle": 1,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 46.506,
+          "gpu_event_interval_us": 445.25501132011414,
+          "wall_completion_us": 458.258,
+          "mode": "native",
+          "cycle": 1,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 403.736,
+          "gpu_event_interval_us": 709.426999092102,
+          "wall_completion_us": 722.265,
+          "mode": "tensor",
+          "cycle": 1,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 388.639,
+          "gpu_event_interval_us": 713.6070132255554,
+          "wall_completion_us": 726.975,
+          "mode": "tensor",
+          "cycle": 2,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 61.764,
+          "gpu_event_interval_us": 460.61500906944275,
+          "wall_completion_us": 473.345,
+          "mode": "native",
+          "cycle": 2,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 44.242,
+          "gpu_event_interval_us": 449.3739902973175,
+          "wall_completion_us": 462.455,
+          "mode": "native",
+          "cycle": 2,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 391.184,
+          "gpu_event_interval_us": 702.8459906578064,
+          "wall_completion_us": 715.624,
+          "mode": "tensor",
+          "cycle": 2,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 395.842,
+          "gpu_event_interval_us": 696.4259743690491,
+          "wall_completion_us": 708.981,
+          "mode": "tensor",
+          "cycle": 3,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 59.059,
+          "gpu_event_interval_us": 456.66399598121643,
+          "wall_completion_us": 469.558,
+          "mode": "native",
+          "cycle": 3,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 47.227,
+          "gpu_event_interval_us": 575.0060081481934,
+          "wall_completion_us": 588.147,
+          "mode": "native",
+          "cycle": 3,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 372.869,
+          "gpu_event_interval_us": 822.3080039024353,
+          "wall_completion_us": 835.935,
+          "mode": "tensor",
+          "cycle": 3,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 361.749,
+          "gpu_event_interval_us": 881.3289999961853,
+          "wall_completion_us": 894.875,
+          "mode": "tensor",
+          "cycle": 4,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 56.084,
+          "gpu_event_interval_us": 992.4399852752686,
+          "wall_completion_us": 1005.901,
+          "mode": "native",
+          "cycle": 4,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 43.53,
+          "gpu_event_interval_us": 935.4889988899231,
+          "wall_completion_us": 948.885,
+          "mode": "native",
+          "cycle": 4,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 407.825,
+          "gpu_event_interval_us": 1198.3519792556763,
+          "wall_completion_us": 1211.711,
+          "mode": "tensor",
+          "cycle": 4,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 387.036,
+          "gpu_event_interval_us": 1063.0500316619873,
+          "wall_completion_us": 1077.032,
+          "mode": "tensor",
+          "cycle": 5,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 62.585,
+          "gpu_event_interval_us": 554.9259781837463,
+          "wall_completion_us": 567.82,
+          "mode": "native",
+          "cycle": 5,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 40.054,
+          "gpu_event_interval_us": 637.9460096359253,
+          "wall_completion_us": 652.507,
+          "mode": "native",
+          "cycle": 5,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 470.44,
+          "gpu_event_interval_us": 1731.1660051345825,
+          "wall_completion_us": 1755.176,
+          "mode": "tensor",
+          "cycle": 5,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 373.541,
+          "gpu_event_interval_us": 889.087975025177,
+          "wall_completion_us": 902.539,
+          "mode": "tensor",
+          "cycle": 6,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 67.826,
+          "gpu_event_interval_us": 644.2670226097107,
+          "wall_completion_us": 657.406,
+          "mode": "native",
+          "cycle": 6,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 40.785,
+          "gpu_event_interval_us": 631.4560174942017,
+          "wall_completion_us": 644.582,
+          "mode": "native",
+          "cycle": 6,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 353.904,
+          "gpu_event_interval_us": 877.9190182685852,
+          "wall_completion_us": 891.228,
+          "mode": "tensor",
+          "cycle": 6,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 354.245,
+          "gpu_event_interval_us": 728.8870215415955,
+          "wall_completion_us": 742.052,
+          "mode": "tensor",
+          "cycle": 7,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 56.574,
+          "gpu_event_interval_us": 484.9250018596649,
+          "wall_completion_us": 497.88,
+          "mode": "native",
+          "cycle": 7,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 39.863,
+          "gpu_event_interval_us": 463.0649983882904,
+          "wall_completion_us": 476.01,
+          "mode": "native",
+          "cycle": 7,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 361.739,
+          "gpu_event_interval_us": 792.0269966125488,
+          "wall_completion_us": 805.279,
+          "mode": "tensor",
+          "cycle": 7,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 361.158,
+          "gpu_event_interval_us": 997.7689981460571,
+          "wall_completion_us": 1011.0,
+          "mode": "tensor",
+          "cycle": 8,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 50.523,
+          "gpu_event_interval_us": 723.7769961357117,
+          "wall_completion_us": 737.594,
+          "mode": "native",
+          "cycle": 8,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 46.566,
+          "gpu_event_interval_us": 1291.6719913482666,
+          "wall_completion_us": 1305.283,
+          "mode": "native",
+          "cycle": 8,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 403.406,
+          "gpu_event_interval_us": 1494.323968887329,
+          "wall_completion_us": 1508.69,
+          "mode": "tensor",
+          "cycle": 8,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 389.02,
+          "gpu_event_interval_us": 1244.81201171875,
+          "wall_completion_us": 1258.658,
+          "mode": "tensor",
+          "cycle": 9,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 49.963,
+          "gpu_event_interval_us": 758.3479881286621,
+          "wall_completion_us": 772.178,
+          "mode": "native",
+          "cycle": 9,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 49.221,
+          "gpu_event_interval_us": 1503.0540227890015,
+          "wall_completion_us": 1519.63,
+          "mode": "native",
+          "cycle": 9,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 386.505,
+          "gpu_event_interval_us": 1145.3009843826294,
+          "wall_completion_us": 1160.897,
+          "mode": "tensor",
+          "cycle": 9,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 365.286,
+          "gpu_event_interval_us": 868.6879873275757,
+          "wall_completion_us": 882.091,
+          "mode": "tensor",
+          "cycle": 10,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 55.262,
+          "gpu_event_interval_us": 622.4650144577026,
+          "wall_completion_us": 635.485,
+          "mode": "native",
+          "cycle": 10,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 40.485,
+          "gpu_event_interval_us": 611.9660139083862,
+          "wall_completion_us": 625.056,
+          "mode": "native",
+          "cycle": 10,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 366.678,
+          "gpu_event_interval_us": 732.217013835907,
+          "wall_completion_us": 745.729,
+          "mode": "tensor",
+          "cycle": 10,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 339.588,
+          "gpu_event_interval_us": 725.2470254898071,
+          "wall_completion_us": 738.907,
+          "mode": "tensor",
+          "cycle": 11,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 50.523,
+          "gpu_event_interval_us": 466.9950008392334,
+          "wall_completion_us": 480.148,
+          "mode": "native",
+          "cycle": 11,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 39.333,
+          "gpu_event_interval_us": 454.07500863075256,
+          "wall_completion_us": 467.214,
+          "mode": "native",
+          "cycle": 11,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 358.182,
+          "gpu_event_interval_us": 723.9969968795776,
+          "wall_completion_us": 737.444,
+          "mode": "tensor",
+          "cycle": 11,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 359.765,
+          "gpu_event_interval_us": 709.2069983482361,
+          "wall_completion_us": 722.626,
+          "mode": "tensor",
+          "cycle": 12,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 52.157,
+          "gpu_event_interval_us": 461.6149961948395,
+          "wall_completion_us": 474.909,
+          "mode": "native",
+          "cycle": 12,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 41.577,
+          "gpu_event_interval_us": 453.46400141716003,
+          "wall_completion_us": 466.222,
+          "mode": "native",
+          "cycle": 12,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 354.435,
+          "gpu_event_interval_us": 712.6759886741638,
+          "wall_completion_us": 726.303,
+          "mode": "tensor",
+          "cycle": 12,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 355.888,
+          "gpu_event_interval_us": 712.5669717788696,
+          "wall_completion_us": 725.882,
+          "mode": "tensor",
+          "cycle": 13,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 51.595,
+          "gpu_event_interval_us": 463.96398544311523,
+          "wall_completion_us": 476.932,
+          "mode": "native",
+          "cycle": 13,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 38.06,
+          "gpu_event_interval_us": 743.956983089447,
+          "wall_completion_us": 757.04,
+          "mode": "native",
+          "cycle": 13,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 382.598,
+          "gpu_event_interval_us": 950.2689838409424,
+          "wall_completion_us": 963.772,
+          "mode": "tensor",
+          "cycle": 13,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 375.484,
+          "gpu_event_interval_us": 1534.2940092086792,
+          "wall_completion_us": 1549.375,
+          "mode": "tensor",
+          "cycle": 14,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 55.363,
+          "gpu_event_interval_us": 1293.6019897460938,
+          "wall_completion_us": 1308.069,
+          "mode": "native",
+          "cycle": 14,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 45.174,
+          "gpu_event_interval_us": 1000.8300542831421,
+          "wall_completion_us": 1015.108,
+          "mode": "native",
+          "cycle": 14,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 369.303,
+          "gpu_event_interval_us": 848.0780124664307,
+          "wall_completion_us": 861.463,
+          "mode": "tensor",
+          "cycle": 14,
+          "arm": 3
+        }
+      ],
+      "summary": {
+        "tensor": {
+          "cpu_enqueue_us": {
+            "median": 373.20500000000004,
+            "p10": 354.416,
+            "p90": 403.439
+          },
+          "gpu_event_interval_us": {
+            "median": 835.193008184433,
+            "p10": 705.0531148910522,
+            "p90": 1269.7632074356084
+          },
+          "wall_completion_us": {
+            "median": 848.699,
+            "p10": 717.7749,
+            "p90": 1283.6612000000002
+          }
+        },
+        "native": {
+          "cpu_enqueue_us": {
+            "median": 49.592,
+            "p10": 40.0349,
+            "p90": 61.84610000000001
+          },
+          "gpu_event_interval_us": {
+            "median": 593.4860110282898,
+            "p10": 451.75901055336,
+            "p90": 1029.914247989655
+          },
+          "wall_completion_us": {
+            "median": 606.6015,
+            "p10": 465.8453,
+            "p90": 1044.1255000000003
+          }
+        }
+      }
+    },
+    {
+      "misses": 16,
+      "bytes": 40857600,
+      "bindings": [
+        [
+          3,
+          1,
+          true
+        ],
+        [
+          8,
+          8,
+          true
+        ],
+        [
+          13,
+          15,
+          true
+        ],
+        [
+          2,
+          6,
+          true
+        ],
+        [
+          7,
+          13,
+          true
+        ],
+        [
+          12,
+          4,
+          true
+        ],
+        [
+          1,
+          11,
+          true
+        ],
+        [
+          6,
+          2,
+          true
+        ],
+        [
+          11,
+          9,
+          true
+        ],
+        [
+          0,
+          0,
+          true
+        ],
+        [
+          5,
+          7,
+          true
+        ],
+        [
+          10,
+          14,
+          true
+        ],
+        [
+          15,
+          5,
+          true
+        ],
+        [
+          4,
+          12,
+          true
+        ],
+        [
+          9,
+          3,
+          true
+        ],
+        [
+          14,
+          10,
+          true
+        ]
+      ],
+      "exact_bytes": true,
+      "samples": [
+        {
+          "cpu_enqueue_us": 1771.727,
+          "gpu_event_interval_us": 3047.05810546875,
+          "wall_completion_us": 3056.202,
+          "mode": "tensor",
+          "cycle": 0,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 173.23,
+          "gpu_event_interval_us": 1658.6450338363647,
+          "wall_completion_us": 1672.302,
+          "mode": "native",
+          "cycle": 0,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 81.851,
+          "gpu_event_interval_us": 1603.1949520111084,
+          "wall_completion_us": 1616.339,
+          "mode": "native",
+          "cycle": 0,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1516.133,
+          "gpu_event_interval_us": 2783.5168838500977,
+          "wall_completion_us": 2796.561,
+          "mode": "tensor",
+          "cycle": 0,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1496.176,
+          "gpu_event_interval_us": 2776.827096939087,
+          "wall_completion_us": 2790.259,
+          "mode": "tensor",
+          "cycle": 1,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 89.616,
+          "gpu_event_interval_us": 1582.1850299835205,
+          "wall_completion_us": 1595.371,
+          "mode": "native",
+          "cycle": 1,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 77.994,
+          "gpu_event_interval_us": 1566.444993019104,
+          "wall_completion_us": 1579.511,
+          "mode": "native",
+          "cycle": 1,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1519.32,
+          "gpu_event_interval_us": 2775.106906890869,
+          "wall_completion_us": 2788.056,
+          "mode": "tensor",
+          "cycle": 1,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1530.821,
+          "gpu_event_interval_us": 2781.8069458007812,
+          "wall_completion_us": 2795.519,
+          "mode": "tensor",
+          "cycle": 2,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 97.28,
+          "gpu_event_interval_us": 1581.7749500274658,
+          "wall_completion_us": 1595.07,
+          "mode": "native",
+          "cycle": 2,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 77.774,
+          "gpu_event_interval_us": 1571.8950033187866,
+          "wall_completion_us": 1585.622,
+          "mode": "native",
+          "cycle": 2,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1513.73,
+          "gpu_event_interval_us": 2781.765937805176,
+          "wall_completion_us": 2795.189,
+          "mode": "tensor",
+          "cycle": 2,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1532.003,
+          "gpu_event_interval_us": 2781.935930252075,
+          "wall_completion_us": 2795.189,
+          "mode": "tensor",
+          "cycle": 3,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 91.88,
+          "gpu_event_interval_us": 1581.8949937820435,
+          "wall_completion_us": 1595.25,
+          "mode": "native",
+          "cycle": 3,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 81.551,
+          "gpu_event_interval_us": 1568.3749914169312,
+          "wall_completion_us": 1581.514,
+          "mode": "native",
+          "cycle": 3,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1552.631,
+          "gpu_event_interval_us": 2783.607006072998,
+          "wall_completion_us": 2796.822,
+          "mode": "tensor",
+          "cycle": 3,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1544.165,
+          "gpu_event_interval_us": 2773.906946182251,
+          "wall_completion_us": 2787.314,
+          "mode": "tensor",
+          "cycle": 4,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 108.691,
+          "gpu_event_interval_us": 1607.9050302505493,
+          "wall_completion_us": 1621.318,
+          "mode": "native",
+          "cycle": 4,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 76.551,
+          "gpu_event_interval_us": 1573.294997215271,
+          "wall_completion_us": 1586.453,
+          "mode": "native",
+          "cycle": 4,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1558.322,
+          "gpu_event_interval_us": 2784.99698638916,
+          "wall_completion_us": 2798.676,
+          "mode": "tensor",
+          "cycle": 4,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1589.209,
+          "gpu_event_interval_us": 3406.3730239868164,
+          "wall_completion_us": 3419.614,
+          "mode": "tensor",
+          "cycle": 5,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 261.043,
+          "gpu_event_interval_us": 4757.475852966309,
+          "wall_completion_us": 4773.477,
+          "mode": "native",
+          "cycle": 5,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 108.24,
+          "gpu_event_interval_us": 6127.327919006348,
+          "wall_completion_us": 6142.559,
+          "mode": "native",
+          "cycle": 5,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 3834.531,
+          "gpu_event_interval_us": 7501.3017654418945,
+          "wall_completion_us": 7521.289,
+          "mode": "tensor",
+          "cycle": 5,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 3628.961,
+          "gpu_event_interval_us": 6444.180965423584,
+          "wall_completion_us": 6560.271,
+          "mode": "tensor",
+          "cycle": 6,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 200.631,
+          "gpu_event_interval_us": 2562.0439052581787,
+          "wall_completion_us": 2575.392,
+          "mode": "native",
+          "cycle": 6,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 73.716,
+          "gpu_event_interval_us": 1784.0169668197632,
+          "wall_completion_us": 1797.263,
+          "mode": "native",
+          "cycle": 6,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1422.461,
+          "gpu_event_interval_us": 2779.536008834839,
+          "wall_completion_us": 2792.925,
+          "mode": "tensor",
+          "cycle": 6,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1409.757,
+          "gpu_event_interval_us": 2761.0270977020264,
+          "wall_completion_us": 2774.28,
+          "mode": "tensor",
+          "cycle": 7,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 76.862,
+          "gpu_event_interval_us": 1551.1850118637085,
+          "wall_completion_us": 1564.343,
+          "mode": "native",
+          "cycle": 7,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 64.499,
+          "gpu_event_interval_us": 1541.1449670791626,
+          "wall_completion_us": 1554.294,
+          "mode": "native",
+          "cycle": 7,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1405.78,
+          "gpu_event_interval_us": 2759.7360610961914,
+          "wall_completion_us": 2773.149,
+          "mode": "tensor",
+          "cycle": 7,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1406.441,
+          "gpu_event_interval_us": 2758.945941925049,
+          "wall_completion_us": 2772.427,
+          "mode": "tensor",
+          "cycle": 8,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 78.776,
+          "gpu_event_interval_us": 1563.444972038269,
+          "wall_completion_us": 1576.776,
+          "mode": "native",
+          "cycle": 8,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 63.818,
+          "gpu_event_interval_us": 1539.674997329712,
+          "wall_completion_us": 1552.972,
+          "mode": "native",
+          "cycle": 8,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1413.223,
+          "gpu_event_interval_us": 2771.0869312286377,
+          "wall_completion_us": 2784.78,
+          "mode": "tensor",
+          "cycle": 8,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1409.386,
+          "gpu_event_interval_us": 2765.716075897217,
+          "wall_completion_us": 2778.818,
+          "mode": "tensor",
+          "cycle": 9,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 77.633,
+          "gpu_event_interval_us": 1553.974986076355,
+          "wall_completion_us": 1567.208,
+          "mode": "native",
+          "cycle": 9,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 63.257,
+          "gpu_event_interval_us": 1541.2050485610962,
+          "wall_completion_us": 1554.414,
+          "mode": "native",
+          "cycle": 9,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1411.04,
+          "gpu_event_interval_us": 2777.846097946167,
+          "wall_completion_us": 2791.242,
+          "mode": "tensor",
+          "cycle": 9,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1421.609,
+          "gpu_event_interval_us": 2775.4459381103516,
+          "wall_completion_us": 2788.677,
+          "mode": "tensor",
+          "cycle": 10,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 202.204,
+          "gpu_event_interval_us": 1681.496024131775,
+          "wall_completion_us": 1694.733,
+          "mode": "native",
+          "cycle": 10,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 69.969,
+          "gpu_event_interval_us": 1548.854947090149,
+          "wall_completion_us": 1562.078,
+          "mode": "native",
+          "cycle": 10,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1414.756,
+          "gpu_event_interval_us": 2772.0959186553955,
+          "wall_completion_us": 2785.681,
+          "mode": "tensor",
+          "cycle": 10,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1420.717,
+          "gpu_event_interval_us": 3006.7479610443115,
+          "wall_completion_us": 3020.436,
+          "mode": "tensor",
+          "cycle": 11,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 78.144,
+          "gpu_event_interval_us": 4035.9878540039062,
+          "wall_completion_us": 4052.654,
+          "mode": "native",
+          "cycle": 11,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 138.717,
+          "gpu_event_interval_us": 2582.6449394226074,
+          "wall_completion_us": 2614.285,
+          "mode": "native",
+          "cycle": 11,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 2638.288,
+          "gpu_event_interval_us": 4191.399097442627,
+          "wall_completion_us": 4258.214,
+          "mode": "tensor",
+          "cycle": 11,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1427.099,
+          "gpu_event_interval_us": 2788.1760597229004,
+          "wall_completion_us": 2801.641,
+          "mode": "tensor",
+          "cycle": 12,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 121.575,
+          "gpu_event_interval_us": 1592.5450325012207,
+          "wall_completion_us": 1606.05,
+          "mode": "native",
+          "cycle": 12,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 66.974,
+          "gpu_event_interval_us": 1541.604995727539,
+          "wall_completion_us": 1554.885,
+          "mode": "native",
+          "cycle": 12,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1414.015,
+          "gpu_event_interval_us": 2766.6358947753906,
+          "wall_completion_us": 2780.152,
+          "mode": "tensor",
+          "cycle": 12,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1405.86,
+          "gpu_event_interval_us": 2760.7059478759766,
+          "wall_completion_us": 2774.581,
+          "mode": "tensor",
+          "cycle": 13,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 109.382,
+          "gpu_event_interval_us": 1588.884949684143,
+          "wall_completion_us": 1602.183,
+          "mode": "native",
+          "cycle": 13,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 65.281,
+          "gpu_event_interval_us": 1545.9940433502197,
+          "wall_completion_us": 1559.193,
+          "mode": "native",
+          "cycle": 13,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1416.058,
+          "gpu_event_interval_us": 2766.947031021118,
+          "wall_completion_us": 2781.343,
+          "mode": "tensor",
+          "cycle": 13,
+          "arm": 3
+        },
+        {
+          "cpu_enqueue_us": 1414.997,
+          "gpu_event_interval_us": 2770.3959941864014,
+          "wall_completion_us": 2783.488,
+          "mode": "tensor",
+          "cycle": 14,
+          "arm": 0
+        },
+        {
+          "cpu_enqueue_us": 89.646,
+          "gpu_event_interval_us": 1572.7349519729614,
+          "wall_completion_us": 1586.203,
+          "mode": "native",
+          "cycle": 14,
+          "arm": 1
+        },
+        {
+          "cpu_enqueue_us": 66.533,
+          "gpu_event_interval_us": 1539.2249822616577,
+          "wall_completion_us": 1553.132,
+          "mode": "native",
+          "cycle": 14,
+          "arm": 2
+        },
+        {
+          "cpu_enqueue_us": 1431.387,
+          "gpu_event_interval_us": 2796.466112136841,
+          "wall_completion_us": 2809.846,
+          "mode": "tensor",
+          "cycle": 14,
+          "arm": 3
+        }
+      ],
+      "summary": {
+        "tensor": {
+          "cpu_enqueue_us": {
+            "median": 1429.243,
+            "p10": 1409.0915,
+            "p90": 1858.3831000000014
+          },
+          "gpu_event_interval_us": {
+            "median": 2778.691053390503,
+            "p10": 2760.9949827194214,
+            "p90": 3484.8756313323984
+          },
+          "wall_completion_us": {
+            "median": 2792.0835,
+            "p10": 2774.5509,
+            "p90": 3503.474000000001
+          }
+        },
+        "native": {
+          "cpu_enqueue_us": {
+            "median": 80.1635,
+            "p10": 65.20280000000001,
+            "p90": 175.97010000000003
+          },
+          "gpu_event_interval_us": {
+            "median": 1577.5349736213684,
+            "p10": 1541.1990404129028,
+            "p90": 2727.9792308807396
+          },
+          "wall_completion_us": {
+            "median": 1590.7615,
+            "p10": 1554.402,
+            "p90": 2758.121900000002
+          }
+        }
+      }
+    }
+  ]
+}

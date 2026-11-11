@@ -77,7 +77,7 @@ class TuningCoverageTests(unittest.TestCase):
                     'printf "%s:%s" "$PYTORCH_TUNABLEOP_ENABLED" '
                     '"${PYTORCH_TUNABLEOP_FILENAME-unset}"',
                     "check-tuning",
-                    str(ROOT / "tools/rdna2/tunableop_env.sh"),
+                    str(ROOT / "tools/rdna2_028/tunableop_env.sh"),
                     str(library),
                     str(ROWS.parent),
                 ],

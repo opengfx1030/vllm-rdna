@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+RUN_OUT=${RUN_OUT:?set a new absolute RUN_OUT path}
+VLLM_SOURCE_ROOT=${VLLM_SOURCE_ROOT:-/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2}
+VENV=${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final}
+PORT=${MASTER_PORT:-29741}
+
+[[ $(hostname) == par1-cs25 ]] || { echo "refusing host $(hostname)" >&2; exit 2; }
+[[ $RUN_OUT == /* && ! -e $RUN_OUT ]] || { echo "RUN_OUT must be a new absolute path" >&2; exit 2; }
+[[ -x $VENV/bin/python && -d $VLLM_SOURCE_ROOT ]] || { echo 'frozen venv/source missing' >&2; exit 2; }
+[[ $(sha256sum "$VLLM_SOURCE_ROOT/vllm/_rocm_C.abi3.so" | cut -d' ' -f1) == 3f688006eec38adef6cf4d4546735f66b8892d8066387336a88ba6fe7b668bac ]] || { echo 'core SHA mismatch' >&2; exit 3; }
+[[ $(sha256sum "$VLLM_SOURCE_ROOT/csrc/rocm/mono_k2_rdna2.cu" | cut -d' ' -f1) == bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf ]] || { echo 'MonoKernel source SHA mismatch' >&2; exit 3; }
+
+mkdir -p "$(dirname "$RUN_OUT")"
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -n 9 || { echo 'HIP6-9 shared lock is held' >&2; exit 4; }
+"$VENV/bin/python" -S "$HERE/check_reserved_gpu.py" >"$RUN_OUT.gpu-owners.txt" 2>&1
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES=6,7,8,9
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export VLLM_SOURCE_ROOT
+export PYTHONPATH="$VLLM_SOURCE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+mkdir -p "$RUN_OUT"
+cat /proc/sys/kernel/random/boot_id >"$RUN_OUT/boot-id.before"
+{
+  printf 'HIP_VISIBLE_DEVICES=%s\n' "$HIP_VISIBLE_DEVICES"
+  printf 'WORLD_SIZE=4\nVLLM_SOURCE_ROOT=%s\nVENV=%s\n' "$VLLM_SOURCE_ROOT" "$VENV"
+  printf 'VLLM_RDNA_AR=%s\nGPU_MAX_HW_QUEUES=%s\n' "${VLLM_RDNA_AR:-}" "${GPU_MAX_HW_QUEUES:-}"
+  printf 'PYTORCH_TUNABLEOP_ENABLED=%s\nPYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=%s\n' \
+    "${PYTORCH_TUNABLEOP_ENABLED:-}" "${PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED:-}"
+  printf 'HSA_FORCE_FINE_GRAIN_PCIE=%s\n' "${HSA_FORCE_FINE_GRAIN_PCIE:-}"
+} >"$RUN_OUT/environment.txt"
+sha256sum \
+  "$VLLM_SOURCE_ROOT/vllm/_rocm_C.abi3.so" \
+  "$VLLM_SOURCE_ROOT/csrc/rocm/mono_k2_rdna2.cu" \
+  "$VLLM_SOURCE_ROOT/vllm/distributed/parallel_state.py" \
+  "$VLLM_SOURCE_ROOT/vllm/distributed/device_communicators/cuda_communicator.py" \
+  "$VLLM_SOURCE_ROOT/vllm/distributed/device_communicators/rdna_all_reduce.py" \
+  "$VLLM_SOURCE_ROOT/vllm/distributed/device_communicators/pynccl.py" \
+  "$VLLM_SOURCE_ROOT/vllm/models/qwen4_exp/amd/mono/rdna2/k2.py" \
+  "$VLLM_SOURCE_ROOT/vllm/models/qwen4_exp/amd/mono/rdna2/layout.py" \
+  >"$RUN_OUT/source.before.sha256"
+set +e
+timeout --signal=TERM --kill-after=10s 240s "$VENV/bin/python" -m torch.distributed.run \
+  --standalone --nnodes=1 --nproc_per_node=4 --master_port="$PORT" \
+  "$HERE/tp4_health_collective.py" --output "$RUN_OUT" >"$RUN_OUT/driver.log" 2>&1
+STATUS=$?
+set -e
+sha256sum \
+  "$VLLM_SOURCE_ROOT/vllm/_rocm_C.abi3.so" \
+  "$VLLM_SOURCE_ROOT/csrc/rocm/mono_k2_rdna2.cu" \
+  "$VLLM_SOURCE_ROOT/vllm/distributed/parallel_state.py" \
+  "$VLLM_SOURCE_ROOT/vllm/distributed/device_communicators/cuda_communicator.py" \
+  "$VLLM_SOURCE_ROOT/vllm/distributed/device_communicators/rdna_all_reduce.py" \
+  "$VLLM_SOURCE_ROOT/vllm/distributed/device_communicators/pynccl.py" \
+  "$VLLM_SOURCE_ROOT/vllm/models/qwen4_exp/amd/mono/rdna2/k2.py" \
+  "$VLLM_SOURCE_ROOT/vllm/models/qwen4_exp/amd/mono/rdna2/layout.py" \
+  >"$RUN_OUT/source.after.sha256"
+cat /proc/sys/kernel/random/boot_id >"$RUN_OUT/boot-id.after"
+diff -u "$RUN_OUT/source.before.sha256" "$RUN_OUT/source.after.sha256"
+diff -u "$RUN_OUT/boot-id.before" "$RUN_OUT/boot-id.after"
+printf '%s\n' "$STATUS" >"$RUN_OUT/exit-status.txt"
+exit "$STATUS"

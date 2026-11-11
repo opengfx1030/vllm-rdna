@@ -7,8 +7,11 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import os
+
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 
 
@@ -178,6 +181,11 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         p_a += HV
 
 
+def _dense_heads(t: torch.Tensor) -> bool:
+    """True when each token's [heads, dim] block is dense (any token stride)."""
+    return t.stride(-1) == 1 and t.stride(-2) == t.shape[-1]
+
+
 def fused_sigmoid_gating_delta_rule_update(
     A_log: torch.Tensor,
     a: torch.Tensor,
@@ -196,11 +204,16 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    out: torch.Tensor | None = None,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
+
+    ``out`` (contiguous [B, T, HV, V], q's dtype) receives the result in place;
+    q/k/v may be views into a packed projection when the RDNA2 HIP kernel
+    takes them (it reads a token stride per tensor).
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -222,7 +235,8 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         assert scale > 0, "scale must be positive"
 
-    o = q.new_empty(NK, *v.shape)
+    assert out is None or out.is_contiguous(), "out must be contiguous"
+    o = q.new_empty(NK, *v.shape) if out is None else out.unsqueeze(0)
     if inplace_final_state:
         final_state = initial_state
     else:
@@ -238,6 +252,68 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
+    # AMD RDNA2 (gfx1030): the MTP spec-verify step launches this kernel once
+    # per GDN layer per decode step. gdn_spec_verify_rdna2 covers the deployed
+    # shape (varlen spec decode, in-place state, fp16 inputs, K == 128); every
+    # other shape stays on Triton.
+    if (
+        os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
+        and on_rdna2_hip()
+        and inplace_final_state
+        and cu_seqlens is not None
+        and ssm_state_indices is not None
+        and use_qk_l2norm_in_kernel
+        and not is_kda
+        and beta == 1.0
+        and threshold == 20.0
+        and q.dtype == torch.float16
+        and k.dtype == torch.float16
+        and v.dtype == torch.float16
+        and a.dtype == torch.float16
+        and b.dtype == torch.float16
+        and initial_state.dtype in (torch.float32, torch.float16)
+        and q.shape[0] == 1
+        and K == 128
+        and V >= 32
+        and V % 32 == 0
+        and HV % H == 0
+        and _dense_heads(q)
+        and _dense_heads(k)
+        and _dense_heads(v)
+        and a.stride(-1) == 1
+        and b.stride(-1) == 1
+        and initial_state.stride(-1) == 1
+        # cu_seqlens / num_accepted_tokens are read with a unit stride.
+        and cu_seqlens.stride(0) == 1
+        and (num_accepted_tokens is None or num_accepted_tokens.stride(0) == 1)
+    ):
+        if not hasattr(torch.ops, "_rocm_C") or not hasattr(
+            torch.ops._rocm_C, "gdn_spec_verify_rdna2"
+        ):
+            # Loud on gfx10x: silently falling back to Triton here is the
+            # regression the HIP port exists to remove.
+            raise RuntimeError(
+                "VLLM_GDN_DECODE_RDNA2 is enabled on gfx10x but "
+                "gdn_spec_verify_rdna2 is not built; rebuild _rocm_C."
+            )
+        torch.ops._rocm_C.gdn_spec_verify_rdna2(
+            q,
+            k,
+            v,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            o.squeeze(0),
+            initial_state,
+            cu_seqlens,
+            ssm_state_indices,
+            num_accepted_tokens
+            if num_accepted_tokens is not None
+            else torch.empty(0, device=q.device, dtype=torch.int32),
+            float(scale),
+        )
+        return o.squeeze(0), final_state
     grid = (NK, NV, N * HV)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,

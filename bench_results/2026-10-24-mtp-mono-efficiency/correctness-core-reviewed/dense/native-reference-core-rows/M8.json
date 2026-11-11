@@ -1,0 +1,247 @@
+{
+  "candidate": "dense_round_adapter:run",
+  "candidate_binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/torch-extensions-dense-round-v2/mono_k2_dense_native_rounding_v2_scratch_20261024/mono_k2_dense_native_rounding_v2_scratch_20261024.so",
+  "candidate_binary_sha256": "837e6ab2ff6c43831bfcaa39e807d8a7916a542039c32d503ee680d9d3bca601",
+  "candidate_error_record": [
+    0,
+    0,
+    0,
+    144,
+    0,
+    18
+  ],
+  "candidate_graph_changed_input_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05,
+      4.57763671875e-05,
+      6.103515625e-05,
+      6.103515625e-05,
+      6.103515625e-05,
+      3.0517578125e-05
+    ],
+    "max_abs_error_ffn": 0.0001220703125,
+    "max_abs_error_injection": 1.52587890625e-05,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "candidate_graph_second_changed_input_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      6.103515625e-05,
+      6.103515625e-05,
+      6.103515625e-05,
+      6.103515625e-05,
+      0.0001220703125,
+      0.0001220703125,
+      3.0517578125e-05,
+      0.0001220703125
+    ],
+    "max_abs_error_ffn": 0.0001220703125,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "candidate_source": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-dense-native-round-v2/mono_k2_dense_native_rounding.cu",
+  "candidate_source_sha256": "28356022f2ca23c667c70fc0712cef300fcdfa16b0dc1c8a23626b2cc413efa8",
+  "changed_input_topk_ids_equal_by_expert": true,
+  "changed_input_topk_weights_max_abs_error_by_expert": null,
+  "device_arch": "gfx1030",
+  "eager_output_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05,
+      3.0517578125e-05,
+      6.103515625e-05,
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05
+    ],
+    "max_abs_error_ffn": 0.0001220703125,
+    "max_abs_error_injection": 0.00048828125,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "fixture": "synthetic existing dense-MTP random FP16 fixture",
+  "fixture_seed": 50124,
+  "gpu": 6,
+  "gpu_selector_alias_normalization": {
+    "CUDA_VISIBLE_DEVICES": "6",
+    "GPU_DEVICE_ORDINAL": null,
+    "HIP_VISIBLE_DEVICES": "6",
+    "ROCR_VISIBLE_DEVICES": null,
+    "matching_cuda_alias_present": true,
+    "policy": "single physical HIP6-9; empty or identical CUDA alias; no ROCR/ordinal mask",
+    "startup_normalizer": "vllm.platforms.rocm._sync_hip_cuda_env_vars"
+  },
+  "loaded_candidate_binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/torch-extensions-dense-round-v2/mono_k2_dense_native_rounding_v2_scratch_20261024/mono_k2_dense_native_rounding_v2_scratch_20261024.so",
+  "loaded_core": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so",
+  "loaded_core_sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+  "module_reference": {
+    "all_reduce": "omitted; rank-local partial comparison",
+    "down": "native RDNA2 HIP op includes router weight before per-slot FP16 store",
+    "gate_up_activation": "native RDNA2 HIP fused op; FP32 reduction then one FP16 act store",
+    "router_logits_dtype": "float16",
+    "shared_combine": "FP16 shared + FP16 routed at MoERunner._finalize local combine point",
+    "slot_sum": "_custom_ops.moe_sum; FP32 sum in fused_topk-returned slot order then FP16 store"
+  },
+  "native_backend": "Rdna2UnquantizedExperts / RDNA2 HIP ops",
+  "native_expert_source": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/csrc/rocm/moe_unquantized_rdna2.cu",
+  "native_expert_source_sha256": "b2cdb9b6a4e5886749ad0530b76f26072f9e38d93c34f8743111160afc09de77",
+  "native_reference_graph_changed_input_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max_abs_error_ffn": 0.0,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "native_reference_graph_second_changed_input_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max_abs_error_ffn": 0.0,
+    "max_abs_error_injection": 0.0,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "notes": [
+    "Output comparison is strict for every row; no router-near-tie masking is applied.",
+    "Top-k sets/weights are compared by expert ID; both observed slot orders are recorded and full FFN parity remains strict.",
+    "Synthetic fixture is diagnostic only and has no model/checkpoint provenance.",
+    "Post-timing eager output, route, finite, and zero-error gates are rerun.",
+    "Zero-error record is not a sticky-timeout retry test; use the separate direct-op fault harness for that guarantee."
+  ],
+  "post_timing_error_record": [
+    0,
+    0,
+    0,
+    144,
+    0,
+    17
+  ],
+  "post_timing_output_check": {
+    "all_finite": true,
+    "ffn_row_max_abs_error": [
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05,
+      3.0517578125e-05,
+      6.103515625e-05,
+      6.103515625e-05,
+      0.0001220703125,
+      6.103515625e-05
+    ],
+    "max_abs_error_ffn": 0.0001220703125,
+    "max_abs_error_injection": 0.00048828125,
+    "max_abs_error_residual": 0.0,
+    "passed": true,
+    "residual_exact": true,
+    "tolerance": 0.005
+  },
+  "post_timing_topk_check": {
+    "ids_equal_by_expert": true,
+    "tolerance": 0.005,
+    "weights_max_abs_error_by_expert": null
+  },
+  "rows": 8,
+  "schema": "actual-rdna2-dense-mtp-reference-v1",
+  "second_changed_input_topk_ids_equal_by_expert": true,
+  "second_changed_input_topk_weights_max_abs_error_by_expert": null,
+  "status": "PASS",
+  "timing_ms": {
+    "candidate_mono": {
+      "mean": 0.5284826442599296,
+      "median": 0.528870016336441,
+      "samples": [
+        0.49272099137306213,
+        0.5542799830436707,
+        0.5048800110816956,
+        0.5550500154495239,
+        0.508080005645752,
+        0.5527799725532532,
+        0.5065299868583679,
+        0.5544099807739258,
+        0.5021200180053711,
+        0.546500027179718,
+        0.5028299689292908,
+        0.5509399771690369,
+        0.5112400054931641,
+        0.5555700063705444,
+        0.5027909874916077,
+        0.5501899719238281,
+        0.5075110197067261,
+        0.552299976348877,
+        0.5062800049781799,
+        0.552649974822998
+      ]
+    },
+    "native_actual_module": {
+      "mean": 0.6306031465530395,
+      "median": 0.624085009098053,
+      "samples": [
+        0.6050000190734863,
+        0.6229900121688843,
+        0.6440699696540833,
+        0.6092209815979004,
+        0.6696000099182129,
+        0.6144499778747559,
+        0.6591309905052185,
+        0.6242300271987915,
+        0.6400799751281738,
+        0.6121000051498413,
+        0.6387900114059448,
+        0.6151400208473206,
+        0.6494110226631165,
+        0.6239399909973145,
+        0.64656001329422,
+        0.6020399928092957,
+        0.6457899808883667,
+        0.6109799742698669,
+        0.663919985294342,
+        0.6146199703216553
+      ]
+    }
+  },
+  "topk_check": {
+    "ids_equal_by_expert": true,
+    "mono_slot_order_observed": "other-observed-order",
+    "native_slot_order_observed": "as returned by fused_topk",
+    "slot_ids_equal_in_order": true,
+    "tolerance": 0.005,
+    "weight_comparison_status": "unavailable: M<=8 weights are not published",
+    "weights_check_available": false,
+    "weights_max_abs_error_by_expert": null
+  }
+}

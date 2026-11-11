@@ -1,0 +1,1 @@
+Source copied from ../source/rdna_expert_cache.cu; exact single batch guard replaced with #if 0. Test return assertion changed from True to False; all exact-byte/order/invalid-input checks unchanged. Qualifies fallback on HIP7.14 only, not an older HIP runtime.

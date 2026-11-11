@@ -1,0 +1,177 @@
+{
+ "arm": "/tmp/t10b/arms/C",
+ "files": [
+  {
+   "file": "expert_stats-dp0-pid282987.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 49,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    2514481
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    2589552
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1761.41,
+   "final_time": 1794307849.048841,
+   "prev_elapsed_s": 1758.556,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid282988.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 49,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    2514481
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    2589552
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1761.251,
+   "final_time": 1794307849.048856,
+   "prev_elapsed_s": 1758.397,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid282989.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 49,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    2514481
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    2589552
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1761.492,
+   "final_time": 1794307849.0488088,
+   "prev_elapsed_s": 1758.638,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid282990.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 49,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    2514481
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    2589552
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1761.357,
+   "final_time": 1794307849.0488048,
+   "prev_elapsed_s": 1758.504,
+   "final_newer_than_last_periodic": true
+  }
+ ],
+ "target_rows_vs_server_final": {
+  "collector_final_minus_seq1": 2514481,
+  "server_last_poll": 2511936.0,
+  "diff": 2545.0,
+  "rel": 0.0010131627557389998,
+  "seconds_final_snapshot_before_last_poll": 12.951159000396729
+ },
+ "target_rows_vs_server_aligned": {
+  "snapshots_compared": 48,
+  "median_rel": 0.004532549202984499,
+  "max_abs_rel": 0.4651228443355591,
+  "last_rel": 0.0010342143984775683
+ },
+ "rank_agreement": {
+  "expert_stats-dp0-pid282988.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    11597,
+    11597
+   ],
+   "final_elapsed_s": [
+    1761.251,
+    1761.41
+   ],
+   "layers_differing": 1,
+   "max_abs_count_diff": 1,
+   "max_rel_to_layer_decode_total": 5.74838183051471e-07,
+   "snapshots": [
+    49,
+    49
+   ]
+  },
+  "expert_stats-dp0-pid282989.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    11597,
+    11597
+   ],
+   "final_elapsed_s": [
+    1761.492,
+    1761.41
+   ],
+   "layers_differing": 16,
+   "max_abs_count_diff": 1,
+   "max_rel_to_layer_decode_total": 5.74838183051471e-07,
+   "snapshots": [
+    49,
+    49
+   ]
+  },
+  "expert_stats-dp0-pid282990.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    11597,
+    11597
+   ],
+   "final_elapsed_s": [
+    1761.357,
+    1761.41
+   ],
+   "layers_differing": 0,
+   "max_abs_count_diff": 0,
+   "max_rel_to_layer_decode_total": 0.0,
+   "snapshots": [
+    49,
+    49
+   ]
+  }
+ }
+}

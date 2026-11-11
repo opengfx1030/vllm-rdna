@@ -83,7 +83,6 @@ class CompressedTensorsW4A4Mxfp4RDNA2MoEMethod(CompressedTensorsW4A4Mxfp4MoEMeth
         # w13: [E, hidden_size//2, 2*intermediate]     — K=hidden, N=2*inter
         # w2:  [E, intermediate//2, hidden_size]       — K=inter, N=hidden
         N_gate_up = w13_packed_T.shape[2]
-        hidden_size = w2_packed_T.shape[2]
         intermediate = N_gate_up // 2 if N_gate_up > 0 else 0
 
         # Pre-allocate buffers for decode (BLOCK_SIZE_M=1, top_k=8).
@@ -96,9 +95,6 @@ class CompressedTensorsW4A4Mxfp4RDNA2MoEMethod(CompressedTensorsW4A4Mxfp4MoEMeth
         )
         layer.rdna2_act_buf = torch.empty(
             buf_size, intermediate, dtype=act_dtype, device=device
-        )
-        layer.rdna2_out_buf = torch.zeros(
-            max_decode_tokens, hidden_size, dtype=act_dtype, device=device
         )
         layer.rdna2_empty_tw = torch.empty(0, device=device)
 

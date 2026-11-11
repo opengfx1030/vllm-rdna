@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Extract raw cumulative Mono K2 and phase-timer snapshots from serve.log."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+
+K2 = re.compile(
+    r"mono k2_rdna2 timing dev(?P<dev>\d+) w(?P<width>\d+): "
+    r"region n=(?P<region_n>\d+) (?P<region_us>[\d.]+) us \| "
+    r"kernel n=(?P<kernel_n>\d+) total (?P<kernel_us>[\d.]+) "
+    r"phases (?P<phases>[\d./]+) \| "
+    r"entry spread (?P<entry_spread_us>[\d.]+) wg0 (?P<wg0_us>[\d.]+) \| "
+    r"mark->first (?P<mark_first_us>[\d.]+) mark->last (?P<mark_last_us>[\d.]+) \| "
+    r"rest n=(?P<rest_n>\d+) (?P<rest_us>[\d.]+) us \| "
+    r"attn n=(?P<attn_n>\d+) (?P<attn_us>[\d.]+) us \(hc (?P<hc_us>[\d.]+)\) \| "
+    r"linear AR n=(?P<linear_ar_n>\d+) (?P<linear_ar_us>[\d.]+) us \| "
+    r"core qsa n=(?P<qsa_n>\d+) (?P<qsa_us>[\d.]+) "
+    r"gdn n=(?P<gdn_n>\d+) (?P<gdn_us>[\d.]+) \| "
+    r"sclk attn (?P<sclk_attn_mhz>[\d.]+) ffn (?P<sclk_ffn_mhz>[\d.]+) MHz \| "
+    r"load pairs (?P<load_pairs>[\d.]+) corr\(pairs, kernel\) (?P<load_corr>-?[\d.]+)"
+)
+PHASE = re.compile(r"\[PHASE tokens=(?P<tokens>\d+) n=(?P<n>\d+)\] (?P<values>.*)$")
+TP_WORKER = re.compile(r"\(Worker_TP(?P<rank>\d+)(?:_EP\d+)? pid=")
+KV = re.compile(r"(?P<key>[A-Za-z0-9_:#@.\[\],-]+)=(?P<value>-?[\d.]+)")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--log", type=Path, required=True)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--expected-width", type=int)
+    ap.add_argument("--expected-kernel-min", type=int, default=1)
+    ap.add_argument("--expected-kernel-max", type=int, default=2147483647)
+    args = ap.parse_args()
+
+    k2_rows = []
+    phase_rows = []
+    for line_no, line in enumerate(
+        args.log.read_text(errors="replace").splitlines(), 1
+    ):
+        m = K2.search(line)
+        if m:
+            row = m.groupdict()
+            row["line"] = line_no
+            worker = TP_WORKER.search(line)
+            row["tp_rank"] = int(worker.group("rank")) if worker else None
+            for key in (
+                "dev",
+                "width",
+                "region_n",
+                "kernel_n",
+                "rest_n",
+                "attn_n",
+                "linear_ar_n",
+                "qsa_n",
+                "gdn_n",
+            ):
+                row[key] = int(row[key])
+            for key, value in list(row.items()):
+                if key not in {
+                    "phases",
+                    "line",
+                    "dev",
+                    "width",
+                    "region_n",
+                    "kernel_n",
+                    "rest_n",
+                    "attn_n",
+                    "linear_ar_n",
+                    "qsa_n",
+                    "gdn_n",
+                    "tp_rank",
+                }:
+                    row[key] = float(value)
+            phase_values = [float(x) for x in row.pop("phases").split("/")]
+            row["phase_p1_to_p7_us"] = phase_values
+            k2_rows.append(row)
+        p = PHASE.search(line)
+        if p:
+            vals = {
+                m.group("key"): float(m.group("value"))
+                for m in KV.finditer(p.group("values"))
+            }
+            phase_rows.append(
+                {
+                    "line": line_no,
+                    "tp_rank": int(TP_WORKER.search(line).group("rank"))
+                    if TP_WORKER.search(line)
+                    else None,
+                    "tokens": int(p.group("tokens")),
+                    "n_steps": int(p.group("n")),
+                    "values_ms_or_counts": vals,
+                    "raw": p.group(0),
+                }
+            )
+
+    latest = {}
+    for row in k2_rows:
+        latest[
+            (
+                row["tp_rank"] if row["tp_rank"] is not None else -1,
+                row["dev"],
+                row["width"],
+            )
+        ] = row
+    result = {
+        "log": str(args.log),
+        "k2_timing_snapshots": k2_rows,
+        "latest_k2_snapshot_by_device_width": [latest[k] for k in sorted(latest)],
+        "phase_timer_snapshots": phase_rows,
+        "caveat": (
+            "All K2 statistics are cumulative since the workspace "
+            "stats buffer was enabled; snapshots are not reset at "
+            "serving-cell boundaries."
+        ),
+    }
+    if args.expected_width is not None:
+        width_rows = [r for r in k2_rows if r["width"] == args.expected_width]
+        expected_devices = sorted({r["dev"] for r in width_rows})
+        expected_tp_ranks = sorted(
+            {r["tp_rank"] for r in width_rows if r["tp_rank"] is not None}
+        )
+        per_rank = {
+            str(rank): {
+                "region_n": max(
+                    (r["region_n"] for r in width_rows if r["tp_rank"] == rank),
+                    default=0,
+                ),
+                "kernel_n": max(
+                    (r["kernel_n"] for r in width_rows if r["tp_rank"] == rank),
+                    default=0,
+                ),
+            }
+            for rank in expected_tp_ranks
+        }
+        result["expected_width"] = args.expected_width
+        result["devices_with_expected_width"] = expected_devices
+        result["tp_ranks_with_expected_width"] = expected_tp_ranks
+        result["expected_width_counts_by_tp_rank"] = per_rank
+        incomplete_ranks = [
+            rank
+            for rank in range(4)
+            if per_rank.get(str(rank), {}).get("region_n", 0) < 1
+            or per_rank.get(str(rank), {}).get("kernel_n", 0) < args.expected_kernel_min
+            or per_rank.get(str(rank), {}).get("kernel_n", 0) > args.expected_kernel_max
+        ]
+        if expected_tp_ranks != [0, 1, 2, 3] or incomplete_ranks:
+            raise SystemExit(
+                f"incomplete profile: width {args.expected_width} "
+                f"counters by TP rank={per_rank}; "
+                f"expected region_n>=1, kernel_n>={args.expected_kernel_min} "
+                f"and <= {args.expected_kernel_max} on ranks 0..3"
+            )
+    phase_ranks = sorted(
+        {
+            r["tp_rank"]
+            for r in phase_rows
+            if r["tp_rank"] is not None
+            and (args.expected_width is None or r["tokens"] == args.expected_width)
+            and {"forward", "sample", "draft"} <= set(r["values_ms_or_counts"])
+        }
+    )
+    result["phase_tp_ranks_with_forward_sample_draft"] = phase_ranks
+    result["phase_caveat"] = (
+        "draft includes post-draft fail-stop collective; phase event "
+        "synchronization/timing perturbs execution; not serving throughput"
+    )
+    if phase_ranks != [0, 1, 2, 3]:
+        raise SystemExit(
+            f"missing forward/sample/draft phase evidence on TP ranks: {phase_ranks}"
+        )
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(result, indent=2) + "\n")
+    print(
+        f"wrote {args.out}: {len(k2_rows)} K2 snapshots, "
+        f"{len(phase_rows)} phase snapshots"
+    )
+
+
+if __name__ == "__main__":
+    main()

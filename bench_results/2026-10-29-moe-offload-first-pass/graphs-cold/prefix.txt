@@ -1,0 +1,3 @@
+cold TTFT 12.69 s, warm TTFT 2.31 s, speedup 5.5x -> PASS
+cold text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be randomly generated technical terms relat'
+warm text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be randomly generated technical terms relat'

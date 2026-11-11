@@ -1,0 +1,13 @@
+Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/triton/language/target_info.py)
+Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+LOADED /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/spec-logits-nan-tests-v2/tree/vllm/v1/worker/gpu_model_runner.py
+GPU_INITIALIZED True
+.......                                                                  [100%]
+=============================== warnings summary ===============================
+../home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/_pytest/config/__init__.py:1345
+../home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/_pytest/config/__init__.py:1345
+  /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/_pytest/config/__init__.py:1345: PytestAssertRewriteWarning: Module already imported so cannot be rewritten; anyio
+    self._mark_plugins_for_rewrite(hook, disable_autoload)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+7 passed, 2 warnings in 0.02s

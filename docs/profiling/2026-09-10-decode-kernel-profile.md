@@ -150,11 +150,11 @@ Per the existing AGENTS.md, the prior investigation found `prepare_inputs` + `fi
 Two `gemm_dynamic_kernel` template instantiations show up at c=1:
 
 - Template A: 1,021 calls × **3,548 µs avg** = 3.62 s. This is the LARGE-M prefill path firing on chunks. Wait, in the c=1 decode window it shouldn't be firing that often. Looking again — 1,021 calls in 40 s = ~25/s. That's prefill-chunk GEMMs running during the chunked prefill of the c=1 request. Not decode.
-- Template B: 19,872 calls × **73 µs avg** = 1.44 s. This IS the M=1 decode path. 19,872 calls in 40 s = 497/s. For c=1 at 80 tokens × ~250 tok/s effective rate, 80 tokens means each layer's GEMMs run ~80 times. 28 layers × 4 W4A16 GEMMs each × 80 tokens = 8,960 calls minimum — we see 19,872. So multiple template instantiations of `gemm_dynamic_kernel` are running for each layer per token (q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, plus the GDN linear_attn projections).
+- Template B: 19,872 calls × **73 µs avg** = 1.44 s. This IS the M=1 decode path. 19,872 calls in 40 s = 497/s. For c=1 at 80 tokens × ~250 tok/s effective rate, 80 tokens means each layer's GEMMs run ~80 times. The checkpoint has **64 decoder layers** (48 linear-attention + 16 full-attention, `full_attention_interval=4`) and a token runs **304 W4A16 GEMMs**: 48 GDN layers × 3 (`in_proj_qkvz`, `in_proj_ba`, `out_proj`) + 16 attention layers × 2 (`qkv_proj`, `o_proj`) + 64 MLPs × 2 (`gate_up_proj`, `down_proj`). 304 × 80 tokens = **24,320** calls, and the trace shows 19,872 + 4,608 (`gemm_q4_kernel_rdna2`) = **24,480**, i.e. 306 per step. The two template instantiations split the same work; there is no extra instantiation per layer.
 
-The 73 µs avg for M=1 is plausible for a bandwidth-bound AWQ GEMM at N=4096, K=4096, M=1: that's ~16 MB of weights to read in 73 µs = **~220 GB/s sustained per GPU**. RDNA2 V620 peak HBM bandwidth is ~512 GB/s, so we're at ~43 % of peak. Reasonable for a small-M GEMM where occupancy and pipe utilization matter.
+The 73 µs avg for M=1 is plausible for a bandwidth-bound AWQ GEMM, but it is an average over GEMMs of very different sizes, not one shape. This checkpoint has hidden 5120 and intermediate 17408, and the profile ran TP=2, so a rank's per-token GEMMs range from the small GDN projections through the GDN `out_proj` and the MLP `down_proj` to the MLP `gate_up_proj`, which is the largest by far. The per-call 73 µs therefore averages a bandwidth-friendly case with a bandwidth-hungry one, and **the implied per-kernel bandwidth (~220 GB/s) is not a measurement**. What the 306 calls per step do give is the aggregate: a rank reads every weight once per decode step, so the step's GEMM time is 306 × 73 µs = **22.3 ms** for the whole weight set. Against the V620's ~512 GB/s of GDDR6 that puts the floor for those reads in the low-to-mid teens of milliseconds, i.e. the GEMM family is already at roughly 60 % of peak in aggregate. That leaves limited headroom in the kernel itself, which is consistent with the step being launch-bound rather than GEMM-bound.
 
-At c=8 the same kernel runs at 84 µs avg with batch M=8, reading ~16 MB of weights (same as M=1, weights are dominant). 16 MB / 84 µs = 190 GB/s. Slightly slower per kernel but serving 8× more requests, so aggregate throughput is fine.
+At c=8 the same kernel runs at 84 µs avg with batch M=8, reading the same weights (weights dominate, as at M=1). Slightly slower per kernel but serving 8× more requests, so aggregate throughput is fine.
 
 ### Finding 3: FA-RDNA2 decode attention is NOT the bottleneck at c=1 (0.5 %)
 
@@ -208,6 +208,7 @@ The warmup phase (8 s, 61,144 events) shows the same kernels firing at ~steady-s
 **Why**: 60 % GPU idle means 60 % of the GPU's bandwidth is being thrown away. Fixing this would more than double decode throughput in theory (from ~250 tok/s to potentially ~600 tok/s for c=1 1k/512).
 
 **How**:
+
 - Profile with `VLLM_DBG_STEP_TIMING=1` AND check the captured-graph replay log to see what's inside the captured region.
 - If the captured graph itself has gaps (NVTX, PYNCCL collect calls, prefix-cache hash), move those OUTSIDE the graph or capture them as part of the graph.
 - If the gap is between graphs (Python overhead between graph launches), look at `prepare_inputs`, `compute_slot_mappings`, `finish_requests`, `build_attn_metadata`. Per AGENTS.md these together are ~5 ms — not the main culprit.
@@ -218,7 +219,8 @@ The warmup phase (8 s, 61,144 events) shows the same kernels firing at ~steady-s
 **Why**: 9.1 % of c=1 GPU time, 26.2 % of c=8 GPU time. A 30 % GEMM speedup would buy ~7 % wall-clock (c=1) or ~9 % wall-clock (c=8). Modest but real.
 
 **How**:
-- `gemm_dynamic_kernel<__half, 8, …>` is the M=1 path. Current 73 µs/call at ~220 GB/s suggests there's room to push bandwidth utilization higher.
+
+- `gemm_dynamic_kernel<__half, 8, …>` is the M=1 path. At 73 µs/call the family is at roughly 60 % of the card's memory bandwidth in aggregate (see Finding 2), so the headroom in the kernel is limited; the step is launch-bound, not GEMM-bound.
 - Look at `csrc/rocm/q_gemm_rdna2_awq_*.cu` and the prefill GEMM tile parameters. RDNA2 sweet spot for M=1 is usually BLOCK_K=128, BLOCK_N=64-128, num_warps=2 (matching Wave32).
 - If current BLOCK_N is too small, increasing it increases per-block weight-cache pressure but may help when wave-pipelining.
 
@@ -227,6 +229,7 @@ The warmup phase (8 s, 61,144 events) shows the same kernels firing at ~steady-s
 **Why**: 914 ms across full run, 430 ms at c=8 decode. Even at 5 µs per call, 100k calls add up.
 
 **How**:
+
 - Add `torch.cuda.nvtx.range` markers around suspected reduce call sites (top-k/top-p sampling, prefix-cache lookup) to find which one fires 100k+ times.
 - Once identified, consider merging the reduce into the preceding kernel (e.g., a fused "compute_topk_inplace" that does the reduction internally).
 
@@ -235,6 +238,7 @@ The warmup phase (8 s, 61,144 events) shows the same kernels firing at ~steady-s
 **Why**: `gdn_decode_packed_rdna2_kernel` fires 3,792 times at c=8 but not at c=1. At c=1 the GDN decode must use a slower path (Triton/FLA fallback or a non-optimal template of `gemm_dynamic_kernel`). Since c=1 represents single-request interactive use, getting this right matters.
 
 **How**:
+
 - Look at `vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py:_gdn_decode_dispatch` (or wherever the dispatch is). Find the gate that picks HIP kernel vs Triton fallback at c=1.
 - Verify the M=1 path is firing the right template.
 
@@ -243,6 +247,7 @@ The warmup phase (8 s, 61,144 events) shows the same kernels firing at ~steady-s
 **Why**: 6.6-8.6 % GPU time. With PIX + Simple protocol we're at the floor for PYNCCL; the vLLM custom AR is firing at 44-81 µs/call.
 
 **How**:
+
 - `VLLM_FORCE_CUSTOM_ALL_REDUCE=1` is on. Verify which AR path is selected at c=1 vs c=8.
 - Investigate why `cross_device_reduce_1stage` (custom AR path) is 81 µs at c=1 but 44 µs at c=8. If there's a bug in the small-batch path, fixing it could shave 50 µs × 320 calls/s = ~16 ms/s of wall time.
 

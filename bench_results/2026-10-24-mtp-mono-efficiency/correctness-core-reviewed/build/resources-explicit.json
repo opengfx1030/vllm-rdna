@@ -1,0 +1,86 @@
+{
+  "status": "PASS",
+  "mode": "CPU-only inspection; no compile, torch or GPU initialization",
+  "object": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-build/compiled/mono_k2_rdna2.candidate.hip.o",
+  "object_sha256": "cb3eb36b73d1f24a8d872f6bfc2addabbc819b92d4f959835de7e7d8f32818ea",
+  "image": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-build/compiled/mono_k2_rdna2.candidate.hip.o.0.hipv4-amdgcn-amd-amdhsa--gfx1030",
+  "image_sha256": "7b9fa3292274ae1d79d969acb9f2da7911a89d0978cbaa8bcf680a7d8099e516",
+  "kernel_count": 5,
+  "all_kernels_wave32": true,
+  "kernels": [
+    {
+      "group_segment_fixed_size": 0,
+      "name": "_ZN8mono_ffn16mono_mark_kernelEPyii",
+      "private_segment_fixed_size": 0,
+      "sgpr_count": 18,
+      "sgpr_spill_count": 0,
+      "vgpr_count": 12,
+      "vgpr_spill_count": 0,
+      "wavefront_size": 32
+    },
+    {
+      "group_segment_fixed_size": 25280,
+      "name": "_ZN8mono_ffn15mono_ffn_kernelILi4ELi8EEEvNS_6ParamsE",
+      "private_segment_fixed_size": 0,
+      "sgpr_count": 107,
+      "sgpr_spill_count": 21,
+      "vgpr_count": 109,
+      "vgpr_spill_count": 0,
+      "wavefront_size": 32
+    },
+    {
+      "group_segment_fixed_size": 25280,
+      "name": "_ZN8mono_ffn15mono_ffn_kernelILi8ELi8EEEvNS_6ParamsE",
+      "private_segment_fixed_size": 0,
+      "sgpr_count": 107,
+      "sgpr_spill_count": 22,
+      "vgpr_count": 109,
+      "vgpr_spill_count": 0,
+      "wavefront_size": 32
+    },
+    {
+      "group_segment_fixed_size": 25280,
+      "name": "_ZN8mono_ffn15mono_ffn_kernelILi12ELi8EEEvNS_6ParamsE",
+      "private_segment_fixed_size": 0,
+      "sgpr_count": 107,
+      "sgpr_spill_count": 22,
+      "vgpr_count": 109,
+      "vgpr_spill_count": 0,
+      "wavefront_size": 32
+    },
+    {
+      "group_segment_fixed_size": 25280,
+      "name": "_ZN8mono_ffn15mono_ffn_kernelILi24ELi8EEEvNS_6ParamsE",
+      "private_segment_fixed_size": 0,
+      "sgpr_count": 107,
+      "sgpr_spill_count": 22,
+      "vgpr_count": 109,
+      "vgpr_spill_count": 0,
+      "wavefront_size": 32
+    }
+  ],
+  "commands": [
+    [
+      "/opt/rocm-7.2.0/core-7.14/lib/llvm/bin/llvm-objdump",
+      "--offloading",
+      "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-build/compiled/mono_k2_rdna2.candidate.hip.o"
+    ],
+    [
+      "/opt/rocm-7.2.0/core-7.14/lib/llvm/bin/llvm-readobj",
+      "--notes",
+      "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-build/compiled/mono_k2_rdna2.candidate.hip.o.0.hipv4-amdgcn-amd-amdhsa--gfx1030"
+    ]
+  ],
+  "sdk_tools_sha256": {
+    "/opt/rocm-7.2.0/core-7.14/lib/llvm/bin/llvm-objdump": "3afb5ccaf108f329685f9c3b8aee79b5a79c414e9d3245e6e9aca4d9d9406fb0",
+    "/opt/rocm-7.2.0/core-7.14/lib/llvm/bin/llvm-readobj": "b084bee7131de365e5aea2724fdc1ffbd1742e4e872a444b6f3aac69fada4e39"
+  },
+  "visibility": {
+    "HIP_VISIBLE_DEVICES": "",
+    "ROCR_VISIBLE_DEVICES": "",
+    "CUDA_VISIBLE_DEVICES": "",
+    "GPU_DEVICE_ORDINAL": ""
+  },
+  "object_unchanged": true,
+  "image_provenance_scope": "Unique adjacent object-named sidecar, as in executed extractor; retained image SHA for audit"
+}

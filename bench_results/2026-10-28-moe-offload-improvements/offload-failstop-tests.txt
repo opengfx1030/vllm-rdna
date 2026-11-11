@@ -1,0 +1,14 @@
+........................................................................ [ 47%]
+........................................................................ [ 94%]
+.........                                                                [100%]
+=============================== warnings summary ===============================
+.venv/lib64/python3.12/site-packages/torch/jit/_script.py:365: 14 warnings
+  /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/lib64/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/models/qwen4_exp/test_amd_mono_rdna2_offload.py::test_production_graph_orchestration_with_stale_capture_inputs[tp2-ep2]
+  /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/lib64/python3.12/site-packages/torch/cuda/graphs.py:126: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /__w/rockrel/rockrel/external-builds/pytorch/pytorch/aten/src/ATen/hip/HIPGraph.cpp:208.)
+    super().capture_end()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+153 passed, 15 warnings in 10.67s

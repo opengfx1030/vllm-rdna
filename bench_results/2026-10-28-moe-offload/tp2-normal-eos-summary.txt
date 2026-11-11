@@ -1,0 +1,36 @@
+[03:02:18] boot TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=6,7 PORT=18766 overrides=TP=2 PLE=int4 PLE_QUANT_DIR=/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4 GMEM=0.92 MAXLEN=32768 MAXBAT=4096 MTP=2 MAXLEN=32768 SEQS=8 MAXBAT=4096 bench_extra=
+[03:08:23] READY in 361s served=flash-next
+[03:08:33] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=' Berlin, which is also the largest city in the country. It is one of the 16 German federal states and is the third most populous city in the European Union. Berlin is a major cultural, political, and scientific center, and'
+RESULT PASS (3/3)
+[03:09:31] CONCURRENCY PASS
+    WARN solo2    6        prompt 6: near-tie token 15/32: margin 0.094, continuation mean lp -0.12 vs solo -0.17
+    WARN together 1        prompt 1: soft token 18/22: margin 0.391, continuation mean lp -0.47 vs solo -0.58, normal-EOS stopping differs: solo 24 tokens (stop/248044), got 22 (stop/248044)
+    WARN together 5        prompt 5: near-tie token 3/32: margin 0.016, continuation mean lp -0.18 vs solo -0.15
+    WARN churn    (3, 1)   prompt 1: soft token 18/23: margin 0.391, continuation mean lp -0.55 vs solo -0.47, normal-EOS stopping differs: solo 24 tokens (stop/248044), got 23 (stop/248044)
+    WARN churn    (7, 5)   prompt 5: near-tie token 3/32: margin 0.016, continuation mean lp -0.18 vs solo -0.15
+    WARN churn    (11, 1)  prompt 1: soft token 18/23: margin 0.391, continuation mean lp -0.54 vs solo -0.47, normal-EOS stopping differs: solo 24 tokens (stop/248044), got 23 (stop/248044)
+    RESULT PASS: 0 failing, 3 near-tie, 3 soft, 0 solo-noise, 38 identical of 44 checks (53.1s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[03:09:41] PROBE-AFTER-LOAD PASS
+[03:09:41] markers:
+          2 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=Qwen4ExpPLEInt4EmbeddingMethod, we
+          1 WNA16 MoE backend.
+          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/2, devices [0, 1],
+          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x
+          1 qwen_gdn_full_forward (opaque to inductor; projecti
+          1 Model loading took 21.39 GiB memory and 214.434991 seconds
+          1 Model loading took 21.39 GiB memory and 211.522650 seconds
+          1 GPU KV cache size: 138,022 tokens, Maximum concurrency fo
+[03:09:41] fault markers in serve.log: 0
+[03:09:41] new amdgpu dmesg faults: 0
+n/a
+[03:09:41] done

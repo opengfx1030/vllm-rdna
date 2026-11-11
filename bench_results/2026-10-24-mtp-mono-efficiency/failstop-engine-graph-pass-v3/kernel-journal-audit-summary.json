@@ -1,0 +1,12 @@
+{
+  "boot_before": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "boot_after": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "raw_records_before": 8641,
+  "raw_records_after": 8720,
+  "appended_record_count": 79,
+  "append_only_prefix_match": true,
+  "driver_checker_result": "PASS privileged kernel journal: 79 new records, no GPU fault",
+  "checker_source_sha256": "d2272c6289f9791472045f2d0091eed1ef2df4a6db9fb35ee476db031ea19bd0",
+  "raw_journal_snapshots_retained": false,
+  "note": "The full journal snapshots are intentionally excluded; the qualification driver ran its pinned fail-closed checker."
+}

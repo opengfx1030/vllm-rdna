@@ -1,0 +1,672 @@
+#!/usr/bin/env python3
+"""TP4 actual-vLLM int32 all-reduce checks; run only via the guarded launcher."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import statistics
+import subprocess
+import sys
+import time
+from collections.abc import MutableMapping
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+
+def sha256_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sanitize_child_gpu_visibility(
+    environ: MutableMapping[str, str],
+) -> dict[str, str | None]:
+    """Validate ROCm selectors and retain the CUDA alias for physical mapping."""
+    hip_visible = environ.get("HIP_VISIBLE_DEVICES")
+    if hip_visible != "6,7,8,9":
+        raise RuntimeError(f"unexpected HIP_VISIBLE_DEVICES={hip_visible!r}")
+    conflicting = {
+        key: environ[key]
+        for key in ("ROCR_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL")
+        if environ.get(key)
+    }
+    if conflicting:
+        raise RuntimeError(f"conflicting physical GPU selectors: {conflicting!r}")
+    cuda_alias = environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_alias not in (None, "", "6,7,8,9"):
+        raise RuntimeError(f"unexpected CUDA_VISIBLE_DEVICES={cuda_alias!r}")
+    return {
+        "HIP_VISIBLE_DEVICES": hip_visible,
+        "ROCR_VISIBLE_DEVICES": environ.get("ROCR_VISIBLE_DEVICES"),
+        "CUDA_VISIBLE_DEVICES_before_torch": cuda_alias,
+        "GPU_DEVICE_ORDINAL": environ.get("GPU_DEVICE_ORDINAL"),
+    }
+
+
+def verify_kfd_rank_device(
+    pid: int,
+    rank: int,
+    topology_root: Path = Path("/sys/class/kfd/kfd/topology/nodes"),
+    proc_root: Path = Path("/sys/class/kfd/kfd/proc"),
+) -> tuple[int, list[int], list[int]]:
+    """Prove each rank owns only its assigned physical KFD device queues."""
+    if rank not in range(4):
+        raise RuntimeError(f"expected TP rank 0..3, got {rank}")
+    nodes = sorted(
+        (path for path in topology_root.iterdir() if path.name.isdigit()),
+        key=lambda path: int(path.name),
+    )
+    gpu_ids = []
+    for node in nodes:
+        gpu_id_path = node / "gpu_id"
+        if gpu_id_path.is_file():
+            gpu_id = int(gpu_id_path.read_text())
+            if gpu_id:
+                gpu_ids.append(gpu_id)
+    if len(gpu_ids) != 10:
+        raise RuntimeError(f"expected 10 KFD GPUs in topology order, found {gpu_ids}")
+    queues = proc_root / str(pid) / "queues"
+    queue_gpus = [int(path.read_text()) for path in queues.glob("*/gpuid")]
+    expected = gpu_ids[rank + 6]
+    if not queue_gpus or set(queue_gpus) != {expected}:
+        raise RuntimeError(
+            f"rank {rank} KFD queues map to {queue_gpus}, expected only {expected}"
+        )
+    return expected, gpu_ids, queue_gpus
+
+
+def source_metadata(
+    source_root: Path, visibility_snapshot: dict[str, str | None]
+) -> dict[str, Any]:
+    import torch
+
+    result: dict[str, Any] = {
+        "source_root": str(source_root),
+        "source_core_sha256": sha256_file(source_root / "vllm/_rocm_C.abi3.so"),
+        "mono_source_sha256": sha256_file(source_root / "csrc/rocm/mono_k2_rdna2.cu"),
+        "source_files_sha256": {
+            rel: sha256_file(source_root / rel)
+            for rel in (
+                "vllm/distributed/parallel_state.py",
+                "vllm/distributed/device_communicators/cuda_communicator.py",
+                "vllm/distributed/device_communicators/rdna_all_reduce.py",
+                "vllm/distributed/device_communicators/pynccl.py",
+                "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py",
+                "vllm/models/qwen4_exp/amd/mono/rdna2/layout.py",
+            )
+        },
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "hostname": subprocess.run(
+            ["hostname"], check=True, capture_output=True, text=True
+        ).stdout.strip(),
+        "python": sys.version,
+        "torch": torch.__version__,
+        "torch_hip": torch.version.hip,
+        "world_size": int(os.environ.get("WORLD_SIZE", "-1")),
+        "rank": int(os.environ.get("RANK", "-1")),
+        "local_rank": int(os.environ.get("LOCAL_RANK", "-1")),
+        "visibility": {
+            key: os.environ.get(key)
+            for key in (
+                "HIP_VISIBLE_DEVICES",
+                "ROCR_VISIBLE_DEVICES",
+                "CUDA_VISIBLE_DEVICES",
+                "GPU_DEVICE_ORDINAL",
+                "HSA_FORCE_FINE_GRAIN_PCIE",
+            )
+        },
+    }
+    result["visibility"].update(visibility_snapshot)
+    result["visibility"]["CUDA_VISIBLE_DEVICES_preserved_for_physical_mapping"] = True
+    return result
+
+
+def collective_backend(group: Any, tensor: Any) -> dict[str, Any]:
+    """Report dispatch eligibility; correctness still validates actual dispatch."""
+    comm = group.device_communicator
+    checks: dict[str, Any] = {"device_communicator": type(comm).__name__}
+    if comm is None:
+        checks["predicted_backend"] = "process-group"
+        return checks
+
+    rdna = getattr(comm, "rdna_ar_comm", None)
+    checks["rdna_ar_enabled"] = bool(rdna is not None and not rdna.disabled)
+    checks["rdna_ar_eligible_for_int32"] = bool(
+        rdna is not None and rdna.should_use(tensor)
+    )
+    fi = getattr(comm, "fi_ar_comm", None)
+    fi_ok = bool(fi is not None and not fi.disabled and fi.should_use_fi_ar(tensor))
+    checks["flashinfer_ar_eligible_for_int32"] = fi_ok
+    fi_pcie = getattr(comm, "fi_pcie_ipc_ar_comm", None)
+    checks["flashinfer_pcie_ar_eligible_for_int32"] = bool(
+        fi_pcie is not None and fi_pcie.should_use(tensor)
+    )
+    custom = getattr(comm, "ca_comm", None)
+    checks["custom_ar_enabled"] = bool(custom is not None and not custom.disabled)
+    checks["custom_ar_eligible_for_int32"] = bool(
+        custom is not None and custom.should_custom_ar(tensor)
+    )
+    checks["pynccl_enabled"] = bool(
+        getattr(comm, "pynccl_comm", None) is not None and not comm.pynccl_comm.disabled
+    )
+    pynccl = getattr(comm, "pynccl_comm", None)
+    if pynccl is not None and not fi_ok and not pynccl.disabled:
+        from vllm.distributed.device_communicators.all_reduce_utils import (
+            should_nccl_symm_mem_allreduce,
+        )
+
+        checks["pynccl_symmetric_mem_candidate"] = bool(
+            should_nccl_symm_mem_allreduce(pynccl.world_size, tensor)
+        )
+    else:
+        checks["pynccl_symmetric_mem_candidate"] = False
+    quick = getattr(comm, "qr_comm", None)
+    checks["quick_ar_eligible_for_int32"] = bool(
+        quick is not None
+        and not quick.disabled
+        and quick.should_quick_allreduce(tensor)
+    )
+    symm = getattr(comm, "symm_mem_comm", None)
+    checks["symmetric_mem_eligible_for_int32"] = bool(
+        symm is not None and not symm.disabled and symm.should_use_symm_mem(tensor)
+    )
+    aiter = getattr(comm, "aiter_ar_comm", None)
+    checks["aiter_ar_eligible_for_int32"] = bool(
+        getattr(comm, "use_aiter_allreduce", False)
+        and aiter is not None
+        and not aiter.disabled
+        and aiter.should_custom_ar(tensor)
+    )
+    checks["torch_process_group_backend"] = str(group.torch_distributed_backend)
+    if checks["rdna_ar_eligible_for_int32"]:
+        checks["predicted_backend"] = "rdna-ar"
+    elif checks["pynccl_symmetric_mem_candidate"]:
+        checks["predicted_backend"] = "pynccl-symmetric-memory"
+    elif not fi_ok and checks["quick_ar_eligible_for_int32"]:
+        checks["predicted_backend"] = "quick-ar"
+    elif checks["flashinfer_pcie_ar_eligible_for_int32"]:
+        checks["predicted_backend"] = "flashinfer-pcie-ar"
+    elif fi_ok:
+        checks["predicted_backend"] = "flashinfer-ar"
+    elif checks["aiter_ar_eligible_for_int32"]:
+        checks["predicted_backend"] = "aiter-ar"
+    elif checks["custom_ar_eligible_for_int32"]:
+        checks["predicted_backend"] = "custom-ar"
+    elif checks["symmetric_mem_eligible_for_int32"]:
+        checks["predicted_backend"] = "symmetric-memory"
+    elif checks["pynccl_enabled"]:
+        checks["predicted_backend"] = "pynccl-or-communicator-fallback"
+    else:
+        checks["predicted_backend"] = "torch-process-group-fallback"
+    return checks
+
+
+def current_tp_group(rank: int, local_rank: int):
+    import torch.distributed as dist
+
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.distributed.parallel_state import GroupCoordinator
+
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        rank=rank,
+        world_size=4,
+        timeout=timedelta(seconds=75),
+    )
+    group = GroupCoordinator(
+        group_ranks=[[0, 1, 2, 3]],
+        local_rank=local_rank,
+        torch_distributed_backend="nccl",
+        use_device_communicator=True,
+        # CudaCommunicator gates TP all-reduce backends on the name prefix.
+        group_name="tp",
+    )
+    parallel_state._TP = group
+    assert parallel_state.get_tp_group() is group
+    return group
+
+
+def tp_all_reduce(tensor: Any):
+    """Exercise the same public TP-group lookup used by the proposal helper."""
+    from vllm.distributed.parallel_state import get_tp_group
+
+    return get_tp_group().all_reduce(tensor)
+
+
+def check_collective(group: Any, device: Any, rank: int, label: str) -> dict[str, Any]:
+    import torch
+
+    status = torch.tensor([1 if rank == 1 else 0], dtype=torch.int32, device=device)
+    before = status.clone()
+    ptr = status.data_ptr()
+    out = tp_all_reduce(status)
+    torch.cuda.synchronize(device)
+    value = out.cpu().tolist()
+    unchanged = torch.equal(status, before)
+    nonalias = out.data_ptr() != ptr
+    assert value == [1], f"{label}: expected rank-1 fault sum 1, got {value}"
+    assert unchanged, f"{label}: all_reduce mutated input"
+    assert nonalias, f"{label}: output aliases input"
+    return {
+        "label": label,
+        "local_input": before.cpu().tolist(),
+        "output": value,
+        "input_unchanged": unchanged,
+        "output_nonalias": nonalias,
+        "dtype": str(status.dtype),
+        "nbytes": status.numel() * status.element_size(),
+    }
+
+
+def check_workspace_semantics(group: Any, device: Any, rank: int) -> dict[str, Any]:
+    import torch
+
+    # Exercise the same explicit coarse-grained arena allocator and registry
+    # used by MonoLayer.setup(), rather than a caching-allocator stand-in.
+    from vllm.models.qwen4_exp.amd.mono.rdna2.layout import (
+        _WORKSPACES,
+    )
+    from vllm.models.qwen4_exp.amd.mono.rdna2.layout import (
+        workspace as mono_workspace,
+    )
+
+    workspace = mono_workspace(device, "mtp")
+    device_index = (
+        device.index
+        if device.index is not None
+        else int(torch.accelerator.current_device_index())
+    )
+    ctrl = workspace[8:12].view(torch.int32)
+    mem_flags = torch.ops._rocm_C.mono_k2_rdna2_mem_flags
+    allocation_flags = int(mem_flags(workspace))
+    allocator_probe = torch.empty(1, dtype=torch.uint8, device=device)
+    allocator_probe_flags = int(mem_flags(allocator_probe))
+    if allocation_flags < 0:
+        raise RuntimeError("HSA pointer flags unavailable for Mono MTP workspace")
+    if allocation_flags & 4 == 0 or allocation_flags & (2 | 8):
+        raise RuntimeError(
+            f"Mono MTP workspace is not coarse-grained HSA memory: "
+            f"flags={allocation_flags}"
+        )
+    workspaces = _WORKSPACES
+    assert workspaces.get((device_index, "mtp")) is workspace
+    zero_cache: dict[int, torch.Tensor] = {}
+
+    def local_error_view():
+        active = workspaces.get((device_index, "mtp"))
+        if active is not None:
+            return active[8:12].view(torch.int32)
+        if device_index not in zero_cache:
+            zero_cache[device_index] = torch.zeros(1, dtype=torch.int32, device=device)
+        return zero_cache[device_index]
+
+    # Simulate the proposed reset prefix: count/gen clear, error remains sticky.
+    ctrl.fill_(1 if rank == 1 else 0)
+    local_before = ctrl.clone()
+    local_view = local_error_view()
+    local_ptr = local_view.data_ptr()
+    reduced = tp_all_reduce(local_error_view())
+    torch.cuda.synchronize(device)
+    assert reduced.item() == 1
+    assert reduced.data_ptr() != local_ptr, "coarse workspace reduction aliased input"
+    assert torch.equal(ctrl, local_before), "collective changed Ctrl.err_code"
+
+    workspace[:8].zero_()
+    assert ctrl.item() == (1 if rank == 1 else 0), "count/gen reset cleared error"
+    sticky = tp_all_reduce(local_error_view())
+    torch.cuda.synchronize(device)
+    assert sticky.item() == 1, "sticky error was not visible to all TP ranks"
+
+    # Move the simulated fault to another rank and clear the old record.
+    ctrl.zero_()
+    if rank == 3:
+        ctrl.fill_(1)
+    changed = tp_all_reduce(local_error_view())
+    torch.cuda.synchronize(device)
+    assert changed.item() == 1
+
+    # A rank without the MTP arena contributes an immutable cached zero.
+    fallback_rank = rank == 0
+    saved = workspaces.pop((device.index, "mtp"), None) if fallback_rank else None
+    sentinel_before = None
+    if fallback_rank:
+        sentinel = local_error_view()
+        sentinel.fill_(0)
+        sentinel_before = sentinel.clone()
+    fallback = tp_all_reduce(local_error_view())
+    torch.cuda.synchronize(device)
+    assert fallback.item() == 1
+    if fallback_rank:
+        assert torch.equal(sentinel, sentinel_before), (
+            "collective mutated zero sentinel"
+        )
+        workspaces[(device.index, "mtp")] = saved
+
+    # Clear the test record before timing. This is an isolated process.
+    ctrl.zero_()
+    return {
+        "allocation_kind": "layout.workspace(device, 'mtp')",
+        "workspace_bytes": workspace.numel() * workspace.element_size(),
+        "workspace_data_ptr": workspace.data_ptr(),
+        "workspace_mem_flags": allocation_flags,
+        "torch_allocator_probe_data_ptr": allocator_probe.data_ptr(),
+        "torch_allocator_probe_mem_flags": allocator_probe_flags,
+        "rank": rank,
+        "coarse_workspace_input_unchanged": True,
+        "coarse_workspace_output_nonalias": True,
+        "prefix_reset_preserves_error": True,
+        "changed_fault_rank_observed": True,
+        "fallback_zero_unchanged": True,
+    }
+
+
+def maybe_graph_replays(group: Any, device: Any, rank: int) -> dict[str, Any]:
+    import torch
+
+    # This mirrors the proposed Ctrl byte offset while exercising the actual
+    # GroupCoordinator collective, without depending on the unapplied helper.
+    workspace = torch.zeros(32, dtype=torch.uint8, device=device)
+    ctrl = workspace[8:12].view(torch.int32)
+    # Warm up and allocate the communicator's cached output before capture.
+    ctrl.fill_(1 if rank == 1 else 0)
+    warm = tp_all_reduce(ctrl)
+    torch.cuda.synchronize(device)
+    assert warm.item() == 1
+
+    capture_error = None
+    graph = torch.cuda.CUDAGraph()
+    static_out = None
+    try:
+        with torch.cuda.graph(graph):
+            static_out = tp_all_reduce(ctrl)
+        torch.cuda.synchronize(device)
+    except Exception as exc:  # backend-dependent capture support
+        capture_error = f"{type(exc).__name__}: {exc}"
+
+    # Reach rank consensus on capture outcome before deciding whether to replay.
+    import torch.distributed as dist
+
+    outcomes: list[Any] = [None] * 4
+    dist.all_gather_object(outcomes, capture_error, group=group.cpu_group)
+    if any(item is not None for item in outcomes):
+        return {"captured_graph_supported": False, "capture_errors": outcomes}
+
+    assert static_out is not None
+    assert static_out.data_ptr() != ctrl.data_ptr(), "captured all_reduce aliases input"
+    observed = []
+    for fault_rank in (1, 3):
+        ctrl.fill_(1 if rank == fault_rank else 0)
+        torch.cuda.synchronize(device)
+        graph.replay()
+        torch.cuda.synchronize(device)
+        val = int(static_out.item())
+        local_val = int(ctrl.item())
+        assert val == 1, f"graph replay for rank {fault_rank} reported {val}"
+        assert local_val == (1 if rank == fault_rank else 0)
+        observed.append(
+            {"fault_rank": fault_rank, "output": val, "local_input": local_val}
+        )
+    ctrl.zero_()
+    torch.cuda.synchronize(device)
+    graph.replay()
+    torch.cuda.synchronize(device)
+    zero = int(static_out.item())
+    assert zero == 0, f"graph replay after clearing status returned {zero}"
+    return {
+        "captured_graph_supported": True,
+        "changed_input_replays": observed,
+        "cleared_input_replay": zero,
+        "input_unchanged": int(ctrl.item()) == 0,
+    }
+
+
+def timing(
+    group: Any, device: Any, rank: int, iterations: int, rounds: int
+) -> dict[str, Any]:
+    import torch
+
+    status = torch.tensor([rank + 1], dtype=torch.int32, device=device)
+    for _ in range(20):
+        out = group.all_reduce(status)
+    torch.cuda.synchronize(device)
+    assert torch.equal(status.cpu(), torch.tensor([rank + 1], dtype=torch.int32))
+    assert int(out.item()) == 10
+    collective_ms = []
+    for _ in range(rounds):
+        torch.distributed.barrier(group=group.device_group)
+        torch.cuda.synchronize(device)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iterations):
+            out = tp_all_reduce(status)
+        end.record()
+        end.synchronize()
+        collective_ms.append(start.elapsed_time(end) / iterations)
+        assert int(out.item()) == 10
+        assert torch.equal(status.cpu(), torch.tensor([rank + 1], dtype=torch.int32))
+
+    main_stream = torch.cuda.current_stream(device)
+    copy_stream = torch.cuda.Stream(device=device)
+    d2h_ms = []
+    d2h_wall_ms = []
+    for _ in range(rounds):
+        torch.distributed.barrier(group=group.device_group)
+        torch.cuda.synchronize(device)
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
+        start_wall = time.perf_counter()
+        with torch.cuda.stream(copy_stream):
+            copy_stream.wait_stream(main_stream)
+            start_evt.record(copy_stream)
+            cpu_copies = []
+            expected_copies = []
+            for iteration in range(1, iterations + 1):
+                with torch.cuda.stream(main_stream):
+                    status.fill_(iteration * (rank + 1))
+                    out = tp_all_reduce(status)
+                copy_stream.wait_stream(main_stream)
+                cpu_copies.append(out.to("cpu", non_blocking=True))
+                out.record_stream(copy_stream)
+                expected_copies.append(iteration * 10)
+            end_evt.record(copy_stream)
+        end_evt.synchronize()
+        d2h_wall_ms.append((time.perf_counter() - start_wall) * 1000 / iterations)
+        d2h_ms.append(start_evt.elapsed_time(end_evt) / iterations)
+        actual_copies = [int(item.item()) for item in cpu_copies]
+        assert actual_copies == expected_copies, (
+            actual_copies[:8],
+            expected_copies[:8],
+        )
+    return {
+        "iterations_per_round": iterations,
+        "rounds": rounds,
+        "healthy_collective_cuda_event_ms_per_call": collective_ms,
+        "healthy_collective_median_ms_per_call": statistics.median(collective_ms),
+        "async_collective_plus_4byte_d2h_event_ms_per_call": d2h_ms,
+        "async_collective_plus_4byte_d2h_wall_ms_per_call": d2h_wall_ms,
+        "async_collective_plus_4byte_d2h_median_event_ms_per_call": statistics.median(
+            d2h_ms
+        ),
+        "async_collective_plus_4byte_d2h_median_wall_ms_per_call": statistics.median(
+            d2h_wall_ms
+        ),
+    }
+
+
+def check_output_lifetime(group: Any, device: Any, rank: int) -> dict[str, Any]:
+    """Ensure a later reduction cannot overwrite an earlier returned result."""
+    import torch
+
+    first_input = torch.tensor(
+        [1 if rank == 1 else 0], dtype=torch.int32, device=device
+    )
+    second_input = torch.tensor(
+        [1 if rank in (1, 2) else 0], dtype=torch.int32, device=device
+    )
+    first = tp_all_reduce(first_input)
+    second = tp_all_reduce(second_input)
+    torch.cuda.synchronize(device)
+    first_value, second_value = int(first.item()), int(second.item())
+    assert first_value == 1 and second_value == 2, (first_value, second_value)
+    return {
+        "first_result_after_second_collective": first_value,
+        "second_result": second_value,
+        "first_output_ptr": first.data_ptr(),
+        "second_output_ptr": second.data_ptr(),
+        "separate_values_preserved": True,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--iterations", type=int, default=100)
+    parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument(
+        "--expect-core-sha256",
+        default="3f688006eec38adef6cf4d4546735f66b8892d8066387336a88ba6fe7b668bac",
+    )
+    parser.add_argument(
+        "--expect-mono-source-sha256",
+        default="bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf",
+    )
+    args = parser.parse_args()
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    if args.iterations < 1 or args.rounds < 1:
+        parser.error("--iterations and --rounds must be positive")
+    assert int(os.environ["WORLD_SIZE"]) == 4
+    visibility_snapshot = sanitize_child_gpu_visibility(os.environ)
+    source_root = Path(os.environ["VLLM_SOURCE_ROOT"]).resolve()
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+
+    import torch
+
+    torch.cuda.set_device(local_rank)
+    meta = source_metadata(source_root, visibility_snapshot)
+    meta["frozen_venv"] = os.environ.get(
+        "VENV", "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final"
+    )
+    actual_core = meta["source_core_sha256"]
+    actual_source = meta["mono_source_sha256"]
+    assert actual_core == args.expect_core_sha256, (
+        actual_core,
+        args.expect_core_sha256,
+    )
+    assert actual_source == args.expect_mono_source_sha256, (
+        actual_source,
+        args.expect_mono_source_sha256,
+    )
+    props = torch.cuda.get_device_properties(local_rank)
+    # Force the HIP context to create a real queue before checking KFD ownership.
+    queue_probe = torch.zeros(1, dtype=torch.uint8, device=f"cuda:{local_rank}")
+    torch.cuda.synchronize(local_rank)
+    from vllm.platforms import current_platform
+
+    physical = current_platform.visible_device_id_to_physical_device_id(local_rank)
+    expected_kfd_gpu_id, topology_gpu_ids, queue_gpu_ids = verify_kfd_rank_device(
+        os.getpid(), rank
+    )
+    assert physical == rank + 6, (physical, rank)
+    assert topology_gpu_ids[physical] == expected_kfd_gpu_id, (
+        physical, expected_kfd_gpu_id, topology_gpu_ids
+    )
+    meta.update(
+        {
+            "device_name": props.name,
+            "gcn_arch_name": getattr(props, "gcnArchName", None),
+            "device_uuid": str(getattr(props, "uuid", "")),
+            "compute_units_reported": getattr(props, "multi_processor_count", None),
+            "total_memory_bytes": getattr(props, "total_memory", None),
+            "visible_device_index": local_rank,
+            "physical_device_id": physical,
+            "expected_kfd_gpu_id": expected_kfd_gpu_id,
+            "kfd_topology_gpu_ids": topology_gpu_ids,
+            "kfd_queue_gpu_ids": queue_gpu_ids,
+            "kfd_queue_probe_bytes": queue_probe.numel() * queue_probe.element_size(),
+            "device_count": torch.cuda.device_count(),
+            "process_group_backend": "nccl/RCCL",
+            "runner_sha256": sha256_file(Path(__file__).resolve()),
+        }
+    )
+
+    group = current_tp_group(rank, local_rank)
+    device = torch.device("cuda", local_rank)
+    meta["torch_distributed_backend"] = str(
+        torch.distributed.get_backend(group.device_group)
+    )
+    meta["device_group_backend_argument"] = str(group.torch_distributed_backend)
+    torch.distributed.barrier(group=group.device_group)
+    backend_probe = torch.zeros(1, dtype=torch.int32, device=device)
+    dispatch = collective_backend(group, backend_probe)
+    correctness = check_collective(group, device, rank, "rank1-fault-eager")
+    workspace = check_workspace_semantics(group, device, rank)
+    perf = timing(group, device, rank, args.iterations, args.rounds)
+    output_lifetime = check_output_lifetime(group, device, rank)
+    graph_result = maybe_graph_replays(group, device, rank)
+
+    payload = {
+        "schema": "mtp-failstop-collective-micro-v1",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "rank": rank,
+        "metadata": meta,
+        "dispatch": dispatch,
+        "checks": {
+            "eager_rank1_fault_sum": correctness,
+            "workspace_sticky_and_fallback": workspace,
+            "captured_graph_replays": graph_result,
+            "returned_output_lifetime": output_lifetime,
+        },
+        "timing": perf,
+        "classification": (
+            "microcheck only; not serving latency or safety qualification"
+        ),
+    }
+    (output / f"rank{rank}.json").write_text(json.dumps(payload, indent=2) + "\n")
+    torch.distributed.barrier(group=group.cpu_group)
+    if rank == 0:
+        ranks = [json.loads((output / f"rank{r}.json").read_text()) for r in range(4)]
+        assert [r["rank"] for r in ranks] == [0, 1, 2, 3]
+        physical_ids = [r["metadata"]["physical_device_id"] for r in ranks]
+        assert sorted(physical_ids) == [6, 7, 8, 9], physical_ids
+        assert all(r["metadata"]["physical_device_id"] == 6 + r["rank"] for r in ranks)
+        assert len({r["metadata"]["boot_id"] for r in ranks}) == 1
+        assert all(r["checks"]["eager_rank1_fault_sum"]["output"] == [1] for r in ranks)
+        (output / "summary.json").write_text(
+            json.dumps(
+                {"schema": "mtp-failstop-collective-summary-v1", "ranks": ranks},
+                indent=2,
+            )
+            + "\n"
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "output": str(output),
+                    "physical_ids": [
+                        r["metadata"]["physical_device_id"] for r in ranks
+                    ],
+                    "dispatch": ranks[0]["dispatch"],
+                    "timing": ranks[0]["timing"],
+                },
+                indent=2,
+            )
+        )
+    torch.distributed.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()

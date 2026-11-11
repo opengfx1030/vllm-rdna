@@ -1,0 +1,20 @@
+fwd   0  group 0  entries   2368     7.9s  
+fwd   1  group 1  entries   2434     1.4s  
+fwd   2  group 2  entries   2434     1.4s  
+fwd   3  group 3  entries   2434     1.4s  
+fwd   4  group 4  entries   2434     1.4s  
+fwd   5  group 1  entries   2434     1.4s  
+fwd   6  group 2  entries   2434     1.4s  
+fwd   7  group 3  entries   2434     1.4s  
+fwd   8  group 4  entries   2434     1.4s  
+fwd   9  group 1  entries   2434     2.3s  language_model.model.layers.0.mlp noise (0.02, 1, 52251), language_model.model.layers.1.mlp noise (0.02, 1, 52370), lang
+fwd  10  group 2  entries   2434     2.3s  language_model.model.layers.0.mlp noise (0.02, 1, 52642), language_model.model.layers.1.mlp noise (0.02, 1, 52272), lang
+fwd  11  group 1  entries   2434     2.3s  language_model.model.layers.0.mlp noise (0.02, 1, 52535), language_model.model.layers.1.mlp noise (0.02, 1, 52305), lang
+fwd  12  group 2  entries   2434     2.3s  language_model.model.layers.0.mlp noise (0.02, 1, 52831), language_model.model.layers.1.mlp noise (0.02, 1, 52368), lang
+fwd  13  group 3  entries   2434     1.4s  language_model.model.layers.0.mlp noise (0.02, 2, 52595), language_model.model.layers.1.mlp noise (0.02, 2, 52412), lang
+fwd  14  group 4  entries   2434     1.4s  language_model.model.layers.0.mlp noise (0.02, 2, 52126), language_model.model.layers.1.mlp noise (0.02, 2, 52253), lang
+fwd  15  group 3  entries   2434     1.4s  language_model.model.layers.0.mlp noise (0.02, 2, 52384), language_model.model.layers.1.mlp noise (0.02, 2, 52198), lang
+fwd  16  group 4  entries   2434     1.4s  language_model.model.layers.0.mlp noise (0.02, 2, 52406), language_model.model.layers.1.mlp noise (0.02, 2, 52453), lang
+fwd  17  group 1  entries   2434     1.4s  language_model.model.layers.0.mlp elem (0, 0, 1, 8828, 8829)
+fwd  18  group 2  entries   2434     1.4s  language_model.model.layers.0.mlp elem (0, 0, 1, 43514, 43515)
+5 groups

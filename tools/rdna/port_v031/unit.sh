@@ -14,15 +14,12 @@ SELF_TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 TREE=${TREE:-$SELF_TREE}
 VENV=${VENV:-$HOME/Apps/vllm/venv-7.14.0_0.31.0}
 TAG=${TAG:-v031}
-GPU=${GPU:-9}  # HIP index; on par1-cs25 0-1 are W7800s, 2-9 are V620s
+GPU=${GPU:-9}
 PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-1800}
 SKIP=${SKIP:-}    # extended regex of test paths to skip, e.g. SKIP=gdn_prefill_kkt
 ONLY=${ONLY:-}    # extended regex: run only matching test paths
 OUT=$HOME/w4a8_runs/port-v031/unit-$TAG
 mkdir -p "$OUT"
-case ",$GPU," in
-    *,0,* | *,1,*) echo "refusing HIP GPUs 0/1 (W7800s on par1-cs25)"; exit 2 ;;
-esac
 
 FILES=(
     tests/kernels/quantization/test_rdna2_w4a16.py
@@ -89,9 +86,9 @@ FILES=(
 )
 
 SITE=$VENV/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
+export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib:$SITE/torch/lib
 export HIP_VISIBLE_DEVICES=$GPU
-export VLLM_ROCM_USE_AITER=0 VLLM_RDNA_FORCE_FP16=1 TORCH_BLAS_PREFER_HIPBLASLT=0
+export VLLM_ROCM_USE_AITER=0 TORCH_BLAS_PREFER_HIPBLASLT=0
 export PYTORCH_TUNABLEOP_ENABLED=0 PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
 export VLLM_WORKER_MULTIPROC_METHOD=spawn GPU_MAX_HW_QUEUES=2
 export TRITON_CACHE_DIR=$OUT/triton-cache

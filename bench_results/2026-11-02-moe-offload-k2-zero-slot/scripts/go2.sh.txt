@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# bash go2.sh GO_NAME ARM1 ARM2: touch $LANE/go-GO_NAME once both arms (q/ARM.log) sit at the barrier, or one boot failed
+cd "$(dirname "$0")"
+G=$1; shift
+for i in $(seq 1 1500); do
+    r=0; dead=0
+    for a in "$@"; do
+        grep -q "waiting for .*go-$G" q/$a.log 2> /dev/null && r=$((r + 1))
+        grep -q "BOOTFAIL" q/$a.log 2> /dev/null && dead=1
+    done
+    [[ $r == $# || $dead == 1 ]] && break
+    sleep 3
+done
+touch go-$G
+echo "$(date +%T) go-$G touched (ready=$r dead=$dead)" >> q/go.log

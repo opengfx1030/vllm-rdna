@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "runtime_commit": "37360d8144",
+  "benchmark_commit": "be26661733",
+  "gpus": [
+    6,
+    7
+  ],
+  "gpu_test_suite_passed": 147,
+  "client_gate_tests_passed": 28,
+  "graph_forced_requests": 72,
+  "graph_forced_output_tokens": 55296,
+  "eager_forced_requests": 2,
+  "eager_forced_output_tokens": 1536,
+  "normal_eos_checks_per_mode": 48,
+  "normal_eos_modes": [
+    "graph-native",
+    "graph-tensor",
+    "eager-native"
+  ],
+  "normal_eos_hard_failures": 0,
+  "ppl": {
+    "graph-native": 4.82,
+    "graph-tensor": 4.83,
+    "eager-native": 4.84
+  },
+  "numeric_fault_markers": 0,
+  "new_gpu_fault_markers": 0,
+  "tensor_copy_default": true,
+  "causal_model_speedup_claimed": false,
+  "original_historical_nan_cause_proven": false
+}

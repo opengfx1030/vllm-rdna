@@ -1,0 +1,9 @@
+Cold-prefix model observations; no causal copy-backend speedup claimed.
+1k-c1 tensor | prefill tok/s/req: 834.58–862.85 | decode tok/s/req: 25.93–44.82 | aggregate output tok/s: 24.50–40.54 | TTFT s: 1.19–1.23 | median ITL ms: 55.72–65.81 | mean ITL ms: 62.37–66.29
+1k-c1 native | prefill tok/s/req: 931.30–967.66 | decode tok/s/req: 19.09–29.60 | aggregate output tok/s: 18.38–27.95 | TTFT s: 1.06–1.10 | median ITL ms: 54.22–61.80 | mean ITL ms: 55.64–69.05
+1k-c8 tensor | prefill tok/s/req: 155.09–164.47 | decode tok/s/req: 4.50–8.88 | aggregate output tok/s: 31.85–56.37 | TTFT s: 6.23–6.60 | median ITL ms: 262.43–306.83 | mean ITL ms: 256.54–492.52
+1k-c8 native | prefill tok/s/req: 179.73–182.73 | decode tok/s/req: 10.68–10.78 | aggregate output tok/s: 67.95–68.00 | TTFT s: 5.60–5.70 | median ITL ms: 181.29–218.53 | mean ITL ms: 175.44–215.75
+16k-c1 tensor | prefill tok/s/req: 927.65–958.29 | decode tok/s/req: 31.55–33.74 | aggregate output tok/s: 20.45–21.60 | TTFT s: 17.10–17.66 | median ITL ms: 72.99–79.71 | mean ITL ms: 76.17–82.08
+16k-c1 native | prefill tok/s/req: 1016.28–1020.01 | decode tok/s/req: 34.18–36.39 | aggregate output tok/s: 22.26–23.15 | TTFT s: 16.06–16.12 | median ITL ms: 66.93–73.72 | mean ITL ms: 70.10–75.01
+16k-c8 tensor | prefill tok/s/req: 137.51–148.98 | decode tok/s/req: 5.83–6.48 | aggregate output tok/s: 24.17–25.10 | TTFT s: 109.97–119.15 | median ITL ms: 238.77–280.87 | mean ITL ms: 348.29–372.34
+16k-c8 native | prefill tok/s/req: 175.14–176.30 | decode tok/s/req: 8.17–8.56 | aggregate output tok/s: 31.91–32.63 | TTFT s: 92.93–93.55 | median ITL ms: 175.15–195.22 | mean ITL ms: 282.19–298.16

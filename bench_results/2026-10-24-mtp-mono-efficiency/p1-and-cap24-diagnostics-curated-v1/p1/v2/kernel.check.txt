@@ -1,0 +1,1 @@
+PASS privileged kernel journal: 0 new records, no GPU fault

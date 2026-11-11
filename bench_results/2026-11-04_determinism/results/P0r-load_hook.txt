@@ -1,0 +1,7 @@
+[14:13:10] perf start
+[14:14:11] perf-16384x256-c1 kfd: evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+    perf-16384x256-c1            prefill   2916.9 tok/s/req (agg  2905.4) | decode  86.54 tok/s/req (agg out   29.89) | TTFT    5.62 s | ITL med    24.8 ms mean    24.6 ms | ok 4
+[14:15:39] perf-1024x512-c8 kfd: evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+    perf-1024x512-c8             prefill   1088.4 tok/s/req (agg  2731.3) | decode  39.13 tok/s/req (agg out  267.29) | TTFT    0.94 s | ITL med    46.4 ms mean    53.5 ms | ok 32
+[14:15:40] perf done rc=0
+PASS det_hook P0r

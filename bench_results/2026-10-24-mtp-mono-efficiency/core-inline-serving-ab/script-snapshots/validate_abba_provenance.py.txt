@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Read-only provenance gate for completed Mono-K2 ABBA serving arms."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_EVIDENCE = HERE / "remote-evidence"
+EXPECTED = {
+    "01-control": {
+        "arm": "control",
+        "so": "6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3",
+        "cu": "101e623a65c1cbb0057845b6accd35d20a04b0f30d6faa00c3684418ef6d5fd1",
+    },
+    "02-candidate": {
+        "arm": "candidate",
+        "so": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+        "cu": "aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf",
+    },
+    "03-candidate": {
+        "arm": "candidate",
+        "so": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+        "cu": "aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf",
+    },
+    "04-control": {
+        "arm": "control",
+        "so": "6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3",
+        "cu": "101e623a65c1cbb0057845b6accd35d20a04b0f30d6faa00c3684418ef6d5fd1",
+    },
+}
+CORE_KEYS = {"vllm/_rocm_C.abi3.so", "csrc/rocm/mono_k2_rdna2.cu"}
+GPU_ORDER = [8425, 5082, 11353, 47517, 45975, 33237, 56424, 18860, 17318, 29156]
+EXPECTED_GPU_IDS = GPU_ORDER[6:10]
+
+
+def fail(message: str) -> None:
+    raise ValueError(message)
+
+
+def sha_manifest(path: Path) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        m = re.fullmatch(r"([0-9a-fA-F]{64})\s+[* ](.+)", line)
+        if not m:
+            fail(f"invalid SHA256 manifest line in {path}: {line!r}")
+        digest, rawpath = m.groups()
+        key = stable_path(rawpath)
+        if key in entries:
+            fail(f"duplicate normalized manifest path {key!r} in {path}")
+        entries[key] = digest.lower()
+    if not entries:
+        fail(f"empty SHA256 manifest: {path}")
+    return entries
+
+
+def stable_path(raw: str) -> str:
+    p = Path(raw)
+    text = p.as_posix()
+    # Strip different source-tree roots while preserving paths within each tree.
+    for anchor in ("/vllm/", "/csrc/", "/tools/", "/tunableop/"):
+        if anchor in text:
+            return anchor[1:] + text.split(anchor, 1)[1]
+    # Model snapshots are outside the source tree and should match exactly.
+    return text
+
+
+def check_arm(evidence: Path, arm_id: str) -> dict:
+    expected = EXPECTED[arm_id]
+    d = evidence / arm_id
+    required = ["ARM-PASS.txt", "arm-provenance.txt", "boot-id.before", "boot-id.after",
+                "sha256.before", "sha256.after", "worker-provenance.json"]
+    missing = [name for name in required if not (d / name).is_file()]
+    if missing:
+        fail(f"{arm_id}: missing required evidence: {missing}")
+
+    pass_text = (d / "ARM-PASS.txt").read_text().strip()
+    pass_re = re.fullmatch(
+        r"ARM PASS arm=(\w+) so=([0-9a-f]{64}) cu=([0-9a-f]{64}) boot=([0-9a-f-]+)",
+        pass_text,
+    )
+    if not pass_re:
+        fail(f"{arm_id}: invalid or non-PASS ARM marker: {pass_text!r}")
+    arm_name, so_sha, cu_sha, pass_boot = pass_re.groups()
+    if (arm_name, so_sha, cu_sha) != (expected["arm"], expected["so"], expected["cu"]):
+        fail(f"{arm_id}: ARM-PASS identity mismatch: arm={arm_name} so={so_sha} cu={cu_sha}")
+
+    before_boot = (d / "boot-id.before").read_text().strip()
+    after_boot = (d / "boot-id.after").read_text().strip()
+    if not before_boot or before_boot != after_boot or before_boot != pass_boot:
+        fail(f"{arm_id}: boot identity mismatch before={before_boot!r} after={after_boot!r} marker={pass_boot!r}")
+
+    before_bytes = (d / "sha256.before").read_bytes()
+    after_bytes = (d / "sha256.after").read_bytes()
+    if before_bytes != after_bytes:
+        fail(f"{arm_id}: before/after SHA manifests are not byte-identical")
+    manifest = sha_manifest(d / "sha256.before")
+    if manifest.get("vllm/_rocm_C.abi3.so") != expected["so"]:
+        fail(f"{arm_id}: manifest core SHA does not match expected {expected['so']}")
+    if manifest.get("csrc/rocm/mono_k2_rdna2.cu") != expected["cu"]:
+        fail(f"{arm_id}: manifest CU SHA does not match expected {expected['cu']}")
+
+    prov_lines = (d / "arm-provenance.txt").read_text().splitlines()
+    kv = {}
+    for line in prov_lines:
+        if "=" in line:
+            k, v = line.split("=", 1)
+            kv[k.strip()] = v.strip()
+    if kv.get("arm") != expected["arm"] or kv.get("expected_so_sha256") != expected["so"] or kv.get("expected_cu_sha256") != expected["cu"]:
+        fail(f"{arm_id}: arm-provenance expected identity mismatch")
+    if kv.get("gpus") != "6,7,8,9":
+        fail(f"{arm_id}: expected gpus=6,7,8,9, got {kv.get('gpus')!r}")
+    if kv.get("boot_id") != before_boot:
+        fail(f"{arm_id}: arm-provenance boot mismatch")
+
+    worker = json.loads((d / "worker-provenance.json").read_text())
+    if worker.get("boot") != before_boot:
+        fail(f"{arm_id}: worker-provenance boot mismatch")
+    if worker.get("all_four_core_mappings_verified") is not True:
+        fail(f"{arm_id}: all_four_core_mappings_verified is not true")
+    if worker.get("all_four_physical_queue_owners_verified") is not True:
+        fail(f"{arm_id}: all_four_physical_queue_owners_verified is not true")
+    topology = worker.get("gpu_ids_in_unremapped_kfd_order")
+    if topology != GPU_ORDER:
+        fail(f"{arm_id}: unexpected KFD topology/order: {topology!r}")
+    workers = worker.get("workers")
+    if not isinstance(workers, list) or sorted(w.get("tp_rank") for w in workers) != [0, 1, 2, 3]:
+        fail(f"{arm_id}: expected exactly TP ranks 0..3")
+    rank_gpu = {}
+    for w in workers:
+        rank = w["tp_rank"]
+        if w.get("loaded_core_sha256") != expected["so"]:
+            fail(f"{arm_id}: rank {rank} loaded wrong core SHA")
+        queue_ids = w.get("physical_queue_gpu_ids")
+        if not isinstance(queue_ids, list) or not queue_ids or len(set(queue_ids)) != 1:
+            fail(f"{arm_id}: rank {rank} queue owners missing or inconsistent: {queue_ids!r}")
+        gpu_id = queue_ids[0]
+        expected_gpu = EXPECTED_GPU_IDS[rank]
+        if gpu_id != expected_gpu or w.get("expected_physical_gpu_id") != expected_gpu:
+            fail(f"{arm_id}: rank {rank} queue GPU {gpu_id} != topology GPU {expected_gpu}")
+        rank_gpu[str(rank)] = gpu_id
+
+    # Parse the captured workload summary as a structural check; GPU ownership
+    # and topology evidence comes from worker-provenance.json above.
+    concurrency = json.loads((d / "concurrency.json").read_text())
+    if not isinstance(concurrency, dict):
+        fail(f"{arm_id}: concurrency report is not a JSON object")
+
+    return {
+        "arm_id": arm_id,
+        "arm": arm_name,
+        "boot": before_boot,
+        "so_sha256": so_sha,
+        "cu_sha256": cu_sha,
+        "workers": 4,
+        "queue_gpu_ids_by_tp_rank": rank_gpu,
+        "manifest_entries": len(manifest),
+        "manifest": manifest,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
+    ap.add_argument("--arms", nargs="+", choices=list(EXPECTED), default=list(EXPECTED),
+                    help="validate these arm directories (default: all four; partial sets are diagnostic only)")
+    ap.add_argument("--output", type=Path, help="write JSON report to a new path; existing files are refused")
+    args = ap.parse_args()
+    try:
+        reports = [check_arm(args.evidence, arm_id) for arm_id in args.arms]
+        boots = {r["boot"] for r in reports}
+        if len(boots) != 1:
+            fail(f"arms do not share one boot: {sorted(boots)}")
+        # Cross-arm source/config provenance must agree; only core binary and CU
+        # are expected to differ between control and candidate.
+        base = reports[0]["manifest"]
+        for report in reports[1:]:
+            current = report["manifest"]
+            common = (set(base) & set(current)) - CORE_KEYS
+            if (set(base) - CORE_KEYS) != (set(current) - CORE_KEYS):
+                fail(f"manifest path sets differ between {reports[0]['arm_id']} and {report['arm_id']}")
+            mismatches = [k for k in sorted(common) if base[k] != current[k]]
+            if mismatches:
+                fail(f"non-core manifest hashes differ between {reports[0]['arm_id']} and {report['arm_id']}: {mismatches}")
+        summary = {
+            "status": "PASS",
+            "qualification_complete": set(args.arms) == set(EXPECTED),
+            "arms_requested": args.arms,
+            "shared_boot": next(iter(boots)),
+            "arm_summaries": [{k: v for k, v in r.items() if k != "manifest"} for r in reports],
+            "cross_arm_noncore_manifest_match": True,
+        }
+        encoded = json.dumps(summary, indent=2) + "\n"
+        print(encoded, end="")
+        if args.output:
+            if args.output.exists():
+                fail(f"refusing to overwrite output: {args.output}")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(encoded)
+        return 0
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        print(json.dumps({"status": "FAIL", "error": str(exc)}, indent=2), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

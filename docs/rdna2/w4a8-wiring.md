@@ -5,18 +5,16 @@ explore kernel from PR #9). Default OFF — the dispatcher takes the existing
 `gptq_gemm_rdna2_prefill` path unless `VLLM_RDNA2_W4A8_SDOT4=1`.
 
 The kernel body (`w4a8_gemm_kernel`, `w4a8_act_quant_kernel`, `Cfg`,
-`W4A8_EXPLORE_CONFIGS`, etc.) is copied verbatim from
-`/tmp/pr9_branch/csrc/rocm/explore/w4a8_sdot4.cuh` into the sibling
-`csrc/rocm/w4a8_sdot4_rdna2.cuh`. The explore source of truth stays
-untouched per the "do not modify `csrc/rocm/explore/*` in place" rule — the
-fork never had an `explore/` directory and this branch does not create one.
+`W4A8_EXPLORE_CONFIGS`) lives in `csrc/rocm/w4a8_sdot4_rdna2.cuh`, included
+by `csrc/rocm/w4a8_sdot4_rdna2.cu`. This tree has no `csrc/rocm/explore/`
+directory.
 
 ## What changed
 
 | File | Purpose |
 |---|---|
 | `csrc/rocm/w4a8_sdot4_rdna2.cu` | Production TU. `w4a8_gemm_rdna2` is a self-contained drop-in for `gptq_gemm_rdna2_prefill` with the same signature: allocates the int8 A buffer, A scales, A group sums, and the output internally; tries the `a8_lds_k32_ag` W4A8 fast path; falls back to `gptq_gemm_rdna2_prefill` whenever the shape/LDS budget is not eligible. `w4a8_act_quant_rdna2` is kept for tests (returns an empty tensor on ineligibility). One-time `TORCH_WARN_ONCE` marker when the fast path fires. |
-| `csrc/rocm/w4a8_sdot4_rdna2.cuh` | Verbatim copy of the explore header (renamed). `W4A8_EXPLORE_CONFIGS` and the kernel templates are unchanged. |
+| `csrc/rocm/w4a8_sdot4_rdna2.cuh` | Kernel templates and `W4A8_EXPLORE_CONFIGS`. |
 | `csrc/rocm/ops.h` | Declarations for the two ops. `w4a8_gemm_rdna2` mirrors `gptq_gemm_rdna2_prefill`'s signature; `w4a8_act_quant_rdna2` keeps the standalone-test signature. |
 | `csrc/rocm/torch_bindings.cpp` | Registers both ops with the new signatures; the C++ Meta stubs are gone (the fake path is `register_fake` in `_custom_ops.py`). |
 | `vllm/_custom_ops.py` | Wrappers `w4a8_act_quant_rdna2` / `w4a8_gemm_rdna2` with `register_fake` paths that match the new contract. |
@@ -121,34 +119,10 @@ a serve log confirms it landed:
 W ... RDNA2 W4A8 sdot4 prefill fast path active (config a8_lds_k32_ag)
 ```
 
-## Build
+## Registration
 
-```bash
-cd <local-home>/Projects/infrastructure/gfx1030_optimized/vllm-rdna-0.28.0
-git switch w4a8-wiring
-rsync -avz --exclude='.git/' -e "ssh -i ~/.ssh/id_ed25519_ansible" \
-    ./ <bench-host>:~/vllm-rdna-0.28.0/
-
-ssh <bench-host>
-source <bench-home>/Apps/vllm/venv-7.14.0_0.28.0/bin/activate
-cd <bench-home>/vllm-rdna-0.28.0
-export SETUPTOOLS_SCM_PRETEND_VERSION=0.20.1.dev99
-export VLLM_TARGET_DEVICE=rocm
-export PYTORCH_ROCM_ARCH='gfx1030'
-export VLLM_PYTHON_EXECUTABLE=$VIRTUAL_ENV/bin/python
-export MAX_JOBS=16
-export CMAKE_BUILD_TYPE=RelWithDebInfo
-export CMAKE_HIP_COMPILER=/opt/rocm/core-7.14/bin/hipcc
-export ROCM_HOME=/opt/rocm/core-7.14
-export ROCM_PATH=/opt/rocm/core-7.14
-export HIP_PATH=/opt/rocm/core-7.14
-export HIP_ROOT_DIR=/opt/rocm/core-7.14
-export CMAKE_HIP_COMPILER_ROCM_ROOT=/opt/rocm/core-7.14
-export PATH=/opt/rocm/core-7.14/bin:$PATH
-pip install -e . --no-build-isolation --no-deps
-```
-
-Verify the ops are registered:
+The ops are in this tree (`csrc/rocm/w4a8_sdot4_rdna2.cu`,
+`csrc/rocm/torch_bindings.cpp`). Verify they are registered:
 
 ```bash
 python -c "
@@ -170,7 +144,6 @@ for n in names: print(n)
 ### Pytest (unit, no model)
 
 ```bash
-cd <bench-home>/vllm-rdna-0.28.0
 .venv/bin/python -m pytest tests/kernels/quantization/test_rdna2_w4a8.py -v
 ```
 
@@ -233,20 +206,3 @@ This env var is **experimental**. No new env vars in the platform selector
   on the `rdna2_decode` arm. The C++ side enforces its own shape gates and
   falls back to the W4A16 prefill kernel whenever any finer check fails —
   the selector is an optimisation, never a correctness dependency.
-
-## Pointer back to the explore work
-
-The explore-only tree lives at `/tmp/pr9_branch/` (extracted copy of upstream
-branch `explore/w4a8-sdot4`):
-
-- Explore kernel body (source of truth, unchanged):
-  `/tmp/pr9_branch/csrc/rocm/explore/w4a8_sdot4.cuh`
-  (copied verbatim into `csrc/rocm/w4a8_sdot4_rdna2.cuh` here).
-- Explore C ABI (replaced by this branch's `.cu`):
-  `/tmp/pr9_branch/csrc/rocm/explore/w4a8_sdot4_capi.cu`
-- Explore ISA shim (CPU compilation without ROCm):
-  `/tmp/pr9_branch/csrc/rocm/explore/w4a8_sdot4_isa_shim.h`
-- Explore NumPy reference (CPU checks, no torch/GPU):
-  `/tmp/pr9_branch/benchmarks/kernels/w4a8_sdot4_explore/reference.py`
-- Explore G2 correctness tests:
-  `/tmp/pr9_branch/benchmarks/kernels/w4a8_sdot4_explore/test_reference.py`

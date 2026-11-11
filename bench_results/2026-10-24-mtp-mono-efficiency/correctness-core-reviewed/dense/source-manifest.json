@@ -1,0 +1,31 @@
+{
+  "base": {
+    "v1_source_sha256": "dc92441d0ed68766de636c987ab34ab12e0a4997febdc0f949aea437fbbcb266",
+    "v1_binding_sha256": "69fc9498d8b1c2432f68cd892f29aaad0e3cc948f3d3a1291bce2d951e1ef059",
+    "v1_manifest": {
+      "base": {
+        "commit": "9576cf5be22776cab883f648601c779f46ea2bca",
+        "source_sha256": "10a4b0d8b7197224808dc749932cfbd07544a022f838561390710f2f5b29d91b"
+      },
+      "source_sha256": "dc92441d0ed68766de636c987ab34ab12e0a4997febdc0f949aea437fbbcb266",
+      "binding_sha256": "69fc9498d8b1c2432f68cd892f29aaad0e3cc948f3d3a1291bce2d951e1ef059",
+      "module": "mono_k2_dense_native_rounding_scratch_20261024",
+      "gate": "dense_mtp && H2560 && I640",
+      "unqualified": true,
+      "dot_association": "existing Mono dense helpers unchanged; native chunk association not matched by this first experiment"
+    }
+  },
+  "source_sha256": "28356022f2ca23c667c70fc0712cef300fcdfa16b0dc1c8a23626b2cc413efa8",
+  "binding_sha256": "e3c943636b36f1e113edb6c5611cc147da1791c2f5f439a2f144eb1c66ddae43",
+  "module": "mono_k2_dense_native_rounding_v2_scratch_20261024",
+  "namespace": "mono_ffn_dense_native_round_v2",
+  "export_prefix": "mono_k2_rdna2_dense_native_round_v2",
+  "ar_stub": "dense_native_round_v2_ar_device",
+  "gate": "dense_mtp && H2560 && I640",
+  "changes_from_v1": [
+    "unique namespace/kernel/type identity, export prefix, AR stub and module",
+    "dense-only FP16 router boundary before max/key/selection/softmax and score ranking"
+  ],
+  "unqualified": true,
+  "trace_required_before_timing": true
+}

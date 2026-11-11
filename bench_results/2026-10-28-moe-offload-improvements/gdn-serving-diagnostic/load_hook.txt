@@ -1,0 +1,21 @@
+1k-c1 arm=0 mode=native: bench-1024x512-c1            prefill   1000.8 tok/s/req (agg  1000.8) | decode  24.17 tok/s/req (agg out   23.10) | TTFT    1.02 s | ITL med    58.6 ms mean    64.5 ms | ok 1
+1k-c1 arm=1 mode=tensor: bench-1024x512-c1            prefill    882.1 tok/s/req (agg   882.1) | decode  25.01 tok/s/req (agg out   23.71) | TTFT    1.16 s | ITL med    58.5 ms mean    67.4 ms | ok 1
+1k-c1 arm=2 mode=tensor: bench-1024x512-c1            prefill    873.1 tok/s/req (agg   873.1) | decode  18.52 tok/s/req (agg out   17.80) | TTFT    1.17 s | ITL med    56.1 ms mean    57.6 ms | ok 1
+1k-c1 arm=3 mode=native: bench-1024x512-c1            prefill   1029.1 tok/s/req (agg  1029.1) | decode  40.78 tok/s/req (agg out   37.85) | TTFT    1.00 s | ITL med    59.0 ms mean    58.8 ms | ok 1
+1k-c8 arm=0 mode=native: bench-1024x512-c8            prefill    193.5 tok/s/req (agg  1019.3) | decode  11.79 tok/s/req (agg out   72.67) | TTFT    5.29 s | ITL med   197.5 ms mean   193.4 ms | ok 8
+1k-c8 arm=1 mode=tensor: bench-1024x512-c8            prefill    168.5 tok/s/req (agg   895.4) | decode   9.77 tok/s/req (agg out   60.47) | TTFT    6.08 s | ITL med   195.4 ms mean   189.2 ms | ok 8
+1k-c8 arm=2 mode=tensor: bench-1024x512-c8            prefill    167.3 tok/s/req (agg   889.1) | decode   9.39 tok/s/req (agg out   59.36) | TTFT    6.12 s | ITL med   252.5 ms mean   241.4 ms | ok 8
+1k-c8 arm=3 mode=native: bench-1024x512-c8            prefill    183.1 tok/s/req (agg   971.3) | decode  10.41 tok/s/req (agg out   65.36) | TTFT    5.59 s | ITL med   218.2 ms mean   200.4 ms | ok 8
+PASS expert-copy A/B; inspect timings and separate quality gates
+16k-c1 arm=0 mode=tensor: bench-16384x1024-c1          prefill    960.6 tok/s/req (agg   960.6) | decode  26.87 tok/s/req (agg out   18.57) | TTFT   17.06 s | ITL med    67.0 ms mean    69.6 ms | ok 1
+16k-c1 arm=1 mode=native: bench-16384x1024-c1          prefill   6402.2 tok/s/req (agg  6402.2) | decode  21.83 tok/s/req (agg out   20.72) | TTFT    2.56 s | ITL med    78.4 ms mean    85.7 ms | ok 1
+PASS expert-copy A/B; inspect timings and separate quality gates
+16k-c1 arm=0 mode=tensor: bench-16384x1024-c1          prefill   5873.7 tok/s/req (agg  5873.7) | decode  23.42 tok/s/req (agg out   22.03) | TTFT    2.79 s | ITL med    71.8 ms mean    79.9 ms | ok 1
+16k-c1 arm=1 mode=native: bench-16384x1024-c1          prefill   5424.6 tok/s/req (agg  5424.6) | decode  24.94 tok/s/req (agg out   23.25) | TTFT    3.02 s | ITL med    68.4 ms mean    75.0 ms | ok 1
+PASS expert-copy A/B; inspect timings and separate quality gates
+16k-c1 arm=0 mode=tensor: bench-16384x1024-c1          prefill   6384.3 tok/s/req (agg  6384.3) | decode  26.01 tok/s/req (agg out   24.44) | TTFT    2.57 s | ITL med    59.2 ms mean    71.9 ms | ok 1
+16k-c1 arm=1 mode=native: bench-16384x1024-c1          prefill   7308.8 tok/s/req (agg  7308.8) | decode  30.12 tok/s/req (agg out   28.28) | TTFT    2.24 s | ITL med    58.5 ms mean    62.1 ms | ok 1
+PASS expert-copy A/B; inspect timings and separate quality gates
+16k-c8 arm=0 mode=native: bench-16384x1024-c8          prefill    188.2 tok/s/req (agg   713.5) | decode   8.68 tok/s/req (agg out   34.46) | TTFT   87.07 s | ITL med   157.5 ms mean   243.6 ms | ok 8
+16k-c8 arm=1 mode=tensor: bench-16384x1024-c8          prefill    337.5 tok/s/req (agg   794.7) | decode   7.16 tok/s/req (agg out   33.62) | TTFT   48.55 s | ITL med   284.8 ms mean   296.8 ms | ok 8
+PASS expert-copy A/B; inspect timings and separate quality gates

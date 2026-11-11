@@ -1,0 +1,98 @@
+{
+  "ARM-PASS.txt": {
+    "sha256": "0f09056e5984620a44e48749341c85128ffa9f1ba148c4cde5e204ec35983b91",
+    "bytes": 338
+  },
+  "README.md": {
+    "sha256": "a1f3a36fbcf168fe89515f8bfe4cec15d31ec195acd0cc5e72f29b44a3a1430a",
+    "bytes": 1878
+  },
+  "analyze_native_vs_mono_v3.py.txt": {
+    "sha256": "766e5e20b21eaf3e0384eb5a70f74bafdd6932f2c3eef7d70ee48dbb7455e699",
+    "bytes": 36480
+  },
+  "analyze_pair_v1.py.txt": {
+    "sha256": "62f766cf1007aef0e4c6f45d1fbc7a56819949c0cb45a85c241c4d59951436cb",
+    "bytes": 25398
+  },
+  "analyzer-source-snapshot-manifest.json": {
+    "sha256": "5011009043b2aa639b2fb5f9046edcc0679d3d28daee92ef21d69e3027ff7fc9",
+    "bytes": 2177
+  },
+  "api-environment-audit.json": {
+    "sha256": "0410a1309c9d6a9b754e87aa42b209a9240a5ed9bad5b032148597d55af53796",
+    "bytes": 517
+  },
+  "arm-provenance.txt": {
+    "sha256": "717d2076c5035f5de5764ed7931f760d80d05710d6c04fde8f8f79bbca421d47",
+    "bytes": 660
+  },
+  "boot-id.after": {
+    "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a",
+    "bytes": 37
+  },
+  "boot-id.before": {
+    "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a",
+    "bytes": 37
+  },
+  "config.env": {
+    "sha256": "06efc3a22446638df474aff3eb81d3e07077987084ab3fbfcd327ff058e316f7",
+    "bytes": 1412
+  },
+  "curate_mono_arm_v3.py.txt": {
+    "sha256": "8d22f4f84d7cb15e8b1409d91cc0b20a8b51625620f6bb7182eb9292d3e2f5ef",
+    "bytes": 8765
+  },
+  "curation-manifest.json": {
+    "sha256": "b80a4b012c2080d60b16cff7e71bd84a89eac416372cf49dc8a0f9780d173c5d",
+    "bytes": 1233
+  },
+  "kernel-journal-audit-summary.json": {
+    "sha256": "50605ce98d9fb0d20b38f20a62925ffb2292de0fbd8ea58b17ac8da8e370cf2a",
+    "bytes": 367
+  },
+  "models.json": {
+    "sha256": "394e7e2526c1cb66078540943290dc3f0e501c02688059d17cdba50a11b57e27",
+    "bytes": 582
+  },
+  "per-cell-metrics.csv": {
+    "sha256": "77a9fa8d89e6d0447995dd3c92ee6344e545c0c361dbd34b245c70e71bb06d30",
+    "bytes": 2645
+  },
+  "per-request-metrics.csv": {
+    "sha256": "8acfeb1624768a0f9793189cd67ec2ffdfa6573caf876d331c42a7d3c5add7a2",
+    "bytes": 19566
+  },
+  "quality-and-gates.txt": {
+    "sha256": "c386d245e1c320be16b233ba78942cbb3efaab11071aefb6a12b295531f4d861",
+    "bytes": 1886
+  },
+  "raw-file-sha256-receipts.json": {
+    "sha256": "1bf44b268d5724da73c277dd0366bb5ed800b5c1476fdd693a00f8f0424052a7",
+    "bytes": 6506
+  },
+  "sha256.after": {
+    "sha256": "87171c451d52c70c9ae64abc26f5c257ef1a61580bc0f30da79022fe91584350",
+    "bytes": 5778
+  },
+  "sha256.before": {
+    "sha256": "87171c451d52c70c9ae64abc26f5c257ef1a61580bc0f30da79022fe91584350",
+    "bytes": 5778
+  },
+  "test_analyze_native_vs_mono_v3.py.txt": {
+    "sha256": "5ff58ed10895d41bff8cd28d1d567b40e82b4e44c683362d628aaa6dae157062",
+    "bytes": 2829
+  },
+  "worker-environment-audit.json": {
+    "sha256": "fd7c624b77b346ef47e1d31e61b17cb5b244e15d2cc1b75d2222c129e0a36642",
+    "bytes": 1526
+  },
+  "worker-provenance.json": {
+    "sha256": "10f38cde0787029e7c16151f2bc916f0059db86c91c056673705da436109e17f",
+    "bytes": 3813
+  },
+  "intended-evidence-files.txt": {
+    "sha256": "fe5a46ab91f8236886a84da109b881b344934c9cd340ced6bf5058fa652123b8",
+    "bytes": 542
+  }
+}

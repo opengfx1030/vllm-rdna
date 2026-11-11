@@ -121,7 +121,6 @@ that selection.
 Reproduce the CPU checks without downloading weights:
 
 ```bash
-.venv/bin/python tools/rdna2/test_startup_plan_cpu.py
 .venv/bin/python -m pytest --noconftest -q \
   tests/distributed/test_rdna_p2p.py \
   tests/kernels/quantization/test_rdna2_w4a16_selection.py \

@@ -1,0 +1,13 @@
+# md5 of the committed files (the tree under test on the box matched them)
+91fc904549923f13abcdec77b0e0111c  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py
+9014c90fa0865f8e848927c7da1be7a9  vllm/model_executor/layers/fused_moe/rdna_expert_cache_policy.py
+d094124ab8d6cb970e69cc0b7510db99  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py
+644958a2d261cb387f08c827550f7b67  tests/model_executor/layers/fused_moe/test_rdna_expert_cache.py
+d78f2d71c57bbb8f337fe20361a11b16  tests/model_executor/layers/fused_moe/test_rdna_expert_cache_policy.py
+07f911614ad5c7b1129915c57b97b02a  tests/models/qwen4_exp/test_amd_mono_rdna2_offload.py
+f6bcc6092f96ed1bb7d715dd940b3230  tools/rdna/prof/offload_gaps.py
+
+# k2.py as run: serve arms T3 and T3x booted the file with 'm * 10' (md5 9eb6dc0c7ade6654c0956bb6428da4d1; T3x's server may already have imported the final file, see its arm-info);
+# arm T3e (eager) and the V3 validation ran the committed file (md5 d094124ab8d6cb970e69cc0b7510db99), where 'm * 10' reads 'm * route_ids.shape[1]' (same value, top-k is 10).
+# BEFORE arms (T0, T0c, T0x, T0e) ran the untouched tree ~/vllm-rdna-0.32.0-head at HEAD cb81247c13.
+# V3b-hip23 (serve/V3b-hip23.validate-summary.txt): the same ~/vllm-rdna-0.32.0-zs tree as V3, run on HIP 2,3 (the other PCIe switch) on 2026-11-03 00:52-01:00.

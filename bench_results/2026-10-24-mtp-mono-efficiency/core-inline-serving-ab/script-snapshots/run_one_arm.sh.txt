@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Run exactly one fresh control or candidate serving arm. Root owns invocation.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+RUNS_ROOT=${RUNS_ROOT:?must be a fresh absolute output root}
+ARM=${ARM:?ARM must be control or candidate}
+BASE_TREE=${BASE_TREE:-/home/chenco_adm/vllm-rdna-mtp-mono}
+CANDIDATE_TREE=${CANDIDATE_TREE:-/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree}
+VENV=${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final}
+MODEL=${MODEL:-/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+PLE_DIR=${PLE_DIR:-/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
+GATE_SCRIPT=${GATE_SCRIPT:-$HERE/../../2026-10-22-mtp-mono-efficiency/mono-mtp-drafter-ab-2026-10-23/serve_validate_mono_ab_gate.sh}
+PORT=${PORT:?assign a unique unused port for this arm}
+TAG=${TAG:-core-inline-$ARM}
+EXPECTED_CONTROL_SO=${EXPECTED_CONTROL_SO:-6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3}
+EXPECTED_CONTROL_CU=${EXPECTED_CONTROL_CU:-101e623a65c1cbb0057845b6accd35d20a04b0f30d6faa00c3684418ef6d5fd1}
+EXPECTED_CANDIDATE_SO=${EXPECTED_CANDIDATE_SO:?candidate _rocm_C.abi3.so SHA256 required}
+EXPECTED_CANDIDATE_CU=${EXPECTED_CANDIDATE_CU:?candidate mono_k2_rdna2.cu SHA256 required}
+
+case "$ARM" in
+    control) TREE=$BASE_TREE; EXPECTED_SO=$EXPECTED_CONTROL_SO; EXPECTED_CU=$EXPECTED_CONTROL_CU ;;
+    candidate) TREE=$CANDIDATE_TREE; EXPECTED_SO=$EXPECTED_CANDIDATE_SO; EXPECTED_CU=$EXPECTED_CANDIDATE_CU ;;
+    *) echo "ARM must be control or candidate" >&2; exit 2 ;;
+esac
+
+[[ $RUNS_ROOT == /* && ! -e $RUNS_ROOT && ! -e ${RUNS_ROOT}.gpu-owners.txt ]] || {
+    echo "RUNS_ROOT and its GPU-owner sidecar must be new and absolute: $RUNS_ROOT" >&2; exit 2;
+}
+[[ $(hostname) == par1-cs25 ]] || { echo "refusing non-par1-cs25 host: $(hostname)" >&2; exit 2; }
+[[ $TREE == /* && -d $TREE && -f $TREE/vllm/_rocm_C.abi3.so ]] || { echo "tree/artifact missing: $TREE" >&2; exit 2; }
+[[ -f $MODEL/config.json && -f $PLE_DIR/META.json && -x $VENV/bin/python ]] || { echo "frozen model/PLE/venv input missing" >&2; exit 2; }
+[[ -f $GATE_SCRIPT ]] || { echo "standard gate script missing: $GATE_SCRIPT" >&2; exit 2; }
+if curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+    echo "refusing occupied port $PORT" >&2; exit 3
+fi
+
+mkdir -p "$(dirname "$RUNS_ROOT")"
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -n 9 || { echo "HIP6-9 serving lock is held" >&2; exit 3; }
+"$VENV/bin/python" -S "$HERE/check_reserved_gpu.py" >"${RUNS_ROOT}.gpu-owners.txt" 2>&1
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES=6,7,8,9
+
+BOOT=$(cat /proc/sys/kernel/random/boot_id)
+hashes() {
+    sha256sum \
+        "$TREE/vllm/_rocm_C.abi3.so" \
+        "$TREE/csrc/rocm/mono_k2_rdna2.cu" \
+        "$TREE/vllm/models/qwen4_exp/amd/mono_decode_rdna2.py" \
+        "$TREE/vllm/models/qwen4_exp/amd/mono/rdna2/k2.py" \
+        "$TREE/vllm/models/qwen4_exp/amd/mono/rdna2/layout.py" \
+        "$TREE/tools/rdna/serve_rdna.sh" \
+        "$TREE/tools/rdna/recipes/flashnext-mtp2.env" \
+        "$MODEL/config.json" "$PLE_DIR/META.json" \
+        "$TREE/tunableop/rocm7.14-rocblas5.5/"tunableop_results{0,1,2,3}.csv
+}
+actual_so=$(sha256sum "$TREE/vllm/_rocm_C.abi3.so" | cut -d' ' -f1)
+actual_cu=$(sha256sum "$TREE/csrc/rocm/mono_k2_rdna2.cu" | cut -d' ' -f1)
+[[ $actual_so == "$EXPECTED_SO" ]] || { echo "$ARM _rocm_C SHA mismatch: $actual_so" >&2; exit 4; }
+[[ $actual_cu == "$EXPECTED_CU" ]] || { echo "$ARM MonoKernel CU SHA mismatch: $actual_cu" >&2; exit 4; }
+
+if [[ $ARM == candidate ]]; then
+    "$VENV/bin/python" -S "$HERE/check_candidate_source.py" \
+        --control "$BASE_TREE/csrc/rocm/mono_k2_rdna2.cu" \
+        --candidate "$CANDIDATE_TREE/csrc/rocm/mono_k2_rdna2.cu"
+    "$VENV/bin/python" -S "$HERE/check_candidate_tree.py" \
+        --control "$BASE_TREE" --candidate "$CANDIDATE_TREE"
+    for rel in \
+        vllm/models/qwen4_exp/amd/mono_decode_rdna2.py \
+        vllm/models/qwen4_exp/amd/mono/rdna2/k2.py \
+        vllm/models/qwen4_exp/amd/mono/rdna2/layout.py \
+        tools/rdna/serve_rdna.sh tools/rdna/recipes/flashnext-mtp2.env; do
+        [[ $(sha256sum "$BASE_TREE/$rel" | cut -d' ' -f1) == \
+           $(sha256sum "$CANDIDATE_TREE/$rel" | cut -d' ' -f1) ]] || {
+            echo "unexpected control/candidate source difference: $rel" >&2; exit 4;
+        }
+    done
+fi
+
+mkdir -p "$RUNS_ROOT"
+OUT=$RUNS_ROOT
+[[ ! -e $OUT/summary.txt ]] || { echo "refusing existing run output" >&2; exit 2; }
+exec > >(tee -a "$OUT/driver.log") 2>&1
+echo "START $(date -Is) arm=$ARM host=$(hostname) boot=$BOOT tree=$TREE port=$PORT"
+{
+    printf 'arm=%s\nbase_tree=%s\ncandidate_tree=%s\nserving_tree=%s\n' "$ARM" "$BASE_TREE" "$CANDIDATE_TREE" "$TREE"
+    printf 'expected_so_sha256=%s\nexpected_cu_sha256=%s\n' "$EXPECTED_SO" "$EXPECTED_CU"
+    printf 'mtp_drafter=0\ngpus=6,7,8,9\nboot_id=%s\n' "$BOOT"
+} > "$OUT/arm-provenance.txt"
+hashes > "$OUT/sha256.before"
+printf '%s\n' "$BOOT" > "$OUT/boot-id.before"
+
+# Identical serving settings for both arms. MTP draft K1/K2 is disabled; this
+# tests the ordinary model K2 core build rather than changing MTP dispatch.
+export MTP_DRAFTER=0
+export RECIPE=flashnext-mtp2 MODEL GPUS=6,7,8,9 VENV
+export PORT TAG OUT CACHE="$RUNS_ROOT/cache"
+export PLE=int4 PLE_QUANT_DIR="$PLE_DIR" KV=4026531840 GMEM=0.92
+export LPTH=1024 PREFILL_INTERVAL=2 SEQS=8
+export CELLS='1024:512:1:8 1024:512:8:32 16384:1024:1:8 16384:1024:8:32'
+export BENCH_EXTRA='--temperature 0 --save-detailed'
+export RESET_PREFIX_CACHE=1 VLLM_SERVER_DEV_MODE=1
+export CONC_PROBE_ARGS='--no-ignore-eos --max-tokens 128'
+export PPL_PROBE=1 PREFIX_PROBE=1 CONC_PROBE=1 WARMUP=1
+export VLLM_RDNA_DYNAMIC_PREFILL=0 VLLM_RDNA_PHASE_TIMING=0 VLLM_RDNA_OP_TIMING=0
+export VLLM_GDN_PREFILL_TIMING=0 VLLM_RDNA_GDN_OPAQUE=1
+export VLLM_RAISE_ON_LOGIT_NANS=1
+export LOAD_HOOK="$BASE_TREE/tools/rdna/mono/parity_hook.sh"
+export SERVE_TREE="$TREE" SERVE_SCRIPT="$TREE/tools/rdna/serve_rdna.sh"
+export EXTRA_ARGS='--monokernel --additional-config {"rocm_mono_decode":{"mtp_drafter":false}}'
+env | sort | grep -E '^(RECIPE|MODEL|GPUS|VENV|PORT|TAG|OUT|CACHE|PLE|PLE_QUANT_DIR|KV|GMEM|LPTH|PREFILL_INTERVAL|SEQS|CELLS|BENCH_EXTRA|RESET_PREFIX_CACHE|VLLM_SERVER_DEV_MODE|CONC_PROBE_ARGS|VLLM_RDNA_DYNAMIC_PREFILL|VLLM_RDNA_PHASE_TIMING|VLLM_RDNA_OP_TIMING|VLLM_GDN_PREFILL_TIMING|VLLM_RDNA_GDN_OPAQUE|VLLM_RAISE_ON_LOGIT_NANS|MTP_DRAFTER|SERVE_TREE|SERVE_SCRIPT|EXTRA_ARGS)=' > "$OUT/config.env"
+
+bash "$GATE_SCRIPT" PLE=int4 PLE_QUANT_DIR="$PLE_DIR" KV=4026531840 \
+    GMEM=0.92 LPTH=1024 PREFILL_INTERVAL=2 SEQS=8
+
+hashes > "$OUT/sha256.after"
+printf '%s\n' "$(cat /proc/sys/kernel/random/boot_id)" > "$OUT/boot-id.after"
+cmp "$OUT/sha256.before" "$OUT/sha256.after"
+cmp "$OUT/boot-id.before" "$OUT/boot-id.after"
+[[ $(cat "$OUT/boot-id.after") == "$BOOT" ]]
+[[ $(sha256sum "$TREE/vllm/_rocm_C.abi3.so" | cut -d' ' -f1) == "$EXPECTED_SO" ]]
+[[ $(sha256sum "$TREE/csrc/rocm/mono_k2_rdna2.cu" | cut -d' ' -f1) == "$EXPECTED_CU" ]]
+for required in 'MONO ROUTE' 'MTP K2 DISPATCH' 'PROBE PASS' 'PPL PROBE PASS' \
+    'PREFIX PASS' 'CONCURRENCY PASS' 'PROBE-AFTER-LOAD PASS' \
+    'LOAD HOOK rc=0 PASS' 'fault markers in serve.log: 0' 'new amdgpu dmesg faults: 0'; do
+    grep -Fq "$required" "$OUT/summary.txt"
+done
+! grep -Eq 'ROUTE FAIL|DISPATCH FAIL|PROBE FAIL|PREFIX FAIL|CONCURRENCY FAIL|fault markers in serve.log: [1-9]|new amdgpu dmesg faults: [1-9]' "$OUT/summary.txt"
+grep -Fq 'MTP K2 DISPATCH dense_calls=0' "$OUT/summary.txt"
+grep -Fq 'MTP_DRAFTER=0' "$OUT/config.env"
+grep -Fq 'monokernel=True' "$OUT/serve.log"
+grep -Fq 'mono kernel' "$OUT/serve.log"
+! grep -Fq 'MTP drafter K1/K2' "$OUT/serve.log"
+! grep -Fq 'dense MTP K2 call' "$OUT/serve.log"
+for cell in 1024x512-c1 1024x512-c8 16384x1024-c1 16384x1024-c8; do
+    grep -Fq "PREFIX RESET PASS before bench-$cell" "$OUT/summary.txt"
+    test -s "$OUT/bench-$cell.json"
+done
+printf 'ARM PASS arm=%s so=%s cu=%s boot=%s\n' "$ARM" "$actual_so" "$actual_cu" "$BOOT" | tee "$OUT/ARM-PASS.txt"

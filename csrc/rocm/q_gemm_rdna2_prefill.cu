@@ -41,6 +41,8 @@
   #define __HIP__RDNA2__
 #endif
 
+void moe_fixedpoint_to_half_rdna2(const torch::Tensor&, torch::Tensor&);
+
 namespace vllm {
 namespace gptq_rdna2_prefill {
 
@@ -89,7 +91,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
     const uint32_t* __restrict__ b_qzeros, const half* __restrict__ b_scales,
     half* __restrict__ c, const int size_m, const int size_n, const int size_k,
     const int groups, const int zero_offset, const int* __restrict__ b_q_perm,
-    const int split_k) {
+    const int split_k, long long* fixed) {
   constexpr int k_per_split = K_PER_SPLIT;
   constexpr int THREADS = Config::THREADS;
   constexpr int N_PER_THREAD = Config::N_PER_THREAD;
@@ -204,7 +206,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
 
       k += K_STEP;
     }
-    epilogue<Config::M_TILE>(block_c, m_tile, size_m, size_n, n, c);
+    epilogue<Config::M_TILE>(block_c, m_tile, size_m, size_n, n, c, fixed);
   }
 }
 
@@ -219,7 +221,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
     const uint32_t* __restrict__ b_qzeros, const half* __restrict__ b_scales,
     half* __restrict__ c, const int size_m, const int size_n, const int size_k,
     const int groups, const int zero_offset, const int* __restrict__ b_q_perm,
-    const int split_k) {
+    const int split_k, long long* fixed) {
   constexpr int THREADS = Config::THREADS;
   constexpr int N_PER_THREAD = Config::N_PER_THREAD;
   constexpr int N_TILE = Config::N_TILE;
@@ -358,7 +360,7 @@ __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
 
       k += K_STEP;
     }
-    epilogue<Config::M_TILE>(block_c, m_tile, size_m, size_n, n, c);
+    epilogue<Config::M_TILE>(block_c, m_tile, size_m, size_n, n, c, fixed);
   }
 }
 
@@ -370,13 +372,13 @@ template <typename Config, int K_PER_SPLIT>
 __global__ __launch_bounds__(Config::THREADS) void gemm_static_kernel(
     const half*, const uint32_t*, const uint32_t*, const half*, half*,
     const int, const int, const int, const int, const int, const int*,
-    const int) {}
+    const int, long long*) {}
 
 template <typename Config>
 __global__ __launch_bounds__(Config::THREADS) void gemm_dynamic_kernel(
     const half*, const uint32_t*, const uint32_t*, const half*, half*,
     const int, const int, const int, const int, const int, const int*,
-    const int) {}
+    const int, long long*) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
@@ -395,7 +397,8 @@ inline void launch_for_config(const half* a, const uint32_t* b_q_weight,
                               const uint32_t* b_qzeros, const half* b_scales,
                               const int* b_q_perm, half* c, int size_m,
                               int size_n, int size_k, int groups, int split_k,
-                              bool use_v2_format, cudaStream_t stream) {
+                              bool use_v2_format, cudaStream_t stream,
+                              long long* fixed = nullptr) {
   constexpr int N_TILE = Config::N_TILE;
   constexpr int M_TILE = Config::M_TILE;
   constexpr int LDS_PAD = Config::LDS_PAD;
@@ -412,22 +415,22 @@ inline void launch_for_config(const half* a, const uint32_t* b_q_weight,
     case 256:
       gemm_static_kernel<Config, 256><<<grid, block, shmem, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-          zero_offset, b_q_perm, split_k);
+          zero_offset, b_q_perm, split_k, fixed);
       break;
     case 512:
       gemm_static_kernel<Config, 512><<<grid, block, shmem, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-          zero_offset, b_q_perm, split_k);
+          zero_offset, b_q_perm, split_k, fixed);
       break;
     case 1024:
       gemm_static_kernel<Config, 1024><<<grid, block, shmem, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-          zero_offset, b_q_perm, split_k);
+          zero_offset, b_q_perm, split_k, fixed);
       break;
     default:
       gemm_dynamic_kernel<Config><<<grid, block, shmem, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-          zero_offset, b_q_perm, split_k);
+          zero_offset, b_q_perm, split_k, fixed);
       break;
   }
 }
@@ -514,42 +517,7 @@ int compute_split_k(int size_m, int size_n, int size_k) {
   return result;
 }
 
-// Public dispatcher entry: pick a Config, compute split_k, launch.
-// K-aware config selection. Mirrors the empirical 4-branch rule from the
-// 3264-cell microbench (M=1..32, K<4096, N=128..16384): ConfigV1 is the safe
-// default; ConfigC wins at M=4..8 with high N and K, and at M=12 with mid N
-// and any K>=512; ConfigA wins at small M (M<4) with large N. The envelope
-// guard (M<=32 AND K<4096) is enforced by the outer dispatcher
-// (_rdna2_w4a16_select_kernel) so this function never sees out-of-envelope
-// cells; the V1 default covers anything outside the explicit K-gated
-// branches.
-// K-aware config selection. Three tiers:
-//
-//   - Small M (M <= 32): original 3264-cell microbench. ConfigV1 is the
-//     safe default; ConfigC wins at M=4..8 with high N and K, and at
-//     M=12/32 in narrow N windows; ConfigA wins at small M (M<4) with
-//     large N.
-//
-//   - Large M (M > 256): empirical data from 2026-09-10 profile run on
-//     Qwen3.8-27B-AWQ-INT4 (gfx1030, TP=2). ConfigV1 (M_TILE=8) is at
-//     53% of peak fp16 for M=1856-2048. ConfigA (M_TILE=16) halves the
-//     M-blocks and reduces atomic contention per output tile from 16
-//     blocks/tile (split_k=16 with M_TILE=8) to 8 blocks/tile (split_k=8
-//     with M_TILE=16). ConfigC (N_TILE=512) is for small-N tiles where
-//     ConfigA's N_TILE=1024 would over-shard the grid.
-//
-//   - Envelope guard: the outer dispatcher (rdna2_w4a16.py) routes
-//     AWQ/GPTQ prefill to this function only when M > 32. ConfigA is
-//     the right choice for Qwen3.8-27B-AWQ high-N shapes (intermediate
-//     projection per-rank N=8704, down-projection per-rank N=2560).
 inline int select_config(int size_m, int size_n, int size_k) {
-  // Debug override: force a specific config for kernel-level bisection.
-  static const int force_config = []() {
-    const char* e = std::getenv("VLLM_RDNA2_PREFILL_FORCE_CONFIG");
-    return e ? std::atoi(e) : -1;
-  }();
-  if (force_config >= 0) return force_config;
-
   // Large-M prefill: prefer ConfigA (M_TILE=16, N_TILE=1024) for high N.
   // ConfigC (M_TILE=16, N_TILE=512) for small N. ConfigV1 (M_TILE=8)
   // would need 2x more M-blocks per output tile and 2x more atomic
@@ -569,47 +537,32 @@ inline int select_config(int size_m, int size_n, int size_k) {
   return ConfigId_V1;
 }
 
-// Debug override: force split_k for isolating the atomic-epilogue cost.
-// split_k divides size_k; the last split absorbs any remainder. The caller
-// must ensure the forced split_k keeps k_per_split within the LDS budget —
-// this knob is for experiments, not production.
-inline int maybe_force_split_k(int computed) {
-  static const int force = []() {
-    const char* e = std::getenv("VLLM_RDNA2_PREFILL_FORCE_SPLIT_K");
-    return e ? std::atoi(e) : -1;
-  }();
-  return force > 0 ? force : computed;
-}
-
 void launch_dispatch(const half* a, const uint32_t* b_q_weight,
                      const uint32_t* b_qzeros, const half* b_scales,
                      const int* b_q_perm, half* c, int size_m, int size_n,
                      int size_k, int groups, bool use_v2_format,
-                     cudaStream_t stream) {
+                     cudaStream_t stream, long long* fixed = nullptr) {
   switch (select_config(size_m, size_n, size_k)) {
     case ConfigId_V1: {
-      const int split_k = maybe_force_split_k(
-          compute_split_k<ConfigV1>(size_m, size_n, size_k));
+      const int split_k = compute_split_k<ConfigV1>(size_m, size_n, size_k);
       launch_for_config<ConfigV1>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                   c, size_m, size_n, size_k, groups, split_k,
-                                  use_v2_format, stream);
+                                  use_v2_format, stream, fixed);
       break;
     }
     case ConfigId_C: {
-      const int split_k =
-          maybe_force_split_k(compute_split_k<ConfigC>(size_m, size_n, size_k));
+      const int split_k = compute_split_k<ConfigC>(size_m, size_n, size_k);
       launch_for_config<ConfigC>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                  size_m, size_n, size_k, groups, split_k,
-                                 use_v2_format, stream);
+                                 use_v2_format, stream, fixed);
       break;
     }
     case ConfigId_A:
     default: {
-      const int split_k =
-          maybe_force_split_k(compute_split_k<ConfigA>(size_m, size_n, size_k));
+      const int split_k = compute_split_k<ConfigA>(size_m, size_n, size_k);
       launch_for_config<ConfigA>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
                                  size_m, size_n, size_k, groups, split_k,
-                                 use_v2_format, stream);
+                                 use_v2_format, stream, fixed);
       break;
     }
   }
@@ -623,15 +576,45 @@ void launch_dispatch(const half* a, const uint32_t* b_q_weight,
 //
 // `gptq_gemm_rdna2_prefill` is the canonical name going forward.  It calls
 // the K-aware `select_config(M, K, N)` to pick V1 / A / C internally; the
-// Python dispatcher does not need to know about configs.  An ABI shim with
-// the old `..._prefill_direct` name is kept at the bottom of the file so
-// existing Python callers continue to link without modification.
+// Python dispatcher does not need to know about configs.
 // ---------------------------------------------------------------------------
 torch::Tensor gptq_gemm_rdna2_prefill(torch::Tensor a, torch::Tensor b_q_weight,
                                       torch::Tensor b_qzeros,
                                       torch::Tensor b_scales,
-                                      torch::Tensor b_g_idx,
-                                      bool use_v2_format) {
+                                      torch::Tensor b_g_idx, bool use_v2_format,
+                                      bool deterministic) {
+  if (deterministic) {
+    TORCH_CHECK(
+        a.dim() == 2 && a.size(1) > 0 && a.size(1) % 32 == 0,
+        "deterministic dense: a must be [M,K], positive K divisible by 32");
+    TORCH_CHECK(
+        b_q_weight.dim() == 2 && b_qzeros.dim() == 2 && b_scales.dim() == 2,
+        "deterministic dense: weights must be matrices");
+    TORCH_CHECK(b_q_weight.scalar_type() == torch::kInt32 &&
+                    b_qzeros.scalar_type() == torch::kInt32,
+                "deterministic dense: packed weights/zeros must be int32");
+    TORCH_CHECK(b_q_weight.device() == a.device() &&
+                    b_qzeros.device() == a.device() &&
+                    b_scales.device() == a.device(),
+                "deterministic dense: all inputs must share a device");
+    TORCH_CHECK(b_q_weight.is_contiguous() && b_qzeros.is_contiguous() &&
+                    b_scales.is_contiguous(),
+                "deterministic dense: weights must be contiguous");
+    const int64_t k = a.size(1), n = b_q_weight.size(1),
+                  groups = b_qzeros.size(0);
+    TORCH_CHECK(n > 0 && n % 8 == 0 && b_q_weight.size(0) * 8 == k &&
+                    groups > 0 && k % groups == 0 && k / groups >= 32 &&
+                    (k / groups) % 8 == 0 && b_qzeros.size(1) * 8 == n &&
+                    b_scales.size(0) == groups && b_scales.size(1) == n,
+                "deterministic dense: incompatible weight/group shapes");
+    TORCH_CHECK(
+        b_g_idx.numel() == 0 ||
+            (b_g_idx.device() == a.device() &&
+             b_g_idx.scalar_type() == torch::kInt32 && b_g_idx.numel() == k &&
+             b_g_idx.is_contiguous()),
+        "deterministic dense: g_idx must be empty or contiguous int32[K]");
+    if (!a.is_contiguous()) a = a.contiguous();
+  }
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
   TORCH_CHECK(b_qzeros.is_cuda(), "b_qzeros must be a CUDA/HIP tensor");
@@ -657,7 +640,18 @@ torch::Tensor gptq_gemm_rdna2_prefill(torch::Tensor a, torch::Tensor b_q_weight,
   TORCH_CHECK(groupsize >= 32, "group_size must be >= 32");
 
   // Fresh, zeroed output per call; see gptq_gemm_rdna2.
-  auto c = torch::zeros({size_m, size_n}, a.options());
+  auto c = deterministic ? torch::empty({size_m, size_n}, a.options())
+                         : torch::zeros({size_m, size_n}, a.options());
+  // Per-invocation storage is graph-pool owned during capture, never a
+  // process-global alias. Finalization uses Q32 -> FP32 -> FP16 once.
+  at::Tensor fixed;
+  long long* fixed_ptr = nullptr;
+  if (deterministic) {
+    fixed = torch::zeros({size_m, (int64_t)size_n + 1},
+                         a.options().dtype(torch::kInt64));
+    fixed_ptr = reinterpret_cast<long long*>(fixed.data_ptr<int64_t>());
+  }
+
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
 
@@ -668,23 +662,8 @@ torch::Tensor gptq_gemm_rdna2_prefill(torch::Tensor a, torch::Tensor b_q_weight,
       reinterpret_cast<const half*>(b_scales.data_ptr()),
       b_g_idx.numel() ? b_g_idx.data_ptr<int>() : nullptr,
       reinterpret_cast<half*>(c.data_ptr()), size_m, size_n, size_k, groups,
-      use_v2_format, stream.stream());
+      use_v2_format, stream.stream(), fixed_ptr);
 
+  if (deterministic) moe_fixedpoint_to_half_rdna2(fixed, c);
   return c;
-}
-
-// ---------------------------------------------------------------------------
-// ABI-compat shim.
-//
-// Same signature and behaviour as the original v1 public entry.  Kept so
-// existing Python callers (RDNA2W4A16LinearKernel.apply_weights in
-// rdna2_w4a16.py) that call `ops.gptq_gemm_rdna2_prefill_direct(...)` keep
-// working without a Python change.  New code should use
-// `ops.gptq_gemm_rdna2_prefill` directly.
-// ---------------------------------------------------------------------------
-torch::Tensor gptq_gemm_rdna2_prefill_direct(
-    torch::Tensor a, torch::Tensor b_q_weight, torch::Tensor b_qzeros,
-    torch::Tensor b_scales, torch::Tensor b_g_idx, bool use_v2_format) {
-  return gptq_gemm_rdna2_prefill(a, b_q_weight, b_qzeros, b_scales, b_g_idx,
-                                 use_v2_format);
 }

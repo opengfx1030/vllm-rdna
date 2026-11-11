@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-import importlib.metadata
 import os
 import random
 import sys
@@ -12,13 +11,17 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import numpy as np
 import numpy.typing as npt
 import torch
-from packaging import version
-from packaging.version import Version
 from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_version import (  # noqa: F401
+    _is_torch_equal,
+    _is_torch_equal_or_newer,
+    is_torch_equal,
+    is_torch_equal_or_newer,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -30,6 +33,10 @@ else:
 logger = init_logger(__name__)
 
 
+# NOTE: registration-time-mutable. Platform backends inject custom
+# --kv-cache-dtype entries here via register_kv_cache_dtype(). Never snapshot
+# this dict (no dict(...), .copy(), list(.keys()), etc.) — every consumer must
+# hold a reference to this live object to see later-registered entries.
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
@@ -41,6 +48,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
     "int4_per_token_head": torch.uint8,
+    "int4_fp16_block": torch.uint8,
     "int8_per_token_head": torch.int8,
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
@@ -50,6 +58,10 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
+    "octave_k3v4": torch.uint8,
+    "octave_k3v3": torch.uint8,
+    "octave_k3v3_compact": torch.uint8,
+    "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
 }
@@ -70,22 +82,6 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
-
-
-PIN_MEMORY = is_pin_memory_available()
-
-
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return (
-        kv_cache_dtype.startswith("fp8")
-        or kv_cache_dtype.endswith("per_token_head")
-        or kv_cache_dtype.startswith("nvfp4")
-    )
-
-
-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* needs per-token-head scales."""
-    return kv_cache_dtype.endswith("per_token_head")
 
 
 def is_meta_module(module: torch.nn.Module) -> bool:
@@ -530,8 +526,12 @@ def kv_cache_dtype_str_to_dtype(
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
-def set_random_seed(seed: int | None) -> None:
+def set_random_seed(seed: int | None, data_parallel_index: int = 0) -> None:
     if seed is not None:
+        if data_parallel_index:
+            # DP engines share the seed but must not sample unseeded requests alike.
+            ss = np.random.SeedSequence((seed, data_parallel_index))
+            seed = int(ss.generate_state(1)[0])
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -912,10 +912,15 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         if cpu_tensor.numel() == 0:
             return torch.empty(cpu_tensor.shape, dtype=cpu_tensor.dtype, device="xpu")
         if not cpu_tensor.is_pinned():
-            contiguous_cpu = cpu_tensor.contiguous()
-            pinned = torch.empty_like(contiguous_cpu, pin_memory=True)
-            pinned.copy_(contiguous_cpu)
-            cpu_tensor = pinned
+            pinned = torch.empty_strided(
+                cpu_tensor.size(),
+                cpu_tensor.stride(),
+                dtype=cpu_tensor.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            pinned.copy_(cpu_tensor)
+            return torch.ops._C.get_xpu_view_from_cpu_tensor(pinned)
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
@@ -926,54 +931,44 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         )
 
 
-# Helper function used in testing.
-def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
-    return version.parse(torch_version) >= version.parse(target)
+def alloc_pinned_exact(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Allocate a page-locked, device-mapped CPU tensor of exactly this size.
 
-
-def is_torch_equal_or_newer(target: str) -> bool:
-    """Check if the installed torch version is >= the target version.
-
-    Args:
-        target: a version string, like "2.6.0".
-
-    Returns:
-        Whether the condition meets.
-
+    torch.empty(..., pin_memory=True) goes through the caching host allocator,
+    which rounds every block up to a power of two (a 23.84 GiB table takes up
+    32 GiB). This allocates the exact byte count with cudaHostAlloc
+    (hipHostMalloc) and frees it when the tensor's storage is released.
     """
-    try:
-        return _is_torch_equal_or_newer(str(torch.__version__), target)
-    except Exception:
-        # Fallback to PKG-INFO to load the package info, needed by the doc gen.
-        return Version(importlib.metadata.version("torch")) >= Version(target)
+    import ctypes
+    import math
+    import weakref
+
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+    nbytes = math.prod(shape) * dtype.itemsize
+    if nbytes == 0:
+        return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+    cudart = CudaRTLibrary()
+    ptr = cudart.cudaHostAlloc(nbytes)
+    owner = np.ctypeslib.as_array((ctypes.c_uint8 * nbytes).from_address(ptr))
+    finalizer = weakref.finalize(owner, cudart.cudaFreeHost, ptr)
+    # The HIP/CUDA runtime may be gone by interpreter exit, and process
+    # teardown releases the block anyway.
+    finalizer.atexit = False  # type: ignore[misc]
+    return torch.from_numpy(owner).view(dtype).view(shape)
 
 
-def _is_torch_equal(target: str) -> bool:
-    assert target.count(".") == 2
-    torch_version = str(torch.__version__)
-    torch_version = version.parse(torch_version)
-    # torch version is like "2.6.0.dev20240101" or "2.6.0.dev20240101+cpu"
-    # or "2.6.0+cu128" but never "2.6.0.1"
-    return (
-        torch_version >= version.parse(target)
-        and version.parse(target + ".1") > torch_version
-    )
+def mlock_tensor(tensor: torch.Tensor) -> int:
+    """mlock() the pages of a CPU tensor; returns 0 or the errno.
 
-
-def is_torch_equal(target: str) -> bool:
-    """Check if the installed torch version is == the target version.
-
-    Args:
-        target: a version string, like "2.6.0".
-
-    Returns:
-        Whether the condition meets.
-
+    Locked pages sit on the unevictable LRU: page reclaim skips them, and with
+    vm.compact_unevictable_allowed=0 compaction does not migrate them either.
+    Fails with ENOMEM/EPERM when the tensor exceeds RLIMIT_MEMLOCK.
     """
-    try:
-        return _is_torch_equal(target)
-    except Exception:
-        return Version(importlib.metadata.version("torch")) == Version(target)
+    from vllm.utils.pinned_host import mlock_range
+
+    storage = tensor.untyped_storage()
+    return mlock_range(storage.data_ptr(), storage.nbytes())
 
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
@@ -1089,3 +1084,9 @@ def direct_register_custom_op(
     my_lib.impl(op_name, impl, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+
+# Keep this at the end of the module: it resolves current_platform, which can
+# load platform plugins that import from this (then partially initialized)
+# module, so everything else here must already be defined.
+PIN_MEMORY = is_pin_memory_available()

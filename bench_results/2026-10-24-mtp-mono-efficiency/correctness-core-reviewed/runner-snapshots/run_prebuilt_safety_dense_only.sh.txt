@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Unprofiled dense-only safety; ordinary path and GPU trace not tested.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+SRC="$BASE/core-inline-serve-tree"
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+OUT="$BASE/dense-native-round-v2-safety-dense-only"
+[[ $(hostname) == par1-cs25 && ! -e $OUT ]]
+[[ -s $BASE/serve-inline-ab/SEQUENCE-RESUME-V2-COMPLETE.txt ]]
+FIXTURE_HELPER="$BASE/large-m-mono-global-validation/validate_global_m_fixture.py"
+COMMON_HELPER="$BASE/large-m-mono-ordinary-safety/prebuilt_timeout_recovery.py"
+FIXTURE_TEST="$SRC/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py"
+BINARY="$BASE/torch-extensions-dense-round-v2/mono_k2_dense_native_rounding_v2_scratch_20261024/mono_k2_dense_native_rounding_v2_scratch_20261024.so"
+# Presence and pinned helper checks precede Python/sitecustomize/runtime init.
+required=(
+    "$VENV/bin/python" "$BINARY"
+    "$HERE/safety_prebuilt_dense_only.py" "$HERE/dense_round_adapter.py"
+    "$HERE/source_manifest.json" "$HERE/mono_k2_dense_native_rounding.cu"
+    "$HERE/binding.cpp" "$FIXTURE_HELPER" "$COMMON_HELPER" "$FIXTURE_TEST"
+    "$BASE/dense-native-reference/validate_actual_rdna_dense_v2.py"
+    "$BASE/core-inline-serving-ab/check_reserved_gpu.py"
+    "$SRC/vllm/__init__.py" "$SRC/vllm/_rocm_C.abi3.so"
+    "$SRC/vllm/_custom_ops.py" "$SRC/vllm/platforms/rocm.py"
+    "$SRC/vllm/model_executor/layers/rdna_ops.py"
+    "$SRC/vllm/model_executor/layers/utils.py"
+    "$SRC/vllm/model_executor/layers/fused_moe/router/fused_topk_router.py"
+    "$SRC/vllm/models/qwen4_exp/amd/ops/hc.py"
+    "$SRC/vllm/models/qwen4_exp/amd/mono_decode_rdna2.py"
+    "$SRC/csrc/rocm/mono_k2_rdna2.cu"
+    "$SRC/csrc/rocm/moe_unquantized_rdna2.cu"
+    "$SRC/tools/rdna2_028/tunableop_env.sh"
+    "$SRC/tunableop/rocm7.14-rocblas5.5/"tunableop_results{0,1,2,3}.csv
+)
+for dependency in "${required[@]}"; do
+    [[ -r $dependency && -f $dependency ]] || {
+        printf 'missing safety dependency: %s\n' "$dependency" >&2
+        exit 1
+    }
+done
+[[ $(sha256sum "$FIXTURE_HELPER" | cut -d' ' -f1) == 4d334bc5f64b6542695ef452789bc1cc56d375a84d022d6ece7a7f5095788f25 ]]
+[[ $(sha256sum "$BASE/dense-native-reference/validate_actual_rdna_dense_v2.py" | cut -d' ' -f1) == 741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca ]]
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -w 90 9
+mkdir "$OUT"
+printf '%s\n' "${required[@]}" > "$OUT/preflight-dependencies.txt"
+"$VENV/bin/python" -S "$BASE/core-inline-serving-ab/check_reserved_gpu.py" > "$OUT/gpu-owners.txt" 2>&1
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES=6
+export VLLM_ROCM_USE_AITER=0 VLLM_RDNA2_MOE_FP32_ACCUM=0
+export ROCM_HOME=/opt/rocm/core-7.14 ROCM_PATH=/opt/rocm/core-7.14 HIP_PATH=/opt/rocm/core-7.14
+export PATH=/opt/rocm/core-7.14/bin:$VENV/bin:$PATH
+export PYTHONPATH="$SRC:$BASE/large-m-mono:$BASE/large-m-mono-validation"
+export VLLM_SOURCE_ROOT="$SRC"
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export PYTORCH_TUNABLEOP_TUNING=0 TUNEOP_REQUIRE_HASH_ROWS=1
+source "$SRC/tools/rdna2_028/tunableop_env.sh"
+configure_tunableop "$SDK_LIB/librocblas.so.5" "$SRC/tunableop"
+export DENSE_ROUND_V2_BINARY="$BINARY"
+export DENSE_ROUND_V2_BINARY_SHA256=837e6ab2ff6c43831bfcaa39e807d8a7916a542039c32d503ee680d9d3bca601
+hashes() {
+    sha256sum "$SRC/vllm/_rocm_C.abi3.so" "$SRC/csrc/rocm/mono_k2_rdna2.cu" \
+        "$SRC/csrc/rocm/moe_unquantized_rdna2.cu" "$DENSE_ROUND_V2_BINARY" \
+        "$HERE/safety_prebuilt_dense_only.py" "$HERE/dense_round_adapter.py" \
+        "$BASE/dense-native-reference/validate_actual_rdna_dense_v2.py" \
+        "$FIXTURE_HELPER" "$COMMON_HELPER" "$FIXTURE_TEST" \
+        "$SRC/tunableop/rocm7.14-rocblas5.5/"tunableop_results{0,1,2,3}.csv \
+        "$HERE/run_prebuilt_safety_dense_only.sh"
+}
+hashes > "$OUT/sha256.before"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.before"
+finish() {
+    rc=$?
+    set +e
+    hashes > "$OUT/sha256.after"
+    cat /proc/sys/kernel/random/boot_id > "$OUT/boot.after"
+    cmp "$OUT/sha256.before" "$OUT/sha256.after" || rc=1
+    cmp "$OUT/boot.before" "$OUT/boot.after" || rc=1
+    printf '%s\n' "$rc" > "$OUT/exit-status.txt"
+    exit "$rc"
+}
+trap finish EXIT
+cd /tmp
+timeout 240 "$VENV/bin/python" "$HERE/safety_prebuilt_dense_only.py" \
+    --repo-root "$SRC" \
+    --native-harness "$BASE/dense-native-reference/validate_actual_rdna_dense_v2.py" \
+    --native-harness-sha256 741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca \
+    --expected-core-sha256 25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f \
+    --expected-native-source-sha256 b2cdb9b6a4e5886749ad0530b76f26072f9e38d93c34f8743111160afc09de77 \
+    --output "$OUT/safety.json" > "$OUT/safety.log" 2>&1

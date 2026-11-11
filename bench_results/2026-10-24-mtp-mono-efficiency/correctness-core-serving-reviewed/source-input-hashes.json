@@ -1,0 +1,320 @@
+{
+  "remote-evidence/01-old/serve.log": {
+    "size_bytes": 237072,
+    "sha256": "805c3f51b4bb864baff86015e45b6b370c9a746214e01ad429b8e1ff7752a0ce",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/driver.log": {
+    "size_bytes": 7065,
+    "sha256": "d06625db88cdfab820c95c88463b53d460dc1b5c709402e0ce80300fd5187838",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/summary.txt": {
+    "size_bytes": 7341,
+    "sha256": "3b1c5ff5d9da67c406949f136984cf4efb8dcfbee491fdbfcaaaf0eb4188d866",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/concurrency.txt": {
+    "size_bytes": 3774,
+    "sha256": "cf652bb34c15e5d0a6cdad819a191122e65e8072fbafc23c4e7c757c73057734",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/concurrency.json": {
+    "size_bytes": 1073763,
+    "sha256": "c2cd68cb89e1d6328bb0938978fd438d9b24d4b3fe50fa37755939532908e442",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/models.json": {
+    "size_bytes": 582,
+    "sha256": "768bb892b23197a1dd58c5b81f8104bf16bd25a22a959b2a0486cbba160ccb14",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/parity.json": {
+    "size_bytes": 172546,
+    "sha256": "983ad415e74d43580dd85b40290d0528cc71bb2cc15f8b2d94355fdbffa1b4e4",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/probe.txt": {
+    "size_bytes": 670,
+    "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/probe-after.txt": {
+    "size_bytes": 664,
+    "sha256": "6c2e57862cf093f1f46b44f28a1de238d2af285f43855cc907fde7b423e34cbe",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/ppl.txt": {
+    "size_bytes": 1155,
+    "sha256": "2b6f1124557fe28d81f2004a5ffa7b61f9caf94254103f989b94fc67d5917e6f",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/prefix.txt": {
+    "size_bytes": 331,
+    "sha256": "0ee8fc11ce0f639663f50ea3fec96ed8d6eaa316f0ec008a1a16186f0b68430f",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/warmup.txt": {
+    "size_bytes": 536,
+    "sha256": "c37ea5cdfada3d09a74bf28092b7d60a3789886f41c71879613378dea2190702",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/load_hook.txt": {
+    "size_bytes": 3230,
+    "sha256": "9790bd9a70d2d4fe747866789906b95c790920bf5f597f049f48b2d79aa9d386",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/worker-provenance.log": {
+    "size_bytes": 3717,
+    "sha256": "5f7520c348b9cd41a5799493e2a51ee93e059a6ec85dba4f5c3a7bdff31f6c43",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/serve.log": {
+    "size_bytes": 235910,
+    "sha256": "aec7d94e41f2353804c3e19410ba7558838b2bd5fc5b11cd478403f4fbbb257b",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/driver.log": {
+    "size_bytes": 7170,
+    "sha256": "d6e67ffbceb7d46c3b97c2295d9fa66d9c939ee7991c13099bbdfa7fb76ea9cf",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/summary.txt": {
+    "size_bytes": 7442,
+    "sha256": "285095016e18a6c5d4f7f1c2770252cb7abc1517229700f2e752f2a47cda864c",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/concurrency.txt": {
+    "size_bytes": 3811,
+    "sha256": "616bc095dab5ebec9d4cd824963d8285d2d90dab23a9ec50d656d7e37e893b74",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/concurrency.json": {
+    "size_bytes": 1073554,
+    "sha256": "b945f4282a57beaa5039320efd86ef1934af72675b5fb2e7d95e3e0af39444f8",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/models.json": {
+    "size_bytes": 582,
+    "sha256": "96316796f061d7bfb16313883ab04a2cec62921fb731ba415b6972e7b6d04bc5",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/parity.json": {
+    "size_bytes": 200201,
+    "sha256": "4c9871a38de7d39139e86e1b61f24619d5ccaa49feacceb1e9f4c9b2787d7004",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/probe.txt": {
+    "size_bytes": 668,
+    "sha256": "64f87651092e0add47261f74d6b6b8ea0bb945b674211505d433d90da64d6a20",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/probe-after.txt": {
+    "size_bytes": 684,
+    "sha256": "37ad63ac639bbd8beeb57d067580c29b9d4c24b106d2362fe6a6fa9473632675",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/ppl.txt": {
+    "size_bytes": 1216,
+    "sha256": "809f945272b9ef133f943f3dc0513b78a9b02a9d693e1488ff92f8784bcbe49f",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/prefix.txt": {
+    "size_bytes": 331,
+    "sha256": "6fa1c209ac4d15cd08e6ffce6909b33f4c0dd291647963b7d2ceb86820d14473",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/warmup.txt": {
+    "size_bytes": 536,
+    "sha256": "98b39b58f3e04d8e5d4eb851ec47f81d6c3a03cba5ef6d1b6f23d2cdf828bbb7",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/load_hook.txt": {
+    "size_bytes": 3231,
+    "sha256": "07875c7beeb1670d1b21d53681267061f35742859d1b9c0778ce03c57a7e1d56",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/02-new/worker-provenance.log": {
+    "size_bytes": 3805,
+    "sha256": "de392ba680d403108df8c1f512379383e2ca47f50881d4895e276bb1d58540f5",
+    "retained": false,
+    "reason": "raw log/data may contain generated text or redundant payload"
+  },
+  "remote-evidence/01-old/bench-1024x512-c1.json": {
+    "size_bytes": 62704,
+    "sha256": "dc5304da1316a0525528a369e5426199a1fdbb69a7aed47bcb37e4fb83d82d14",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/bench-1024x512-c1.log": {
+    "size_bytes": 6595,
+    "sha256": "a712d4ce10a03094efa32d86d2141331eee1f046924e486e0f5f19f7af30e899",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/bench-1024x512-c8.json": {
+    "size_bytes": 246129,
+    "sha256": "a84bb7b0f2644e1e36d2a64dc76e8853f7431a8e84a04612938bd8c9d6cf89e2",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/bench-1024x512-c8.log": {
+    "size_bytes": 8018,
+    "sha256": "e144ab2b632098b1506be51e9edbb5601c5f59ef820bc1d6770578b22cc57681",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/bench-16384x1024-c1.json": {
+    "size_bytes": 113998,
+    "sha256": "f65392e8d3d55a9bc90c9ad6c98d8fa4c7dd88319dc72e3e03798372a9623bca",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/bench-16384x1024-c1.log": {
+    "size_bytes": 6603,
+    "sha256": "5abc0ea58e4224018683975929d75ae96e85b3add4c818271f61ee897a6b1f40",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/bench-16384x1024-c8.json": {
+    "size_bytes": 445068,
+    "sha256": "cf3054d4365af907e32a12b52e25e743c612a7bd1b1714a2ed42f26930889aad",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/bench-16384x1024-c8.log": {
+    "size_bytes": 8026,
+    "sha256": "bab42aab394b4faee93433eec7dab4935afe187a7739a2093b4c7e1e306364f9",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/reset-prefix-bench-1024x512-c1.json": {
+    "size_bytes": 16,
+    "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/reset-prefix-bench-1024x512-c8.json": {
+    "size_bytes": 16,
+    "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/reset-prefix-bench-16384x1024-c1.json": {
+    "size_bytes": 16,
+    "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/01-old/reset-prefix-bench-16384x1024-c8.json": {
+    "size_bytes": 16,
+    "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/bench-1024x512-c1.json": {
+    "size_bytes": 62853,
+    "sha256": "eb4deca48aa26bff2a0c5aa31ecbc47f5378c3c48871698d9ffd90ef5f84cff1",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/bench-1024x512-c1.log": {
+    "size_bytes": 6595,
+    "sha256": "f5869ac35cb6237f0d3bca19b6c90596e8a6ec27bcae7e889880e53b66f92b4a",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/bench-1024x512-c8.json": {
+    "size_bytes": 254766,
+    "sha256": "af1e84e7e82b05fca61b27681283df58e6d757f303818359cf48df16b20ae6a2",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/bench-1024x512-c8.log": {
+    "size_bytes": 7950,
+    "sha256": "b1e4c89439c4db59d9bb7d83e5b245fd58040cbcb04e8c74fdd9567bacd57bbb",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/bench-16384x1024-c1.json": {
+    "size_bytes": 125208,
+    "sha256": "99ffebb4a5e7c97460ab90cfe3cb43d4daa4faf73c42bec778fbfb4a5d076047",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/bench-16384x1024-c1.log": {
+    "size_bytes": 6603,
+    "sha256": "6e49afd3c2e170279ee61a5068d4b7c052b4cfff259f5fe2a11be9043cdc1d80",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/bench-16384x1024-c8.json": {
+    "size_bytes": 429326,
+    "sha256": "015523fba2dd8ddf3690b1c1d059c0d3d6199611794cf9686104f6bdfd71dd50",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/bench-16384x1024-c8.log": {
+    "size_bytes": 7977,
+    "sha256": "f7c99cb2c9c46be6c8538919e5e4c00f536a6524865519d476a7ca7000e03fd6",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/reset-prefix-bench-1024x512-c1.json": {
+    "size_bytes": 16,
+    "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/reset-prefix-bench-1024x512-c8.json": {
+    "size_bytes": 16,
+    "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/reset-prefix-bench-16384x1024-c1.json": {
+    "size_bytes": 16,
+    "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "remote-evidence/02-new/reset-prefix-bench-16384x1024-c8.json": {
+    "size_bytes": 16,
+    "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+    "retained": false,
+    "reason": "detailed request JSON/log may include response payloads; metrics are exported in analysis CSVs"
+  },
+  "kernel-window.raw.log": {
+    "size_bytes": 83904,
+    "sha256": "16722763789f986928ef9d2bfc7cb3428674addc51c57db863ff27bb5eb03129",
+    "retained": false,
+    "reason": "full journal omitted; independent bounded audit JSON retained"
+  }
+}

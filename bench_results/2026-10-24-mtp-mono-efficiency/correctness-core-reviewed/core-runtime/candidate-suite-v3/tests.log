@@ -1,0 +1,10 @@
+LOADED /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2/vllm/_rocm_C.abi3.so 3f688006eec38adef6cf4d4546735f66b8892d8066387336a88ba6fe7b668bac
+........................................................................ [ 80%]
+..................                                                       [100%]
+=============================== warnings summary ===============================
+test_amd_mono_rdna2_kernels_v3.py: 14 warnings
+  /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+90 passed, 245 deselected, 14 warnings in 9.48s

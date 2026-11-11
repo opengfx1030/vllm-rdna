@@ -1,0 +1,57 @@
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -1390,6 +1390,10 @@
+         if logging_config := getattr(vllm_config, "logging_config", None):
+             configure_logging(logging_config)
+ 
++        from vllm.platforms import current_platform
++
++        rocm_cleanup = current_platform.is_rocm()
++
+         # Ensure we can serialize transformer config after spawning
+         maybe_register_config_serialize_by_value()
+ 
+@@ -1471,24 +1475,34 @@
+             if engine_core is None:
+                 logger.exception("EngineCore failed to start.")
+             else:
++                # The frontend reacts to ENGINE_CORE_DEAD by sending SIGTERM.
++                # Keep it from interrupting this process's worker cleanup.
++                if rocm_cleanup:
++                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                 logger.exception("EngineCore encountered a fatal error.")
+                 engine_core._send_engine_dead()
+             raise e
+         finally:
+-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
++            # The parent retains a bounded SIGKILL escalation. Ignore another
++            # SIGTERM only while ROCm workers are being released.
++            if rocm_cleanup and engine_core is not None:
++                signal.signal(signal.SIGTERM, signal.SIG_IGN)
++            else:
++                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+             signal.signal(signal.SIGINT, signal.SIG_DFL)
+-            if signal_callback is not None:
+-                signal_callback.stop()
+-            if engine_core is not None:
+-                engine_core.shutdown()
+-            if clean_shutdown:
+-                from vllm.platforms import current_platform
+-
+-                if current_platform.is_rocm():
++            try:
++                if signal_callback is not None:
++                    signal_callback.stop()
++                if engine_core is not None:
++                    engine_core.shutdown()
++                if clean_shutdown and rocm_cleanup:
+                     # Cleanup above already unfreezes and collects the heap.
+                     # Freeze the surviving graph to skip another slow cyclic-GC
+                     # scan during finalization; process exit reclaims it.
+                     gc.freeze()
++            finally:
++                if rocm_cleanup and engine_core is not None:
++                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+ 
+     def _init_data_parallel(self, vllm_config: VllmConfig):
+         pass

@@ -1,0 +1,79 @@
+[
+  {
+    "file": "bench-1024x512-c1.json",
+    "completed": 1,
+    "forced_length": true,
+    "quality_warnings": []
+  },
+  {
+    "file": "bench-1024x512-c8.json",
+    "completed": 8,
+    "forced_length": true,
+    "quality_warnings": [
+      {
+        "request": 1,
+        "garbage": null,
+        "repetition_warning": "repeated 24-char span"
+      },
+      {
+        "request": 4,
+        "garbage": null,
+        "repetition_warning": "repeated 24-char span"
+      },
+      {
+        "request": 7,
+        "garbage": "non-Latin script 382/382",
+        "repetition_warning": "repeated 24-char span"
+      }
+    ]
+  },
+  {
+    "file": "bench-16384x1024-c1.json",
+    "completed": 1,
+    "forced_length": true,
+    "quality_warnings": [
+      {
+        "request": 0,
+        "garbage": null,
+        "repetition_warning": "repeated 24-char span"
+      }
+    ]
+  },
+  {
+    "file": "bench-16384x1024-c8.json",
+    "completed": 8,
+    "forced_length": true,
+    "quality_warnings": [
+      {
+        "request": 0,
+        "garbage": null,
+        "repetition_warning": "repeated 24-char span"
+      },
+      {
+        "request": 1,
+        "garbage": null,
+        "repetition_warning": "repeated 24-char span"
+      },
+      {
+        "request": 3,
+        "garbage": null,
+        "repetition_warning": "repeated 24-char span"
+      },
+      {
+        "request": 4,
+        "garbage": null,
+        "repetition_warning": "repeated 24-char span"
+      },
+      {
+        "request": 5,
+        "garbage": "non-Latin script 438/1303",
+        "repetition_warning": null
+      },
+      {
+        "request": 7,
+        "garbage": null,
+        "repetition_warning": "repeated 24-char span"
+      }
+    ]
+  }
+]

@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Verify candidate source differs from control only by the approved inline attr."""
+
+import argparse
+import hashlib
+from pathlib import Path
+
+OLD = "__device__ bool grid_barrier("
+NEW = "__device__ __forceinline__ bool grid_barrier("
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--control", type=Path, required=True)
+    parser.add_argument("--candidate", type=Path, required=True)
+    args = parser.parse_args()
+    control = args.control.read_bytes()
+    candidate = args.candidate.read_bytes()
+    old = OLD.encode()
+    new = NEW.encode()
+    if control.count(old) != 1:
+        raise SystemExit("control source does not contain exactly one approved grid_barrier declaration")
+    if candidate.count(new) != 1:
+        raise SystemExit("candidate source does not contain exactly one force-inline grid_barrier declaration")
+    if candidate != control.replace(old, new, 1):
+        raise SystemExit("candidate contains source changes beyond the approved grid_barrier attribute")
+    print(f"PASS control={digest(control)} candidate={digest(candidate)} single-change=grid_barrier-forceinline")
+
+
+if __name__ == "__main__":
+    main()

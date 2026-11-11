@@ -1,0 +1,106 @@
+{
+  "schema": "failstop-evidence-manifest-v1",
+  "scope": "curated eager TP4 engine fault-containment result and CPU-only helper tests; graph qualification excluded",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 2155,
+      "sha256": "2415926bf95fa623305b6d08afff41c9555ac39e24b4d48ed315a1fa93ddd532"
+    },
+    {
+      "path": "cpu-helpers/boot.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "cpu-helpers/boot.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "cpu-helpers/exit-status.txt",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "cpu-helpers/inputs.after",
+      "bytes": 352,
+      "sha256": "45a82524202805bd5731ce9598e1651473467c42fb001424d959e575cc28f0b4"
+    },
+    {
+      "path": "cpu-helpers/inputs.before",
+      "bytes": 352,
+      "sha256": "45a82524202805bd5731ce9598e1651473467c42fb001424d959e575cc28f0b4"
+    },
+    {
+      "path": "cpu-helpers/overlay.after",
+      "bytes": 62,
+      "sha256": "cdf51ae93d644ceaca63a9bb180491cf60249f36e39f8ffeff4e1701ecb7d2ee"
+    },
+    {
+      "path": "cpu-helpers/overlay.before",
+      "bytes": 62,
+      "sha256": "cdf51ae93d644ceaca63a9bb180491cf60249f36e39f8ffeff4e1701ecb7d2ee"
+    },
+    {
+      "path": "cpu-helpers/pytest.log",
+      "bytes": 759,
+      "sha256": "b74373ff391a1c921369aed729415f8c6d8351e85c2e85319b4b7ad8474f267c"
+    },
+    {
+      "path": "engine-eager/ARM-PASS.txt",
+      "bytes": 128,
+      "sha256": "c0998848f3bad1ba1dec84c67dbaa797cf47473d200284f8d65fc4a237e5700a"
+    },
+    {
+      "path": "engine-eager/boot-id.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "engine-eager/boot-id.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "engine-eager/config.env",
+      "bytes": 648,
+      "sha256": "99bb49dad30531a862f7dd5edff0bfc6458c3735c5fe8d8bc64cb8d367e70bb1"
+    },
+    {
+      "path": "engine-eager/gpu-owners.after.txt",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "engine-eager/kernel.privileged-window-audit.json",
+      "bytes": 502,
+      "sha256": "bba89af365e5db7349fa9016d776add9bbedb71f9fb67e4520181ae9ff83a867"
+    },
+    {
+      "path": "engine-eager/models.json",
+      "bytes": 582,
+      "sha256": "20cdbd067827561479993dbc32b3ddcd0f87bb0eee19346a64e525d41cec1d81"
+    },
+    {
+      "path": "engine-eager/rank1-qualification.json",
+      "bytes": 568,
+      "sha256": "dce1ed69b1187e4b6a180c50ec4f5364a34fd6f1d7ee9cda224991427f11c942"
+    },
+    {
+      "path": "engine-eager/sha256.after",
+      "bytes": 4576,
+      "sha256": "9a21157152868b2ded7750e36cacca5755f9d9e997f0ecd0dc7ac3cd9687ad99"
+    },
+    {
+      "path": "engine-eager/sha256.before",
+      "bytes": 4576,
+      "sha256": "9a21157152868b2ded7750e36cacca5755f9d9e997f0ecd0dc7ac3cd9687ad99"
+    },
+    {
+      "path": "engine-eager/worker-provenance.json",
+      "bytes": 3797,
+      "sha256": "a3f99112ed7c62623d1fe82ac7c4a31ea6aa4587e63219e1eb075813d28a2805"
+    }
+  ]
+}

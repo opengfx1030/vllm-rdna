@@ -1,0 +1,4 @@
+[12:02:39] pass 1 start (0 s of 300)
+[12:12:11] pass 1 rc=0
+[12:12:11] passes: 1 in 572 s
+PASS

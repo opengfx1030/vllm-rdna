@@ -1,0 +1,26 @@
+{
+  "schema": "failstop-evidence-manifest-v1",
+  "scope": "compact graph-mode injected-fault cleanup failure; no raw logs or caches",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 1732,
+      "sha256": "978f1631d4cdffb84ea91b51a117b70dc4b444afc36108153ebc49112ef56e0a"
+    },
+    {
+      "path": "failure.txt",
+      "bytes": 1599,
+      "sha256": "b433fde35acabbb9f3f794f1710321e8c06c97872482924f22a6c50dd9faa400"
+    },
+    {
+      "path": "run-metadata.json",
+      "bytes": 2027,
+      "sha256": "889cb4e71e28dbe101d7cd940fadbe7788314b5e57638a25f9ac5087d0298033"
+    },
+    {
+      "path": "source-hashes.txt",
+      "bytes": 731,
+      "sha256": "eb7b7fdf9a92c01a97698450e56125586457ddf7ba92354f898e80043e284d13"
+    }
+  ]
+}

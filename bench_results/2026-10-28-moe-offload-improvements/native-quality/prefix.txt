@@ -1,0 +1,3 @@
+cold TTFT 12.05 s, warm TTFT 2.29 s, speedup 5.3x -> PASS
+cold text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "bar'
+warm text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "bar'

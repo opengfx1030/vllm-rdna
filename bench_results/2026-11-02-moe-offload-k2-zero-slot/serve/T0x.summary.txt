@@ -1,0 +1,15 @@
+== arm-info
+tree /home/chenco_adm/vllm-rdna-0.32.0-head
+ec7ce7df7599c36d82fbee5076ea4ec0  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py
+70dfe18aa3717dd5d41c43a0edf97540  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py
+5a1fa44aa939f199a018aa77206052f4  vllm/model_executor/layers/fused_moe/rdna_expert_cache_policy.py
+MONO_CFG= EXTRA_ENV= GPUSET=6,7 PORT=18426
+== cells
+| label | cell | ok | prefill tok/s req (agg) | decode tok/s req | agg out tok/s | TTFT mean/p50/p99 s | ITL p50/p99 ms (mean) | acc len |
+|---|---|---|---|---|---|---|---|---|
+| 1024x512-c1 | 1024/512 c1 | 10/10 | 726 (602) | 31.49 | 29.0 | 1.41/1.40/1.70 | 65.8/107 (68.4) | 2.16 |
+| 1024x512-c4 | 1024/512 c4 | 12/12 | 374 (763) | 11.96 | 44.1 | 2.74/2.00/5.37 | 176.5/302 (190.1) | 2.28 |
+== greedy
+greedy_probe: sha256=5527d8b3bd52d7d5 seq==conc=False chars=2735
+== errors in serve.log
+0

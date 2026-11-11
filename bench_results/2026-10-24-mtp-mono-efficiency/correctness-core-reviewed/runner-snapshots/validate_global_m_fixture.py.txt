@@ -1,0 +1,874 @@
+#!/usr/bin/env python3
+"""Parity, graph-replay, and timing harness for global-workspace K2.
+
+This is evidence tooling, not a production path. It deliberately refuses to
+initialize GPUs outside HIP 6--9. Run with the task-approved host/venv only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import csv
+import importlib
+import importlib.util
+import json
+import os
+import statistics
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Callable
+
+
+M_SWEEP = (1, 4, 8, 12, 24, 25, 32, 48, 49, 64, 128, 256, 512, 768, 1024, 1045, 1536, 2048)
+TOL = 5e-3
+TIE_GAP = 1e-3
+K2_MAX_M = 24
+
+
+def _visible_gpu_id() -> int:
+    """Require one explicitly selected physical GPU in the reserved range."""
+    selected = []
+    for name in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        if len(parts) != 1 or not parts[0].isdigit():
+            raise SystemExit(f"{name} must select exactly one numeric GPU, got {value!r}")
+        selected.append((name, int(parts[0])))
+    if len({gpu_id for _, gpu_id in selected}) > 1:
+        raise SystemExit(f"conflicting GPU selectors are set: {selected!r}")
+    if selected:
+        name, gpu_id = selected[0]
+        if gpu_id not in range(6, 10):
+            raise SystemExit(f"refusing GPU {gpu_id}; this task is HIP 6--9 only")
+        return gpu_id
+    raise SystemExit("set HIP_VISIBLE_DEVICES to exactly one GPU id in 6,7,8,9")
+
+
+def _load_test_module(repo_root: Path):
+    path = repo_root / "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py"
+    spec = importlib.util.spec_from_file_location("mono_k2_reference_tests", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load existing K2 reference tests from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _candidate_from_spec(spec: str | None) -> Callable | None:
+    if spec is None:
+        return None
+    module_name, separator, function_name = spec.partition(":")
+    if not separator:
+        raise ValueError("candidate must use module:function syntax")
+    function = getattr(importlib.import_module(module_name), function_name)
+    if not callable(function):
+        raise TypeError(f"candidate {spec} is not callable")
+    return function
+
+
+def _loop_existing_k2(k2, mono, res, blk, inj, torch):
+    """Invoke the current K2 op in bounded row slices and concatenate outputs."""
+    result_chunks = [[], [], []]
+    for start in range(0, res.shape[0], K2_MAX_M):
+        end = min(start + K2_MAX_M, res.shape[0])
+        chunk = k2.run(mono, res[start:end], blk[start:end], inj[start:end])
+        for outputs, tensor in zip(result_chunks, chunk):
+            outputs.append(tensor)
+    return tuple(torch.cat(chunks, dim=0) for chunks in result_chunks)
+
+
+def _make_dense_mtp_fixture(test_module, torch, seed: int):
+    """Materialize the exact-shape dense-MTP fixture without a test helper.
+
+    The harness imports the K2 kernel-test module, but the meta-layer helper is
+    defined in a separate model test module. It is not needed for this
+    deterministic numerical fixture: construct the same dense MonoLayer tensor
+    dictionary directly, with full random contiguous FP16 expert weights.
+    """
+    del test_module
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+
+    def materialize(shape, std):
+        return torch.empty(shape, dtype=torch.float16, device="cuda").normal_(
+            mean=0.0, std=std, generator=gen
+        )
+
+    norm_w = materialize((10240,), 0.1)
+    wd = materialize((336, 10240), 10240**-0.5)
+    wu = materialize((10240, 320), 320**-0.5 * 2)
+    wr = materialize((512, 2560), 2560**-0.5 * 2)
+    w13 = materialize((128, 1280, 2560), 2560**-0.5)
+    w2 = materialize((128, 2560, 640), 640**-0.5)
+    se_w1 = materialize((320, 2560), 2560**-0.5)
+    se_w2 = materialize((2560, 160), 160**-0.5)
+    se_wg = materialize((1, 2560), 2560**-0.5).reshape(-1).contiguous()
+    L = {
+        "norm_w": norm_w,
+        "wd": wd,
+        "wu": wu,
+        "wr": wr,
+        "se_w1": se_w1,
+        "se_w2": se_w2,
+        "se_wg": se_wg,
+        "w13": w13,
+        "s13": torch.empty(0, dtype=torch.float16, device="cuda"),
+        "z13": torch.empty(0, dtype=torch.int32, device="cuda"),
+        "w2": w2,
+        "s2": torch.empty(0, dtype=torch.float16, device="cuda"),
+        "z2": torch.empty(0, dtype=torch.int32, device="cuda"),
+    }
+    ws_size = int(
+        torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(2560, 320, 336, 512, 160, 640)
+    )
+    ws = torch.ops._rocm_C.mono_k2_rdna2_workspace_alloc(
+        ws_size + 8192, torch.cuda.current_device()
+    )
+    return SimpleNamespace(
+        t=L,
+        ws=ws,
+        base=0,
+        eps=1e-6,
+        is_mtp=True,
+        dense_mtp=True,
+    )
+
+
+def _dense_module_reference(L, res, blk, inj, torch, F):
+    """Today's dense MTP module sequence for the synthetic fixture."""
+    from vllm.model_executor.layers import rdna_ops  # noqa: F401
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+    from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
+    from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_norm
+
+    H, HC, R, E, ISE, TOPK, EPS = 2560, 4, 320, 512, 160, 10, 1e-6
+    I = L["w2"].shape[-1]
+    M = res.shape[0]
+    residual_out, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
+    block_input, dai = torch.ops.vllm.rdna_hc_mix(
+        xn, L["wd"], None, None, L["wu"], None, None, R, HC
+    )
+    injection_out = dai[:, R : R + HC].contiguous()
+    shared = torch.ops.vllm.rdna_shared_expert(
+        block_input,
+        L["se_w1"],
+        None,
+        None,
+        L["se_w2"],
+        None,
+        None,
+        L["se_wg"],
+    )
+    logits = rocm_unquantized_gemm_impl(block_input, L["wr"], None)
+    top_weights, top_ids, _ = fused_topk(block_input, logits, TOPK, True)
+
+    # Accumulate row-major dense expert results in fp32; each expert's down
+    # projection returns fp16, matching the MonoKernel's explicit down-round.
+    routed = torch.zeros((M, H), dtype=torch.float32, device=res.device)
+    for expert in range(L["w13"].shape[0]):
+        row_ids, slot_ids = (top_ids == expert).nonzero(as_tuple=True)
+        if row_ids.numel() == 0:
+            continue
+        x = block_input.index_select(0, row_ids)
+        gate_up = F.linear(x, L["w13"][expert])
+        gate, up = gate_up.split(I, dim=-1)
+        act = F.silu(gate) * up
+        down = F.linear(act, L["w2"][expert])
+        weighted = down.float() * top_weights[row_ids, slot_ids].float().unsqueeze(-1)
+        routed.index_add_(0, row_ids, weighted)
+
+    ffn_out = (shared.float() + routed).to(torch.float16)
+    return residual_out, ffn_out, injection_out
+
+
+def _dense_reference(L, res, blk, inj, torch, F):
+    outputs = _dense_module_reference(L, res, blk, inj, torch, F)
+    from vllm.model_executor.layers import rdna_ops  # noqa: F401
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+    from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
+    from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_norm
+
+    H, HC, R, ND, E, ISE, TOPK, EPS = 2560, 4, 320, 336, 512, 160, 10, 1e-6
+    M = res.shape[0]
+    _, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
+    block_input, _ = torch.ops.vllm.rdna_hc_mix(
+        xn, L["wd"], None, None, L["wu"], None, None, R, HC
+    )
+    logits = rocm_unquantized_gemm_impl(block_input, L["wr"], None)
+    sorted_logits = logits.float().sort(dim=-1, descending=True).values
+    gaps = sorted_logits[:, TOPK - 1] - sorted_logits[:, TOPK]
+    return (*outputs, gaps)
+
+
+def _reference(case, test_module, L, G, res, blk, inj, torch, F):
+    if case == "quantized-target":
+        ffn, residual, injection = test_module._today_ffn(L, res, blk, inj)
+        gaps = test_module._golden_gaps(G, res, blk, inj)
+        gaps = torch.tensor(gaps, device=res.device, dtype=torch.float32)
+        return residual, ffn, injection, gaps
+    return _dense_reference(L, res, blk, inj, torch, F)
+
+
+def _inputs(M, seed, case, test_module, torch):
+    if case == "quantized-target":
+        return test_module._inputs(M, seed)
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    return (
+        torch.randn(M, 10240, generator=gen, device="cuda").half(),
+        (torch.randn(M, 2560, generator=gen, device="cuda") * 0.5).half(),
+        torch.randn(M, 4, generator=gen, device="cuda").half(),
+    )
+
+
+def _compare(got, expected, gaps, torch):
+    finite = all(bool(torch.isfinite(t).all().item()) for t in (*got, *expected))
+    errors = [(a.float() - b.float()).abs() for a, b in zip(got, expected)]
+    row_error = errors[1].amax(dim=-1)
+    tied = gaps < TIE_GAP
+    bad_rows = (~tied) & (row_error >= TOL)
+    residual_exact = torch.equal(got[0], expected[0])
+    injection_error = errors[2].max().item()
+    return {
+        "max_abs_error": max(e.max().item() for e in errors),
+        "ffn_max_abs_error": errors[1].max().item(),
+        "residual_exact": residual_exact,
+        "injection_max_abs_error": injection_error,
+        "router_near_tie_rows": int(tied.sum().item()),
+        "ffn_non_tie_bad_rows": int(bad_rows.sum().item()),
+        "all_finite": finite,
+        "parity_ok": finite and residual_exact and injection_error < TOL and not bool(bad_rows.any()),
+    }
+
+
+def _compare_direct(got, expected, torch, gaps):
+    """Strictly compare K2 outputs, while reporting route-tie context.
+
+    Direct parity stays strict (raw maximum error must remain below TOL).
+    Near-tie rows are only explanatory metadata and never mask a failure.
+    """
+    finite = all(bool(torch.isfinite(t).all().item()) for t in (*got, *expected))
+    errors = [(a.float() - b.float()).abs() for a, b in zip(got, expected)]
+    max_error = max(e.max().item() for e in errors)
+    residual_exact = torch.equal(got[0], expected[0])
+    row_error = errors[1].reshape(errors[1].shape[0], -1).amax(dim=1)
+    tied = gaps < TIE_GAP
+    non_tie_bad_rows = (~tied) & (row_error >= TOL)
+    injection_error = errors[2].max().item()
+    return {
+        "candidate_vs_loop_max_abs_error": max_error,
+        "candidate_vs_loop_residual_exact": residual_exact,
+        "candidate_vs_loop_non_tie_max_abs_error": (
+            float(row_error[~tied].max().item()) if bool((~tied).any().item()) else 0.0
+        ),
+        "candidate_vs_loop_non_tie_bad_rows": int(non_tie_bad_rows.sum().item()),
+        "candidate_vs_loop_near_tie_rows": int(tied.sum().item()),
+        "candidate_vs_loop_injection_max_abs_error": injection_error,
+        "candidate_vs_loop_parity_ok": finite and residual_exact and max_error < TOL,
+    }
+
+
+def _candidate_call(candidate, k2, mono, res, blk, inj, torch):
+    if candidate is None:
+        return _loop_existing_k2(k2, mono, res, blk, inj, torch)
+    # Adapter contract: candidate(mono, residual, attn_out, injection) ->
+    # (residual_out, partial_ffn_out, injection_out), same as k2.run.
+    return candidate(mono, res, blk, inj)
+
+
+def _check_candidate_error(candidate):
+    check = getattr(candidate, "check_error", None) if candidate is not None else None
+    if check is not None:
+        check()
+
+
+def _time_eager(fn, torch, iters: int, warmup: int) -> list[float]:
+    for _ in range(warmup):
+        result = fn()
+    torch.cuda.synchronize()
+    del result
+    samples = []
+    for _ in range(iters):
+        start = time.perf_counter()
+        result = fn()
+        torch.cuda.synchronize()
+        samples.append((time.perf_counter() - start) * 1000)
+        del result
+    return samples
+
+
+def _time_graph(fn, torch, iters: int, warmup: int, changed_inputs: list) -> tuple[list[float], tuple]:
+    for _ in range(warmup):
+        result = fn()
+    torch.cuda.synchronize()
+    del result
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        result = fn()
+    torch.cuda.synchronize()
+    for target, source in changed_inputs:
+        target.copy_(source)
+    torch.cuda.synchronize()
+    graph.replay()
+    torch.cuda.synchronize()
+    samples = []
+    start_event, stop_event = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    for _ in range(iters):
+        start_event.record()
+        graph.replay()
+        stop_event.record()
+        stop_event.synchronize()
+        samples.append(start_event.elapsed_time(stop_event))
+    return samples, result
+
+
+def _peak_extra(fn, torch) -> int:
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    value = fn()
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated()
+    del value
+    torch.cuda.synchronize()
+    return max(0, peak - before)
+
+
+def _stats(samples):
+    if not samples:
+        return {"median_ms": None, "p95_ms": None}
+    ordered = sorted(samples)
+    return {
+        "median_ms": statistics.median(ordered),
+        "p95_ms": ordered[min(len(ordered) - 1, int(0.95 * (len(ordered) - 1)))],
+    }
+
+
+def main():
+    selected_gpu = _visible_gpu_id()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--case", choices=("quantized-target", "dense-mtp"), required=True)
+    parser.add_argument("--rows", default=",".join(map(str, M_SWEEP)))
+    parser.add_argument("--seed", type=int, default=50124)
+    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--iters", type=int, default=5)
+    parser.add_argument(
+        "--candidate",
+        choices=("large-m-global",),
+        default="large-m-global",
+        help="isolated global-workspace scratch candidate",
+    )
+    parser.add_argument(
+        "--num-wg",
+        type=int,
+        default=32,
+        help="candidate grid WGs; initial global-workspace screening uses G=32",
+    )
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--fixture-dir", type=Path, default=None,
+                        help="verified production-loaded rank-local fixture; replaces synthetic weights")
+    parser.add_argument("--expected-model-id")
+    parser.add_argument("--expected-snapshot-id")
+    parser.add_argument("--expected-source-revision")
+    parser.add_argument("--expected-module-path")
+    parser.add_argument("--expected-tp-rank", type=int)
+    parser.add_argument("--expected-ep-rank", type=int)
+    parser.add_argument("--expected-tp-world-size", type=int)
+    parser.add_argument("--expected-ep-world-size", type=int)
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path(__file__).resolve().parents[3],
+        help="vLLM checkout root (defaults to this branch checkout)",
+    )
+    args = parser.parse_args()
+    if args.fixture_dir is not None:
+        required_provenance = (
+            args.expected_model_id, args.expected_snapshot_id,
+            args.expected_source_revision, args.expected_module_path, args.expected_tp_rank,
+            args.expected_ep_rank, args.expected_tp_world_size,
+            args.expected_ep_world_size,
+        )
+        if any(value is None for value in required_provenance):
+            raise SystemExit("--fixture-dir requires all --expected-{model-id,snapshot-id,source-revision,module-path,tp-rank,ep-rank,tp-world-size,ep-world-size} values")
+    if args.output.exists() or args.output.with_suffix(".json").exists():
+        raise SystemExit(f"refusing to overwrite existing evidence for: {args.output}")
+    rows = [int(value) for value in args.rows.split(",") if value]
+    if not rows or any(m <= 0 for m in rows):
+        raise SystemExit("--rows must be a comma-separated list of positive M values")
+    if args.num_wg <= 0:
+        raise SystemExit("--num-wg must be positive")
+
+    import torch
+    import torch.nn.functional as F
+
+    if not torch.version.hip:
+        raise SystemExit("this harness requires the frozen ROCm venv")
+    props = torch.cuda.get_device_properties(0)
+    arch = getattr(props, "gcnArchName", "")
+    if not arch.startswith("gfx10"):
+        raise SystemExit(f"expected gfx10x on selected HIP {selected_gpu}; got {arch}")
+    if torch.cuda.device_count() != 1:
+        raise SystemExit(f"expected exactly one visible GPU; got {torch.cuda.device_count()}")
+
+    repo_root = args.repo_root.resolve()
+    os.environ.setdefault("VLLM_SOURCE_ROOT", str(repo_root))
+    test_module = _load_test_module(repo_root)
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+    candidate_module = importlib.import_module("large_m_global_scratch")
+    candidate = candidate_module.make_runner(torch, num_wg=args.num_wg)
+    fixture_manifest = None
+    if args.fixture_dir is not None:
+        fixture_path = Path(__file__).resolve().parent / "loaded_fixture" / "mono_k2_loaded_fixture.py"
+        fixture_spec = importlib.util.spec_from_file_location("mono_k2_loaded_fixture", fixture_path)
+        if fixture_spec is None or fixture_spec.loader is None:
+            raise RuntimeError(f"cannot load production fixture helper: {fixture_path}")
+        fixture_helper = importlib.util.module_from_spec(fixture_spec)
+        sys.modules[fixture_spec.name] = fixture_helper
+        fixture_spec.loader.exec_module(fixture_helper)
+        expected_role = "target" if args.case == "quantized-target" else "mtp"
+        fixture_tensors, fixture_manifest = fixture_helper.load_fixture(
+            args.fixture_dir,
+            expected_role=expected_role,
+            expected_model_id=args.expected_model_id,
+            expected_snapshot_id=args.expected_snapshot_id,
+            expected_source_revision=args.expected_source_revision,
+            expected_module_path=args.expected_module_path,
+            expected_tp_rank=args.expected_tp_rank,
+            expected_ep_rank=args.expected_ep_rank,
+            expected_tp_world_size=args.expected_tp_world_size,
+            expected_ep_world_size=args.expected_ep_world_size,
+        )
+        fixture_layer = {name: tensor.to(device="cuda") for name, tensor in fixture_tensors.items()}
+        fixture_mono = fixture_manifest["mono"]
+        if args.case == "dense-mtp" and not fixture_mono["dense_mtp"]:
+            raise SystemExit("dense-mtp case requires a production dense-MTP fixture")
+        if args.case == "quantized-target" and fixture_mono["dense_mtp"]:
+            raise SystemExit("quantized-target case cannot use a dense-MTP fixture")
+        L = fixture_layer
+        G = {name: tensor.float() for name, tensor in fixture_layer.items()
+             if name in ("norm_w", "wd", "wu", "wr")}
+        mono = SimpleNamespace(
+            t=L, ws=None, base=int(fixture_mono["expert_base"]),
+            eps=float(fixture_mono["eps"]),
+            is_mtp=bool(fixture_mono["is_mtp"]),
+            dense_mtp=bool(fixture_mono["dense_mtp"]), ar_on=False,
+        )
+        if args.case == "dense-mtp":
+            # Production MTP dense weights use the same K2 workspace contract.
+            ws_size = int(torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(
+                2560, 320, 336, 512, 160, 640
+            ))
+        else:
+            ws_size = int(torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(
+                2560, 320, 336, 512, 160, 640
+            ))
+        mono.ws = torch.zeros(ws_size + 8192, dtype=torch.uint8, device="cuda")
+    elif args.case == "quantized-target":
+        gen = torch.Generator(device="cuda").manual_seed(args.seed)
+        L, G = test_module._make_layer(gen, keep_golden=True)
+        ws_size = int(
+            torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(
+                test_module.H,
+                test_module.R,
+                test_module.ND,
+                test_module.E,
+                test_module.ISE,
+                test_module.INTER,
+            )
+        )
+        mono = SimpleNamespace(
+            t=L,
+            ws=torch.zeros(ws_size + 8192, dtype=torch.uint8, device="cuda"),
+            base=0,
+            eps=test_module.EPS,
+            is_mtp=False,
+            dense_mtp=False,
+        )
+    else:
+        mono = _make_dense_mtp_fixture(test_module, torch, args.seed)
+        L, G = mono.t, None
+        ws_size = mono.ws.numel() * mono.ws.element_size()
+
+    # Keep the installed 24-row layout/workspace isolated from any candidate
+    # with its own global-M workspace layout.
+    baseline_mono = copy.copy(mono)
+    baseline_ws_size = mono.ws.numel() * mono.ws.element_size()
+
+    if candidate_module is not None:
+        mono.ws = candidate_module.allocate_workspace(
+            mono.t, args.case, torch, mono.base, mono.eps
+        )
+        ws_size = mono.ws.numel() * mono.ws.element_size()
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    fields = (
+        "case",
+        "gpu_id",
+        "arch",
+        "M",
+        "mode",
+        "parity_ok",
+        "max_abs_error",
+        "ffn_max_abs_error",
+        "residual_exact",
+        "injection_max_abs_error",
+        "router_near_tie_rows",
+        "ffn_non_tie_bad_rows",
+        "all_finite",
+        "candidate_vs_loop_max_abs_error",
+        "candidate_vs_loop_residual_exact",
+        "candidate_vs_loop_parity_ok",
+        "candidate_vs_loop_non_tie_max_abs_error",
+        "candidate_vs_loop_non_tie_bad_rows",
+        "candidate_vs_loop_near_tie_rows",
+        "candidate_vs_loop_injection_max_abs_error",
+        "median_ms",
+        "p95_ms",
+        "workspace_bytes",
+        "baseline_workspace_bytes",
+        "peak_extra_bytes",
+        "graph_changed_input_parity",
+        "candidate_num_wg",
+        "installed_baseline_pass",
+        "module_reference_pass",
+        "candidate_module_pass",
+        "strict_direct_pass",
+    )
+    records = []
+    strict_direct_failures = []
+    module_reference_failures = []
+    candidate_module_failures = []
+    installed_baseline_failures = []
+    metadata_path = args.output.with_suffix(".json")
+    metadata = {
+        "case": args.case,
+        "visible_physical_gpu": selected_gpu,
+        "arch": arch,
+        "rows_requested": rows,
+        "rows_completed": [],
+        "current_M": None,
+        "completed_modes_current_M": [],
+        "seed": args.seed,
+        "warmup": args.warmup,
+        "iters": args.iters,
+        "candidate": args.candidate or "existing K2 loop in <=24-row chunks",
+        "candidate_num_wg": args.num_wg,
+        "fixture": fixture_manifest,
+        "fixture_weights_used": fixture_manifest is not None,
+        "workspace_bytes": ws_size,
+        "output_csv": str(args.output.resolve()),
+        "complete": False,
+        "strict_direct_failures": [],
+        "strict_direct_comparison_pass": True,
+        "module_reference_failures": [],
+        "module_reference_pass": True,
+        "candidate_module_failures": [],
+        "candidate_module_pass": True,
+        "installed_baseline_failures": [],
+        "installed_baseline_pass": True,
+        "overall_diagnostic_pass": True,
+        "precision_note": (
+            "reference route and K2 can disagree for rows whose top10/top11 "
+            "router-logit gap is below 1e-3; these are reported separately"
+        ),
+        "output_scope": "rank-local partial; no TP all-reduce is performed by scratch candidate",
+    }
+    _write_metadata(metadata_path, metadata)
+    current_modes = []
+    for M in rows:
+        current_modes = []
+        res, blk, inj = _inputs(M, args.seed + M, args.case, test_module, torch)
+        original_inputs = tuple(t.clone() for t in (res, blk, inj))
+        reference = _reference(args.case, test_module, L, G, res, blk, inj, torch, F)
+        expected = reference[:3]
+        gaps = reference[3]
+        loop_fn = lambda: _loop_existing_k2(k2, baseline_mono, res, blk, inj, torch)
+        loop_out = loop_fn()
+        torch.cuda.synchronize()
+        loop_cmp = _compare(loop_out, expected, gaps, torch)
+        if not loop_cmp["parity_ok"]:
+            installed_baseline_failures.append({"M": M, "mode": "eager", **loop_cmp})
+            metadata["installed_baseline_failures"] = list(installed_baseline_failures)
+            metadata["installed_baseline_pass"] = False
+            metadata["overall_diagnostic_pass"] = False
+            _write_metadata(metadata_path, metadata)
+
+        loop_times = _time_eager(loop_fn, torch, args.iters, args.warmup)
+        records.append(
+            {
+                "case": args.case,
+                "gpu_id": selected_gpu,
+                "arch": arch,
+                "M": M,
+                "mode": "eager_existing_k2_chunk_loop",
+                **loop_cmp,
+                **_stats(loop_times),
+                "workspace_bytes": ws_size,
+                "baseline_workspace_bytes": baseline_ws_size,
+                "peak_extra_bytes": _peak_extra(loop_fn, torch),
+                "graph_changed_input_parity": None,
+                "candidate_num_wg": args.num_wg,
+            }
+        )
+        _persist_latest(args.output, fields, records[-1], metadata, current_modes)
+
+        changed = _inputs(M, args.seed + 100_000 + M, args.case, test_module, torch)
+        loop_graph_samples, loop_graph_out = _time_graph(
+            loop_fn,
+            torch,
+            args.iters,
+            args.warmup,
+            list(zip((res, blk, inj), changed)),
+        )
+        changed_ref = _reference(args.case, test_module, L, G, res, blk, inj, torch, F)
+        loop_graph_cmp = _compare(
+            loop_graph_out, changed_ref[:3], changed_ref[3], torch
+        )
+        if not loop_graph_cmp["parity_ok"]:
+            installed_baseline_failures.append(
+                {"M": M, "mode": "changed_input_graph", **loop_graph_cmp}
+            )
+            metadata["installed_baseline_failures"] = list(installed_baseline_failures)
+            metadata["installed_baseline_pass"] = False
+            metadata["overall_diagnostic_pass"] = False
+            _write_metadata(metadata_path, metadata)
+        records.append(
+            {
+                "case": args.case,
+                "gpu_id": selected_gpu,
+                "arch": arch,
+                "M": M,
+                "mode": "graph_replay_existing_k2_chunk_loop",
+                **loop_graph_cmp,
+                **_stats(loop_graph_samples),
+                "workspace_bytes": ws_size,
+                "baseline_workspace_bytes": baseline_ws_size,
+                "peak_extra_bytes": None,
+                "graph_changed_input_parity": True,
+                "candidate_num_wg": args.num_wg,
+            }
+        )
+        _persist_latest(args.output, fields, records[-1], metadata, current_modes)
+
+        # Baseline graph replay above overwrote the shared input tensors with
+        # `changed`. Restore the original values before measuring the module
+        # reference and candidate eager paths so they match `expected`/`gaps`.
+        for target, source in zip((res, blk, inj), original_inputs):
+            target.copy_(source)
+        torch.cuda.synchronize()
+
+        if args.case == "quantized-target":
+            def reference_fn():
+                ffn_out, residual_out, injection_out = test_module._today_ffn(
+                    L, res, blk, inj
+                )
+                return residual_out, ffn_out, injection_out
+        else:
+            reference_fn = lambda: _dense_module_reference(
+                L, res, blk, inj, torch, F
+            )
+        # The full diagnostic reference above computes row-wise router gaps.
+        # Keep that extra GEMM/sort outside timed and peak-allocation paths.
+        reference_out = reference_fn()
+        reference_cmp = _compare(reference_out, expected, gaps, torch)
+        if not reference_cmp["parity_ok"]:
+            module_reference_failures.append({"M": M, **reference_cmp})
+            metadata["module_reference_failures"] = list(module_reference_failures)
+            metadata["module_reference_pass"] = False
+            metadata["overall_diagnostic_pass"] = False
+            _write_metadata(metadata_path, metadata)
+        reference_times = _time_eager(reference_fn, torch, args.iters, args.warmup)
+        records.append(
+            {
+                "case": args.case,
+                "gpu_id": selected_gpu,
+                "arch": arch,
+                "M": M,
+                "mode": "eager_modules_reference",
+                **reference_cmp,
+                **_stats(reference_times),
+                "workspace_bytes": 0,
+                "baseline_workspace_bytes": baseline_ws_size,
+                "peak_extra_bytes": _peak_extra(reference_fn, torch),
+                "graph_changed_input_parity": None,
+                "candidate_num_wg": args.num_wg,
+            }
+        )
+        _persist_latest(args.output, fields, records[-1], metadata, current_modes)
+
+        fn = lambda: _candidate_call(candidate, k2, mono, res, blk, inj, torch)
+        got = fn()
+        torch.cuda.synchronize()
+        _check_candidate_error(candidate)
+        cmp = _compare(got, expected, gaps, torch)
+        direct_cmp = _compare_direct(got, loop_out, torch, gaps)
+        if not direct_cmp["candidate_vs_loop_parity_ok"]:
+            strict_direct_failures.append(
+                {"M": M, "mode": "eager_candidate", **direct_cmp}
+            )
+            metadata["strict_direct_failures"] = list(strict_direct_failures)
+            metadata["strict_direct_comparison_pass"] = False
+            _write_metadata(metadata_path, metadata)
+        if not cmp["parity_ok"]:
+            candidate_module_failures.append({"M": M, "mode": "eager", **cmp})
+            metadata["candidate_module_failures"] = list(candidate_module_failures)
+            metadata["candidate_module_pass"] = False
+            metadata["overall_diagnostic_pass"] = False
+        eager = _time_eager(fn, torch, args.iters, args.warmup)
+        peak_extra = _peak_extra(fn, torch)
+        records.append(
+            {
+                "case": args.case,
+                "gpu_id": selected_gpu,
+                "arch": arch,
+                "M": M,
+                "mode": "eager_candidate",
+                **cmp,
+                **direct_cmp,
+                **_stats(eager),
+                "workspace_bytes": ws_size,
+                "baseline_workspace_bytes": baseline_ws_size,
+                "peak_extra_bytes": peak_extra,
+                "graph_changed_input_parity": None,
+                "candidate_num_wg": args.num_wg,
+            }
+        )
+        _persist_latest(args.output, fields, records[-1], metadata, current_modes)
+
+        graph_samples, graph_out = _time_graph(
+            fn,
+            torch,
+            args.iters,
+            args.warmup,
+            list(zip((res, blk, inj), changed)),
+        )
+        changed_ref = _reference(args.case, test_module, L, G, res, blk, inj, torch, F)
+        graph_cmp = _compare(graph_out, changed_ref[:3], changed_ref[3], torch)
+        graph_direct_cmp = _compare_direct(graph_out, loop_graph_out, torch, changed_ref[3])
+        if not graph_direct_cmp["candidate_vs_loop_parity_ok"]:
+            strict_direct_failures.append(
+                {"M": M, "mode": "graph_replay_candidate", **graph_direct_cmp}
+            )
+            metadata["strict_direct_failures"] = list(strict_direct_failures)
+            metadata["strict_direct_comparison_pass"] = False
+            _write_metadata(metadata_path, metadata)
+        torch.cuda.synchronize()
+        _check_candidate_error(candidate)
+        if not graph_cmp["parity_ok"]:
+            candidate_module_failures.append({"M": M, "mode": "changed_input_graph", **graph_cmp})
+            metadata["candidate_module_failures"] = list(candidate_module_failures)
+            metadata["candidate_module_pass"] = False
+            metadata["overall_diagnostic_pass"] = False
+        records.append(
+            {
+                "case": args.case,
+                "gpu_id": selected_gpu,
+                "arch": arch,
+                "M": M,
+                "mode": "graph_replay_candidate",
+                **graph_cmp,
+                **graph_direct_cmp,
+                **_stats(graph_samples),
+                "workspace_bytes": ws_size,
+                "baseline_workspace_bytes": baseline_ws_size,
+                "peak_extra_bytes": None,
+                "graph_changed_input_parity": True,
+                "candidate_num_wg": args.num_wg,
+            }
+        )
+        _persist_latest(args.output, fields, records[-1], metadata, current_modes)
+        print(
+            f"{args.case} M={M:4d} eager={statistics.median(eager):.4f} ms "
+            f"graph={statistics.median(graph_samples):.4f} ms "
+            f"workspace={ws_size} peak+={peak_extra} "
+            f"module_parity={'PASS' if cmp['parity_ok'] and graph_cmp['parity_ok'] else 'FAIL'} "
+            f"strict_direct={'PASS' if graph_direct_cmp['candidate_vs_loop_parity_ok'] else 'FAIL'}",
+            flush=True,
+        )
+        # Persist each completed row group so a later OOM or kernel failure
+        # retains the parity and timing evidence already collected.
+        del loop_out, loop_graph_out, got, graph_out, reference, reference_out
+        del reference_cmp, loop_cmp, loop_graph_cmp, cmp, graph_cmp
+        del changed_ref, changed, original_inputs, res, blk, inj
+        torch.cuda.synchronize()
+        metadata["strict_direct_failures"] = list(strict_direct_failures)
+        metadata["strict_direct_comparison_pass"] = not strict_direct_failures
+        metadata["module_reference_failures"] = list(module_reference_failures)
+        metadata["module_reference_pass"] = not module_reference_failures
+        metadata["candidate_module_failures"] = list(candidate_module_failures)
+        metadata["candidate_module_pass"] = not candidate_module_failures
+        metadata["installed_baseline_failures"] = list(installed_baseline_failures)
+        metadata["installed_baseline_pass"] = not installed_baseline_failures
+        metadata["overall_diagnostic_pass"] = not (
+            strict_direct_failures or module_reference_failures or candidate_module_failures
+            or installed_baseline_failures
+        )
+        _write_metadata(metadata_path, metadata)
+
+    metadata["complete"] = True
+    metadata["current_M"] = None
+    metadata["completed_modes_current_M"] = []
+    metadata["strict_direct_failures"] = list(strict_direct_failures)
+    metadata["strict_direct_comparison_pass"] = not strict_direct_failures
+    metadata["module_reference_failures"] = list(module_reference_failures)
+    metadata["module_reference_pass"] = not module_reference_failures
+    metadata["candidate_module_failures"] = list(candidate_module_failures)
+    metadata["candidate_module_pass"] = not candidate_module_failures
+    metadata["installed_baseline_failures"] = list(installed_baseline_failures)
+    metadata["installed_baseline_pass"] = not installed_baseline_failures
+    metadata["overall_diagnostic_pass"] = not (
+        strict_direct_failures or module_reference_failures or candidate_module_failures
+        or installed_baseline_failures
+    )
+    _write_metadata(metadata_path, metadata)
+
+
+def _persist_latest(output, fields, record, metadata, current_modes):
+    mode = record["mode"]
+    record.setdefault("installed_baseline_pass", record.get("parity_ok") if mode in (
+        "eager_existing_k2_chunk_loop", "graph_replay_existing_k2_chunk_loop") else None)
+    record.setdefault("module_reference_pass", record.get("parity_ok") if mode == "eager_modules_reference" else None)
+    record.setdefault("candidate_module_pass", record.get("parity_ok") if mode in (
+        "eager_candidate", "graph_replay_candidate") else None)
+    record.setdefault("strict_direct_pass", record.get("candidate_vs_loop_parity_ok") if mode in (
+        "eager_candidate", "graph_replay_candidate") else None)
+    append_records(output, fields, [record])
+    current_modes.append(record["mode"])
+    metadata["current_M"] = record["M"]
+    metadata["completed_modes_current_M"] = list(current_modes)
+    if record["mode"] == "graph_replay_candidate":
+        metadata["rows_completed"].append(record["M"])
+        metadata["current_M"] = None
+        metadata["completed_modes_current_M"] = []
+        current_modes.clear()
+    _write_metadata(output.with_suffix(".json"), metadata)
+
+
+def _write_metadata(path, metadata):
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(metadata, indent=2) + "\n")
+    tmp_path.replace(path)
+
+
+def append_records(output: Path, fields: tuple[str, ...], records: list[dict]):
+    is_new = not output.exists() or output.stat().st_size == 0
+    with output.open("a", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        if is_new:
+            writer.writeheader()
+        writer.writerows(records)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+if __name__ == "__main__":
+    # Check before importing torch, since even device discovery is forbidden
+    # outside the reserved group.
+    _visible_gpu_id()
+    main()

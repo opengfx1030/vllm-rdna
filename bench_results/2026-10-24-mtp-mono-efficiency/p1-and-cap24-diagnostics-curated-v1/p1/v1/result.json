@@ -1,0 +1,11 @@
+{
+  "status": "RUNNING",
+  "complete": false,
+  "scope": "untimed M128 seed250252 actual FP32 P1 trace; no serving claim",
+  "boot": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "trace_build_manifest": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v1-build/compiled/build_manifest.json",
+  "trace_build_manifest_sha256": "ccac443a820ff8d83fd0d8d3be239a45106fc0fc538c4c43cfaa0e9716aa35a2",
+  "core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+  "tests_sha256": "f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7",
+  "records": []
+}

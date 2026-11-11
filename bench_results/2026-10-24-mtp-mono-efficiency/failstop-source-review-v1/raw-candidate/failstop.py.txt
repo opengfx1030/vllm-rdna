@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Post-proposal TP-wide fail-stop for the opt-in Mono MTP drafter."""
+
+import torch
+
+from vllm.distributed.parallel_state import get_tp_group
+
+from .layout import _WORKSPACES
+
+_ZERO: dict[int, torch.Tensor] = {}
+
+
+def enabled(vllm_config) -> bool:
+    # Compute once at runner construction. Native MTP and non-Mono routes
+    # never enter the post-proposal check.
+    from vllm.models.qwen4_exp.amd.mono_decode_rdna2 import options
+
+    opts = options(vllm_config)
+    return bool(opts is not None and opts.mtp_drafter)
+
+
+def local_error_view(device: torch.device) -> torch.Tensor:
+    idx = device.index
+    if idx is None:
+        idx = torch.accelerator.current_device_index()
+    # layout.workspace() keys one arena per (device, scope). Every active
+    # MTP MonoLayer uses this exact arena, including dense FFN and GDN.
+    ws = _WORKSPACES.get((idx, "mtp"))
+    if ws is not None:
+        return ws[8:12].view(torch.int32)
+    # Still participate in the collective when this rank used the fallback
+    # path. Allocate once; never mutate this sentinel.
+    zero = _ZERO.get(idx)
+    if zero is None:
+        zero = torch.zeros(1, dtype=torch.int32, device=device)
+        _ZERO[idx] = zero
+    return zero
+
+
+def collect_tp_error(device: torch.device) -> torch.Tensor:
+    """One post-proposal GPU collective; no host/device synchronization."""
+    return get_tp_group().all_reduce(local_error_view(device))
+
+
+def raise_if_error(error_cpu: torch.Tensor) -> None:
+    if int(error_cpu.item()) != 0:
+        raise RuntimeError("Mono MTP drafter K2 fault on a TP rank; restart the engine")
+
+
+def clear_mtp_fault_for_recovery(device: torch.device) -> None:
+    """Explicit test/offline recovery; caller must stop all inference first."""
+    idx = device.index
+    if idx is None:
+        idx = torch.accelerator.current_device_index()
+    torch.accelerator.synchronize()
+    ws = _WORKSPACES.get((idx, "mtp"))
+    if ws is not None:
+        ws.zero_()  # also discard partially written gu/acc/scratch and stats
+        torch.accelerator.synchronize()

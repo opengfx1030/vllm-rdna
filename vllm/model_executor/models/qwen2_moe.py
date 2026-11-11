@@ -145,9 +145,11 @@ class Qwen2MoeMLP(nn.Module):
 
     def forward(self, x):
         if self.expert_gate is not None and _rdna_shared_expert_ok(self, x):
-            # T46 (gfx1030): opaque op; decode (M <= 8) = gate_up+silu*mul kernel
-            # then down GEMV with sigmoid(w_gate.x) fused (6 launches -> 2);
-            # prefill = torch inside the op. Row-parallel reduce as before.
+            # T46 (gfx1030): opaque op; decode and MTP verify batches (M <= 32
+            # with fp16 weights, M <= 8 with int8 shadows) = gate_up+silu*mul
+            # kernel that also yields the expert gate, then a down GEMV scaled
+            # by it (6-9 launches -> 2); larger M = torch inside the op.
+            # Row-parallel reduce as before.
             from vllm.model_executor.layers import rdna_ops  # noqa: F401
 
             g, d, e = self.gate_up_proj, self.down_proj, self.expert_gate

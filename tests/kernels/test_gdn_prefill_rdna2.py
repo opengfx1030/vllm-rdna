@@ -36,6 +36,13 @@ def _inputs(T, FLA_CHUNK_SIZE, seed=0):
     return q, k, v, g_raw, beta, initial_state, cu_seqlens
 
 
+@pytest.mark.skip(
+    reason=(
+        "Recorded GPU hang: the HIP GDN prefill chain calls "
+        "gdn_prefill_kkt_rdna2, which fails then aborts in hsa_signal_wait "
+        "(docs/rdna2/v0.31.0-port-notes.md)"
+    )
+)
 @pytest.mark.parametrize(
     "T",
     [

@@ -1,0 +1,126 @@
+{
+  "README.md": {
+    "sha256": "252b91e588cc678a0b09a2ec005ad519c6ca61b616596644a3d19f34ca69f6f3",
+    "bytes": 2131
+  },
+  "README.txt": {
+    "sha256": "918eb6e87f9d4323c0a74f545154c212938d92b662cec6fa51c2de078886d657",
+    "bytes": 2017
+  },
+  "analyze_native_vs_mono_v4.py.txt": {
+    "sha256": "9676b6a460b958f71dc90e60810aa834f0ed74b0e2df711af6195ca09bd43bee",
+    "bytes": 36664
+  },
+  "analyze_pair_v1.py.txt": {
+    "sha256": "62f766cf1007aef0e4c6f45d1fbc7a56819949c0cb45a85c241c4d59951436cb",
+    "bytes": 25398
+  },
+  "curate_pair_v4.py.txt": {
+    "sha256": "d44c5455070bd2e588b820ff479eefbb81ab5f0baa9f33726c97c3a07cc8605b",
+    "bytes": 13958
+  },
+  "evidence-receipts.json": {
+    "sha256": "d65b2cd77362f7b9f0a9722edd9dd4a772c8f268e2bcc8ef03e2a5ef44f25270",
+    "bytes": 18967
+  },
+  "native-ARM-PASS.txt": {
+    "sha256": "b38a1c2bd878ce8aefb992667ade7d78f8854ccfe43b25d9bd96f991794e8ebc",
+    "bytes": 347
+  },
+  "native-arm-provenance.txt": {
+    "sha256": "0fc531f00baa9d9f344531e87ca84a5846a8a7180088f1d1df90babfff77e826",
+    "bytes": 687
+  },
+  "native-boot-id.after": {
+    "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a",
+    "bytes": 37
+  },
+  "native-boot-id.before": {
+    "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a",
+    "bytes": 37
+  },
+  "native-concurrency-details.txt": {
+    "sha256": "93bc45b73187cc602d4906174245da793283d3b42457f46ecfce9661bb24e408",
+    "bytes": 131
+  },
+  "native-config.env": {
+    "sha256": "b6222ec7a8d6893a4402ae81903f14214958c660440114c20543df83c45cd321",
+    "bytes": 1375
+  },
+  "native-kernel-journal-audit-summary.json": {
+    "sha256": "dc3492e17733e6c34eae0f8213bbda8b1c7bd8e17eb872faf82d009c1c4b2be8",
+    "bytes": 698
+  },
+  "native-models.json": {
+    "sha256": "e2d010298e7fa861145bf0467877a2a9994fb45ac731f40bdb44cba0776bb3d7",
+    "bytes": 582
+  },
+  "native-per-cell-metrics.csv": {
+    "sha256": "8104973290a2733905ec906a0662024bb67c3db40b37519315898fcde933270a",
+    "bytes": 2328
+  },
+  "native-per-request-metrics.csv": {
+    "sha256": "69b43ad224465a80839f00968d88d47b9d62699261a6e4610722319aa08f2e23",
+    "bytes": 19599
+  },
+  "native-quality-and-gates.txt": {
+    "sha256": "267422241e5506582c765519a755af7a363732977eca5823946b1c2e02dc01ee",
+    "bytes": 957
+  },
+  "native-sha256.after": {
+    "sha256": "3e43ffb880c268f8a8b6a5c6db721e03f1969470013fb677870e2f41808fe645",
+    "bytes": 6334
+  },
+  "native-sha256.before": {
+    "sha256": "3e43ffb880c268f8a8b6a5c6db721e03f1969470013fb677870e2f41808fe645",
+    "bytes": 6334
+  },
+  "native-worker-provenance.json": {
+    "sha256": "1a8c576849dd667a203c93b6529ea8a99bba507425d30c5426b4b66c1e78731f",
+    "bytes": 3813
+  },
+  "per-cell-mono.csv": {
+    "sha256": "69ff5b1aea799dc8cd53cfd6b6c4861506ec9c7396f698f863e30f7527eec26c",
+    "bytes": 3234
+  },
+  "per-cell-native-vs-mono.csv": {
+    "sha256": "7e6e9248347df1f3c9a4518b30bf9a3674f9f0b7c9e4d4ba96d26d482713ae5d",
+    "bytes": 8033
+  },
+  "per-cell-native.csv": {
+    "sha256": "406af48a7f8dabc4c43f993282f487182b59c1ea0b15737057b00e8d7d81bb5f",
+    "bytes": 3219
+  },
+  "per-request-native-vs-mono.csv": {
+    "sha256": "1d75d6b9ebfceaa86a261959c34e2a283554ca478d5415605b4e87ba4a8d1a5c",
+    "bytes": 54014
+  },
+  "per-request-rate-and-latency-summary.csv": {
+    "sha256": "757479f31b115ab5e769164e77d28c203e7dc11c11f757ff441e13cdd3cc5040",
+    "bytes": 2267
+  },
+  "provenance-validation.json": {
+    "sha256": "ed2af8e3cba9c16156daa5d6ce2b7dbd81078943396472c982853d83f0e22ffc",
+    "bytes": 1758
+  },
+  "same-source-keys-receipt.json": {
+    "sha256": "7a9c74336ae5e4f113a2f0513824b437909846e10ab57e8cede95818b4d048a1",
+    "bytes": 3746
+  },
+  "test_analyze_native_vs_mono_v4.py.txt": {
+    "sha256": "3dfd313c3d7a98b8c6aa138b6175d99ea5ed9e703bb0afacd7fa18143c2ea94d",
+    "bytes": 3968
+  },
+  "test_curate_pair_v3.py.txt": {
+    "sha256": "bb23438bccd1f32e57e279a1ddff77c73e3774b6aa3c306bfbec90241ccf0c19",
+    "bytes": 1905
+  },
+  "whole-run-native-vs-mono.csv": {
+    "sha256": "61d268b9700690adfc793a7d43abf8443a1c716ba87568f4bf8fbd31bf2ed5e8",
+    "bytes": 2751
+  },
+  "intended-evidence-files.txt": {
+    "sha256": "9861e055d64c1ff2ff5e838ab5fe61a9a424d357f6ea4d9d8406e787920f0842",
+    "bytes": 796
+  }
+}

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,6 +32,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -69,11 +71,13 @@ def _allocate_kv_caches(
     kv_cache_config: KVCacheConfig,
     attn_groups: list[list],
     device: torch.device,
+    kernel_block_sizes: list[int] | None = None,
 ):
     """Allocate kv_caches exactly as the model runner does at startup."""
     from vllm.v1.worker.utils import allocate_kv_cache
 
-    kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
+    if kernel_block_sizes is None:
+        kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
     return allocate_kv_cache(
         kv_cache_config, device, KVCacheLayout.LBNHC, kernel_block_sizes
     )
@@ -135,13 +139,14 @@ def _store_metadata(job_id: int) -> OffloadingConnectorMetadata:
     )
 
 
-def _load_metadata(job_id: int) -> OffloadingConnectorMetadata:
+def _load_metadata(job_id: int, sync: bool = False) -> OffloadingConnectorMetadata:
     return OffloadingConnectorMetadata(
         load_jobs={
             job_id: TransferJob(
                 req_id="req",
                 src_spec=LoadStoreSpec(),
                 dst_spec=GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+                sync=sync,
             )
         },
         store_jobs={},
@@ -150,6 +155,204 @@ def _load_metadata(job_id: int) -> OffloadingConnectorMetadata:
 
 def _empty_metadata() -> OffloadingConnectorMetadata:
     return OffloadingConnectorMetadata(load_jobs={}, store_jobs={})
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires native GPU/CPU transfers"
+)
+@pytest.mark.parametrize("blocks_per_chunk", [1, 3])
+@torch.inference_mode()
+def test_native_hybrid_cpu_roundtrip_is_byte_identical(blocks_per_chunk):
+    """Exercise real attention/latent/mixed-dtype state allocation and DMA.
+
+    Distinct source/destination block IDs, padded recurrent pages, partial
+    CPU chunks, and pending producer/zero writes catch errors that model
+    logprob comparisons cannot distinguish from recomputation differences.
+    """
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.mamba.abstract import MambaBase
+    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+
+    block_size = 1024
+    num_blocks = 18
+    attention = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=4, head_size=128, dtype=torch.float16
+    )
+    page = attention.page_size_bytes
+    # These are the model calculator's TP2 GDN and replicated PLE layouts,
+    # including two speculative tokens of convolution history.
+    gdn_shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        tp_world_size=2,
+        num_k_heads=8,
+        num_v_heads=48,
+        head_k_dim=128,
+        head_v_dim=128,
+        conv_kernel_size=4,
+        num_spec=2,
+    )
+    ple_shapes = MambaStateShapeCalculator.short_conv_state_shape(
+        tp_world_size=1, intermediate_size=4 * 2560, conv_kernel=7, num_spec=2
+    )
+    specs = [
+        attention,
+        MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.float16,
+            page_size_padded=page,
+        ),
+        MambaSpec(
+            block_size=block_size,
+            shapes=gdn_shapes,
+            dtypes=(torch.float16, torch.float32),
+            page_size_padded=page,
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            mamba_cache_mode="align",
+        ),
+        MambaSpec(
+            block_size=block_size,
+            shapes=ple_shapes,
+            dtypes=(torch.float16,),
+            page_size_padded=page,
+            mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+            mamba_cache_mode="align",
+            tp_replicated=True,
+        ),
+    ]
+    names = ["attention", "latent_attention", "gdn", "ple"]
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=page * num_blocks,
+                layers=[name],
+                layer_stride=page * num_blocks,
+                block_stride=page,
+            )
+            for name in names
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)
+            for name, spec in zip(names, specs)
+        ],
+    )
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    caches = _allocate_kv_caches(config, [], device, [block_size] * len(specs))
+    typed_states = {}
+    for name, state_spec in zip(names[2:], specs[2:]):
+        owner = SimpleNamespace(
+            get_state_shape=lambda spec=state_spec: spec.shapes,
+            get_state_dtype=lambda spec=state_spec: spec.dtypes,
+        )
+        MambaBase.bind_kv_cache(owner, caches[name])
+        typed_states[name] = owner.kv_cache
+    assert tuple(state.dtype for state in typed_states["gdn"]) == (
+        torch.float16,
+        torch.float32,
+    )
+    assert tuple(state.shape[1:] for state in typed_states["gdn"]) == gdn_shapes
+    assert tuple(state.shape[1:] for state in typed_states["ple"]) == ple_shapes
+    connector, spec = _make_worker(config)
+    connector.register_kv_caches(caches)
+    canonical = spec.get_worker.call_args[0][0]
+    assert len(canonical.group_data_refs) == 4
+    worker = CPUOffloadingWorker(
+        kv_caches=canonical, blocks_per_chunk=blocks_per_chunk, num_cpu_chunks=16
+    )
+    src_groups = [(4 * group + 1, 4 * group + 3) for group in range(4)]
+    dst_groups = [(4 * group + 2, 4 * group + 4) for group in range(4)]
+    skip = 1 if blocks_per_chunk == 3 else 0
+    chunks_per_group = (2 + skip + blocks_per_chunk - 1) // blocks_per_chunk
+    cpu_groups = [
+        list(range(1 + 4 * group, 1 + 4 * group + chunks_per_group))
+        for group in range(4)
+    ]
+    cpu_spec = CPULoadStoreSpec([chunk for group in cpu_groups for chunk in group])
+    source_spec = GPULoadStoreSpec(
+        [block for group in src_groups for block in group],
+        group_sizes=(2, 2, 2, 2),
+        block_indices=(skip,) * 4,
+    )
+    destination_spec = GPULoadStoreSpec(
+        [block for group in dst_groups for block in group],
+        group_sizes=(2, 2, 2, 2),
+        block_indices=(skip,) * 4,
+    )
+    byte_count = 2 * sum(
+        ref.page_size_bytes for group in canonical.group_data_refs for ref in group
+    )
+    try:
+        for trial in range(2):
+            source_bytes = []
+            for tensor_index, ref in enumerate(canonical.tensors):
+                host = torch.empty(ref.tensor.shape, dtype=torch.int8, pin_memory=True)
+                pattern = torch.arange(ref.tensor.shape[1], dtype=torch.int32) * 17
+                for block in range(num_blocks):
+                    host[block].copy_(
+                        (
+                            (pattern + block * 31 + tensor_index * 13 + trial * 19)
+                            % 251
+                        ).to(torch.int8)
+                    )
+                source_bytes.append(host)
+                # Leave production writes pending on the compute stream;
+                # the native store handler must fence this copy itself.
+                ref.tensor.copy_(host, non_blocking=True)
+            store_id, load_id = trial * 2 + 1, trial * 2 + 2
+            assert worker.submit_store(store_id, source_spec, cpu_spec)
+            worker.wait({store_id})
+            completed = worker.get_finished()
+            assert len(completed) == 1 and completed[0].success
+            assert completed[0].transfer_size == byte_count
+            expected_gpu = [
+                torch.full_like(host, -71, device="cpu") for host in source_bytes
+            ]
+            expected_cpu = [
+                torch.zeros_like(tensor) for tensor in worker._load_handler.src_tensors
+            ]
+            for group_index, refs in enumerate(canonical.group_data_refs):
+                for ref in refs:
+                    for offset, (src, dst) in enumerate(
+                        zip(src_groups[group_index], dst_groups[group_index])
+                    ):
+                        data = source_bytes[ref.tensor_idx][src, : ref.page_size_bytes]
+                        expected_gpu[ref.tensor_idx][dst, : ref.page_size_bytes].copy_(
+                            data
+                        )
+                        logical = skip + offset
+                        chunk = cpu_groups[group_index][logical // blocks_per_chunk]
+                        start = (logical % blocks_per_chunk) * page
+                        expected_cpu[ref.tensor_idx][
+                            chunk, start : start + ref.page_size_bytes
+                        ].copy_(data)
+            for actual, expected in zip(worker._load_handler.src_tensors, expected_cpu):
+                assert torch.equal(actual, expected), (
+                    "GPU-to-CPU changed payload or padding bytes"
+                )
+            for ref in canonical.tensors:
+                # The load must wait for pending destination initialization,
+                # including bytes outside the restored groups and null block.
+                ref.tensor.fill_(-71)
+            assert worker.submit_load(load_id, cpu_spec, destination_spec)
+            worker.wait({load_id})
+            completed = worker.get_finished()
+            assert len(completed) == 1 and completed[0].success
+            assert completed[0].transfer_size == byte_count
+            for ref, expected in zip(canonical.tensors, expected_gpu):
+                assert torch.equal(ref.tensor.cpu(), expected), (
+                    "CPU reload changed payload, padding, untouched or null bytes"
+                )
+        print(
+            f"hybrid native roundtrip: blocks_per_chunk={blocks_per_chunk}, "
+            f"payload_bytes_per_direction={byte_count}, trials=2, byte_identity=PASS"
+        )
+    finally:
+        worker.shutdown()
 
 
 def _offloading_config(rank: int = 0) -> OffloadingConfig:
@@ -276,6 +479,36 @@ def test_start_kv_transfers_non_writer_still_submits_load():
     assert worker.build_connector_worker_meta() is None
 
 
+@pytest.mark.parametrize("sync", [False, True])
+def test_load_completion(sync: bool):
+    """Sync loads are submitted expedited and waited on, skip
+    finished_recving, and count as loads."""
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+
+    worker.start_kv_transfers(_load_metadata(11, sync=sync))
+
+    assert worker.worker is not None
+    worker.worker.submit_load.assert_called_once()
+    expedited = worker.worker.submit_load.call_args.kwargs.get("expedited", False)
+    assert expedited == sync
+    if sync:
+        worker.worker.wait.assert_called_once_with({11})
+    else:
+        worker.worker.wait.assert_not_called()
+
+    worker.worker.get_finished.return_value = [
+        TransferResult(job_id=11, success=True, transfer_size=64, transfer_time=0.5)
+    ]
+    assert worker.get_finished(set()) == (set(), set() if sync else {"req"})
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {11: 1}
+    assert meta.transfer_stats.load.bytes == 64
+    assert meta.transfer_stats.store.is_empty()
+
+
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,
@@ -311,6 +544,7 @@ def test_register_kv_caches(backend):
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
     """
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerBackend,
     )
@@ -329,6 +563,7 @@ def test_register_kv_caches(backend):
     ALIGNED_SSM_STATE_SHAPE = (BLOCK_SIZE * NUM_KV_HEADS, HEAD_SIZE)
 
     backend_cls = AttentionBackendEnum[backend].get_class()
+    indexer_backend_cls = cast(type[AttentionBackend], DeepseekV32IndexerBackend)
 
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -422,19 +657,19 @@ def test_register_kv_caches(backend):
                 kv_cache_group_id=0,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,
+                backend=indexer_backend_cls,
                 layer_names=mla_layer_names,
                 kv_cache_spec=mla_spec,
                 kv_cache_group_id=1,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,  # unused for mamba
+                backend=indexer_backend_cls,  # unused for mamba
                 layer_names=unaligned_mamba_layer_names,
                 kv_cache_spec=unaligned_mamba_spec,
                 kv_cache_group_id=2,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,  # unused for mamba
+                backend=indexer_backend_cls,  # unused for mamba
                 layer_names=aligned_mamba_layer_names,
                 kv_cache_spec=aligned_mamba_spec,
                 kv_cache_group_id=3,
@@ -678,5 +913,9 @@ def test_register_kv_caches_uniform_type(backend):
 
     # Only layer_a matches the model's total KV head count, so layer_b gets an
     # opaque mapping rather than a certified, parallelism-agnostic one
-    assert group_refs[0].mapping.parallelism_agnostic
-    assert not group_refs[1].mapping.parallelism_agnostic
+    layer_a_mapping = group_refs[0].mapping
+    layer_b_mapping = group_refs[1].mapping
+    assert layer_a_mapping is not None
+    assert layer_b_mapping is not None
+    assert layer_a_mapping.parallelism_agnostic
+    assert not layer_b_mapping.parallelism_agnostic

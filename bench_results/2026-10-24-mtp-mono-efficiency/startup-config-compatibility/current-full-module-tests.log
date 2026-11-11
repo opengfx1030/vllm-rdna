@@ -1,0 +1,627 @@
+.............sss..............FFFF.FFF..F.....                           [100%]
+=================================== FAILURES ===================================
+_________ test_moe_not_symmetric_w4a16_rdna2_is_refused[other-method] __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6fa99cd940>
+deployment = None, qm = namespace(), w4a8 = False
+reason = 'got SimpleNamespace'
+
+    @pytest.mark.parametrize(
+        "qm, w4a8, reason",
+        [
+            (SimpleNamespace(), False, "got SimpleNamespace"),
+            (CompressedTensorsWNA16RDNA2MoEMethod(symmetric=False), False, "asymmetric"),
+            (CompressedTensorsWNA16RDNA2MoEMethod(), True, "got W4A8"),
+        ],
+        ids=["other-method", "asymmetric", "w4a8"],
+    )
+    def test_moe_not_symmetric_w4a16_rdna2_is_refused(
+        monkeypatch, deployment, qm, w4a8, reason
+    ):
+>       import vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe as moe
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py:344: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/__init__.py:19: in <module>
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/fused_moe_method_base.py:9: in <module>
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/modular_kernel.py:30: in <module>
+    from vllm.model_executor.layers.fused_moe.utils import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/utils.py:43: in <module>
+    from vllm.model_executor.models.utils import PPMissingLayer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/models/utils.py:22: in <module>
+    from vllm.model_executor.model_loader.reload import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/__init__.py:11: in <module>
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/base_loader.py:12: in <module>
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/__init__.py:28: in <module>
+    from .layerwise import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/layerwise.py:12: in <module>
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/__init__.py:15: in <module>
+    from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/mm_encoder_attention.py:11: in <module>
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/__init__.py:5: in <module>
+    from . import aiter_ops, oink_ops, triton, vllm_c
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/oink_ops.py:18: in <module>
+    OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/interface.py:460: in has_device_capability
+    current_capability = cls.get_device_capability(device_id=device_id)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/rocm.py:947: in get_device_capability
+    major, minor = torch.cuda.get_device_capability(device_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:682: in get_device_capability
+    prop = get_device_properties(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:699: in get_device_properties
+    _lazy_init()  # will define _get_device_properties
+    ^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _lazy_init():
+        global _initialized, _queued_calls
+        if is_initialized() or hasattr(_tls, "is_initializing"):
+            return
+        with _initialization_lock:
+            # We be double-checked locking, boys!  This is OK because
+            # the above test was GIL protected anyway.  The inner test
+            # is for when a thread blocked on some other thread which was
+            # doing the initialization; when they get the lock, they will
+            # find there is nothing left to do.
+            if is_initialized():
+                return
+            # It is important to prevent other threads from entering _lazy_init
+            # immediately, while we are still guaranteed to have the GIL, because some
+            # of the C calls we make below will release the GIL
+            if _is_in_bad_fork():
+                raise RuntimeError(
+                    "Cannot re-initialize CUDA in forked subprocess. To use CUDA with "
+                    "multiprocessing, you must use the 'spawn' start method"
+                )
+            if not hasattr(torch._C, "_cuda_getDeviceCount"):
+                raise AssertionError("Torch not compiled with CUDA enabled")
+            if _cudart is None:
+                raise AssertionError(
+                    "libcudart functions unavailable. It looks like you have a broken build?"
+                )
+            # This function throws if there's a driver initialization error, no GPUs
+            # are found or any other error occurs
+>           torch._C._cuda_init()
+E           RuntimeError: No CUDA GPUs are available
+
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:491: RuntimeError
+------------------------------ Captured log call -------------------------------
+ERROR    vllm.model_executor.layers.fused_moe.config:config.py:34 Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/triton/language/target_info.py)
+WARNING  vllm.platforms.rocm:rocm.py:942 Could not derive device capability from GCN arch '', falling back to torch.cuda (this will initialize CUDA).
+__________ test_moe_not_symmetric_w4a16_rdna2_is_refused[asymmetric] ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6fa970b110>
+deployment = None
+qm = <test_amd_mono_rdna2.CompressedTensorsWNA16RDNA2MoEMethod object at 0x7f6faf111160>
+w4a8 = False, reason = 'asymmetric'
+
+    @pytest.mark.parametrize(
+        "qm, w4a8, reason",
+        [
+            (SimpleNamespace(), False, "got SimpleNamespace"),
+            (CompressedTensorsWNA16RDNA2MoEMethod(symmetric=False), False, "asymmetric"),
+            (CompressedTensorsWNA16RDNA2MoEMethod(), True, "got W4A8"),
+        ],
+        ids=["other-method", "asymmetric", "w4a8"],
+    )
+    def test_moe_not_symmetric_w4a16_rdna2_is_refused(
+        monkeypatch, deployment, qm, w4a8, reason
+    ):
+>       import vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe as moe
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py:344: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/__init__.py:19: in <module>
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/fused_moe_method_base.py:9: in <module>
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/modular_kernel.py:30: in <module>
+    from vllm.model_executor.layers.fused_moe.utils import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/utils.py:43: in <module>
+    from vllm.model_executor.models.utils import PPMissingLayer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/models/utils.py:22: in <module>
+    from vllm.model_executor.model_loader.reload import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/__init__.py:11: in <module>
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/base_loader.py:12: in <module>
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/__init__.py:28: in <module>
+    from .layerwise import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/layerwise.py:12: in <module>
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/__init__.py:15: in <module>
+    from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/mm_encoder_attention.py:11: in <module>
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/__init__.py:5: in <module>
+    from . import aiter_ops, oink_ops, triton, vllm_c
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/oink_ops.py:18: in <module>
+    OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/interface.py:460: in has_device_capability
+    current_capability = cls.get_device_capability(device_id=device_id)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/rocm.py:947: in get_device_capability
+    major, minor = torch.cuda.get_device_capability(device_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:682: in get_device_capability
+    prop = get_device_properties(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:699: in get_device_properties
+    _lazy_init()  # will define _get_device_properties
+    ^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _lazy_init():
+        global _initialized, _queued_calls
+        if is_initialized() or hasattr(_tls, "is_initializing"):
+            return
+        with _initialization_lock:
+            # We be double-checked locking, boys!  This is OK because
+            # the above test was GIL protected anyway.  The inner test
+            # is for when a thread blocked on some other thread which was
+            # doing the initialization; when they get the lock, they will
+            # find there is nothing left to do.
+            if is_initialized():
+                return
+            # It is important to prevent other threads from entering _lazy_init
+            # immediately, while we are still guaranteed to have the GIL, because some
+            # of the C calls we make below will release the GIL
+            if _is_in_bad_fork():
+                raise RuntimeError(
+                    "Cannot re-initialize CUDA in forked subprocess. To use CUDA with "
+                    "multiprocessing, you must use the 'spawn' start method"
+                )
+            if not hasattr(torch._C, "_cuda_getDeviceCount"):
+                raise AssertionError("Torch not compiled with CUDA enabled")
+            if _cudart is None:
+                raise AssertionError(
+                    "libcudart functions unavailable. It looks like you have a broken build?"
+                )
+            # This function throws if there's a driver initialization error, no GPUs
+            # are found or any other error occurs
+>           torch._C._cuda_init()
+E           RuntimeError: No CUDA GPUs are available
+
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:491: RuntimeError
+_____________ test_moe_not_symmetric_w4a16_rdna2_is_refused[w4a8] ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6fa9736cf0>
+deployment = None
+qm = <test_amd_mono_rdna2.CompressedTensorsWNA16RDNA2MoEMethod object at 0x7f6faf111190>
+w4a8 = True, reason = 'got W4A8'
+
+    @pytest.mark.parametrize(
+        "qm, w4a8, reason",
+        [
+            (SimpleNamespace(), False, "got SimpleNamespace"),
+            (CompressedTensorsWNA16RDNA2MoEMethod(symmetric=False), False, "asymmetric"),
+            (CompressedTensorsWNA16RDNA2MoEMethod(), True, "got W4A8"),
+        ],
+        ids=["other-method", "asymmetric", "w4a8"],
+    )
+    def test_moe_not_symmetric_w4a16_rdna2_is_refused(
+        monkeypatch, deployment, qm, w4a8, reason
+    ):
+>       import vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe as moe
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py:344: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/__init__.py:19: in <module>
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/fused_moe_method_base.py:9: in <module>
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/modular_kernel.py:30: in <module>
+    from vllm.model_executor.layers.fused_moe.utils import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/utils.py:43: in <module>
+    from vllm.model_executor.models.utils import PPMissingLayer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/models/utils.py:22: in <module>
+    from vllm.model_executor.model_loader.reload import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/__init__.py:11: in <module>
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/base_loader.py:12: in <module>
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/__init__.py:28: in <module>
+    from .layerwise import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/layerwise.py:12: in <module>
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/__init__.py:15: in <module>
+    from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/mm_encoder_attention.py:11: in <module>
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/__init__.py:5: in <module>
+    from . import aiter_ops, oink_ops, triton, vllm_c
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/oink_ops.py:18: in <module>
+    OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/interface.py:460: in has_device_capability
+    current_capability = cls.get_device_capability(device_id=device_id)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/rocm.py:947: in get_device_capability
+    major, minor = torch.cuda.get_device_capability(device_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:682: in get_device_capability
+    prop = get_device_properties(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:699: in get_device_properties
+    _lazy_init()  # will define _get_device_properties
+    ^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _lazy_init():
+        global _initialized, _queued_calls
+        if is_initialized() or hasattr(_tls, "is_initializing"):
+            return
+        with _initialization_lock:
+            # We be double-checked locking, boys!  This is OK because
+            # the above test was GIL protected anyway.  The inner test
+            # is for when a thread blocked on some other thread which was
+            # doing the initialization; when they get the lock, they will
+            # find there is nothing left to do.
+            if is_initialized():
+                return
+            # It is important to prevent other threads from entering _lazy_init
+            # immediately, while we are still guaranteed to have the GIL, because some
+            # of the C calls we make below will release the GIL
+            if _is_in_bad_fork():
+                raise RuntimeError(
+                    "Cannot re-initialize CUDA in forked subprocess. To use CUDA with "
+                    "multiprocessing, you must use the 'spawn' start method"
+                )
+            if not hasattr(torch._C, "_cuda_getDeviceCount"):
+                raise AssertionError("Torch not compiled with CUDA enabled")
+            if _cudart is None:
+                raise AssertionError(
+                    "libcudart functions unavailable. It looks like you have a broken build?"
+                )
+            # This function throws if there's a driver initialization error, no GPUs
+            # are found or any other error occurs
+>           torch._C._cuda_init()
+E           RuntimeError: No CUDA GPUs are available
+
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:491: RuntimeError
+_______________ test_switch_adds_no_parameters_and_keeps_values ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6fa9737290>
+deployment = None
+
+    def test_switch_adds_no_parameters_and_keeps_values(monkeypatch, deployment):
+        """named_parameters() and the loaded values are the same with the switch
+        on or off: the per-layer MonoKernel state lives in the forward context,
+        not in the module tree."""
+>       import vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe as moe
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py:362: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/__init__.py:19: in <module>
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/fused_moe_method_base.py:9: in <module>
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/modular_kernel.py:30: in <module>
+    from vllm.model_executor.layers.fused_moe.utils import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/utils.py:43: in <module>
+    from vllm.model_executor.models.utils import PPMissingLayer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/models/utils.py:22: in <module>
+    from vllm.model_executor.model_loader.reload import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/__init__.py:11: in <module>
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/base_loader.py:12: in <module>
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/__init__.py:28: in <module>
+    from .layerwise import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/layerwise.py:12: in <module>
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/__init__.py:15: in <module>
+    from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/mm_encoder_attention.py:11: in <module>
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/__init__.py:5: in <module>
+    from . import aiter_ops, oink_ops, triton, vllm_c
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/oink_ops.py:18: in <module>
+    OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/interface.py:460: in has_device_capability
+    current_capability = cls.get_device_capability(device_id=device_id)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/rocm.py:947: in get_device_capability
+    major, minor = torch.cuda.get_device_capability(device_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:682: in get_device_capability
+    prop = get_device_properties(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:699: in get_device_properties
+    _lazy_init()  # will define _get_device_properties
+    ^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _lazy_init():
+        global _initialized, _queued_calls
+        if is_initialized() or hasattr(_tls, "is_initializing"):
+            return
+        with _initialization_lock:
+            # We be double-checked locking, boys!  This is OK because
+            # the above test was GIL protected anyway.  The inner test
+            # is for when a thread blocked on some other thread which was
+            # doing the initialization; when they get the lock, they will
+            # find there is nothing left to do.
+            if is_initialized():
+                return
+            # It is important to prevent other threads from entering _lazy_init
+            # immediately, while we are still guaranteed to have the GIL, because some
+            # of the C calls we make below will release the GIL
+            if _is_in_bad_fork():
+                raise RuntimeError(
+                    "Cannot re-initialize CUDA in forked subprocess. To use CUDA with "
+                    "multiprocessing, you must use the 'spawn' start method"
+                )
+            if not hasattr(torch._C, "_cuda_getDeviceCount"):
+                raise AssertionError("Torch not compiled with CUDA enabled")
+            if _cudart is None:
+                raise AssertionError(
+                    "libcudart functions unavailable. It looks like you have a broken build?"
+                )
+            # This function throws if there's a driver initialization error, no GPUs
+            # are found or any other error occurs
+>           torch._C._cuda_init()
+E           RuntimeError: No CUDA GPUs are available
+
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:491: RuntimeError
+____________ test_mtp_drafter_opt_in_registers_isolated_mono_layer _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6fa8c4fb00>
+deployment = None
+
+    def test_mtp_drafter_opt_in_registers_isolated_mono_layer(monkeypatch, deployment):
+>       import vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe as moe
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py:396: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/__init__.py:19: in <module>
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/fused_moe_method_base.py:9: in <module>
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/modular_kernel.py:30: in <module>
+    from vllm.model_executor.layers.fused_moe.utils import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/utils.py:43: in <module>
+    from vllm.model_executor.models.utils import PPMissingLayer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/models/utils.py:22: in <module>
+    from vllm.model_executor.model_loader.reload import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/__init__.py:11: in <module>
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/base_loader.py:12: in <module>
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/__init__.py:28: in <module>
+    from .layerwise import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/layerwise.py:12: in <module>
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/__init__.py:15: in <module>
+    from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/mm_encoder_attention.py:11: in <module>
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/__init__.py:5: in <module>
+    from . import aiter_ops, oink_ops, triton, vllm_c
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/oink_ops.py:18: in <module>
+    OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/interface.py:460: in has_device_capability
+    current_capability = cls.get_device_capability(device_id=device_id)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/rocm.py:947: in get_device_capability
+    major, minor = torch.cuda.get_device_capability(device_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:682: in get_device_capability
+    prop = get_device_properties(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:699: in get_device_properties
+    _lazy_init()  # will define _get_device_properties
+    ^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _lazy_init():
+        global _initialized, _queued_calls
+        if is_initialized() or hasattr(_tls, "is_initializing"):
+            return
+        with _initialization_lock:
+            # We be double-checked locking, boys!  This is OK because
+            # the above test was GIL protected anyway.  The inner test
+            # is for when a thread blocked on some other thread which was
+            # doing the initialization; when they get the lock, they will
+            # find there is nothing left to do.
+            if is_initialized():
+                return
+            # It is important to prevent other threads from entering _lazy_init
+            # immediately, while we are still guaranteed to have the GIL, because some
+            # of the C calls we make below will release the GIL
+            if _is_in_bad_fork():
+                raise RuntimeError(
+                    "Cannot re-initialize CUDA in forked subprocess. To use CUDA with "
+                    "multiprocessing, you must use the 'spawn' start method"
+                )
+            if not hasattr(torch._C, "_cuda_getDeviceCount"):
+                raise AssertionError("Torch not compiled with CUDA enabled")
+            if _cudart is None:
+                raise AssertionError(
+                    "libcudart functions unavailable. It looks like you have a broken build?"
+                )
+            # This function throws if there's a driver initialization error, no GPUs
+            # are found or any other error occurs
+>           torch._C._cuda_init()
+E           RuntimeError: No CUDA GPUs are available
+
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:491: RuntimeError
+______________ test_unsupported_mtp_drafter_keeps_module_fallback ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6fa8c6e240>
+deployment = None
+
+    def test_unsupported_mtp_drafter_keeps_module_fallback(monkeypatch, deployment):
+>       import vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe as moe
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py:418: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/__init__.py:19: in <module>
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/fused_moe_method_base.py:9: in <module>
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/modular_kernel.py:30: in <module>
+    from vllm.model_executor.layers.fused_moe.utils import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/fused_moe/utils.py:43: in <module>
+    from vllm.model_executor.models.utils import PPMissingLayer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/models/utils.py:22: in <module>
+    from vllm.model_executor.model_loader.reload import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/__init__.py:11: in <module>
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/base_loader.py:12: in <module>
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/__init__.py:28: in <module>
+    from .layerwise import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/model_loader/reload/layerwise.py:12: in <module>
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/__init__.py:15: in <module>
+    from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/model_executor/layers/attention/mm_encoder_attention.py:11: in <module>
+    from vllm.kernels.triton.qkv_padded_fp8_quant import (
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/__init__.py:5: in <module>
+    from . import aiter_ops, oink_ops, triton, vllm_c
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/kernels/oink_ops.py:18: in <module>
+    OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/interface.py:460: in has_device_capability
+    current_capability = cls.get_device_capability(device_id=device_id)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/vllm-rdna-mtp-mono/vllm/platforms/rocm.py:947: in get_device_capability
+    major, minor = torch.cuda.get_device_capability(device_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:682: in get_device_capability
+    prop = get_device_properties(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:699: in get_device_properties
+    _lazy_init()  # will define _get_device_properties
+    ^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _lazy_init():
+        global _initialized, _queued_calls
+        if is_initialized() or hasattr(_tls, "is_initializing"):
+            return
+        with _initialization_lock:
+            # We be double-checked locking, boys!  This is OK because
+            # the above test was GIL protected anyway.  The inner test
+            # is for when a thread blocked on some other thread which was
+            # doing the initialization; when they get the lock, they will
+            # find there is nothing left to do.
+            if is_initialized():
+                return
+            # It is important to prevent other threads from entering _lazy_init
+            # immediately, while we are still guaranteed to have the GIL, because some
+            # of the C calls we make below will release the GIL
+            if _is_in_bad_fork():
+                raise RuntimeError(
+                    "Cannot re-initialize CUDA in forked subprocess. To use CUDA with "
+                    "multiprocessing, you must use the 'spawn' start method"
+                )
+            if not hasattr(torch._C, "_cuda_getDeviceCount"):
+                raise AssertionError("Torch not compiled with CUDA enabled")
+            if _cudart is None:
+                raise AssertionError(
+                    "libcudart functions unavailable. It looks like you have a broken build?"
+                )
+            # This function throws if there's a driver initialization error, no GPUs
+            # are found or any other error occurs
+>           torch._C._cuda_init()
+E           RuntimeError: No CUDA GPUs are available
+
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/cuda/__init__.py:491: RuntimeError
+______________ test_mtp_k1_setup_is_independent_of_unsupported_k2 ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6fa8fd7380>
+
+    def test_mtp_k1_setup_is_independent_of_unsupported_k2(monkeypatch):
+        from vllm.models.qwen4_exp.amd.mono.rdna2 import layout
+    
+        def hc():
+            down = SimpleNamespace(
+                weight=torch.empty((4, 8), dtype=torch.float16), weight_i8=None
+            )
+            up = SimpleNamespace(
+                weight=torch.empty((8, 4), dtype=torch.float16), weight_i8=None
+            )
+            return SimpleNamespace(
+                hc_count=4,
+                use_combine=True,
+                input_mix_weight_down_block_inject=down,
+                input_mix_weight_up=up,
+                hc_norm=SimpleNamespace(weight=torch.ones(8, dtype=torch.float16)),
+                config=SimpleNamespace(rms_norm_eps=1e-6),
+            )
+    
+        layer = SimpleNamespace(
+            mlp=SimpleNamespace(
+                gate=object(), experts=SimpleNamespace(quant_method=SimpleNamespace())
+            ),
+            mlp_hyper_connection=hc(),
+            attn_hyper_connection=hc(),
+        )
+        monkeypatch.setattr(layout, "workspace", lambda device, scope: object())
+        monkeypatch.setattr(layout.torch.cuda, "current_device", lambda: 0)
+        monkeypatch.setattr(layout, "ZEROS", {})
+    
+        mono = layout.MonoLayer(layer, is_mtp=True)
+>       assert mono.setup_k1()
+E       assert False
+E        +  where False = setup_k1()
+E        +    where setup_k1 = <vllm.models.qwen4_exp.amd.mono.rdna2.layout.MonoLayer object at 0x7f6fa8fa9580>.setup_k1
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py:462: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  vllm.models.qwen4_exp.amd.mono.rdna2.layout:layout.py:174 mono k1_rdna2 disabled for SimpleNamespace: No CUDA GPUs are available
+___________ test_dense_unquantized_mtp_wrong_shared_shard_falls_back ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6fa8fa8dd0>
+
+    def test_dense_unquantized_mtp_wrong_shared_shard_falls_back(monkeypatch):
+        from vllm.models.qwen4_exp.amd.mono.rdna2 import layout
+    
+        _, layer = _dense_mtp_layer()
+        layer.mlp.shared_expert.gate_up_proj.weight = torch.empty(
+            (640, 2560), dtype=torch.float16, device="meta"
+        )
+        monkeypatch.setattr(layout, "workspace", lambda device, scope: object())
+    
+        mono = layout.MonoLayer(layer, is_mtp=True)
+        assert not mono.setup()
+        assert not mono.dense_mtp
+>       assert "geometry" in mono.reason
+E       AssertionError: assert 'geometry' in 'dense MTP shared expert layout is unsupported: expected TP4 local width 160 from global width 640; gate_up=(640, 2560), down=(2560, 160), gate=(1, 2560)'
+E        +  where 'dense MTP shared expert layout is unsupported: expected TP4 local width 160 from global width 640; gate_up=(640, 2560), down=(2560, 160), gate=(1, 2560)' = <vllm.models.qwen4_exp.amd.mono.rdna2.layout.MonoLayer object at 0x7f6fa8fa90a0>.reason
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py:560: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  vllm.models.qwen4_exp.amd.mono.rdna2.layout:layout.py:155 mono k2_rdna2 disabled for SimpleNamespace: dense MTP shared expert layout is unsupported: expected TP4 local width 160 from global width 640; gate_up=(640, 2560), down=(2560, 160), gate=(1, 2560)
+=============================== warnings summary ===============================
+test_amd_mono_rdna2.py: 14 warnings
+  /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py::test_moe_not_symmetric_w4a16_rdna2_is_refused[other-method]
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py::test_moe_not_symmetric_w4a16_rdna2_is_refused[asymmetric]
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py::test_moe_not_symmetric_w4a16_rdna2_is_refused[w4a8]
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py::test_switch_adds_no_parameters_and_keeps_values
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py::test_mtp_drafter_opt_in_registers_isolated_mono_layer
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py::test_unsupported_mtp_drafter_keeps_module_fallback
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py::test_mtp_k1_setup_is_independent_of_unsupported_k2
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/startup-config-v2/test_amd_mono_rdna2.py::test_dense_unquantized_mtp_wrong_shared_shard_falls_back
+8 failed, 35 passed, 3 skipped, 14 warnings in 8.01s
+{"pytest_exit_code": 1, "visible_gpu_count": 0, "cuda_initialized": false, "serving_source_unchanged": true, "serving_source_sha256": "3dea31fa8fce0cab59d8e4d7b3d0bd5f22acf2f5381efe445fe17382dd6e3c27", "patched_source_sha256": "2cc31d71007e04f29a9105c43f249fa3ccb059d0bf0564c9db1662d3447703ff", "test_source_sha256": "3fce5df163feb42ad64cf0e728d8c65a823cc1d516bb2a0df1b02f55df914953", "scope": "startup-only configuration checks, no serving/inference source or core changed"}

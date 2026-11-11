@@ -6,6 +6,10 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -88,6 +92,8 @@ class PleShortConvAttentionMetadata(ShortConvAttentionMetadata):
     spec_token_indx: torch.Tensor | None = None
     non_spec_token_indx: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    # Internal prefill checkpoints, one row per non-spec request.
+    checkpoint: MambaPrefillCheckpointMetadata | None = None
 
 
 class PleShortConvAttentionBackend(ShortConvAttentionBackend):
@@ -118,6 +124,16 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_spec = self.num_spec_tokens
+        # Dynamic speculation only: a zero-draft decode row takes the ordinary
+        # decode path. With a fixed K, zero-draft rows stay spec rows, as in
+        # the GDN / Mamba builders.
+        spec_config = vllm_config.speculative_config
+        self.zero_draft_decode = (
+            spec_config is not None and spec_config.uses_dynamic_speculative_decoding()
+        )
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
@@ -222,8 +238,15 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 .item()
             )
 
+        checkpoint = None
+        if metadata.num_prefills > 0:
+            checkpoint = self.checkpoint_builder.build(
+                common_attn_metadata, list(range(common_attn_metadata.num_reqs))
+            )
+
         return replace(
             metadata,
+            checkpoint=checkpoint,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             spec_query_len=self.num_spec + 1,
             max_prefill_query_len=max_prefill_query_len,
@@ -247,10 +270,11 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         m = common_attn_metadata
         spec_sequence_masks_cpu: torch.Tensor | None = None
         # Detect speculative-decode requests. We use -1 to mark prefill and
-        # plain-decode requests, so any value >= 0 is a (multi-query)
-        # spec-decode request.
+        # plain-decode requests. Under dynamic speculation, zero drafts also use
+        # ordinary decode, including one-token captures.
         if self.use_spec_decode and num_decode_draft_tokens_cpu is not None:
-            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= 0
+            min_drafts = 1 if self.zero_draft_decode else 0
+            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= min_drafts
             if bool(candidate_mask.any().item()):
                 spec_sequence_masks_cpu = candidate_mask
 
@@ -283,7 +307,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
 
         has_initial_states_p = None
         has_initial_states_d = None
-        num_computed_tokens_p = None
 
         # Per-request classification by mask, NOT by position. With
         # spec-decode, the front decode group can contain both spec-decode
@@ -376,6 +399,10 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 out=non_spec_query_start_loc[1:],
             )
 
+        checkpoint = None
+        if num_prefills > 0:
+            checkpoint = self.checkpoint_builder.build(m, non_spec_req_idx_cpu.tolist())
+
         # Compute the conv-state slots for the non-spec decode/prefill split.
         if non_spec_state_indices_tensor is None:
             state_indices_tensor = block_table_tensor[:0, 0]
@@ -402,10 +429,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 assert non_spec_query_start_loc is not None
                 query_start_loc_d = non_spec_query_start_loc[: num_decodes + 1]
             if num_prefills > 0:
-                num_computed_tokens_p = num_computed_tokens[
-                    num_decodes : num_decodes + num_prefills
-                ]
-                has_initial_states_p = num_computed_tokens_p > 0
+                has_initial_states_p = (
+                    num_computed_tokens[num_decodes : num_decodes + num_prefills] > 0
+                )
                 assert non_spec_query_start_loc is not None
                 query_start_loc_p = (
                     non_spec_query_start_loc[num_decodes:] - num_decode_tokens
@@ -478,12 +504,8 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             query_start_loc_d=query_start_loc_d,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
-            num_computed_tokens_p=num_computed_tokens_p,
-            block_idx_last_scheduled_token=None,
-            block_idx_first_scheduled_token_p=None,
-            block_idx_last_computed_token=None,
-            block_idx_last_scheduled_token_prev_step=None,
             seq_lens=m.seq_lens,
+            checkpoint=checkpoint,
         )
 
     def build_for_cudagraph_capture(

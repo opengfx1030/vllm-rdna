@@ -1,0 +1,14 @@
+[10:18:59] warm-up warm4k: rc=0 in 19 s
+[10:19:26] warm-up warm16k: rc=0 in 28 s
+[10:19:47] warm-up warm-c8: rc=0 in 20 s
+[10:20:20] cell ttft4k try 1 seed 4101: valid | EVICT OK (4 workers, 33 s) | TTFT 1.42 s prefill 2892/2877 tok/s ITL 24.2 ms decode 89.1 tok/s/req accept 2.169491525423729
+[10:21:28] cell ttft16k try 1 seed 4102: valid | EVICT OK (4 workers, 68 s) | TTFT 5.60 s prefill 2925/2902 tok/s ITL 24.1 ms decode 85.4 tok/s/req accept 2.0239043824701195
+[10:22:04] cell c1 try 1 seed 4201: valid | EVICT OK (4 workers, 36 s) | TTFT 0.39 s prefill 2652/2608 tok/s ITL 23.7 ms decode 112.4 tok/s/req accept 2.6640625
+[10:23:20] cell c6 try 1 seed 4206: valid | EVICT OK (4 workers, 76 s) | TTFT 0.80 s prefill 1279/2742 tok/s ITL 42.1 ms decode 40.9 tok/s/req accept 1.8995977722772277
+[10:24:39] cell c8 try 1 seed 4208: valid | EVICT OK (4 workers, 80 s) | TTFT 0.89 s prefill 1151/2721 tok/s ITL 45.5 ms decode 36.9 tok/s/req accept 1.9533412887828163
+[10:27:29] cell agg16k try 1 seed 4301: valid | EVICT OK (4 workers, 170 s) | TTFT 17.54 s prefill 934/2661 tok/s ITL 47.7 ms decode 20.2 tok/s/req accept 2.1597679936725545
+[10:27:41] parity dump rc=0
+[10:29:19] topk (limit 32/domain) rc=0 in 99 s
+[10:30:11] topk_rep (limit 16/domain) rc=0 in 52 s
+[10:30:11] whole-hook EVICT OK (4 workers, 692 s)
+[10:30:11] PASS

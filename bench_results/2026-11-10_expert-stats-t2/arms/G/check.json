@@ -1,0 +1,177 @@
+{
+ "arm": "/tmp/t10b/run/arms/G",
+ "files": [
+  {
+   "file": "expert_stats-dp0-pid313972.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 26,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1256865
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1298464
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1063.98,
+   "final_time": 1794309138.1716888,
+   "prev_elapsed_s": 1038.483,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid313974.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 26,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1256865
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1298464
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1063.976,
+   "final_time": 1794309138.1809332,
+   "prev_elapsed_s": 1038.47,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid313975.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 26,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1256865
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1298464
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1064.345,
+   "final_time": 1794309138.193952,
+   "prev_elapsed_s": 1038.826,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid313976.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 26,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    1256865
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    1298464
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 1064.001,
+   "final_time": 1794309138.1718824,
+   "prev_elapsed_s": 1038.504,
+   "final_newer_than_last_periodic": true
+  }
+ ],
+ "target_rows_vs_server_final": {
+  "collector_final_minus_seq1": 1256865,
+  "server_last_poll": 1255460.0,
+  "diff": 1405.0,
+  "rel": 0.0011191117200070094,
+  "seconds_final_snapshot_before_last_poll": 8.828311204910278
+ },
+ "target_rows_vs_server_aligned": {
+  "snapshots_compared": 25,
+  "median_rel": 0.0054960852226068075,
+  "max_abs_rel": 0.5953170946598743,
+  "last_rel": 0.0011191117200070094
+ },
+ "rank_agreement": {
+  "expert_stats-dp0-pid313974.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    6191,
+    6191
+   ],
+   "final_elapsed_s": [
+    1063.976,
+    1063.98
+   ],
+   "layers_differing": 0,
+   "max_abs_count_diff": 0,
+   "max_rel_to_layer_decode_total": 0.0,
+   "snapshots": [
+    26,
+    26
+   ]
+  },
+  "expert_stats-dp0-pid313975.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    6191,
+    6191
+   ],
+   "final_elapsed_s": [
+    1064.345,
+    1063.98
+   ],
+   "layers_differing": 14,
+   "max_abs_count_diff": 1,
+   "max_rel_to_layer_decode_total": 1.0367528899486808e-06,
+   "snapshots": [
+    26,
+    26
+   ]
+  },
+  "expert_stats-dp0-pid313976.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    6191,
+    6191
+   ],
+   "final_elapsed_s": [
+    1064.001,
+    1063.98
+   ],
+   "layers_differing": 1,
+   "max_abs_count_diff": 1,
+   "max_rel_to_layer_decode_total": 1.0367528899486808e-06,
+   "snapshots": [
+    26,
+    26
+   ]
+  }
+ }
+}

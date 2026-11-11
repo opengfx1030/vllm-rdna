@@ -1,0 +1,39 @@
+import importlib.util, json, os, sys
+from pathlib import Path
+import torch
+root=Path('/home/chenco_adm/w4a8_runs/moe-offload/batch-copy-probe/native')
+assert os.environ['HIP_VISIBLE_DEVICES']=='8'
+torch.cuda.set_device(0)
+assert torch.cuda.device_count()==1
+library=root/'native_copy.so'
+if hasattr(torch.ops._rocm_C,'rdna2_expert_cache_copy'):
+ library=Path('/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/vllm/_rocm_C.abi3.so')
+else:torch.ops.load_library(str(library))
+directory=root/'project/vllm/model_executor/layers/fused_moe'
+for name,path in [('vllm.model_executor.layers.fused_moe.rdna_expert_cache_policy',directory/'rdna_expert_cache_policy.py'),('cache_stress96',directory/'rdna_expert_cache.py')]:
+ spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module)
+sizes=[1638400,51200,12800,819200,25600,6400]
+dtypes=[torch.int32,torch.float16,torch.int32,torch.int32,torch.float16,torch.int32]
+bank={}
+for p,(name,size,dtype) in enumerate(zip(module.PAYLOAD_NAMES,sizes,dtypes)):
+ width=size//torch.empty((),dtype=dtype).element_size()
+ source=torch.empty((96,width),dtype=dtype,pin_memory=True)
+ pattern=torch.arange(width,dtype=torch.int32).remainder_(251)
+ for expert in range(96):source[expert].copy_(pattern);source[expert].add_(expert*3+p)
+ del pattern
+ bank[name]=source
+cache=module.PackedExpertCache(bank,96,'cuda',copy_mode='native')
+assert cache.host_bytes+cache.device_bytes<500_000_000
+bindings=[(95-i,(i*5+3)%96,True) for i in range(96)]
+with torch.cuda.stream(cache._copy_stream):
+ for tensor in cache.payload.values():tensor.fill_(-17)
+ cache._copy(bindings)
+ for tensor in cache.payload.values():tensor.add_(1)
+cache._copy_stream.synchronize()
+for expert,slot,_ in bindings:
+ for name in module.PAYLOAD_NAMES:
+  actual=cache.payload[name][slot].cpu().view(torch.uint8)
+  expected=(cache.host_payload[name][expert]+1).view(torch.uint8)
+  assert torch.equal(actual,expected),(name,expert,slot)
+assert cache.native_copy_calls==cache.batch_copy_calls==1
+print(json.dumps({'misses':96,'copies':576,'host_plus_gpu_payload_bytes':cache.host_bytes+cache.device_bytes,'native_copy_calls':cache.native_copy_calls,'batch_copy_calls':cache.batch_copy_calls,'copied_bytes':cache.copied_bytes,'exact_all_bytes':True,'same_stream_fill_batch_add_ordering':True,'device':torch.cuda.get_device_name(0),'arch':torch.cuda.get_device_properties(0).gcnArchName,'hip':torch.version.hip,'native_library':str(library),'qualification':'single576-copy batch with actual six mixed-dtype payload sizes; no model execution'}),flush=True)

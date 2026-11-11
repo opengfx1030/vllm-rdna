@@ -69,8 +69,8 @@ fi
 # TunableOp: solution IDs belong to a rocBLAS build, not just a version number.
 # The rows root holds one rocblas-<sha256-first-12>/ directory per build.
 if [[ ${V620_TUNABLEOP:-1} == 1 ]]; then
-    # shellcheck source=tools/rdna2/tunableop_env.sh
-    source "$source_dir/tools/rdna2/tunableop_env.sh"
+    # shellcheck source=tools/rdna2_028/tunableop_env.sh
+    source "$source_dir/tools/rdna2_028/tunableop_env.sh"
     rows_root=${V620_TUNABLEOP_ROOT:-$source_dir/../pr17-tunableop}
     configure_v620_tunableop \
         "${V620_ROCBLAS_LIBRARY:-$rocm_lib/librocblas.so.5}" "$rows_root"

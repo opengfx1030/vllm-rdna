@@ -17,6 +17,17 @@ def is_supported(weight_quant) -> bool:
     """Check if a native ROCm MoE kernel is available for this config."""
     if weight_quant.num_bits not in (4, 8):
         return False
+    # The RDNA2 W4A16 MoE method loads per-group zero points (v2 format); the
+    # W8A16 method synthesizes symmetric ones, so an asymmetric 8-bit
+    # checkpoint falls back to CompressedTensorsWNA16MoEMethod.
+    if not weight_quant.symmetric and weight_quant.num_bits != 4:
+        logger.warning_once(
+            "Asymmetric %d-bit MoE checkpoint: the native RDNA2 MoE kernels "
+            "only support symmetric weights; using the generic WNA16 MoE path "
+            "(slower). Prefer a symmetric checkpoint on gfx1030.",
+            weight_quant.num_bits,
+        )
+        return False
 
     from vllm.platforms.rocm import on_gfx10x
 

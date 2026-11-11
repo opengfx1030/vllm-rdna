@@ -1,0 +1,25 @@
+{
+  "baseline_preexisting_untethered": [
+    "tests/models/qwen4_exp/test_hc_ops_rdna2.py",
+    "tests/models/qwen4_exp/test_hc_prefill_rdna2.py",
+    "tests/models/qwen4_exp/test_ple_pp.py",
+    "tests/models/qwen4_exp/test_ple_prefill_conv.py",
+    "tests/models/qwen4_exp/test_qsa_metadata_rdna2.py",
+    "tests/tools/test_quant_mtp_experts.py",
+    "tests/v1/ple_offload/test_exl3_ngram_ring.py"
+  ],
+  "current_untethered": [
+    "tests/models/qwen4_exp/test_hc_ops_rdna2.py",
+    "tests/models/qwen4_exp/test_hc_prefill_rdna2.py",
+    "tests/models/qwen4_exp/test_ple_pp.py",
+    "tests/models/qwen4_exp/test_ple_prefill_conv.py",
+    "tests/models/qwen4_exp/test_qsa_metadata_rdna2.py",
+    "tests/tools/test_quant_mtp_experts.py",
+    "tests/v1/ple_offload/test_exl3_ngram_ring.py"
+  ],
+  "new_tests_tethered": [
+    "tests/models/qwen4_exp/test_mono_mtp_failstop.py",
+    "tests/v1/shutdown/test_rocm_fatal_cleanup.py"
+  ],
+  "no_new_ci_gaps": true
+}

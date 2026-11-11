@@ -12,7 +12,7 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/rdna_launcher_common.sh"
 #   MODEL=/path/to/ckpt VENV=/path/to/venv
 #   rdna_init                 # tree, venv, ROCm SDK, shared vLLM env, caches
-#   rdna_tunableop            # honours TUNABLEOP=0/1 and TUNABLEOP_PROFILE
+#   rdna_tunableop            # honours TUNABLEOP=0/1, TUNABLEOP_PROFILE/ROOT
 #   rdna_select_attention fa  # fa | triton  (sets $attention_backend)
 #   rdna_mtp_args 2           # sets $spec_args and $capture_sizes
 #   rdna_kill_stale           # scoped to $VLLM_CACHE_ROOT
@@ -68,7 +68,7 @@ rdna_init() {
     ROCM_SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
     ROCM_SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
     export ROCM_SDK_ROOT ROCM_SDK_LIB ROCM_SDK
-    export LD_LIBRARY_PATH="$ROCM_SDK_LIB:$ROCM_SDK/host-math/lib:$ROCM_SDK/rocm_sysdeps/lib:$ROCM_SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH="$ROCM_SDK_LIB:$ROCM_SDK:$ROCM_SDK/host-math/lib:$ROCM_SDK/rocm_sysdeps/lib:$ROCM_SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export ROCM_HOME=${ROCM_HOME:-$ROCM_SDK_ROOT} ROCM_PATH=${ROCM_PATH:-$ROCM_SDK_ROOT}
     export HIP_PATH=${HIP_PATH:-$ROCM_SDK_ROOT} HIP_ROOT_DIR=${HIP_ROOT_DIR:-$ROCM_SDK_ROOT}
     [[ -d $ROCM_SDK_ROOT/include ]] && export CPATH="$ROCM_SDK_ROOT/include${CPATH:+:$CPATH}"
@@ -80,9 +80,12 @@ rdna_init() {
     export HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-${GPUIDS:-0,1,2,3}}
     export VLLM_WORKER_MULTIPROC_METHOD=${VLLM_WORKER_MULTIPROC_METHOD:-spawn}
     export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+    # Serving never attaches a GPU profiler: keep the HIP/HSA runtimes from
+    # registering with rocprofiler (no tool init, no queue interception).
+    # Profiling runs set ROCPROFILER_REGISTER_ENABLED=1.
+    export ROCPROFILER_REGISTER_ENABLED=${ROCPROFILER_REGISTER_ENABLED:-0}
     export VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0}
     export VLLM_ROCM_USE_AITER_MOE=${VLLM_ROCM_USE_AITER_MOE:-0}
-    export VLLM_RDNA_FORCE_FP16=${VLLM_RDNA_FORCE_FP16:-1}
     export TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT:-0}
     export VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-0}
 
@@ -92,11 +95,36 @@ rdna_init() {
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$source_dir/cache/extensions}
 }
 
+# rdna_resolve_pci_buses BUS...  ->  comma-separated HIP indices, in the order given.
+# A HIP index is enumeration order and moves when cards, risers or switches change
+# (par1-cs25 re-enumerated on 2026-11-05); a PCI bus does not. BUS is the hex bus number
+# ("ce", "0a") or "domain:bus". Needs $VENV (torch) and the ROCm libraries from
+# rdna_init. Exits non-zero (message on stderr) when a bus has no GPU or is repeated.
+rdna_resolve_pci_buses() {
+    env -u HIP_VISIBLE_DEVICES -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
+        "$VENV/bin/python" -c '
+import sys
+import torch
+want = [a.lower().split(":")[-1] for a in sys.argv[1:]]
+have = {}
+for i in range(torch.cuda.device_count()):
+    have.setdefault("%02x" % torch.cuda.get_device_properties(i).pci_bus_id, i)
+missing = [b for b in want if b not in have]
+if missing:
+    sys.exit("no GPU on PCI bus %s (present: %s)" % (",".join(missing), " ".join(sorted(have))))
+if len(set(want)) != len(want):
+    sys.exit("a PCI bus is listed twice: %s" % " ".join(want))
+print(",".join(str(have[b]) for b in want))
+' "$@"
+}
+
 rdna_tunableop() {
     # shellcheck source=tools/rdna2_028/tunableop_env.sh
     source "$source_dir/tools/rdna2_028/tunableop_env.sh"
     if [[ ${TUNABLEOP:-1} == 1 ]]; then
-        configure_tunableop "$ROCM_SDK_LIB/librocblas.so.5" "$source_dir/tunableop" || return 1
+        # One TunableOp rank file per worker device ordinal (TP * PP workers on this host).
+        TUNABLEOP_RANKS=$((${TP:-1} * ${PP:-1})) configure_tunableop \
+            "$ROCM_SDK_LIB/librocblas.so.5" "${TUNABLEOP_ROOT:-$source_dir/tunableop}" || return 1
     else
         export PYTORCH_TUNABLEOP_ENABLED=0 PYTORCH_TUNABLEOP_TUNING=0
         export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0
@@ -143,13 +171,23 @@ rdna_run_cwd() {
 }
 
 rdna_kill_stale() {
-    local _sig _p
+    local _sig _p _sent
     for _sig in TERM KILL; do
+        _sent=0
         for _p in $(pgrep -f "entrypoints.cli.main serve|entrypoints.openai.api_server|VLLM::Worker|VLLM::EngineCore|PleOffloadWorker" 2>/dev/null); do
             [ -r "/proc/$_p/environ" ] || continue
-            tr '\0' '\n' < "/proc/$_p/environ" 2>/dev/null | grep -q "^VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT}$" && kill -"$_sig" "$_p" 2>/dev/null
+            if tr '\0' '\n' < "/proc/$_p/environ" 2>/dev/null | grep -q "^VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT}$"; then
+                if kill -"$_sig" "$_p" 2>/dev/null; then
+                    _sent=1
+                fi
+            fi
         done
-        [ "$_sig" = TERM ] && sleep 8
+        if [[ $_sent == 1 ]]; then
+            if [[ $_sig == TERM ]]; then
+                sleep 8
+            else
+                sleep 3
+            fi
+        fi
     done
-    sleep 3
 }

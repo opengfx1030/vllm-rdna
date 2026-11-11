@@ -1,0 +1,16 @@
+[10:29:45] READY in 261s served=flash-next
+RESULT PASS (3/3)
+    PPL 4.79 (mean NLL 1.567 over 261 tokens) PASS
+    cold TTFT 5.61 s, warm TTFT 0.66 s, speedup 8.5x -> PASS
+    RESULT PASS: 0 failing, 14 near-tie, 2 soft, 0 solo-noise, 32 identical of 48 checks (44.9s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[10:31:18] PREFIX RESET PASS before bench-1024x512-c1
+[10:32:39] PREFIX RESET PASS before bench-1024x512-c8
+[10:34:11] PREFIX RESET PASS before bench-16384x1024-c1
+[10:37:09] PREFIX RESET PASS before bench-16384x1024-c8
+[10:43:39] PROBE-AFTER-LOAD PASS
+[10:43:39] fault markers in serve.log: 0
+[10:43:39] new amdgpu dmesg faults: 0
+[10:43:39] NATIVE ROUTE-AFTER-LOAD PASS
+[10:43:39] done
+
+Privileged kernel journal offline audit: PASS; 234 appended records; append-only prefix matched; 0 GPU/PCIe fault matches. Checker SHA-256 d2272c6289f9791472045f2d0091eed1ef2df4a6db9fb35ee476db031ea19bd0. Raw snapshots are excluded from curated package.

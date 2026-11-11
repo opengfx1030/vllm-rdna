@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+import unittest
+
+from curate_pair_v3 import concurrency_gate, filtered_native_gates
+
+
+class NativeConcurrencyGateTests(unittest.TestCase):
+    def test_soft_and_near_tie_counts_are_preserved(self):
+        summary = (
+            "RESULT PASS: 0 failing, 14 near-tie, 2 soft, 0 solo-noise, "
+            "32 identical of 48 checks (example thresholds)"
+        )
+        self.assertEqual(
+            concurrency_gate(summary),
+            {
+                "hard_failures": 0,
+                "near_ties": 14,
+                "soft_differences": 2,
+                "solo_noise": 0,
+                "identical": 32,
+                "total_checks": 48,
+            },
+        )
+
+    def test_inconsistent_counts_fail(self):
+        summary = (
+            "RESULT PASS: 0 failing, 14 near-tie, 2 soft, 0 solo-noise, "
+            "31 identical of 48 checks (example thresholds)"
+        )
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            concurrency_gate(summary)
+
+    def test_filtered_gate_summary_keeps_soft_counts_without_text(self):
+        summary = "\n".join(
+            (
+                "[10:00:00] NATIVE ROUTE monokernel=0 ranks=4 mtp_ranks=4 PASS",
+                "RESULT PASS (3/3)",
+                "    PPL 4.80 (mean NLL 1.57 over 260 tokens) PASS",
+                "    cold TTFT 5.6 s, warm TTFT 0.7 s, speedup 8.0x -> PASS",
+                "    RESULT PASS: 0 failing, 14 near-tie, 2 soft, "
+                "0 solo-noise, 32 identical of 48 checks (details)",
+                "PASS prompt='private prompt' reply='private response'",
+            )
+        )
+        filtered = filtered_native_gates(summary)
+        self.assertIn("14 near-tie, 2 soft", filtered)
+        self.assertNotIn("private prompt", filtered)
+        self.assertNotIn("private response", filtered)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,994 @@
+#!/usr/bin/env python3
+"""Strict native-module vs dense-Mono comparison; diagnostic only, no compile."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import hashlib
+import importlib
+import importlib.util
+import json
+import os
+import statistics
+import sys
+from pathlib import Path
+
+TOPK = 10
+H = 2560
+LOCAL_E = 128
+GLOBAL_E = 512
+I = 640
+TOL = 5e-3
+EXPECTED_CTRL_TOPK_OFFSET = 20576
+
+
+class NativeCtrl(ctypes.Structure):
+    """The pinned production ordinary-M Ctrl prefix through route weights."""
+
+    _fields_ = [
+        ("count", ctypes.c_uint),
+        ("gen", ctypes.c_uint),
+        ("err_code", ctypes.c_int),
+        ("err_phase", ctypes.c_int),
+        ("err_wg", ctypes.c_int),
+        ("pad", ctypes.c_int * 3),
+        ("ts", ctypes.c_ulonglong * 8),
+        ("wg_done", (ctypes.c_ulonglong * 256) * 10),
+        ("topk_id", ctypes.c_int * (24 * TOPK)),
+        ("topw", ctypes.c_float * (24 * TOPK)),
+        ("gwork", ctypes.c_int * 4),
+    ]
+
+
+if NativeCtrl.topk_id.offset != EXPECTED_CTRL_TOPK_OFFSET:
+    raise RuntimeError(
+        f"Mono Ctrl route offset changed: {NativeCtrl.topk_id.offset} != "
+        f"{EXPECTED_CTRL_TOPK_OFFSET}; update/review the ABI before running"
+    )
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def import_file(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def selected_gpu() -> int:
+    value = os.environ.get("HIP_VISIBLE_DEVICES")
+    if value not in {"6", "7", "8", "9"}:
+        raise SystemExit(
+            "set HIP_VISIBLE_DEVICES to exactly one physical GPU in 6,7,8,9"
+        )
+    # Frozen ROCm startup normalizes HIP to an identical CUDA alias. This is
+    # one physical selector, unlike an additional ROCR visibility mask.
+    for key in ("ROCR_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
+        if os.environ.get(key):
+            raise SystemExit(f"unset {key}; additional device masks are rejected")
+    cuda_alias = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_alias and cuda_alias != value:
+        raise SystemExit(
+            "CUDA_VISIBLE_DEVICES must be empty or exactly match HIP_VISIBLE_DEVICES"
+        )
+    return int(value)
+
+
+def selector_alias_normalization() -> dict:
+    hip = os.environ.get("HIP_VISIBLE_DEVICES")
+    cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+    return {
+        "HIP_VISIBLE_DEVICES": hip,
+        "CUDA_VISIBLE_DEVICES": cuda,
+        "ROCR_VISIBLE_DEVICES": os.environ.get("ROCR_VISIBLE_DEVICES"),
+        "GPU_DEVICE_ORDINAL": os.environ.get("GPU_DEVICE_ORDINAL"),
+        "matching_cuda_alias_present": bool(cuda) and cuda == hip,
+        "policy": (
+            "single physical HIP6-9; empty or identical CUDA alias; "
+            "no ROCR/ordinal mask"
+        ),
+        "startup_normalizer": "vllm.platforms.rocm._sync_hip_cuda_env_vars",
+    }
+
+
+def mono_ctrl_routes(workspace, rows: int, torch):
+    base = workspace.view(torch.uint8)
+    ids = base.narrow(0, NativeCtrl.topk_id.offset, rows * TOPK * 4)
+    ids = ids.view(torch.int32).reshape(rows, TOPK).clone()
+    # The ordinary-M kernel keeps top weights in LDS for M<=8 and does not
+    # publish Ctrl.topw there. That is a real ABI limitation, not a reason to
+    # read stale memory. IDs are published for every supported M.
+    weights = None
+    if rows > 8:
+        weight_bytes = rows * TOPK * ctypes.sizeof(ctypes.c_float)
+        weights = base.narrow(0, NativeCtrl.topw.offset, weight_bytes)
+        weights = weights.view(torch.float32).reshape(rows, TOPK).clone()
+    return ids, weights
+
+
+def route_by_expert(ids, weights):
+    order = ids.argsort(dim=1)
+    return ids.gather(1, order), weights.gather(1, order)
+
+
+def compare_routes(mono_ids, mono_weights, native_ids, native_weights, torch):
+    ids_equal = torch.equal(mono_ids.sort(dim=1).values, native_ids.sort(dim=1).values)
+    weight_error = None
+    if ids_equal and mono_weights is not None:
+        _, mono_sorted = route_by_expert(mono_ids, mono_weights)
+        _, native_sorted = route_by_expert(native_ids, native_weights)
+        weight_error = float((mono_sorted - native_sorted).abs().max().item())
+    return ids_equal, weight_error
+
+
+def output_diagnostics(actual, expected, torch):
+    if len(actual) != 3 or len(expected) != 3:
+        raise AssertionError("expected (residual, ffn, injection) tuples")
+    finite = all(bool(torch.isfinite(x).all().item()) for x in (*actual, *expected))
+    errors = [
+        float((a.float() - b.float()).abs().max().item())
+        for a, b in zip(actual, expected)
+    ]
+    exact_residual = torch.equal(actual[0], expected[0])
+    row_error = (
+        (actual[1].float() - expected[1].float())
+        .abs()
+        .reshape(actual[1].shape[0], -1)
+        .amax(dim=1)
+    )
+    return {
+        "max_abs_error_residual": errors[0],
+        "max_abs_error_ffn": errors[1],
+        "max_abs_error_injection": errors[2],
+        "ffn_row_max_abs_error": row_error.cpu().tolist(),
+        "all_finite": finite,
+        "residual_exact": exact_residual,
+        "tolerance": TOL,
+        "passed": finite and exact_residual and max(errors[1:]) < TOL,
+    }
+
+
+def write_failure(path: Path, payload: dict, gate: str, details) -> None:
+    failed = dict(payload)
+    failed.update(status="FAIL", failed_gate=gate, raw_diagnostics=details)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(failed, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    raise RuntimeError(f"{gate} failed; raw diagnostics saved at {path}")
+
+
+def event_ms(fn, torch) -> float:
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    stream = torch.cuda.current_stream()
+    start.record(stream)
+    fn()
+    end.record(stream)
+    end.synchronize()
+    return float(start.elapsed_time(end))
+
+
+def build_native_reference(repo: Path, weights, torch):
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers import rdna_ops as _rdna_ops  # noqa: F401
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+    from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
+    from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_norm
+
+    native = torch.ops._rocm_C
+    required = (
+        "moe_gate_up_silu_unquantized_rdna2",
+        "moe_down_unquantized_rdna2",
+        "mono_k2_rdna2",
+        "mono_k2_rdna2_error",
+    )
+    missing = [name for name in required if not hasattr(native, name)]
+    if missing:
+        raise RuntimeError(f"required RDNA2 HIP operators are missing: {missing}")
+
+    # Production holds this fixed expert map across rows/calls. Keep it out of
+    # both graph capture and timed GPU work in this diagnostic reference.
+    expert_map = torch.full(
+        (GLOBAL_E,), -1, dtype=torch.int32, device=weights["wr"].device
+    )
+    expert_map[:LOCAL_E] = torch.arange(
+        LOCAL_E, dtype=torch.int32, device=weights["wr"].device
+    )
+    buffers: dict[int, tuple[object, object, object]] = {}
+
+    def run(res, blk, inj):
+        m = int(res.shape[0])
+        residual, xn = hc_combine_norm(res, blk, inj, weights["norm_w"], 1e-6, 4)
+        block, dai = torch.ops.vllm.rdna_hc_mix(
+            xn, weights["wd"], None, None, weights["wu"], None, None, 320, 4
+        )
+        injection = dai[:, 320:324].contiguous()
+        shared = torch.ops.vllm.rdna_shared_expert(
+            block,
+            weights["se_w1"],
+            None,
+            None,
+            weights["se_w2"],
+            None,
+            None,
+            weights["se_wg"],
+        )
+
+        # Match the shipped gfx10 route: this utility returns the native
+        # FP16 router logits before fused_topk's float calculations.
+        logits = rocm_unquantized_gemm_impl(block, weights["wr"], None)
+        if logits.dtype != torch.float16:
+            raise RuntimeError(
+                f"native RDNA2 router logits must be FP16, got {logits.dtype}"
+            )
+        top_weights, top_ids, _ = fused_topk(block, logits, TOPK, True)
+        top_weights = top_weights.contiguous()
+        top_ids = top_ids.to(torch.int32).contiguous()
+
+        ids_flat = top_ids.reshape(-1).contiguous()
+        if m not in buffers:
+            buffers[m] = (
+                torch.empty((m * TOPK, I), dtype=torch.float16, device=res.device),
+                torch.empty((m, TOPK, H), dtype=torch.float16, device=res.device),
+                torch.empty((m, H), dtype=torch.float16, device=res.device),
+            )
+        act, slots, routed = buffers[m]
+        native.moe_gate_up_silu_unquantized_rdna2(
+            block, weights["w13"], ids_flat, expert_map, act, TOPK, I, H
+        )
+        native.moe_down_unquantized_rdna2(
+            act,
+            weights["w2"],
+            ids_flat,
+            expert_map,
+            top_weights.reshape(-1),
+            True,
+            slots,
+            TOPK,
+            I,
+            H,
+        )
+        ops.moe_sum(slots, routed, top_ids, expert_map)
+
+        # This is the actual local MoERunner combine point: both arguments are
+        # FP16, so the addition itself rounds to FP16. The outer TP all-reduce
+        # is outside the rank-local module and is intentionally not called.
+        ffn = shared + routed
+        return (residual, ffn, injection), (top_ids, top_weights)
+
+    return run
+
+
+def candidate_runner(spec: str | None, torch, mono):
+    if spec is None:
+        from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+        run = lambda res, blk, inj: k2.run(mono, res, blk, inj)
+        return (
+            run,
+            lambda: torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws),
+            lambda rows: mono_ctrl_routes(mono.ws, rows, torch),
+        )
+    module_name, separator, attribute = spec.partition(":")
+    if not separator:
+        raise ValueError("--candidate must be module:function")
+    fn = getattr(importlib.import_module(module_name), attribute)
+    if not callable(fn):
+        raise TypeError(f"candidate {spec!r} is not callable")
+    adapter = sys.modules[module_name]
+    run = lambda res, blk, inj: fn(mono, res, blk, inj)
+
+    def check_error():
+        checker = getattr(adapter, "check_error", None)
+        if checker is not None:
+            return checker(mono, torch)
+        if getattr(adapter, "uses_scratch_workspace", False):
+            raise RuntimeError(
+                "scratch candidate adapter must expose check_error(mono, torch)"
+            )
+        return torch.ops._rocm_C.mono_k2_rdna2_error(mono.ws)
+
+    def read_routes(rows: int):
+        reader = getattr(adapter, "read_routes", None)
+        if reader is not None:
+            return reader(mono, rows, torch)
+        if getattr(adapter, "uses_scratch_workspace", False):
+            raise RuntimeError(
+                "scratch candidate adapter must expose read_routes(mono, rows, torch)"
+            )
+        return mono_ctrl_routes(mono.ws, rows, torch)
+
+    run.adapter = adapter
+    return run, check_error, read_routes
+
+
+def verify_loaded_candidate_binary(path: Path, expected_sha: str) -> str:
+    """Prove the pinned candidate .so is actually loaded in this process."""
+    expected = path.resolve()
+    matches = []
+    for module in tuple(sys.modules.values()):
+        module_path = getattr(module, "__file__", None)
+        if not module_path:
+            continue
+        try:
+            resolved = Path(module_path).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved == expected:
+            matches.append(resolved)
+    if not matches:
+        raise RuntimeError(
+            f"candidate binary was hashed but not loaded: {expected}; "
+            "adapter must import the pinned extension in this process"
+        )
+    actual_sha = sha256(expected)
+    if actual_sha != expected_sha:
+        raise RuntimeError(
+            f"loaded candidate binary changed: expected {expected_sha}, got {actual_sha}"
+        )
+    return str(expected)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--expected-core-sha256", required=True)
+    parser.add_argument("--expected-native-source-sha256", required=True)
+    parser.add_argument("--rows", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=50124)
+    parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument("--candidate", help="optional scratch module:function")
+    parser.add_argument("--candidate-source", type=Path)
+    parser.add_argument("--expected-candidate-source-sha256")
+    parser.add_argument("--candidate-binary", type=Path)
+    parser.add_argument("--expected-candidate-binary-sha256")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    gpu = selected_gpu()
+    selector_aliases = selector_alias_normalization()
+    repo = args.repo_root.resolve()
+    if args.rows < 1 or args.rows > 24:
+        raise SystemExit("production Ctrl route check is bounded to 1 <= rows <= 24")
+    if args.warmup < 1 or args.iters < 3:
+        raise SystemExit("require warmup>=1 and iters>=3")
+    if args.output.exists():
+        raise SystemExit(f"refusing to overwrite {args.output}")
+    for path_arg, sha_arg, label in (
+        (
+            args.candidate_source,
+            args.expected_candidate_source_sha256,
+            "candidate source",
+        ),
+        (
+            args.candidate_binary,
+            args.expected_candidate_binary_sha256,
+            "candidate binary",
+        ),
+    ):
+        if (path_arg is None) != (sha_arg is None):
+            raise SystemExit(f"{label} path and expected SHA must be supplied together")
+        if args.candidate and path_arg is None:
+            raise SystemExit(
+                f"--candidate requires an explicit pinned {label} path and SHA"
+            )
+    candidate_source_sha = None
+    if args.candidate_source is not None:
+        candidate_source_sha = sha256(args.candidate_source.resolve())
+        if candidate_source_sha != args.expected_candidate_source_sha256:
+            raise SystemExit(
+                "candidate source SHA mismatch: "
+                f"expected {args.expected_candidate_source_sha256}, got {candidate_source_sha}"
+            )
+    candidate_binary_sha = None
+    if args.candidate_binary is not None:
+        candidate_binary_sha = sha256(args.candidate_binary.resolve())
+        if candidate_binary_sha != args.expected_candidate_binary_sha256:
+            raise SystemExit(
+                "candidate binary SHA mismatch: "
+                f"expected {args.expected_candidate_binary_sha256}, got {candidate_binary_sha}"
+            )
+
+    native_source = repo / "csrc/rocm/moe_unquantized_rdna2.cu"
+    if not native_source.is_file():
+        raise SystemExit(f"native RDNA2 HIP source not found: {native_source}")
+    actual_source_sha = sha256(native_source)
+    if actual_source_sha != args.expected_native_source_sha256:
+        raise SystemExit(
+            "native expert source SHA mismatch: "
+            f"expected {args.expected_native_source_sha256}, got {actual_source_sha}"
+        )
+
+    os.environ.setdefault("VLLM_SOURCE_ROOT", str(repo))
+    sys.path.insert(0, str(repo))
+    import torch
+
+    if torch.version.hip is None or torch.cuda.device_count() != 1:
+        raise SystemExit("requires frozen ROCm PyTorch with exactly one visible GPU")
+    props = torch.cuda.get_device_properties(0)
+    arch = getattr(props, "gcnArchName", "")
+    if not arch.startswith("gfx10"):
+        raise SystemExit(f"expected gfx10x on HIP {gpu}, got {arch}")
+
+    import vllm._rocm_C as rocm_core
+
+    core_path = Path(rocm_core.__file__).resolve()
+    actual_core_sha = sha256(core_path)
+    if actual_core_sha != args.expected_core_sha256:
+        raise SystemExit(
+            f"loaded core SHA mismatch: expected {args.expected_core_sha256}, "
+            f"got {actual_core_sha} at {core_path}"
+        )
+
+    tests = import_file(
+        "dense_actual_rdna_test_fixture",
+        repo / "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py",
+    )
+    helper = import_file(
+        "dense_actual_rdna_fixture_helper",
+        Path(__file__).resolve().parent.parent
+        / "large-m-mono-global-validation/validate_global_m_fixture.py",
+    )
+    mono = helper._make_dense_mtp_fixture(tests, torch, args.seed)
+    mono.t["w13"] = mono.t["w13"].contiguous()
+    mono.t["w2"] = mono.t["w2"].contiguous()
+    res, blk, inj = tests._inputs(args.rows, args.seed + args.rows)
+    reference = build_native_reference(repo, mono.t, torch)
+
+    # Each Mono arm owns an independent workspace/control record.
+    mono.is_mtp = True
+    mono.dense_mtp = True
+    mono.ar_on = False
+    candidate, candidate_check_error, candidate_read_routes = candidate_runner(
+        args.candidate, torch, mono
+    )
+
+    base_payload = {
+        "schema": "actual-rdna2-dense-mtp-reference-v1",
+        "gpu": gpu,
+        "gpu_selector_alias_normalization": selector_aliases,
+        "device_arch": arch,
+        "fixture": "synthetic existing dense-MTP random FP16 fixture",
+        "fixture_seed": args.seed,
+        "rows": args.rows,
+        "native_backend": "Rdna2UnquantizedExperts / RDNA2 HIP ops",
+        "native_expert_source": str(native_source),
+        "native_expert_source_sha256": actual_source_sha,
+        "loaded_core": str(core_path),
+        "loaded_core_sha256": actual_core_sha,
+        "candidate": args.candidate or "installed k2.run",
+        "candidate_source": str(args.candidate_source.resolve())
+        if args.candidate_source
+        else None,
+        "candidate_source_sha256": candidate_source_sha,
+        "candidate_binary": str(args.candidate_binary.resolve())
+        if args.candidate_binary
+        else None,
+        "candidate_binary_sha256": candidate_binary_sha,
+    }
+
+    reference_out, reference_routes = reference(res, blk, inj)
+    candidate_out = candidate(res, blk, inj)
+    torch.cuda.synchronize()
+    if args.candidate_binary is not None:
+        loaded_candidate_binary = verify_loaded_candidate_binary(
+            args.candidate_binary, args.expected_candidate_binary_sha256
+        )
+    else:
+        loaded_candidate_binary = None
+    base_payload["loaded_candidate_binary"] = loaded_candidate_binary
+    err = candidate_check_error().cpu().tolist()
+    output_check = output_diagnostics(candidate_out, reference_out, torch)
+    mono_ids, mono_tw = candidate_read_routes(args.rows)
+    ref_ids, ref_tw = reference_routes
+    mono_sorted_ids = mono_ids.sort(dim=1).values
+    ref_sorted_ids = ref_ids.sort(dim=1).values
+    ids_equal = torch.equal(mono_sorted_ids, ref_sorted_ids)
+    weight_error = None
+    weight_comparison_status = "unavailable: M<=8 weights are not published"
+    if mono_tw is not None and ids_equal:
+        mono_sorted_weight_ids, mono_sorted_tw = route_by_expert(mono_ids, mono_tw)
+        ref_sorted_weight_ids, ref_sorted_tw = route_by_expert(ref_ids, ref_tw)
+        if not torch.equal(mono_sorted_weight_ids, ref_sorted_weight_ids):
+            raise RuntimeError("internal expert-ID sort mismatch despite equal ID sets")
+        weight_error = float((mono_sorted_tw - ref_sorted_tw).abs().max().item())
+        weight_comparison_status = "compared by expert ID"
+    elif mono_tw is not None:
+        weight_comparison_status = "unavailable: selected expert ID sets differ"
+    if err[0] != 0:
+        write_failure(
+            args.output,
+            base_payload,
+            "eager_sticky_error",
+            {
+                "error_record": err,
+                "output_check": output_check,
+                "mono_ids": mono_ids.cpu().tolist(),
+                "native_ids": ref_ids.cpu().tolist(),
+                "mono_weights": mono_tw.cpu().tolist() if mono_tw is not None else None,
+                "native_weights": ref_tw.cpu().tolist(),
+                "weights_max_abs_error_by_expert": weight_error,
+                "weight_comparison_status": weight_comparison_status,
+            },
+        )
+    if not output_check["passed"]:
+        write_failure(
+            args.output,
+            base_payload,
+            "eager_output_parity",
+            {
+                "output_check": output_check,
+                "mono_ids": mono_ids.cpu().tolist(),
+                "native_ids": ref_ids.cpu().tolist(),
+                "mono_weights": mono_tw.cpu().tolist() if mono_tw is not None else None,
+                "native_weights": ref_tw.cpu().tolist(),
+                "weights_max_abs_error_by_expert": weight_error,
+                "weight_comparison_status": weight_comparison_status,
+            },
+        )
+    if not ids_equal or (weight_error is not None and weight_error >= TOL):
+        write_failure(
+            args.output,
+            base_payload,
+            "eager_topk_parity",
+            {
+                "ids_equal_by_expert": ids_equal,
+                "mono_ids": mono_ids.cpu().tolist(),
+                "native_ids": ref_ids.cpu().tolist(),
+                "weights_max_abs_error_by_expert": weight_error,
+                "weight_comparison_status": weight_comparison_status,
+                "mono_weights": mono_tw.cpu().tolist() if mono_tw is not None else None,
+                "native_weights": ref_tw.cpu().tolist(),
+                "tolerance": TOL,
+            },
+        )
+
+    observed_slot_order = (
+        "ascending-expert-id"
+        if torch.equal(mono_ids, mono_sorted_ids)
+        else "other-observed-order"
+    )
+    topk_check = {
+        "ids_equal_by_expert": ids_equal,
+        "slot_ids_equal_in_order": torch.equal(mono_ids, ref_ids),
+        "weights_max_abs_error_by_expert": weight_error,
+        "weights_check_available": weight_error is not None,
+        "weight_comparison_status": weight_comparison_status,
+        "tolerance": TOL,
+        "native_slot_order_observed": "as returned by fused_topk",
+        "mono_slot_order_observed": observed_slot_order,
+    }
+
+    # Changed-input replay checks that the captured native reference is not
+    # accidentally reusing the first call's route/expert intermediates.
+    changed_res, changed_blk, changed_inj = tests._inputs(
+        args.rows, args.seed + args.rows + 1
+    )
+    changed2_res, changed2_blk, changed2_inj = tests._inputs(
+        args.rows, args.seed + args.rows + 2
+    )
+    for label, before, after in (
+        ("res replay1", res, changed_res),
+        ("blk replay1", blk, changed_blk),
+        ("inj replay1", inj, changed_inj),
+        ("res replay2", res, changed2_res),
+        ("blk replay2", blk, changed2_blk),
+        ("inj replay2", inj, changed2_inj),
+        ("res between replays", changed_res, changed2_res),
+        ("blk between replays", changed_blk, changed2_blk),
+        ("inj between replays", changed_inj, changed2_inj),
+    ):
+        if torch.equal(before, after):
+            raise RuntimeError(f"changed-input fixture did not change {label}")
+    changed_expected, changed_native_routes = reference(
+        changed_res, changed_blk, changed_inj
+    )
+    changed2_expected, changed2_native_routes = reference(
+        changed2_res, changed2_blk, changed2_inj
+    )
+    static_res, static_blk, static_inj = res.clone(), blk.clone(), inj.clone()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_reference, _ = reference(static_res, static_blk, static_inj)
+    torch.cuda.synchronize()
+    static_res.copy_(changed_res)
+    static_blk.copy_(changed_blk)
+    static_inj.copy_(changed_inj)
+    graph.replay()
+    torch.cuda.synchronize()
+    graph_check = output_diagnostics(captured_reference, changed_expected, torch)
+    if not graph_check["passed"]:
+        write_failure(
+            args.output,
+            base_payload,
+            "native_reference_changed_input_graph",
+            graph_check,
+        )
+    static_res.copy_(changed2_res)
+    static_blk.copy_(changed2_blk)
+    static_inj.copy_(changed2_inj)
+    graph.replay()
+    torch.cuda.synchronize()
+    graph_check2 = output_diagnostics(captured_reference, changed2_expected, torch)
+    if not graph_check2["passed"]:
+        write_failure(
+            args.output,
+            base_payload,
+            "native_reference_second_changed_input_graph",
+            graph_check2,
+        )
+
+    # Capture with the original input, then mutate all inputs before replay.
+    changed_static_res, changed_static_blk, changed_static_inj = (
+        res.clone(),
+        blk.clone(),
+        inj.clone(),
+    )
+    candidate_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(candidate_graph):
+        captured_candidate = candidate(
+            changed_static_res, changed_static_blk, changed_static_inj
+        )
+    torch.cuda.synchronize()
+    changed_static_res.copy_(changed_res)
+    changed_static_blk.copy_(changed_blk)
+    changed_static_inj.copy_(changed_inj)
+    candidate_graph.replay()
+    torch.cuda.synchronize()
+    err = candidate_check_error().cpu().tolist()
+    candidate_graph_check = output_diagnostics(
+        captured_candidate, changed_expected, torch
+    )
+    changed_mono_ids, changed_mono_weights = candidate_read_routes(args.rows)
+    changed_native_ids, changed_native_weights = changed_native_routes
+    changed_ids_equal = torch.equal(
+        changed_mono_ids.sort(dim=1).values,
+        changed_native_ids.sort(dim=1).values,
+    )
+    if err[0] != 0:
+        write_failure(
+            args.output,
+            base_payload,
+            "changed_input_sticky_error",
+            {
+                "error_record": err,
+                "output_check": candidate_graph_check,
+                "mono_ids": changed_mono_ids.cpu().tolist(),
+                "native_ids": changed_native_ids.cpu().tolist(),
+                "ids_equal_by_expert": changed_ids_equal,
+            },
+        )
+    if not candidate_graph_check["passed"]:
+        write_failure(
+            args.output,
+            base_payload,
+            "candidate_changed_input_graph",
+            {
+                "output_check": candidate_graph_check,
+                "mono_ids": changed_mono_ids.cpu().tolist(),
+                "native_ids": changed_native_ids.cpu().tolist(),
+                "ids_equal_by_expert": changed_ids_equal,
+            },
+        )
+    changed_static_res.copy_(changed2_res)
+    changed_static_blk.copy_(changed2_blk)
+    changed_static_inj.copy_(changed2_inj)
+    candidate_graph.replay()
+    torch.cuda.synchronize()
+    err = candidate_check_error().cpu().tolist()
+    candidate_graph_check2 = output_diagnostics(
+        captured_candidate, changed2_expected, torch
+    )
+    changed2_mono_ids, changed2_mono_weights = candidate_read_routes(args.rows)
+    changed2_native_ids, changed2_native_weights = changed2_native_routes
+    changed2_ids_equal = torch.equal(
+        changed2_mono_ids.sort(dim=1).values,
+        changed2_native_ids.sort(dim=1).values,
+    )
+    if err[0] != 0:
+        write_failure(
+            args.output,
+            base_payload,
+            "second_changed_input_sticky_error",
+            {
+                "error_record": err,
+                "output_check": candidate_graph_check2,
+                "mono_ids": changed2_mono_ids.cpu().tolist(),
+                "native_ids": changed2_native_ids.cpu().tolist(),
+                "ids_equal_by_expert": changed2_ids_equal,
+            },
+        )
+    if not candidate_graph_check2["passed"]:
+        write_failure(
+            args.output,
+            base_payload,
+            "candidate_second_changed_input_graph",
+            {
+                "output_check": candidate_graph_check2,
+                "mono_ids": changed2_mono_ids.cpu().tolist(),
+                "native_ids": changed2_native_ids.cpu().tolist(),
+                "ids_equal_by_expert": changed2_ids_equal,
+            },
+        )
+    changed_ids_equal = torch.equal(
+        changed_mono_ids.sort(dim=1).values, changed_native_ids.sort(dim=1).values
+    )
+    if not changed_ids_equal:
+        write_failure(
+            args.output,
+            base_payload,
+            "changed_input_topk_ids",
+            {
+                "mono_ids": changed_mono_ids.cpu().tolist(),
+                "native_ids": changed_native_ids.cpu().tolist(),
+            },
+        )
+    changed_weight_error = None
+    if changed_mono_weights is not None and changed_ids_equal:
+        _, changed_mono_sorted_weights = route_by_expert(
+            changed_mono_ids, changed_mono_weights
+        )
+        _, changed_native_sorted_weights = route_by_expert(
+            changed_native_ids, changed_native_weights
+        )
+        changed_weight_error = float(
+            (changed_mono_sorted_weights - changed_native_sorted_weights)
+            .abs()
+            .max()
+            .item()
+        )
+        if changed_weight_error >= TOL:
+            write_failure(
+                args.output,
+                base_payload,
+                "changed_input_topk_weights",
+                {
+                    "max_abs_error": changed_weight_error,
+                    "mono_weights": changed_mono_weights.cpu().tolist(),
+                    "native_weights": changed_native_weights.cpu().tolist(),
+                    "tolerance": TOL,
+                },
+            )
+    if torch.equal(ref_ids.sort(dim=1).values, changed_native_ids.sort(dim=1).values):
+        write_failure(
+            args.output,
+            base_payload,
+            "changed_input_route_was_not_changed",
+            {
+                "initial_native_ids": ref_ids.cpu().tolist(),
+                "changed_native_ids": changed_native_ids.cpu().tolist(),
+            },
+        )
+    changed2_ids_equal = torch.equal(
+        changed2_mono_ids.sort(dim=1).values,
+        changed2_native_ids.sort(dim=1).values,
+    )
+    changed2_weight_error = None
+    if changed2_mono_weights is not None and changed2_ids_equal:
+        _, mono_sorted = route_by_expert(changed2_mono_ids, changed2_mono_weights)
+        _, native_sorted = route_by_expert(changed2_native_ids, changed2_native_weights)
+        changed2_weight_error = float((mono_sorted - native_sorted).abs().max().item())
+    if not changed2_ids_equal or (
+        changed2_weight_error is not None and changed2_weight_error >= TOL
+    ):
+        write_failure(
+            args.output,
+            base_payload,
+            "second_changed_input_topk_parity",
+            {
+                "ids_equal_by_expert": changed2_ids_equal,
+                "weights_max_abs_error_by_expert": changed2_weight_error,
+                "tolerance": TOL,
+            },
+        )
+
+    # Time both complete local FFN paths with HIP events on the same stream.
+    for _ in range(args.warmup):
+        reference(res, blk, inj)
+        candidate(res, blk, inj)
+    torch.cuda.synchronize()
+    ref_samples, candidate_samples = [], []
+
+    def timed_candidate_call(sample_index: int) -> float:
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        stream = torch.cuda.current_stream()
+        start.record(stream)
+        try:
+            result = candidate(res, blk, inj)
+            end.record(stream)
+            end.synchronize()
+        except Exception as exc:
+            write_failure(
+                args.output,
+                base_payload,
+                "timed_candidate_exception",
+                {
+                    "sample_index": sample_index,
+                    "exception": repr(exc),
+                    "prior_candidate_samples_ms": list(candidate_samples),
+                },
+            )
+        elapsed_ms = float(start.elapsed_time(end))
+        torch.cuda.synchronize()
+        error = candidate_check_error().cpu().tolist()
+        output = output_diagnostics(result, reference_out, torch)
+        ids, weights = candidate_read_routes(args.rows)
+        ids_equal = torch.equal(ids.sort(dim=1).values, ref_ids.sort(dim=1).values)
+        weight_error_timed = None
+        if weights is not None and ids_equal:
+            _, mono_w = route_by_expert(ids, weights)
+            _, native_w = route_by_expert(ref_ids, ref_tw)
+            weight_error_timed = float((mono_w - native_w).abs().max().item())
+        if (
+            error[0] != 0
+            or not output["passed"]
+            or not ids_equal
+            or (weight_error_timed is not None and weight_error_timed >= TOL)
+        ):
+            write_failure(
+                args.output,
+                base_payload,
+                "timed_candidate_correctness",
+                {
+                    "sample_index": sample_index,
+                    "elapsed_ms": elapsed_ms,
+                    "error_record": error,
+                    "output_check": output,
+                    "mono_ids": ids.cpu().tolist(),
+                    "native_ids": ref_ids.cpu().tolist(),
+                    "mono_weights": weights.cpu().tolist()
+                    if weights is not None
+                    else None,
+                    "native_weights": ref_tw.cpu().tolist(),
+                    "ids_equal_by_expert": ids_equal,
+                    "weights_max_abs_error_by_expert": weight_error_timed,
+                    "prior_candidate_samples_ms": list(candidate_samples),
+                },
+            )
+        return elapsed_ms
+
+    for i in range(args.iters):
+        if i % 2 == 0:
+            ref_samples.append(event_ms(lambda: reference(res, blk, inj), torch))
+            candidate_samples.append(timed_candidate_call(len(candidate_samples)))
+        else:
+            candidate_samples.append(timed_candidate_call(len(candidate_samples)))
+            ref_samples.append(event_ms(lambda: reference(res, blk, inj), torch))
+
+    # Re-run every strict correctness gate after timing so a timed failure or
+    # stale workspace cannot be hidden by the earlier pre-timing check.
+    final_reference, final_routes = reference(res, blk, inj)
+    final_candidate = candidate(res, blk, inj)
+    torch.cuda.synchronize()
+    final_error = candidate_check_error().cpu().tolist()
+    if final_error[0] != 0:
+        write_failure(
+            args.output, base_payload, "post_timing_sticky_error", final_error
+        )
+    final_output_check = output_diagnostics(final_candidate, final_reference, torch)
+    if not final_output_check["passed"]:
+        write_failure(
+            args.output, base_payload, "post_timing_output_parity", final_output_check
+        )
+    final_mono_ids, final_mono_weights = candidate_read_routes(args.rows)
+    final_native_ids, final_native_weights = final_routes
+    final_ids_equal = torch.equal(
+        final_mono_ids.sort(dim=1).values, final_native_ids.sort(dim=1).values
+    )
+    final_weight_error = None
+    if final_mono_weights is not None and final_ids_equal:
+        _, final_mono_sorted_weights = route_by_expert(
+            final_mono_ids, final_mono_weights
+        )
+        _, final_native_sorted_weights = route_by_expert(
+            final_native_ids, final_native_weights
+        )
+        final_weight_error = float(
+            (final_mono_sorted_weights - final_native_sorted_weights).abs().max().item()
+        )
+    if not final_ids_equal or (
+        final_weight_error is not None and final_weight_error >= TOL
+    ):
+        write_failure(
+            args.output,
+            base_payload,
+            "post_timing_topk_parity",
+            {
+                "ids_equal_by_expert": final_ids_equal,
+                "weights_max_abs_error_by_expert": final_weight_error,
+                "tolerance": TOL,
+            },
+        )
+
+    payload = {
+        "status": "PASS",
+        "schema": "actual-rdna2-dense-mtp-reference-v1",
+        "gpu": gpu,
+        "gpu_selector_alias_normalization": selector_aliases,
+        "device_arch": arch,
+        "fixture": "synthetic existing dense-MTP random FP16 fixture",
+        "fixture_seed": args.seed,
+        "rows": args.rows,
+        "native_backend": "Rdna2UnquantizedExperts / RDNA2 HIP ops",
+        "native_expert_source": str(native_source),
+        "native_expert_source_sha256": actual_source_sha,
+        "loaded_core": str(core_path),
+        "loaded_core_sha256": actual_core_sha,
+        "candidate": args.candidate or "installed k2.run",
+        "candidate_source": str(args.candidate_source.resolve())
+        if args.candidate_source
+        else None,
+        "candidate_source_sha256": candidate_source_sha,
+        "candidate_binary": str(args.candidate_binary.resolve())
+        if args.candidate_binary
+        else None,
+        "candidate_binary_sha256": candidate_binary_sha,
+        "loaded_candidate_binary": loaded_candidate_binary,
+        "module_reference": {
+            "router_logits_dtype": "float16",
+            "gate_up_activation": "native RDNA2 HIP fused op; FP32 reduction then one FP16 act store",
+            "down": "native RDNA2 HIP op includes router weight before per-slot FP16 store",
+            "slot_sum": "_custom_ops.moe_sum; FP32 sum in fused_topk-returned slot order then FP16 store",
+            "shared_combine": "FP16 shared + FP16 routed at MoERunner._finalize local combine point",
+            "all_reduce": "omitted; rank-local partial comparison",
+        },
+        "topk_check": topk_check,
+        "eager_output_check": output_check,
+        "native_reference_graph_changed_input_check": graph_check,
+        "candidate_graph_changed_input_check": candidate_graph_check,
+        "native_reference_graph_second_changed_input_check": graph_check2,
+        "candidate_graph_second_changed_input_check": candidate_graph_check2,
+        "changed_input_topk_ids_equal_by_expert": changed_ids_equal,
+        "changed_input_topk_weights_max_abs_error_by_expert": changed_weight_error,
+        "second_changed_input_topk_ids_equal_by_expert": changed2_ids_equal,
+        "second_changed_input_topk_weights_max_abs_error_by_expert": changed2_weight_error,
+        "candidate_error_record": err,
+        "post_timing_error_record": final_error,
+        "post_timing_output_check": final_output_check,
+        "post_timing_topk_check": {
+            "ids_equal_by_expert": final_ids_equal,
+            "weights_max_abs_error_by_expert": final_weight_error,
+            "tolerance": TOL,
+        },
+        "timing_ms": {
+            "native_actual_module": {
+                "samples": ref_samples,
+                "median": statistics.median(ref_samples),
+                "mean": statistics.mean(ref_samples),
+            },
+            "candidate_mono": {
+                "samples": candidate_samples,
+                "median": statistics.median(candidate_samples),
+                "mean": statistics.mean(candidate_samples),
+            },
+        },
+        "notes": [
+            "Output comparison is strict for every row; no router-near-tie masking is applied.",
+            "Top-k sets/weights are compared by expert ID; both observed slot orders are recorded and full FFN parity remains strict.",
+            "Synthetic fixture is diagnostic only and has no model/checkpoint provenance.",
+            "Post-timing eager output, route, finite, and zero-error gates are rerun.",
+            "Zero-error record is not a sticky-timeout retry test; use the separate direct-op fault harness for that guarantee.",
+        ],
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("x", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

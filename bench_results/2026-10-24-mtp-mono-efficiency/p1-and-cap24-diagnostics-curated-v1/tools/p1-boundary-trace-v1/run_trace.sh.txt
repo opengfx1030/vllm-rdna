@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Parent-run only after disposable CPU build and existing GPU owner release.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+SRC=${SOURCE_ROOT:-$BASE/dense-mtp-failstop-healthy-tree-v1}
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+CORE_SHA=6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed
+TEST_SHA=f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7
+HC_SHA=a01bf43fe5563cff8ab3d26086cb293bf1130878d494870b6a4bcf65e556880e
+CHECK="$BASE/reserved-gpu-owner-v2/check_reserved_gpu_v2.py"
+CHECK_SHA=6c5345b98a52ffd8b572e657861f512b66e932c31ef9a0edde4a434d8df83d84
+JOURNAL="$BASE/dense-mtp-failstop-serving-stage-v3/kernel_journal_v2.py"
+VERIFY="$BASE/dense-mtp-failstop-serving-stage-v1/verify_overlay.py"
+[[ $# == 2 ]] || { echo 'usage: run_trace.sh FRESH_OUT_UNDER_EVIDENCE_BASE TRACE_BUILD_MANIFEST' >&2; exit 2; }
+OUT=$(realpath -m "$1")
+BUILD=$(realpath -e "$2")
+[[ $(hostname) == par1-cs25 && $OUT == "$BASE/"* && ! -e $OUT ]]
+[[ $(sha256sum "$CHECK" | awk '{print $1}') == "$CHECK_SHA" ]]
+[[ $(sha256sum "$SRC/vllm/_rocm_C.abi3.so" | awk '{print $1}') == "$CORE_SHA" ]]
+[[ $(sha256sum "$SRC/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py" | awk '{print $1}') == "$TEST_SHA" ]]
+[[ $(sha256sum "$SRC/csrc/rocm/hc_rdna2.cu" | awk '{print $1}') == "$HC_SHA" ]]
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -w 90 9
+mkdir "$OUT"
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES=6 GPU_MAX_HW_QUEUES=4
+export VLLM_SOURCE_ROOT="$SRC" PYTHONPATH="$SRC"
+export VLLM_ROCM_USE_AITER=0 VLLM_RDNA2_MOE_FP32_ACCUM=0 VLLM_RDNA_HC_PREFILL_HIP=1
+export ROCM_HOME=/opt/rocm/core-7.14 ROCM_PATH=/opt/rocm/core-7.14 HIP_PATH=/opt/rocm/core-7.14
+export PATH=/opt/rocm/core-7.14/bin:$VENV/bin:$PATH
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export PYTORCH_TUNABLEOP_TUNING=0 TUNEOP_REQUIRE_HASH_ROWS=1
+source "$SRC/tools/rdna2_028/tunableop_env.sh"
+configure_tunableop "$SDK_LIB/librocblas.so.5" "$SRC/tunableop"
+INPUTS=("$HERE/run_trace.sh" "$HERE/check_runtime.py" "$HERE/generate.py" "$HERE/compile_cpu_only.py" "$HERE/test_cpu.py" "$HERE/source_manifest.json" "$HERE/generated/native_trace.cu" "$HERE/generated/native_binding.cpp" "$HERE/generated/global_trace.cu" "$HERE/generated/global_binding.cpp" "$BUILD" "$CHECK" "$JOURNAL" "$VERIFY" "$SRC/vllm/_rocm_C.abi3.so" "$SRC/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py" "$SRC/csrc/rocm/hc_rdna2.cu" "$BASE/full-m-router-half-pair-v1-build/0-build.json" "$BASE/full-m-router-half-pair-v2-continue/1-build.json")
+sha256sum "${INPUTS[@]}" > "$OUT/inputs.before"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.before"
+finish() {
+  rc=$?
+  set +e
+  "$VENV/bin/python" -S "$JOURNAL" check --before "$OUT/kernel.before.json" --after "$OUT/kernel.after.json" > "$OUT/kernel.check.txt" 2>&1 || rc=1
+  "$VENV/bin/python" -S "$CHECK" > "$OUT/gpu-owners.after.json" 2> "$OUT/gpu-owners.after.err" || rc=1
+  sha256sum "${INPUTS[@]}" > "$OUT/inputs.after"
+  cat /proc/sys/kernel/random/boot_id > "$OUT/boot.after"
+  cmp "$OUT/inputs.before" "$OUT/inputs.after" || rc=1
+  cmp "$OUT/boot.before" "$OUT/boot.after" || rc=1
+  "$VENV/bin/python" -S "$VERIFY" --tree "$SRC" --source-tree "$BASE/correctness-core-v1-serve-tree-v2" --candidate-core-sha256 "$CORE_SHA" --mode healthy > "$OUT/overlay.after" || rc=1
+  printf '%s\n' "$rc" > "$OUT/exit-status.txt"
+  exit "$rc"
+}
+trap finish EXIT
+"$VENV/bin/python" -S "$CHECK" > "$OUT/gpu-owners.before.json" 2> "$OUT/gpu-owners.before.err"
+"$VENV/bin/python" -S "$JOURNAL" snapshot --before "$OUT/kernel.before.json"
+"$VENV/bin/python" -S "$VERIFY" --tree "$SRC" --source-tree "$BASE/correctness-core-v1-serve-tree-v2" --candidate-core-sha256 "$CORE_SHA" --mode healthy > "$OUT/overlay.before"
+cd /tmp
+timeout -k 10 300 "$VENV/bin/python" "$HERE/check_runtime.py" \
+  --repo-root "$SRC" --trace-build-manifest "$BUILD" \
+  --output "$OUT/result.json" > "$OUT/runtime.log" 2>&1

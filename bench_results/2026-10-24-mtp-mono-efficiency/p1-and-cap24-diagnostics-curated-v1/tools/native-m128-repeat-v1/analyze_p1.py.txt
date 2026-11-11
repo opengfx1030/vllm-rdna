@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Offline FP32-order simulation for row104 stream0; report parity, never waive gates."""
+
+import argparse
+import json
+import math
+import struct
+from pathlib import Path
+
+
+def f32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def add(a: float, b: float) -> float:
+    return f32(a + b)
+
+
+def mul(a: float, b: float) -> float:
+    return f32(a * b)
+
+
+def half(bit: int) -> float:
+    return struct.unpack("<e", struct.pack("<H", bit & 0xFFFF))[0]
+
+
+def half_bit(value: float) -> int:
+    return struct.unpack("<H", struct.pack("<e", value))[0]
+
+
+def down_wave(values: list[float]) -> float:
+    assert len(values) == 32
+    for off in (16, 8, 4, 2, 1):
+        old = values
+        values = [add(v, old[i + off]) if i + off < 32 else v
+                  for i, v in enumerate(old)]
+    return values[0]
+
+
+def xor_wave(values: list[float]) -> float:
+    assert len(values) == 32
+    for off in (16, 8, 4, 2, 1):
+        old = values
+        values = [add(v, old[i ^ off]) for i, v in enumerate(old)]
+    return values[0]
+
+
+def native_sum(xs: list[float]) -> float:
+    assert len(xs) == 2560
+    logical = []
+    for lane in range(320):
+        acc = f32(0.0)
+        for u in range(4):
+            i = lane * 8 + u * 2
+            pair = add(mul(xs[i], xs[i]), mul(xs[i + 1], xs[i + 1]))
+            acc = add(acc, pair)
+        logical.append(acc)
+    waves = [down_wave(logical[i:i + 32]) for i in range(0, 320, 32)]
+    return down_wave(waves + [f32(0.0)] * 22)
+
+
+def mono_sum(xs: list[float]) -> float:
+    assert len(xs) == 2560
+    physical = []
+    for tid in range(256):
+        acc = f32(0.0)
+        for i in range(tid, 2560, 256):
+            acc = add(acc, mul(xs[i], xs[i]))
+        physical.append(acc)
+    waves = [xor_wave(physical[i:i + 32]) for i in range(0, 256, 32)]
+    total = f32(0.0)
+    for wave in waves:
+        total = add(total, wave)
+    return total
+
+
+def predict(xs: list[float], ws: list[float], total: float) -> list[int]:
+    # stdlib sqrt approximates device rsqrtf; exact output parity is required
+    # before interpreting a simulated sum as the source of a half difference.
+    rrms = f32(1.0 / math.sqrt(add(f32(total / 2560), f32(1e-6))))
+    result = []
+    for x, w in zip(xs, ws):
+        lo = mul(x, rrms)
+        result.append(half_bit(add(lo, mul(lo, w))))
+    return result
+
+
+def search_effective_rrms(xs: list[float], ws: list[float], actual: list[int],
+                          base_total: float) -> dict:
+    """Infer output-compatible rrms/contract mode; not a device sum measurement."""
+    base = f32(1.0 / math.sqrt(add(f32(base_total / 2560), f32(1e-6))))
+    base_bits = struct.unpack("<I", struct.pack("<f", base))[0]
+    fits = []
+    best = None
+    for delta in range(-32, 33):
+        rrms = struct.unpack("<f", struct.pack("<I", base_bits + delta))[0]
+        for mode in ("separate", "fma"):
+            wrong = 0
+            for x, w, bit in zip(xs, ws, actual):
+                lo = mul(x, rrms)
+                value = (add(lo, mul(lo, w)) if mode == "separate"
+                         else f32(math.fma(lo, w, lo)))
+                wrong += half_bit(value) != (bit & 0xFFFF)
+            candidate = {"delta_f32_ulp": delta, "rrms": rrms,
+                         "contract": mode, "mismatch_count": wrong}
+            if wrong == 0:
+                fits.append(candidate)
+            if best is None or wrong < best["mismatch_count"]:
+                best = candidate
+    return {"base_rrms": base, "exact_fits": fits, "best": best,
+            "scope": "output-compatible inference only; no device sum/rsqrt read"}
+
+
+def comparison(actual: list[int], predicted: list[int]) -> dict:
+    wrong = [i for i, (a, p) in enumerate(zip(actual, predicted))
+             if (a & 0xFFFF) != p]
+    return {"exact": not wrong, "mismatch_count": len(wrong),
+            "first_mismatch_indices": wrong[:16], "index1690_actual": half(actual[1690]),
+            "index1690_predicted": half(predicted[1690])}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repeat-result", type=Path, required=True)
+    parser.add_argument("--v2-snapshot", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.output.exists():
+        raise FileExistsError(args.output)
+    repeat = json.loads(args.repeat_result.read_text())
+    snap = json.loads(args.v2_snapshot.read_text())
+    if (repeat.get("status") != "COMPLETE" or not repeat.get("routes_stable")
+            or snap.get("seed") != 250252):
+        raise RuntimeError("native repeat incomplete/unstable or wrong seed")
+    payload = repeat["row104_stream0_p1"]
+    resbits = payload["res_out_fp16_bits_int16"]
+    wbits = payload["norm_weight_fp16_bits_int16"]
+    native_new = payload["native_xn_fp16_bits_int16"]
+    native_old = snap["snapshots"]["native"]["xn"]["values"][104][:2560]
+    mono_old = snap["snapshots"]["candidate"]["xn"]["values"][104][:2560]
+    if not (len(resbits) == len(wbits) == len(native_new) == 2560):
+        raise RuntimeError("wrong P1 row width")
+    native_across_boot = comparison(native_old, [x & 0xFFFF for x in native_new])
+    xs = [half(x) for x in resbits]
+    ws = [half(w) for w in wbits]
+    nsum, msum = native_sum(xs), mono_sum(xs)
+    n_pred, m_pred = predict(xs, ws, nsum), predict(xs, ws, msum)
+    result = {
+        "scope": "CPU FP32-order model; not device FP32 intermediate measurement",
+        "source_repeat": str(args.repeat_result),
+        "source_v2_snapshot": str(args.v2_snapshot),
+        "native_xn_across_runs": native_across_boot,
+        "native_sum_simulated": nsum,
+        "mono_sum_simulated": msum,
+        "sum_difference_simulated": msum - nsum,
+        "native_output_vs_simulation": comparison(native_new, n_pred),
+        "mono_output_vs_simulation": comparison(mono_old, m_pred),
+        "row104_index1690": {
+            "native_actual": half(native_new[1690]),
+            "mono_actual": half(mono_old[1690]),
+            "native_simulated": half(n_pred[1690]),
+            "mono_simulated": half(m_pred[1690]),
+        },
+        "native_effective_rrms_search": search_effective_rrms(
+            xs, ws, native_new, nsum),
+        "mono_effective_rrms_search": search_effective_rrms(
+            xs, ws, mono_old, msum),
+    }
+    result["reduction_order_explains_observed_output"] = (
+        native_across_boot["exact"]
+        and result["native_output_vs_simulation"]["exact"]
+        and result["mono_output_vs_simulation"]["exact"]
+        and nsum != msum
+    )
+    args.output.write_text(json.dumps(result, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()

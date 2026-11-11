@@ -41,10 +41,13 @@ logger = init_logger(__name__)
 # W4A8 (int4 weights, int8 activations) MoE opt-in. Default OFF; resolved once
 # at weight-load time so the traced forward only reads a Python bool.
 W4A8_MOE_ENV_VAR = "VLLM_RDNA2_W4A8_SDOT4"
+# W4A8 is prefill-only: below this many tokens the W4A16 kernel is as fast or
+# faster (V620, Flash-Next per-rank shapes, tools/rdna/bench_moe_w4a8.py:
+# 0.94x at 256, 1.00x at 512, 1.24x at 1024, 1.38x at 2048, 1.43x at 4096).
+W4A8_MOE_MIN_TOKENS = 512
 
 # moe_gptq_gemm_rdna2 supports block_size_m in {1, 2, 4, 8} (the kernel's
-# TORCH_CHECK). The pre-allocated routing buffers must be large enough for the
-# worst case, so size them for the kernel's maximum.
+# TORCH_CHECK).
 _MAX_BLOCK_SIZE_M = 8
 
 # Overflow tile width for the MoE prefill path. The decode-shaped default caps
@@ -172,33 +175,6 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         output = (M, K)
         return (workspace1, workspace2, output)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        self.w13_weight_scale = layer.w13_weight_scale
-        self.w13_qzeros = getattr(layer, "w13_qzeros", None)
-        if self.w13_qzeros is None:
-            self.w13_qzeros = getattr(layer, "w13_weight_scale_zeros", None)
-        self.w2_weight_scale = layer.w2_weight_scale
-        self.w2_qzeros = getattr(layer, "w2_qzeros", None)
-        if self.w2_qzeros is None:
-            self.w2_qzeros = getattr(layer, "w2_weight_scale_zeros", None)
-        device = layer.w13_weight_scale.device
-        self._empty_tw = torch.empty(0, device=device)
-        self._topk_w_buf = torch.empty(
-            layer.moe_config.max_num_tokens * layer.top_k,
-            dtype=torch.float32,
-            device=device,
-        )
-        max_tokens = layer.moe_config.max_num_tokens * layer.top_k
-        max_padded = max_tokens + layer.moe_config.num_experts * (_MAX_BLOCK_SIZE_M - 1)
-        self._sorted_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
-        self._expert_ids = torch.empty(
-            (max_padded + _MAX_BLOCK_SIZE_M - 1) // _MAX_BLOCK_SIZE_M,
-            dtype=torch.int32,
-            device=device,
-        )
-        self._num_tokens_post_pad = torch.empty((1,), dtype=torch.int32, device=device)
-        self._w4a8 = resolve_w4a8_moe()
-
     def apply(
         self,
         output: torch.Tensor,
@@ -248,6 +224,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         w2_qzeros = self.w2_zp
         if not hasattr(self, "_w4a8"):
             self._w4a8 = resolve_w4a8_moe()
+        w4a8 = self._w4a8 and num_tokens >= W4A8_MOE_MIN_TOKENS
 
         total_tokens = num_tokens * top_k
         if total_tokens <= workspace13.shape[0] and N_gate_up <= workspace13.shape[1]:
@@ -263,7 +240,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
 
         topk_w_buf = topk_weights.reshape(-1).float()
         empty_tw = topk_w_buf.new_empty(0)
-        if getattr(self, "_w4a8", False):
+        if w4a8:
             ops.moe_w4a8_gemm_rdna2(
                 hidden_states,
                 w1_out,
@@ -308,7 +285,7 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
                 output.shape, dtype=torch.float16, device=output.device
             )
         out_buf.zero_()
-        if getattr(self, "_w4a8", False):
+        if w4a8:
             ops.moe_w4a8_gemm_rdna2(
                 activated,
                 out_buf,

@@ -1,0 +1,54 @@
+{
+  "scope": "CPU only; no compile, GPU, SSH",
+  "checks": {
+    "v2": {
+      "all_pass": true,
+      "source_normalizes_exactly_to_frozen_v1": true,
+      "binding_normalizes_exactly_to_frozen_v1": true,
+      "barriers_launches_and_poison_unchanged": true,
+      "old_namespace_and_AR_stub_absent": true,
+      "all_nonstatic_global_mono_exports_unique": [
+        "mono_k2_rdna2_dense_native_round_v2_workspace_bytes",
+        "mono_k2_rdna2_dense_native_round_v2_set_ar",
+        "mono_k2_rdna2_dense_native_round_v2",
+        "mono_k2_rdna2_dense_native_round_v2_e1a",
+        "mono_k1_rdna2_dense_native_round_v2",
+        "mono_k2_rdna2_dense_native_round_v2_phase_ts",
+        "mono_k2_rdna2_dense_native_round_v2_topk",
+        "mono_k2_rdna2_dense_native_round_v2_mark",
+        "mono_k2_rdna2_dense_native_round_v2_workspace_alloc",
+        "mono_k2_rdna2_dense_native_round_v2_mem_flags",
+        "mono_k2_rdna2_dense_native_round_v2_error"
+      ],
+      "FP16_boundary_collision_model": "PASS",
+      "source_sha256": "28356022f2ca23c667c70fc0712cef300fcdfa16b0dc1c8a23626b2cc413efa8",
+      "unqualified": true
+    },
+    "inherited_v1": {
+      "all_pass": true,
+      "source_normalization_byte_identical": true,
+      "barriers_ABI_layout_unchanged": true,
+      "rank_cases": 1000,
+      "gu_capacity_bytes": 2457600,
+      "max_half_slot_bytes": 1228800,
+      "healthy_changed_routing_and_dense_reset_zeroing": true,
+      "source_sha256": "dc92441d0ed68766de636c987ab34ab12e0a4997febdc0f949aea437fbbcb266",
+      "limitation": "CPU lifetime model only; no GPU/native numerical, compiler-resource, serving, arbitrary cross-mode failed-reset or all-phase fault claim"
+    }
+  },
+  "ruff_format_and_check": "PASS",
+  "syntax": "PASS",
+  "files": {
+    "mono_k2_dense_native_rounding.frozen-v1.cu": "dc92441d0ed68766de636c987ab34ab12e0a4997febdc0f949aea437fbbcb266",
+    "safety_prebuilt.py": "c7ec25c676a7aeb11d6fe448b8859fbc6ed5b4173cf6537b035bc2f9912083df",
+    "mono_k2_dense_native_rounding.cu": "28356022f2ca23c667c70fc0712cef300fcdfa16b0dc1c8a23626b2cc413efa8",
+    "dense_round_adapter.py": "13de50aa4101cc3ab9c4a51009da1401bf592e8101accc79a9f8f9b98de7c165",
+    "generate_v2.py": "53c68a273383f7fe7d6c6c367e79202288d5517d8f0a0d99464091e89268ba54",
+    "binding.cpp": "e3c943636b36f1e113edb6c5611cc147da1791c2f5f439a2f144eb1c66ddae43",
+    "compile_dense_native_rounding.py": "50cd849d902fdeecf4f57bc34a2da607b56a9879cea9f445d6e3d0ca022f40d2",
+    "run_actual_reference.py": "e344ec983068dfe0f69cb673a27b21c8a07d24689aa0496210cf6e55517ecad4",
+    "static_check_v2.py": "c6583de287edde1adb5748fb4229354d7a986b3397f0251e5e635a0c028e56d1",
+    "binding.frozen-v1.cpp": "69fc9498d8b1c2432f68cd892f29aaad0e3cc948f3d3a1291bce2d951e1ef059"
+  },
+  "unqualified": true
+}

@@ -1,0 +1,63 @@
+[18:52:59] boot TREE=/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=6,7 PORT=18766 overrides=TP=2 PLE=int4 PLE_QUANT_DIR=/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4 GMEM=0.92 MAXLEN=32768 MAXBAT=4096 SEQS=8 bench_extra=--temperature 0 --random-range-ratio 0.0 --save-detailed
+[18:59:04] READY in 360s served=flash-next
+[18:59:14] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=' Berlin, which is also the largest city in the country. It is one of the 16 German federal states and is the third most populous city in the European Union. Berlin is a major cultural, political, and scientific center, and'
+RESULT PASS (3/3)
+[18:59:27] PPL PROBE PASS
+    PPL 4.79 (mean NLL 1.567 over 261 tokens) PASS
+    ok      'The history of the printing press begins' -> ' with the invention of the movable type printing press in China, where the first printed book was published in 868. This early form of printing, known as woodblock printing, was used in China as early as the 7th century and spread to other East Asian countries. The oldest known printed book, the'
+    ok      'Here is a short recipe for vegetable soup:' -> '\n\n<think>\nThe user seems to be starting a message about a vegetable soup recipe but hasn\'t actually asked a question or made a complete request. They\'ve written "Here is a short recipe for vegetable soup:" which suggests they might be about to share a recipe, or they might want me to provide one. Since the'
+    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational concept necessary for understanding primality. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive'
+    RESULT PASS
+[18:59:49] PREFIX PASS
+    cold TTFT 12.34 s, warm TTFT 2.31 s, speedup 5.3x -> PASS
+    cold text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "ker'
+    warm text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "ker'
+[19:00:20] warmup rc=0 in 31s (sizes default); slowest:
+    decode batch 6:   3.42 s
+    decode batch 8:   3.32 s
+    decode batch 7:   3.32 s
+[19:02:50] CONCURRENCY PASS
+    WARN churn    (8, 0)   prompt 0: soft token 2/16: margin 0.758, continuation mean lp -0.55 vs solo -0.24
+    WARN churn    (11, 1)  prompt 1: near-tie token 18/64: margin 0.141, continuation mean lp -0.27 vs solo -0.24
+    WARN churn    (13, 7)  prompt 7: near-tie token 39/40: margin 0.078, continuation mean lp -1.56 vs solo -1.57
+    WARN churn    (14, 2)  prompt 2: near-tie token 43/48: margin 0.156, continuation mean lp -0.22 vs solo -0.15
+    WARN long     0        prompt 0: near-tie token 46/64: margin 0.016, continuation mean lp -0.20 vs solo -0.22
+    WARN long     1        prompt 1: soft token 43/64: margin 0.203, continuation mean lp -0.21 vs solo -0.25
+    WARN long     2        prompt 2: near-tie token 45/64: margin 0.172, continuation mean lp -0.21 vs solo -0.22
+    RESULT PASS: 0 failing, 13 near-tie, 4 soft, 0 solo-noise, 31 identical of 48 checks (143.7s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[19:02:57] PREFIX RESET PASS before bench-1024x512-c1
+[19:02:57] bench bench-1024x512-c1 (n=1)
+    bench-1024x512-c1            prefill    580.2 tok/s/req (agg   580.2) | decode  20.38 tok/s/req (agg out   19.08) | TTFT    1.77 s | ITL med   116.0 ms mean   120.0 ms | ok 1
+[19:04:03] PREFIX RESET PASS before bench-1024x512-c8
+[19:04:03] bench bench-1024x512-c8 (n=8)
+    bench-1024x512-c8            prefill    152.9 tok/s/req (agg   783.6) | decode   7.22 tok/s/req (agg out   48.15) | TTFT    6.70 s | ITL med   260.4 ms mean   265.4 ms | ok 8
+[19:06:17] PREFIX RESET PASS before bench-16384x1024-c1
+[19:06:17] bench bench-16384x1024-c1 (n=1)
+    bench-16384x1024-c1          prefill    972.6 tok/s/req (agg   972.6) | decode  34.33 tok/s/req (agg out   21.95) | TTFT   16.85 s | ITL med    73.8 ms mean    76.8 ms | ok 1
+[19:07:31] PREFIX RESET PASS before bench-16384x1024-c8
+[19:07:31] bench bench-16384x1024-c8 (n=8)
+    bench-16384x1024-c8          prefill    178.4 tok/s/req (agg   568.8) | decode   6.74 tok/s/req (agg out   27.28) | TTFT   91.85 s | ITL med   239.3 ms mean   321.7 ms | ok 8
+[19:13:06] PROBE-AFTER-LOAD PASS
+[19:13:06] markers:
+          2 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_method=Qwen4ExpPLEInt4EmbeddingMethod, we
+          1 WNA16 MoE backend.
+          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/2, devices [0, 1],
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/2, devices [0, 1],
+          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x
+          1 qwen_gdn_full_forward (opaque to inductor; projecti
+          1 Model loading took 20.98 GiB memory and 228.654653 seconds
+          1 Model loading took 20.98 GiB memory and 224.626825 seconds
+          1 GPU KV cache size: 138,022 tokens, Maximum concurrency fo
+[19:13:06] fault markers in serve.log: 0
+[19:13:06] new amdgpu dmesg faults: 0
+n/a
+[19:13:06] done

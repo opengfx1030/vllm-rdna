@@ -1,0 +1,44 @@
+{
+  "scope": "CPU resources only; no correctness/latency/serving gain claim",
+  "cpu_only": true,
+  "visible_gpu_count": 0,
+  "boot_before": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "boot_after": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "module": "mono_k2_global_quant_immutable_params_v1_20261024",
+  "source_sha256": "25ccb0ce897bf3734b9e03dbbf5057024dc5925d358a678b30c5f62c70f65e97",
+  "binding_sha256": "ea82f784ac0a65f821ae303261b025213d8fbe7572271cf9161b2793d5a59049",
+  "binary_sha256": "38a9b7710d30bfe93b8df384a8468b037f9376dffdbd788c037a586ff2e9a330",
+  "ninja_sha256": "57f46c0b065456dba7477e212d78633d5d0bf8ca5b0df3ffdba37876ece6486a",
+  "matched_O3_compile_link_flags": true,
+  "baseline": {
+    "group_segment_fixed_size": 30792,
+    "name": "_ZN33mono_ffn_global_quant_router_half30mono_ffn_kernel_global_chunkedILi48ELi8EEEvNS_6ParamsE",
+    "private_segment_fixed_size": 1920,
+    "sgpr_count": 107,
+    "sgpr_spill_count": 43,
+    "vgpr_count": 128,
+    "vgpr_spill_count": 204,
+    "wavefront_size": 32
+  },
+  "candidate": {
+    "group_segment_fixed_size": 30788,
+    "name": "_ZN50mono_ffn_global_quant_router_half_immutable_params30mono_ffn_kernel_global_chunkedILi48ELi8EEEvNS_6ParamsE",
+    "private_segment_fixed_size": 1312,
+    "sgpr_count": 107,
+    "sgpr_spill_count": 5,
+    "vgpr_count": 128,
+    "vgpr_spill_count": 200,
+    "wavefront_size": 32
+  },
+  "candidate_minus_baseline": {
+    "private_segment_fixed_size": -608,
+    "vgpr_count": 0,
+    "sgpr_count": 0,
+    "group_segment_fixed_size": -4,
+    "vgpr_spill_count": -4,
+    "sgpr_spill_count": -38
+  },
+  "runtime_performed": false,
+  "exit_status": "0",
+  "qualification_status": "GPU correctness and performance validation is blocked/pending; resource reduction alone is insufficient."
+}
