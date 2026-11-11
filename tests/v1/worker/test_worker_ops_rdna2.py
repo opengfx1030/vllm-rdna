@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bit-for-bit parity between the gfx1030 HIP ports and the Triton kernels for
+"""Bit-for-bit parity between the gfx1030/gfx1100 HIP ports and the Triton kernels for
 the v1 worker's per-step index/arithmetic ops:
 
   _gather_block_tables_kernel      (gpu/block_table.py)
@@ -16,18 +16,33 @@ not a tolerance.
 import pytest
 import torch
 
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna3
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import (
     _compute_slot_mappings_kernel,
     _gather_block_tables_kernel,
 )
-from vllm.v1.worker.gpu.buffer_utils import _apply_write_kernel
+from vllm.v1.worker.gpu.buffer_utils import (
+    _WRITE_BLOCK_SIZE,
+    _apply_write_kernel,
+    _num_write_chunks,
+)
 from vllm.v1.worker.utils import _zero_kv_blocks_kernel
 
 pytestmark = pytest.mark.skipif(
-    not (torch.cuda.is_available() and on_rdna2()),
-    reason="gfx10x (RDNA2) ROCm required",
+    not (
+        torch.cuda.is_available()
+        and (
+            on_rdna2()
+            or (
+                on_rdna3()
+                and hasattr(torch.ops._rocm_C, "gather_block_tables_rdna2")
+                and hasattr(torch.ops._rocm_C, "apply_write_rdna2")
+                and hasattr(torch.ops._rocm_C, "zero_kv_blocks_rdna2")
+            )
+        )
+    ),
+    reason="gfx10x (RDNA2) or gfx1100 (op built) ROCm required",
 )
 
 DEVICE = torch.device("cuda")
@@ -39,9 +54,18 @@ def hipptrs(tensors: list[torch.Tensor]) -> torch.Tensor:
     )
 
 
+def _gather_extras(num_groups):
+    """sliding_window_reach and block_sizes: any int32 tensors do while the sliding
+    window mask is off (BlockTables.gather_block_tables passes them the same way)."""
+    reach = torch.zeros(num_groups, dtype=torch.int32, device=DEVICE)
+    sizes = torch.full((num_groups,), 16, dtype=torch.int32, device=DEVICE)
+    return reach, sizes
+
+
 def triton_gather(
     idx_mapping, src_ptrs, dst_ptrs, strides, num_blocks, num_reqs, num_reqs_padded
 ):
+    reach, sizes = _gather_extras(src_ptrs.numel())
     _gather_block_tables_kernel[(src_ptrs.numel(), num_reqs_padded)](
         idx_mapping,
         src_ptrs,
@@ -50,6 +74,10 @@ def triton_gather(
         num_blocks,
         num_blocks.numel() // num_blocks.shape[0],
         num_reqs,
+        reach,  # num_computed_tokens: read only with the sliding window mask
+        reach,
+        sizes,
+        MASK_SLIDING_WINDOW=False,
         BLOCK_SIZE=1024,
     )
 
@@ -57,6 +85,7 @@ def triton_gather(
 def hip_gather(
     idx_mapping, src_ptrs, dst_ptrs, strides, num_blocks, num_reqs, num_reqs_padded
 ):
+    reach, sizes = _gather_extras(src_ptrs.numel())
     torch.ops._rocm_C.gather_block_tables_rdna2(
         idx_mapping,
         src_ptrs,
@@ -66,6 +95,10 @@ def hip_gather(
         num_blocks.stride(0),
         num_reqs,
         num_reqs_padded,
+        reach,
+        reach,
+        sizes,
+        False,
     )
 
 
@@ -87,18 +120,14 @@ def test_gather_block_tables_parity(num_groups, num_reqs, num_reqs_padded, width
     torch.manual_seed(num_groups * 1000 + width)
     strides = torch.full((num_groups,), width, dtype=torch.int64, device=DEVICE)
     # Some rows only partially filled; padded rows (>= num_reqs) must be zeroed.
-    num_blocks = torch.zeros(
-        (num_groups, num_reqs), dtype=torch.int32, device=DEVICE
-    )
+    num_blocks = torch.zeros((num_groups, num_reqs), dtype=torch.int32, device=DEVICE)
     for g in range(num_groups):
         num_blocks[g] = torch.randint(
             0, width + 1, (num_reqs,), dtype=torch.int32, device=DEVICE
         )
 
     src = [
-        torch.randint(
-            1, 1 << 20, (num_reqs, width), dtype=torch.int32, device=DEVICE
-        )
+        torch.randint(1, 1 << 20, (num_reqs, width), dtype=torch.int32, device=DEVICE)
         for _ in range(num_groups)
     ]
     dst_triton = [
@@ -231,7 +260,6 @@ def triton_slot(args, out, num_groups, num_reqs):
         args["block_table_ptrs"],
         args["block_table_strides"],
         args["block_sizes"],
-        args["kernel_block_sizes"],
         args["slot_mapping_enabled"],
         args["dcp_sharded"],
         out,
@@ -253,7 +281,6 @@ def hip_slot(args, out, num_groups, num_reqs):
         args["block_table_ptrs"],
         args["block_table_strides"],
         args["block_sizes"],
-        args["kernel_block_sizes"],
         args["slot_mapping_enabled"],
         args["dcp_sharded"],
         out,
@@ -361,9 +388,9 @@ def _apply_write_case(
             torch.arange(num_writes, dtype=torch.int32, device=DEVICE) // num_groups
         )
         if group_ids is None:
-            group_ids = torch.arange(
-                num_writes, dtype=torch.int32, device=DEVICE
-            ) % num_groups
+            group_ids = (
+                torch.arange(num_writes, dtype=torch.int32, device=DEVICE) % num_groups
+            )
     else:
         indices = torch.arange(num_writes, dtype=torch.int32, device=DEVICE)
     starts = torch.randint(
@@ -374,17 +401,26 @@ def _apply_write_case(
     ).to(DEVICE)
     if dtype == torch.float32:
         contents = contents.float()
-    cu_lens = torch.arange(
-        1, num_writes + 1, dtype=torch.int32, device=DEVICE
-    ) * content_len
+    cu_lens = (
+        torch.arange(1, num_writes + 1, dtype=torch.int32, device=DEVICE) * content_len
+    )
     if group_ids is None:
         group_ids = torch.arange(num_writes, dtype=torch.int32, device=DEVICE) % (
             num_groups
         )
 
+    # The exact result, from torch: a parity failure between the two kernels alone
+    # cannot say which side is wrong.
+    expected = [t.clone() for t in out]
+    for w in range(num_writes):
+        start = int(starts[w])
+        expected[int(group_ids[w])][int(indices[w]), start : start + content_len] = (
+            contents[w * content_len : (w + 1) * content_len]
+        )
+
     ref = [t.clone() for t in out]
     if multi_group:
-        _apply_write_kernel[(num_writes,)](
+        _apply_write_kernel[(num_writes, _num_write_chunks(content_len))](
             hipptrs(ref),
             torch.full((num_groups,), row_width, dtype=torch.int64, device=DEVICE),
             indices,
@@ -392,7 +428,7 @@ def _apply_write_case(
             contents,
             cu_lens,
             group_ids,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
             MULTI_GROUP=True,
         )
         torch.ops._rocm_C.fused_apply_write_rdna2(
@@ -405,7 +441,7 @@ def _apply_write_case(
             group_ids,
         )
     else:
-        _apply_write_kernel[(num_writes,)](
+        _apply_write_kernel[(num_writes, _num_write_chunks(content_len))](
             ref[0],
             row_width,
             indices,
@@ -413,23 +449,25 @@ def _apply_write_case(
             contents,
             cu_lens,
             None,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
             MULTI_GROUP=False,
         )
         torch.ops._rocm_C.apply_write_rdna2(
             out[0], row_width, indices, starts, contents, cu_lens
         )
     torch.accelerator.synchronize()
-    return ref, out
+    return ref, out, expected
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.float32])
-@pytest.mark.parametrize(
-    "content_len", [1, 7, 1023, 1024, 1025, 4096]
-)
+@pytest.mark.parametrize("content_len", [1, 7, 1023, 1024, 1025, 4096])
 def test_apply_write_single_group_parity(dtype, content_len):
-    ref, out = _apply_write_case(
+    ref, out, expected = _apply_write_case(
         dtype, False, 3, content_len + 5, content_len, seed=content_len
+    )
+    assert torch.equal(out[0], expected[0]), "HIP op differs from the torch oracle"
+    assert torch.equal(ref[0], expected[0]), (
+        "Triton kernel differs from the torch oracle"
     )
     assert torch.equal(ref[0], out[0])
 
@@ -438,10 +476,12 @@ def test_apply_write_single_group_parity(dtype, content_len):
     "num_writes,content_len", [(1, 1), (2, 3), (8, 1025), (8, 1024)]
 )
 def test_apply_write_multi_group_parity(num_writes, content_len):
-    ref, out = _apply_write_case(
+    ref, out, expected = _apply_write_case(
         torch.int32, True, num_writes, content_len + 7, content_len, seed=num_writes
     )
-    for r, o in zip(ref, out):
+    for r, o, e in zip(ref, out, expected):
+        assert torch.equal(o, e), "HIP op differs from the torch oracle"
+        assert torch.equal(r, e), "Triton kernel differs from the torch oracle"
         assert torch.equal(r, o)
 
 
@@ -450,8 +490,13 @@ def test_apply_write_zero_writes_is_inert():
     empty32 = torch.empty(0, dtype=torch.int32, device=DEVICE)
     torch.ops._rocm_C.apply_write_rdna2(row, 4, empty32, empty32, empty32, empty32)
     torch.ops._rocm_C.fused_apply_write_rdna2(
-        hipptrs([row]), torch.ones(1, dtype=torch.int64, device=DEVICE),
-        empty32, empty32, empty32, empty32, empty32,
+        hipptrs([row]),
+        torch.ones(1, dtype=torch.int64, device=DEVICE),
+        empty32,
+        empty32,
+        empty32,
+        empty32,
+        empty32,
     )
     torch.accelerator.synchronize()
     assert (row == 3).all()

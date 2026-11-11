@@ -13,8 +13,9 @@
 //       s=hipMemcpyPeerAsync. All xfers run concurrently for <seconds>;
 //       bg: xfers are reported in a separate aggregate (interference runs).
 //
-// Build: hipcc -x hip -O3 --offload-arch=gfx1030 -o p2p_probe p2p_probe.cpp
-// -pthread
+// Build: hipcc -x hip -O3 --offload-arch=gfx1030 --offload-arch=gfx1100
+//   -o p2p_probe p2p_probe.cpp -pthread
+// (fat binary: the same file runs on V620 gfx1030 and W7800 gfx1100)
 #include <hip/hip_runtime.h>
 
 #include <algorithm>

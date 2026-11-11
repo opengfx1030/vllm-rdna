@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""gfx1030 (RDNA2) HIP top-k/top-p masking vs the reference implementations.
+"""gfx1030 (RDNA2) / gfx1100 HIP top-k/top-p masking vs the reference implementations.
 
 The HIP kernel in ``csrc/rocm/v1_topk_topp_rdna2.cu`` replaces the Triton
 kernels of ``vllm/v1/sample/ops/topk_topp_triton.py`` (the monolithic
@@ -20,10 +20,13 @@ equality.
 import pytest
 import torch
 
-from vllm.platforms.rdna import on_rdna2
+from vllm.platforms.rdna import on_rdna2, on_rdna3
 from vllm.v1.sample.ops import topk_topp_sampler as tt
 
-pytestmark = pytest.mark.skipif(not on_rdna2(), reason="gfx10x HIP kernels only")
+pytestmark = pytest.mark.skipif(
+    not (on_rdna2() or (on_rdna3() and hasattr(torch.ops._rocm_C, "topk_topp_rdna2"))),
+    reason="gfx10x or gfx1100 (op built) HIP kernels only",
+)
 
 NEG = float("-inf")
 DEV = torch.device("cuda")
@@ -31,15 +34,18 @@ SERVED_VOCAB = 151936
 
 
 @pytest.fixture(autouse=True)
-def _hip_binding_available():
+def _hip_binding_available(monkeypatch):
+    # gfx1100: the dispatcher reads on_rdna2_hip() once at import, False there
+    # unless VLLM_RDNA3_HIP_OPS names v1; force the HIP route as the opt-in does.
+    if on_rdna3():
+        monkeypatch.setattr(tt, "_ON_RDNA2", True)
     # gfx10x must raise rather than silently fall back to Triton.
     assert callable(tt._rdna2_topk_topp_op())
 
 
 def _kept(masked, mask_value=NEG):
     return [
-        frozenset(torch.nonzero(row > mask_value).flatten().tolist())
-        for row in masked
+        frozenset(torch.nonzero(row > mask_value).flatten().tolist()) for row in masked
     ]
 
 
@@ -91,7 +97,9 @@ def test_sampling_workflow_shape():
     """k=50 / p=0.9 is what SamplingParams.for_sampler_warmup() exercises."""
     torch.manual_seed(1)
     logits = torch.randn(24, SERVED_VOCAB, dtype=torch.float32, device=DEV)
-    _check(logits, _idx([50] * 24), torch.full((24,), 0.9, dtype=torch.float32, device=DEV))
+    _check(
+        logits, _idx([50] * 24), torch.full((24,), 0.9, dtype=torch.float32, device=DEV)
+    )
 
 
 @pytest.mark.parametrize(
@@ -117,7 +125,11 @@ def test_edge_cases_match_references(rows, vocab, k, p):
 def test_no_filters_returns_input():
     torch.manual_seed(3)
     logits = torch.randn(4, 1032, dtype=torch.float32, device=DEV)
-    for k, p in ((None, None), (_idx([1032] * 4), None), (None, torch.ones(4, device=DEV))):
+    for k, p in (
+        (None, None),
+        (_idx([1032] * 4), None),
+        (None, torch.ones(4, device=DEV)),
+    ):
         out = tt.apply_top_k_top_p(logits.clone(), k, p)
         assert torch.equal(out, logits) or _kept(out) == _kept(logits)
 
@@ -139,7 +151,9 @@ def test_grammar_masked_rows_match_references():
     logits[0, 1000:] = NEG
     logits[1, :150000] = NEG
     logits[3, ::2] = NEG
-    _check(logits, _idx([20] * 4), torch.full((4,), 0.9, dtype=torch.float32, device=DEV))
+    _check(
+        logits, _idx([20] * 4), torch.full((4,), 0.9, dtype=torch.float32, device=DEV)
+    )
 
 
 def test_mask_value_is_applied():
@@ -187,7 +201,9 @@ def test_hip_path_taken_when_triton_is_poisoned(monkeypatch):
     torch.manual_seed(7)
     logits = torch.randn(4, 1032, dtype=torch.float32, device=DEV)
     k, p = _idx([20] * 4), _idx([0.9] * 4, torch.float32)
-    assert _kept(tt.apply_top_k_top_p(logits.clone(), k, p)) == _kept(_ref(logits, k, p))
+    assert _kept(tt.apply_top_k_top_p(logits.clone(), k, p)) == _kept(
+        _ref(logits, k, p)
+    )
 
 
 def test_missing_hip_binding_raises(monkeypatch):

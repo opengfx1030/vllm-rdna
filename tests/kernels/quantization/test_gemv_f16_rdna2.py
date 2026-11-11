@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""gemv_f16_rdna2 (gfx10x fp16 skinny GEMM) matches torch for M in 1..32."""
+"""gemv_f16_rdna2 (gfx10x / gfx1100 fp16 skinny GEMM) matches torch for M in 1..32.
+
+The op is called directly, so gfx1100 needs no VLLM_RDNA3_HIP_OPS (that opt-in,
+family ``dense``, only moves the product dispatch onto this op).
+"""
 
 import pytest
 import torch
@@ -10,21 +14,25 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("gemv_f16_rdna2 is ROCm-only", allow_module_level=True)
 
-from vllm.platforms.rocm import on_gfx10x  # noqa: E402
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not (
-        on_gfx10x()
+        (on_gfx10x() or on_gfx1100())
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "gemv_f16_rdna2")
     ),
-    reason="Requires gfx10x with gemv_f16_rdna2",
+    reason="Requires gfx10x or gfx1100 with gemv_f16_rdna2",
 )
 
 
-# 1..8 use exact-row kernels, 9..32 the 16/24/32 row capacities.
+# 1..8 use exact-row kernels, 9..32 the 16/24/32 row capacities. The last two
+# shapes are the Flash-Next lm_head shards (vocab 248320 at TP1, half at TP2).
 @pytest.mark.parametrize("M", [1, 3, 8, 9, 12, 16, 17, 24, 32])
-@pytest.mark.parametrize("N, K", [(4096, 512), (300, 1024), (62080, 256)])
+@pytest.mark.parametrize(
+    "N, K",
+    [(4096, 512), (300, 1024), (62080, 256), (124160, 2560), (248320, 2560)],
+)
 @pytest.mark.parametrize("with_bias", [False, True])
 def test_gemv_f16_rdna2_matches_linear(M, N, K, with_bias):
     torch.manual_seed(0)

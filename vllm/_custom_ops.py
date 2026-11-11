@@ -1999,6 +1999,15 @@ def moe_gptq_gemm_rdna3(
     mul_topk_weight: bool,
     output_topk: int = 0,
 ) -> None:
+    """Fused W4A16 MoE GEMM on gfx1100.
+
+    ``c`` is either a zeroed fp16/bf16 ``[rows, N]`` tensor, accumulated with
+    packed CAS atomics in arrival order, or (fp16 only) a zeroed int64
+    ``[rows, N + 1]`` Q32 accumulator whose sums are order-independent; finish
+    it with ``moe_fixedpoint_to_half_rdna3``. ``rows`` is
+    ``a.size(0) * top_k``, divided (rounding up) by ``output_topk`` when that
+    is positive.
+    """
     torch.ops._rocm_C.moe_gptq_gemm_rdna3(
         a,
         c,
@@ -2014,6 +2023,94 @@ def moe_gptq_gemm_rdna3(
         mul_topk_weight,
         output_topk,
     )
+
+
+def moe_gptq_gemm_rdna3_wmma(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    """WMMA grouped W4A16 MoE GEMM on gfx1100 (prefill).
+
+    Same contract as ``moe_gptq_gemm_rdna3`` with ``block_size_m`` in
+    ``{16, 32, 64}``; the whole K reduction runs in fp32 registers, without
+    split-K or GEMM atomics. ``output_topk == 0``: ``c`` is an fp16/bf16
+    ``[a.size(0) * top_k, N]`` tensor, every scheduled pair row is stored once
+    with one rounding (rows of padding and skipped blocks are not touched, so
+    ``c`` needs no zeroing). ``output_topk > 0``: ``c`` is the zeroed int64
+    ``[ceil(a.size(0) * top_k / output_topk), N + 1]`` Q32 accumulator (fp16
+    activations only), finished by ``moe_fixedpoint_to_half_rdna3``.
+    """
+    torch.ops._rocm_C.moe_gptq_gemm_rdna3_wmma(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_gptq_gemm_rdna3_wmma"
+):
+
+    @register_fake("_rocm_C::moe_gptq_gemm_rdna3_wmma")
+    def _moe_gptq_gemm_rdna3_wmma_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        pass
+
+
+def moe_fixedpoint_to_half_rdna3(
+    accumulator: torch.Tensor, output: torch.Tensor
+) -> None:
+    """Finalize an int64 ``[rows, N + 1]`` Q32 accumulator into fp16 ``output``.
+
+    Rounds int64 -> fp32 -> fp16. A row whose status column is set, and a value
+    outside the fp16 range, becomes NaN. Every element of ``output`` is written.
+    """
+    torch.ops._rocm_C.moe_fixedpoint_to_half_rdna3(accumulator, output)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_fixedpoint_to_half_rdna3"
+):
+
+    @register_fake("_rocm_C::moe_fixedpoint_to_half_rdna3")
+    def _moe_fixedpoint_to_half_rdna3_fake(
+        accumulator: torch.Tensor, output: torch.Tensor
+    ) -> None:
+        pass
 
 
 # cutlass
@@ -3453,6 +3550,156 @@ def rdna_ar_slow_info(handle: int) -> int:
     return torch.ops._rocm_C.rdna_ar_slow_info(handle)
 
 
+# hx: heterogeneous MoE transport (csrc/rocm/hetero_moe/hx_ops.cu). The compute
+# ops enqueue one kernel on the current stream and capture into graphs; the
+# setup ops run on the host. ``ctx`` is HxHub.ctx / the server's ctx.
+def hx_alloc(nbytes: int, kind: int) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_alloc(nbytes, kind)
+
+
+def hx_free(ptr: int) -> None:
+    torch.ops._rocm_C.hx_free(ptr)
+
+
+def hx_open(handle: torch.Tensor) -> int:
+    return torch.ops._rocm_C.hx_open(handle)
+
+
+def hx_close(ptr: int) -> None:
+    torch.ops._rocm_C.hx_close(ptr)
+
+
+def hx_view(
+    ptr: int, sizes: list[int], dtype: torch.dtype, device: int
+) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_view(ptr, sizes, dtype, device)
+
+
+def hx_calibrate(interval_ms: int) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_calibrate(interval_ms)
+
+
+def hx_ctx_new() -> torch.Tensor:
+    return torch.ops._rocm_C.hx_ctx_new()
+
+
+def hx_ctx_set(image: torch.Tensor, name: str, value: int) -> None:
+    torch.ops._rocm_C.hx_ctx_set(image, name, value)
+
+
+def hx_ctx_get(image: torch.Tensor, name: str) -> int:
+    return torch.ops._rocm_C.hx_ctx_get(image, name)
+
+
+def hx_ctx_register(ctx: torch.Tensor, image: torch.Tensor) -> None:
+    torch.ops._rocm_C.hx_ctx_register(ctx, image)
+
+
+def hx_ctx_unregister(ctx: torch.Tensor) -> None:
+    torch.ops._rocm_C.hx_ctx_unregister(ctx)
+
+
+def hx_status(ctx: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_status(ctx)
+
+
+def hx_dig_stats(ctx: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.hx_dig_stats(ctx)
+
+
+def hx_host_abort(ctx: torch.Tensor) -> None:
+    torch.ops._rocm_C.hx_host_abort(ctx)
+
+
+def hx_srv_post_desc(ctx: torch.Tensor, epoch: int, T: int, bucket: int) -> None:
+    torch.ops._rocm_C.hx_srv_post_desc(ctx, epoch, T, bucket)
+
+
+def hx_begin_step(ctx: torch.Tensor, T: int, bucket: int) -> None:
+    torch.ops._rocm_C.hx_begin_step(ctx, T, bucket)
+
+
+def hx_dispatch(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_w: torch.Tensor,
+    hub_ids_out: torch.Tensor,
+    ctx: torch.Tensor,
+    layer: int,
+) -> None:
+    torch.ops._rocm_C.hx_dispatch(x, topk_ids, topk_w, hub_ids_out, ctx, layer)
+
+
+def hx_combine(
+    y_hub: torch.Tensor, out: torch.Tensor, ctx: torch.Tensor, layer: int
+) -> None:
+    torch.ops._rocm_C.hx_combine(y_hub, out, ctx, layer)
+
+
+def hx_srv_begin(ctx: torch.Tensor) -> None:
+    torch.ops._rocm_C.hx_srv_begin(ctx)
+
+
+def hx_srv_wait(ctx: torch.Tensor, layer: int, T: int) -> None:
+    torch.ops._rocm_C.hx_srv_wait(ctx, layer, T)
+
+
+def hx_srv_push(y: torch.Tensor, ctx: torch.Tensor, layer: int, T: int) -> None:
+    torch.ops._rocm_C.hx_srv_push(y, ctx, layer, T)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "hx_begin_step"):
+
+    @register_fake("_rocm_C::hx_begin_step")
+    def _hx_begin_step_fake(ctx: torch.Tensor, T: int, bucket: int) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_dispatch")
+    def _hx_dispatch_fake(
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_w: torch.Tensor,
+        hub_ids_out: torch.Tensor,
+        ctx: torch.Tensor,
+        layer: int,
+    ) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_combine")
+    def _hx_combine_fake(
+        y_hub: torch.Tensor, out: torch.Tensor, ctx: torch.Tensor, layer: int
+    ) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_srv_begin")
+    def _hx_srv_begin_fake(ctx: torch.Tensor) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_srv_wait")
+    def _hx_srv_wait_fake(ctx: torch.Tensor, layer: int, T: int) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_srv_push")
+    def _hx_srv_push_fake(
+        y: torch.Tensor, ctx: torch.Tensor, layer: int, T: int
+    ) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_srv_post_desc")
+    def _hx_srv_post_desc_fake(
+        ctx: torch.Tensor, epoch: int, T: int, bucket: int
+    ) -> None:
+        pass
+
+    @register_fake("_rocm_C::hx_status")
+    def _hx_status_fake(ctx: torch.Tensor) -> torch.Tensor:
+        return torch.empty(8, dtype=torch.int64)
+
+    @register_fake("_rocm_C::hx_dig_stats")
+    def _hx_dig_stats_fake(ctx: torch.Tensor) -> torch.Tensor:
+        return torch.empty(8, dtype=torch.int64)
+
+
 def wvSplitK_int4_g(
     weight: torch.Tensor,
     activation: torch.Tensor,
@@ -3514,12 +3761,12 @@ def rdna_gemm_smallm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
 
 
 def rdna_se_gate_up_tile(x, w, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
-    """Shared-expert gate_up for 8 < M <= 32: (silu(g) * u, sigmoid gate)."""
+    """Shared-expert gate_up for 8 < M <= 64: (silu(g) * u, sigmoid gate)."""
     return torch.ops._rocm_C.rdna_se_gate_up_tile(x, w, w_gate)
 
 
 def rdna_se_down_tile(act, w, gate) -> torch.Tensor:
-    """Shared-expert down for 8 < M <= 32: gate[m] * (act[m] @ w.T), fp16."""
+    """Shared-expert down for 8 < M <= 64: gate[m] * (act[m] @ w.T), fp16."""
     return torch.ops._rocm_C.rdna_se_down_tile(act, w, gate)
 
 

@@ -19,6 +19,17 @@
 # tests/distributed/ - multi-GPU / multi-node suites, launched via torchrun or a
 # custom runner rather than a directory-level pytest invocation.
 tests/distributed/aux_output_connector/test_store.py  # added by #45635 (2026-09-21), no job collects this path
+tests/distributed/hetero_moe/test_hx_ctx.py  # hetero-MoE hx ctx image builders; CPU test run on par1-cs25 (tools/rdna/rdna3/cpu_pytest.sh), no Buildkite job
+tests/distributed/hetero_moe/test_hx_handshake.py  # hetero-MoE hx hub handshake with fake ops; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_launcher.py  # hetero-MoE expert-server launcher; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_model.py  # hetero-MoE hx protocol model; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_proto.py  # hetero-MoE hx wire protocol reference; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_rdv.py  # hetero-MoE hx rendezvous and peer watcher; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_ring.py  # hetero-MoE hx step ring; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_server_host.py  # hetero-MoE expert-server host logic with fake ops; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_server_model.py  # hetero-MoE expert-server model; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_t5_common.py  # hetero-MoE T5 harness helpers; CPU test run on par1-cs25, no Buildkite job
+tests/distributed/hetero_moe/test_hx_t5_driver.py  # hetero-MoE T5 driver and hub replay with fake ops; CPU test run on par1-cs25, no Buildkite job
 tests/distributed/test_dcp_a2a.py  # multi-GPU DCP all-to-all; no dir-level pytest job
 tests/distributed/test_eplb_events.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_eplb_fused_moe_layer.py  # multi-GPU EPLB; no dir-level pytest job
@@ -69,6 +80,7 @@ tests/distributed/test_rdna_gather_allreduce.py  # fork-only P2P-less gather rep
 tests/models/qwen4_exp/test_offload_policy_sweep_tp4.py  # fork-only expert-offload TP4 sweep rank map, CPU unit test; not in CI
 tests/models/qwen4_exp/test_qualify_expert_copy_ranks.py  # fork-only expert-copy qualifier rank check, CPU unit test; not in CI
 tests/tools/rdna/test_rdna2_offload_ar_cli.py  # fork-only offload AR checker CLI, CPU unit test; not in CI
+tests/tools/rdna/test_hetero_perf_model.py  # fork-only hetero-MoE analytic performance model (TP4 calibration, spill balance, byte table), CPU unit test; not in CI
 tests/tools/rdna/test_serve_offload_topology.py  # fork-only offload launcher topology contract, CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_devices.py  # fork-only qualification-driver device pin, CPU unit test; not in CI
 tests/tools/rdna/test_mono_w4a8_plan.py  # fork-only mono + W4A8 GPU plan tools (eviction verdict, arm checks, slot dry run), CPU unit test; not in CI
@@ -79,6 +91,9 @@ tests/tools/rdna/test_pinned_fdinfo_check.py  # fork-only KFD-buffer-versus-VmLc
 tests/tools/rdna/test_serve_pci_buses.py  # fork-only PCI_BUSES launcher key and TP8 / TP4xPP2 recipe plans (print mode, stub venv), CPU unit test; not in CI
 tests/tools/rdna/test_spec_acceptance.py  # fork-only speculative acceptance length of a bench cell (fake server log), CPU unit test; not in CI
 tests/tools/rdna/test_hetero_moe.py  # fork-only hetero-MoE expert-stats IO, placement solver, validator and simulator tools, CPU unit test; not in CI
+tests/tools/rdna/test_hetero_conc_gate.py  # fork-only hetero-MoE stand-in concurrency gate (hx digest counters and solo/solo2 bit-identity over probe results), CPU unit test; not in CI
+tests/tools/rdna/test_hetero_recipes.py  # fork-only hetero-MoE launcher stanza (H1 and V620 stand-in print mode, stub venv; supervisor with stub servers and hub), CPU unit test; not in CI
+tests/tools/rdna/test_tp8pp2_hetero_cfg.py  # fork-only tp8pp2 harness hetero slot HA and CFG=h1/h1v (slots.sh with a stub venv python, driver.sh start-up report), CPU unit test; not in CI
 tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py  # fork-only opt-in routing statistics collector (CPU torch, AST zero-cost-off checks), CPU unit test; not in CI
 tests/models/qwen4_exp/test_amd_mono_rdna2_w4a8.py  # fork-only mono next to the W4A8 MoE prefill (meta-tensor layout, dispatch), CPU unit test; not in CI
 tests/models/qwen4_exp/test_hc_ops_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC ops, not in CI
@@ -94,6 +109,14 @@ tests/models/qwen4_exp/test_ple_pinned_table.py  # fork-only gfx10x pinned PLE t
 tests/platforms/test_rocm_capability_alias_config.py  # fork-only gfx10xx capability-alias checks (config), CPU unit test on a patched platform; not in CI
 tests/platforms/test_rocm_capability_alias_nvidia_only.py  # fork-only gfx10xx capability-alias checks (NVIDIA-only kernels/models), CPU unit test on a patched platform; not in CI
 tests/platforms/test_rocm_capability_alias_triton_tuning.py  # fork-only gfx10xx capability-alias checks (Triton launch tuning), CPU unit test on a patched platform; not in CI
+tests/platforms/test_rdna3_dispatch.py  # fork-only gfx1100 dispatch of the RDNA HIP families (faked arch), CPU unit test; not in CI
+tests/tools/rdna/test_flashnext_w2_recipe.py  # fork-only W7800 TP2 Flash-Next recipe plan (print mode, stub venv), CPU unit test; not in CI
+tests/tools/rdna/test_code_object_fingerprint.py  # fork-only device-code fingerprint classifier, CPU unit test; not in CI
+tests/tools/rdna/test_perop_expectations.py  # fork-only W7800 per-op expectation model, CPU unit test; not in CI
+tests/kernels/quantization/test_rdna3_moe_modes.py  # fork-only gfx1100 MoE Q32 / block-size / expert-map contract, CPU unit test with a faked op; not in CI
+tests/distributed/test_rdna_ar_gate.py  # fork-only rdna_ar gfx11 opt-in gate and group agreement, CPU unit test; not in CI
+tests/tools/rdna/test_gpu_g0_g7.py  # fork-only W7800 G0-G7 runner plan (dry-run print mode, lease refusal), CPU unit test; not in CI
+tests/tools/rdna/test_trunc_checkpoint.py  # fork-only layer-truncated Flash-Next checkpoint builder and truncated-model numerics compare, CPU unit test; not in CI
 tests/tools/test_quant_mtp_experts.py  # fork-only MTP-expert W4A16 quantizer, CPU unit test; not in CI
 tests/tools/test_v620_tuning_coverage.py  # fork-only V620 (gfx1030) tuning tables; not in CI
 tests/v1/ple_offload/test_exl3_ngram_ring.py  # fork-only exl3 ngram ring decode, CPU unit test; not in CI

@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""In-process reference of the ``hx`` ops: the same module-level API as
+``hetero_moe.hx`` (``begin_step`` / ``dispatch`` / ``combine`` on a hub object),
+with torch ops instead of the HIP kernels and with in-process "servers".
+
+Use: unit tests (CPU) and a functional fallback while the HIP transport is
+being brought up. It implements exactly the dispatch rule of ``tables.py``
+(``split_pairs`` is the vectorised, capture-safe statement of it: static
+shapes, no host sync) and the combine order of the wire protocol (fp16 hub
+partial, then the servers' fp16 partials in server order, fp32 sum, one fp16
+rounding).
+"""
+
+from collections.abc import Callable
+
+import torch
+
+from .tables import IslandTables
+
+# A server computes the partial MoE of the pairs sent to it: (layer, x, ids, w) with
+# ids [T, top_k] int32 (-1 where the pair is not this server's) -> fp32 [T, H].
+ServerFn = Callable[[int, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def split_pairs(
+    topk_ids: torch.Tensor,
+    slot_map: torch.Tensor,
+    n_cold: torch.Tensor,
+    cold_srv: torch.Tensor,
+    owned: torch.Tensor,
+    layer: int,
+    k_keep: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Vectorised dispatch rule; returns ``(hub_ids, dest, lost)`` ``[T, top_k]``
+    (see ``tables.split_pairs_loop``): int32 hub ids and server indices, and the
+    bool mask of pairs that are plan errors (an owned expert that is neither
+    kept on the hub nor has a server copy). A pair is valid iff its id is in
+    ``[0, E)`` and the expert is owned by the island."""
+    t_n = topk_ids.shape[0]
+    e_n = slot_map.shape[0]
+    ids = topk_ids.long()
+    in_range = (ids >= 0) & (ids < e_n)
+    idc = ids.clamp(0, e_n - 1)
+    valid = in_range & (owned[idc] != 0)
+    slot = torch.where(valid, slot_map[idc].long(), torch.full_like(ids, -1))
+    resident = slot >= 0
+    # touched-slot bitmap (slots are below E; index E is the "none" sink)
+    touched = torch.zeros(e_n + 1, dtype=torch.int32, device=ids.device)
+    sink = torch.full_like(slot, e_n)
+    where = torch.where(resident, slot, sink)
+    touched.scatter_(
+        0, where.reshape(-1), torch.ones_like(where, dtype=torch.int32).reshape(-1)
+    )
+    touched[e_n] = 0
+    rank = torch.cumsum(touched, 0) - touched  # prefix popcount in slot order
+    keep = resident & (rank[where] < k_keep)
+    hub_ids = torch.where(keep, topk_ids.to(torch.int32), torch.full_like(topk_ids, -1))
+    ncold = n_cold[idc].long()
+    row = torch.arange(t_n, device=ids.device, dtype=torch.long).unsqueeze(1)
+    copy = (row + layer) % ncold.clamp(min=1)
+    srv = cold_srv[idc, copy]
+    remote = valid & ~keep & (ncold > 0)
+    dest = torch.where(remote, srv, torch.full_like(srv, -1))
+    lost = valid & ~keep & (ncold == 0)
+    return hub_ids.to(torch.int32), dest.to(torch.int32), lost
+
+
+class RefHub:
+    """Stand-in of ``HxHub``. ``servers[s]`` computes server ``s``' partial."""
+
+    def __init__(
+        self,
+        tables: IslandTables,
+        servers: dict[int, ServerFn],
+        *,
+        device: torch.device | str = "cpu",
+        exact: bool = False,
+    ):
+        self.tables = tables
+        self.servers = servers
+        # exact: float64 partials without the fp16 wire rounding (identity tests)
+        self.exact = exact
+        self.device = torch.device(device)
+        # The live [L, E] n_cold table the dispatch reads, as the device table of the
+        # real hub (HxHub.n_cold_table): the runtime installs the cold-copy rule of
+        # each step into it in place, so the per-layer rows below are views of it.
+        self.n_cold_table = torch.from_numpy(tables.stacked().n_cold).to(self.device)
+        n_hx = int(self.n_cold_table.shape[0])
+        self._dev = {
+            li: (
+                torch.from_numpy(lt.slot_map).to(self.device),
+                self.n_cold_table[li]
+                if lt.uses_hx and li < n_hx
+                else torch.from_numpy(lt.n_cold).to(self.device),
+                torch.from_numpy(lt.cold_srv).to(self.device),
+                torch.from_numpy(lt.owned).to(self.device),
+            )
+            for li, lt in tables.layers.items()
+        }
+        self.ctx = torch.zeros(8, dtype=torch.int64, device=self.device)
+        self.rows = 0
+        self.k_keep = 0
+        self.posted: list[tuple[int, int]] = []
+        self.began: list[tuple[int, int]] = []
+        self.checks = 0
+        self.closed = False
+        self.abort: Exception | None = None
+        self.calls: list[tuple[str, int]] = []
+        self._pending: dict[int, tuple] = {}
+        self.dispatched_pairs = {"hub": 0, "remote": 0, "dropped": 0}
+        # per plan layer: pairs kept on the hub, sent to servers because the expert
+        # is not resident, sent to servers by the spill rule (HxHub.layer_stats)
+        self.layer_counts: dict[int, list[int]] = {
+            li: [0, 0, 0] for li in tables.layers
+        }
+
+    def status_words(self) -> list[int]:
+        """The ``hx_status`` layout: abort record, epoch, live record, steps,
+        dispatches, combines, pairs on the hub, pairs on the servers."""
+        n = {"dispatch": 0, "combine": 0}
+        for name, _ in self.calls:
+            if name in n:
+                n[name] += 1
+        return [
+            0,
+            len(self.posted),
+            0,
+            len(self.began),
+            n["dispatch"],
+            n["combine"],
+            self.dispatched_pairs["hub"],
+            self.dispatched_pairs["remote"],
+        ]
+
+    def layer_stats(self) -> list[list[int]]:
+        n_layers = max(self.layer_counts) + 1
+        return [self.layer_counts.get(li, [0, 0, 0]) for li in range(n_layers)]
+
+    # ---- host side (as HxHub) ---------------------------------------------------
+
+    def post_step(self, rows: int, bucket: int) -> None:
+        self.posted.append((rows, bucket))
+
+    def check(self) -> None:
+        self.checks += 1
+        if self.abort is not None:
+            raise self.abort
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def begin_step(hub: RefHub, rows: int, bucket: int) -> None:
+    hub.calls.append(("begin", -1))
+    hub.rows = rows
+    hub.k_keep = hub.tables.k_for(rows)
+    hub.began.append((rows, bucket))
+    hub._pending.clear()
+
+
+def dispatch(
+    hub: RefHub,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_w: torch.Tensor,
+    hub_ids_out: torch.Tensor,
+    layer: int,
+) -> None:
+    hub.calls.append(("dispatch", layer))
+    assert x.shape[0] == hub.rows, "dispatch rows differ from begin_step rows"
+    slot_map, n_cold, cold_srv, owned = hub._dev[layer]
+    hub_ids, dest, lost = split_pairs(
+        topk_ids, slot_map, n_cold, cold_srv, owned, layer, hub.k_keep
+    )
+    if bool(lost.any()):
+        raise RuntimeError(
+            f"hx plan error: layer {layer} has an owned expert that is neither on "
+            "the hub nor on a server"
+        )
+    hub_ids_out.copy_(hub_ids)
+    hub._pending[layer] = (x, topk_ids, topk_w, dest)
+    in_range = (topk_ids >= 0) & (topk_ids < slot_map.shape[0])
+    n_hub = int((hub_ids >= 0).sum())
+    n_remote = int((dest >= 0).sum())
+    hub.dispatched_pairs["hub"] += n_hub
+    hub.dispatched_pairs["remote"] += n_remote
+    resident = in_range & (
+        slot_map[topk_ids.long().clamp(0, slot_map.shape[0] - 1)] >= 0
+    )
+    n_spilled = int(((dest >= 0) & resident).sum())
+    counts = hub.layer_counts[layer]
+    counts[0] += n_hub
+    counts[1] += n_remote - n_spilled
+    counts[2] += n_spilled
+    # in-range ids of experts that belong to another island
+    hub.dispatched_pairs["dropped"] += int(in_range.sum()) - n_hub - n_remote
+
+
+def combine(
+    hub: RefHub, y_hub: torch.Tensor, out: torch.Tensor, layer: int
+) -> torch.Tensor:
+    hub.calls.append(("combine", layer))
+    x, topk_ids, topk_w, dest = hub._pending.pop(layer)
+    acc_dtype = torch.float64 if hub.exact else torch.float32
+    wire_dtype = torch.float64 if hub.exact else torch.float16
+    acc = y_hub.to(acc_dtype).clone()
+    for s in range(hub.tables.num_servers):
+        sel = dest == s
+        if not bool(sel.any()):
+            continue
+        ids_s = torch.where(
+            sel, topk_ids.to(torch.int32), torch.full_like(topk_ids, -1)
+        )
+        y_s = hub.servers[s](layer, x, ids_s, topk_w)
+        acc += y_s.to(wire_dtype).to(acc_dtype)  # the wire carries fp16
+    out.copy_(acc.to(out.dtype))
+    return out
+
+
+def status(hub: RefHub) -> torch.Tensor:
+    return torch.zeros(8, dtype=torch.int64)

@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Parity tests for the gfx1030 HIP HyperConnection kernels.
+"""Parity tests for the HIP HyperConnection kernels (gfx1030, gfx1100).
 
 Every HIP op is compared against the Triton kernel it replaces and, where the
 result is not a plain elementwise expression, against an fp32 reference. The
 sigmoid uses the hardware ``__expf``, so the comparison tolerance is one fp16
 ulp rather than bit equality.
+
+The ``hc_rdna2`` wrappers are called directly and the references are the private
+Triton kernels, so gfx1100 needs no VLLM_RDNA3_HIP_OPS.
 """
 
 import pytest
@@ -13,10 +16,11 @@ import torch
 
 from vllm.models.qwen4_exp.amd.ops import hc as hc_triton
 from vllm.models.qwen4_exp.amd.ops import hc_rdna2
-from vllm.platforms.rocm import on_gfx10x
+from vllm.platforms.rocm import on_gfx10x, on_gfx1100
 
 pytestmark = pytest.mark.skipif(
-    not on_gfx10x(), reason="RDNA2 HIP HC kernels require gfx10x"
+    not (on_gfx10x() or (on_gfx1100() and hasattr(torch.ops._rocm_C, "hc_silu_rdna2"))),
+    reason="HIP HC kernels require gfx10x or gfx1100 with the ops built",
 )
 
 HC = 4
@@ -40,6 +44,7 @@ def _gemma_norm(grouped: torch.Tensor, w: torch.Tensor, shared: bool) -> torch.T
     rrms = torch.rsqrt(grouped.square().mean(-1, keepdim=True) + EPS)
     wv = w.float() if shared else w.float().unflatten(-1, (HC, HIDDEN))
     return (grouped * rrms * (1.0 + wv)).flatten(-2)
+
 
 @pytest.mark.parametrize("num_tokens", TOKENS)
 @pytest.mark.parametrize("shared_weight", [False, True])
@@ -120,7 +125,9 @@ def test_hc_combine(num_tokens: int) -> None:
     ref = res.float().unflatten(-1, (HC, HIDDEN)) + blk.float().unsqueeze(
         -2
     ) * iw.unsqueeze(-1)
-    torch.testing.assert_close(h, ref.flatten(-2).to(torch.float16), rtol=RTOL, atol=ATOL)
+    torch.testing.assert_close(
+        h, ref.flatten(-2).to(torch.float16), rtol=RTOL, atol=ATOL
+    )
     torch.testing.assert_close(h, t, rtol=RTOL, atol=ATOL)
 
 
@@ -142,7 +149,10 @@ def test_hc_ops_unusual_hc_count(num_tokens: int) -> None:
             hc_rdna2.grouped_gemma_rmsnorm(x, w, EPS, hc),
             hc_triton._grouped_gemma_rmsnorm(x, w, EPS, hc),
         ),
-        (hc_rdna2.hc_combine(res, blk, inj, hc), hc_triton._hc_combine(res, blk, inj, hc)),
+        (
+            hc_rdna2.hc_combine(res, blk, inj, hc),
+            hc_triton._hc_combine(res, blk, inj, hc),
+        ),
     ):
         torch.testing.assert_close(h, t, rtol=RTOL, atol=ATOL)
 

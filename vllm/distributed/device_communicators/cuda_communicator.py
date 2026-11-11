@@ -116,7 +116,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
-        self.rdna_ar_comm = None  # T44: gfx1030 one-shot all-reduce
+        self.rdna_ar_comm = None  # T44: gfx10x / gfx1100 one-shot all-reduce
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
@@ -190,12 +190,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and 2 <= self.world_size <= 8
             and os.getenv("VLLM_RDNA_AR", "0") == "1"
         ):
-            # T44: gfx1030 one-shot all-reduce. Opt-in; default off.
+            # T44: one-shot all-reduce on gfx10x, and on gfx1100 once the "ar"
+            # family of VLLM_RDNA3_HIP_OPS is opted in. Opt-in; default off.
             # When enabled, eligible tensors dispatch ahead of CUSTOM.
             # Protocol from leapdragon/vllm-rdna2-qwen T44/T44b (Aron Hsiao).
+            # The protocol is symmetric: the constructor first makes every rank
+            # of the group agree on the GPU architecture and the opt-in, and a
+            # group that does not agree (e.g. W7800 + V620) stays on RCCL.
+            from vllm.platforms.rdna import on_rdna3_hip
             from vllm.platforms.rocm import on_gfx10x
 
-            if on_gfx10x():
+            if on_gfx10x() or on_rdna3_hip("ar"):
                 from vllm.distributed.device_communicators.rdna_all_reduce import (
                     RdnaOneShotAllReduce,
                 )
@@ -390,8 +395,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
-        # Opt-in gfx10x oneshot. Only constructed when VLLM_RDNA_AR=1, so
-        # this is a no-op on the default CUSTOM / RCCL path.
+        # Opt-in oneshot (gfx10x; gfx1100 with the "ar" opt-in). Only built
+        # when VLLM_RDNA_AR=1, so this is a no-op on the default CUSTOM / RCCL
+        # path.
         rdna_ar_comm = self.rdna_ar_comm
         if rdna_ar_comm is not None and rdna_ar_comm.should_use(input_):
             return rdna_ar_comm.all_reduce(input_)
@@ -499,9 +505,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # gather-before-GEMM uses dim=0 with tp-aligned (uniform) shards.
         if dim < 0:
             dim += input_.dim()
-        # gfx10x: small last-dim gathers (MTP fc pair, (value, index) pairs)
-        # ride the rdna_ar HIP push instead of an RCCL launch. Bit-equal to
-        # all_gather_into_tensor + movedim; ineligible tensors fall through.
+        # rdna_ar (gfx10x, or gfx1100 with the "ar" opt-in): small last-dim
+        # gathers (MTP fc pair, (value, index) pairs) ride the HIP push instead
+        # of an RCCL launch. Bit-equal to all_gather_into_tensor + movedim;
+        # ineligible tensors fall through.
         rdna_ar_comm = self.rdna_ar_comm
         if (
             rdna_ar_comm is not None
