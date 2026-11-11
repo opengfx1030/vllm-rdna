@@ -42,14 +42,15 @@
 //   role runs on (default 0). --dir must not be under /tmp.
 //
 // Output: one line per measurement, written with a single write(2):
-//   T1 <test> role=<hub|srv<i>|-> [label=..] key=value ... PASS|FAIL|INFO
+//   T1 <test> role=<hub|srv<i>|-> [label=..] key=value ... PASS|FAIL|WARN|INFO
 // Values never contain blanks. The exit code is non-zero if any line is FAIL
 // (2 = runtime error, 3 = rendezvous/kernel hang, 64 = usage).
 // The hub line of a test is the combined verdict (it also reports the
 // server's counters); the server line carries the server's own counters.
 // Targets (spec T1): lat p50 <= 9 us and p99 <= 20 us for 16 KiB + flag, fan-in
-// 4 x 15,540 B p50 <= 15 us, 1 MiB fan-in >= 24 GB/s; alloc_kinds is INFO
-// (which kinds are peer-coherent), everything else PASS/FAIL.
+// 4 x 15,540 B p50 <= 15 us; the 1 MiB fan-in is recorded and is WARN below
+// 24 GB/s (decision 17, never FAIL); alloc_kinds is INFO (which kinds are
+// peer-coherent), everything else PASS/FAIL.
 //
 // Memory layout (both roles; every region is 4 KiB control page + 1 MiB):
 //   server inbox  (size 1 region, written by the hub):  +0x000 flag word,
@@ -1599,11 +1600,12 @@ static void run_fanin(Ctx& c, Bufs& b, const char* test, const char* what,
     double gbps_mean = p.mean > 0 ? (double)n * nbytes / (p.mean * 1e3) : 0;
     double gbps_p50 = p.p50 > 0 ? (double)n * nbytes / (p.p50 * 1e3) : 0;
     bool pass = !s.timeouts && !bad;
-    if (is_lat)
-      pass = pass && p.p50 <= 15.0;
-    else
-      pass = pass && gbps_mean >= 24.0;
-    emit(test, pass ? "PASS" : "FAIL",
+    if (is_lat) pass = pass && p.p50 <= 15.0;
+    // The 1 MiB bandwidth is recorded: WARN below 24 GB/s, never FAIL.
+    const char* verdict = !pass                           ? "FAIL"
+                          : (!is_lat && gbps_mean < 24.0) ? "WARN"
+                                                          : "PASS";
+    emit(test, verdict,
          "what=%s n=%d bytes_per_srv=%u iters=%u poll=%s p50_us=%.2f "
          "p99_us=%.2f max_us=%.2f mean_us=%.2f agg_gbps_mean=%.2f "
          "agg_gbps_p50=%.2f secs=%.3f target=%s verify_bad_words=%llu "

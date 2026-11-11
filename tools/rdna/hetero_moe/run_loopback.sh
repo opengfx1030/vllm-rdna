@@ -570,6 +570,17 @@ done
 if [[ $bench -eq 1 ]]; then
     echo
     grep -h '^HXBENCH' "$LOGDIR/hub.log" 2>/dev/null
+    # T1 gate of spec decision 17: the stream-mode layer p50 at T=2048 is at most 3.7 ms
+    gate_us=$(awk '/^HXBENCH hub T=2048 mode=stream/ {
+        for (i = 1; i <= NF; i++) if ($i ~ /^layer_us_p50=/) { sub(/^layer_us_p50=/, "", $i); print $i }
+    }' "$LOGDIR/hub.log" 2>/dev/null)
+    if [[ -z $gate_us ]]; then
+        note "T1 gate (layer p50 at T=2048, stream mode, <= 3700 us) not evaluated: use --bench --T-list 3,24,48,2048 without --graph"
+    elif awk -v v="$gate_us" 'BEGIN {exit !(v <= 3700)}'; then
+        note "T1 GATE PASS: stream-mode layer p50 at T=2048 is $gate_us us (limit 3700 us, decision 17)"
+    else
+        fail "T1 GATE: stream-mode layer p50 at T=2048 is $gate_us us, limit 3700 us (decision 17)"
+    fi
 fi
 echo
 
