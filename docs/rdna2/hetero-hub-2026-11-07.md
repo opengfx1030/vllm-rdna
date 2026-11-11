@@ -8,13 +8,16 @@ protocol, the launcher and the two recipes. The `hx` transport, the expert serve
 kernels belong to `feat/hetero-hx` (`docs/rdna2/hetero-hx-2026-11-07.md`).
 
 **Status.** Everything below that says "tested" was run on a CPU only: the Mac for the plan, tables,
-runtime, launcher, harness and gate tests (157), the box (`par1-cs25`, CPU-only environment) for the quant
-method tests, which need the vLLM stack (910 with HxServer's tests, exact tree `97634f2553`). GPU: the V620
-stand-in (interim layout: hub HIP 1, servers HIP 2-5; no W7800) boots in eager and in production compiled
-mode (section 10.1, numbers in section 13). With the recipe defaults (deterministic hub MoE, hx digest on;
-tree `97634f2553`): self-test 9.5e-04, PPL 4.79, the concurrency gate PASS (the digest is clean on the hub and
+runtime, launcher, harness and gate tests (195), the box (`par1-cs25`, CPU-only environment) for the quant
+method tests, which need the vLLM stack (1071 with HxServer's and ExpertStats' tests, exact tree `d11682cba9`).
+GPU: the V620 stand-in (interim layout: hub HIP 1, servers HIP 2-5; no W7800) boots in eager and in production
+compiled mode (section 10.1, numbers in section 13). With the recipe defaults (deterministic hub MoE, hx digest
+on; tree `97634f2553`): self-test 9.5e-04, PPL 4.79, the concurrency gate PASS (the digest is clean on the hub and
 on the four servers over 698,304 exchanges each, `solo` and `solo2` are bit-identical in 9 runs), c1 ITL
-45.3 ms and c8 ITL 51.5 ms (44.6 and 50.7 ms with the digest off). The token flips against the T=3 solo are
+45.3 ms and c8 ITL 51.5 ms (44.6 and 50.7 ms with the digest off). The decode dispatch knob of user decision 16
+(`VLLM_HETERO_MOE_DECODE_DISPATCH=row|primary`, section 3; `row` is the default and adds no op) is built and
+CPU-tested for both rules, and one stand-in boot with `primary` passed the gate (section 13); the ABBA pair that
+decides between the rules waits for the W7800 (section 10.2). The token flips against the T=3 solo are
 reproducible numerics of the batch composition (one row above 1.0 nats, section 11 item 9); the prefix probe
 fails on its 2 GiB KV pool. Every W7800 step (section 10.2) is blocked until a W7800 is installed. What is still
 `[INFERENCE]` is marked.
@@ -36,11 +39,11 @@ all-reduce, `apply()` returns the island's whole sum.
 
 | File | Role |
 |---|---|
-| `vllm/distributed/hetero_moe/plan.py` | loads and validates a plan with the same checker as the solver, answers `hub_resident`, `server_experts`, `cold_copies`, owner and island questions, numpy only |
-| `vllm/distributed/hetero_moe/tables.py` | `slot_map`, `n_cold`, `cold_srv`, `owned` per layer, spill K table (`default_spill_k`), `split_pairs_loop` (the oracle of the dispatch rule) |
-| `vllm/distributed/hetero_moe/ref_hx.py`, `ref_moe.py` | in-process reference of the `hx` ops (vectorised `split_pairs`, combine order of the wire) and a CPU W4A16 reference MoE, for tests |
-| `vllm/distributed/hetero_moe/runtime.py` | `HubRuntime`: per-step protocol, one MoE layer, boot self-test, counters (with the raw `hx_status` words), the optional per-step log; process singleton and the model-runner hooks |
-| `vllm/distributed/hetero_moe/cli.py` | plan command line for the launcher (`validate`, `hubs`, `servers`, `buckets`, `retarget`, `stripe`), numpy and regex only, no vLLM import |
+| `vllm/distributed/hetero_moe/plan.py` | loads and validates a plan with the same checker as the solver, answers `hub_resident`, `server_experts`, `cold_copies`, owner and island questions and the plan's spill K table of a decode dispatch rule (`spill_k(rule)`, whose capture widths the load checks), numpy only |
+| `vllm/distributed/hetero_moe/tables.py` | `slot_map`, `n_cold`, `cold_srv`, `owned` per layer, the spill K table (`default_spill_k`, the plan's table of the rule), `rule_for(bucket)`, `split_pairs_loop` (the oracle of the dispatch rule, both rules) and `describe_dispatch` (the line of the plan check and of the boot log) |
+| `vllm/distributed/hetero_moe/ref_hx.py`, `ref_moe.py` | in-process reference of the `hx` ops (vectorised `split_pairs`, combine order of the wire, a live `n_cold_table`) and a CPU W4A16 reference MoE, for tests |
+| `vllm/distributed/hetero_moe/runtime.py` | `HubRuntime`: per-step protocol, one MoE layer, the decode dispatch rule's table switch, boot self-test, counters (with the raw `hx_status` words and the forwards per rule), the optional per-step log; process singleton and the model-runner hooks |
+| `vllm/distributed/hetero_moe/cli.py` | plan command line for the launcher (`validate`, `hubs`, `servers`, `buckets`, `dispatch`, `retarget`, `stripe`), numpy and regex only, no vLLM import |
 | `vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_hetero.py` | `HeteroMoEMethod` mixin and `maybe_wrap_hetero_method` |
 | `vllm/model_executor/layers/fused_moe/expert_map_manager.py` | explicit local expert list (the slot pool) for `determine_expert_map`, hetero hook in `ExpertMapManager` |
 | `vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe.py` | `_hetero_wrap` at both WNA16 return points of `get_moe_method` |
@@ -79,6 +82,27 @@ A pair is valid when its expert id is in `[0, E)` and owned by the island. An ow
 neither kept on the hub nor has a server copy is a plan error: the reference raises, and the `hx`
 dispatch kernel writes an abort record of phase 7 (`HX_PH_PLAN`, HxServer's `hx_proto.py`).
 
+**Decode dispatch rule** (spec C.5; user decision 16: decided after the first W7800 run, not before S4-H1 and
+S5-H1 pass on `row`). A cold pair goes to the server `cold_srv[e][(row + layer) % n_cold[e]]` (`row`, the
+default and what the kernel always did) or, with `VLLM_HETERO_MOE_DECODE_DISPATCH=primary`, to the first listed
+copy `cold_srv[e][0]` on the graph steps at the capture widths. Eager steps (a prefill chunk above the largest
+width, the capture warm-ups, profile and dummy runs, the boot self-test, every step of an `EAGER=1` arm) keep
+`row` under both settings (`IslandTables.rule_for(bucket)`; bucket 0 is an eager step). There is no kernel
+change: the dispatch kernel reads `n_cold` from device memory at every call, and `n_cold = 1` makes the row
+rule pick index 0. The hub keeps the table as built and a copy with every count clamped to one;
+`HubRuntime.begin_step` (the first hx layer of a forward) copies the table of the step's rule over the live
+device table (`HxHub.n_cold_table`, in place, because the hx ctx holds its address). The copy is a memcpy node
+of every captured graph, so a replay installs the rule it was captured with and the next eager step puts `row`
+back. `row` adds no op; `primary` on a plan without a replica skips the copy and says so at boot. Each rule runs
+on its own K table: `runtime.spill_k_by_dispatch[rule]` of the plan (T10 `H1.W1`: row `9/17/31/53/87`, primary
+`9/16/28/48/79`), else `runtime.spill_k`, else the defaults above, and `VLLM_HETERO_MOE_SPILL_K` wins over all
+of them. The load refuses per-rule tables whose capture widths differ from each other or from `runtime.spill_k`,
+so the capture sizes and the servers' `--buckets` never depend on the rule. The rule is recorded in the plan
+check (`cli.py dispatch`; the arm's `plan_check.log`, the launcher's PRINT stanza and log), in the hub's boot line
+and in the `hx status` line, with the forwards run under each rule (the `hx_status` words are fixed by the
+kernel). It does not fix the token flips of the concurrency probe: HxServer (hx doc 8.9) found that choosing
+the copy by layer alone removed none of them, so the choice is about speed (decision 16), not numerics.
+
 `cli.py` is run by path so the launcher needs no vLLM import:
 
 ```bash
@@ -88,6 +112,7 @@ python vllm/distributed/hetero_moe/cli.py stripe --out plan.json \
 python vllm/distributed/hetero_moe/cli.py validate plan.json             # one line, exit 0 or 1
 python vllm/distributed/hetero_moe/cli.py servers plan.json              # island id hip switch arch
 python vllm/distributed/hetero_moe/cli.py buckets plan.json              # 3,6,12,24,48
+python vllm/distributed/hetero_moe/cli.py dispatch plan.json --rule primary  # rule, K table and source, replicas
 ```
 
 `stripe` runs the ExpertStats solver without statistics (the uniform stripe) with the H1 command of
@@ -172,7 +197,8 @@ capture (a capture executes nothing). Two places announce:
    (eager launches outside `execute_model`: the profile run, capture warm-ups, dummy runs) it posts the
    step itself. During a capture it posts nothing, bakes the width into the graph and refuses widths the
    servers have no graph for, with a message that names `cudagraph_capture_sizes`, the spill table and the
-   server `--buckets`.
+   server `--buckets`. Under `VLLM_HETERO_MOE_DECODE_DISPATCH=primary` it also copies the rule's `n_cold` table
+   over the live one first (a node of the captured graph; section 3).
 
 The runtime connects lazily at the first MoE `apply` (the profile run) and refuses to connect inside a
 capture. The first `get_runtime` call also asserts that `gcnArchName` of the process' device equals the
@@ -245,6 +271,13 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 - **Capture sizes.** `rdna_mtp_args 2` captures `[3,6,12,24]` (decode width 3 times 1, 2, 4, 8). The
   servers' buckets (`3,6,12,24,48`) are a superset. A larger `cudagraph_capture_sizes` entry is refused at
   capture with a message; set `CG_SIZES` and the spill table together.
+- **Decode dispatch rule.** Both recipes set `VLLM_HETERO_MOE_DECODE_DISPATCH=row`. The launcher refuses a value
+  other than `row` or `primary` and exports it to the hub (the servers ignore it); the PRINT stanza has a
+  `# hetero:    decode dispatch <rule>: ...` line (the rule, the K table of the rule and its source, the replica
+  count: `cli.py dispatch`) and the supervisor logs the same line before it starts the hub. `driver.sh`
+  `check_plan` runs the command for the arm's rule (recipe default, then `SERVE_ENV`, then `EXTRA_OV`: the
+  precedence of `serve_rdna.sh`; `VLLM_HETERO_MOE_SPILL_K` is passed on) and writes the line to the log and as
+  the second line of `plan_check.log`. Select `primary` with `EXTRA_OV="VLLM_HETERO_MOE_DECODE_DISPATCH=primary"`.
 
 ## 8. Environment variables
 
@@ -255,7 +288,8 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 | `VLLM_HETERO_MOE_ROLE` | empty | `hub` for the engine, `expert` for a server (set by the launcher) |
 | `VLLM_HETERO_MOE_DEVICE_ID` | empty | plan device id(s); hub ids in TP/EP rank order, comma separated |
 | `VLLM_HETERO_MOE_SERVERS` | empty | server PCI buses, `;` between islands, `,` between buses |
-| `VLLM_HETERO_MOE_SPILL_K` | empty | spill K override, `"3:10,6:21,..."` (empty = plan, then defaults) |
+| `VLLM_HETERO_MOE_SPILL_K` | empty | spill K override, `"3:10,6:21,..."` (empty = the plan's table of the decode dispatch rule, then the defaults) |
+| `VLLM_HETERO_MOE_DECODE_DISPATCH` | row | cold-copy rule of the decode steps (decision 16, section 3): `row` sends a cold pair to copy `(row + layer) % n_cold` on every step, `primary` to the first listed copy on graph steps at the capture widths (eager and prefill steps keep `row`) and takes the plan's K table of that rule. Read by the hub, checked by the launcher; recorded in the plan check, the boot line and the `hx status` line. Set it with `EXTRA_OV` or `SERVE_ENV` |
 | `VLLM_HETERO_MOE_WAIT_MS` | 2000 | device-side poll limit before a step aborts with a record |
 | `VLLM_HETERO_MOE_STATS` | 0 | log the `hx_status` counters every 1000 forwards and the per-layer hub / cold / spilled pairs at close |
 | `VLLM_HX_DEV_LIB` | unset | HxServer's development build of the hx ops (`hx_dev.so`) while `_rocm_C` lacks them |
@@ -266,31 +300,33 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-hetero-h1 MODEL=$CKPT VENV=$VENV 
 
 | File | Tests | What it proves |
 |---|---:|---|
-| `tests/quantization/test_hetero_moe_plan.py` | 33 | plan load/validation, tables, spill K defaults and scaling, `owned` and lost pairs, hub-only layer ids beyond the protocol, the four ExpertStats T10 real-statistics plans and the committed stand-in plan (40 slots per layer, V620 hub, four servers, budgets), the CLI (`validate`, `hubs`, `servers`, `buckets`, `retarget`, `stripe`) |
-| `tests/quantization/test_hetero_moe_runtime.py` | 38 | partial-sum identity (hub residents plus remote partials equal the full MoE for H1 and H2 shapes, with and without spill), the call sequence, the armed step protocol, capture rules, the boot self-test (passes; catches a wrongly mapped server, NaN, an unregistered layer), counters (totals, per-layer, the `hx_status` line, the digest line of a digest hub, a hub without `layer_stats`), the step log (one line per announced step, queued as tuples and written every `STEP_LOG_EVERY` forwards and at close, off by default, a broken batch turns it off and never fails a forward) |
-| `tests/quantization/test_hetero_moe_method.py` | 19 | the wrapped method on the real vLLM classes: slot-map checks, call order with and without a shared expert, hub-only layers untouched, runner hooks, `get_runtime` (arch check, connect, self-test, `layer_stats=True` only with `VLLM_HETERO_MOE_STATS=1`) |
-| `tests/tools/rdna/test_hetero_recipes.py` | 30 | the launcher: PRINT stanza of both recipes with a stub venv (the stand-in with its committed plan, the interim buses and `RDNA_ROCMINFO_STUB`), bus resolution, disjointness, `--expect-bus`, the `VLLM_HETERO_MOE_STEP_LOG` override, a full `serve_rdna.sh` run with stub servers and hub for both recipes (the stub `rocminfo` first on the stand-in's PATH, in the hub and in every server), and the supervisor with stub servers and hubs (ready wait, a dead server, exit codes, SIGTERM, a hub that ignores TERM) |
-| `tests/tools/rdna/test_tp8pp2_hetero_cfg.py` | 42 | the arm harness: slot `HA` (W7800 first, then slot A) refuses a V620 in the hub position and a W7800 in a server position, slot `HV` (hub HIP 1 bus `d4`, servers HIP 2-5) refuses the old layout and misplaced GPUs, slots A, B and AB unchanged, `driver.sh` start-up report of `h1` / `h1v` (default plans), `need_leases` (`a2` + `b4`, foreign holders, requests ignored) and `check_plan` with `driver.sh` sourced; the `evicted_ms` capture of the hub's engine core and the expert servers (labels, the `timeout` wrapper skipped, the `KFD_EVICT_HETERO` default, the CLI flag, the driver exporting it for `h1` / `h1v` only); the driver's hetero concurrency gate (run, a FAIL reported but not an arm failure, `CONC_GATE=probe` and other configs skip it) |
+| `tests/quantization/test_hetero_moe_plan.py` | 44 | plan load/validation, tables, spill K defaults and scaling, `owned` and lost pairs, hub-only layer ids beyond the protocol, the four ExpertStats T10 real-statistics plans and the committed stand-in plan (40 slots per layer, V620 hub, four servers, budgets), the CLI (`validate`, `hubs`, `servers`, `buckets`, `dispatch`, `retarget`, `stripe`); the decode dispatch rule: the K table of each rule and its source (argument, plan table, defaults), per-rule tables with other capture widths refused, an unknown rule refused, `rule_for`, the loop oracle's primary rule by hand, ExpertStats' simulator against the runtime's tables for both rules on a plan with and without replicas, `describe_dispatch` |
+| `tests/quantization/test_hetero_moe_runtime.py` | 56 | partial-sum identity (hub residents plus remote partials equal the full MoE for H1 and H2 shapes, with and without spill), the call sequence, the armed step protocol, capture rules, the boot self-test (passes; catches a wrongly mapped server, NaN, an unregistered layer), counters (totals, per-layer, the `hx_status` line, the digest line of a digest hub, a hub without `layer_stats`), the step log (one line per announced step, queued as tuples and written every `STEP_LOG_EVERY` forwards and at close, off by default, a broken batch turns it off and never fails a forward); the decode dispatch rule: `row` adds no op, `primary` installs its clamped table on a capture and `row` on an eager step (the table's address unchanged), partial-sum identity and the loop oracle under both rules on eager and captured steps, the forwards per rule in the `hx status` line, the boot line, `primary` without replicas a logged no-op, a hub without `n_cold_table` refused |
+| `tests/quantization/test_hetero_moe_method.py` | 23 | the wrapped method on the real vLLM classes: slot-map checks, call order with and without a shared expert, hub-only layers untouched, runner hooks, `get_runtime` (arch check, connect, self-test, `layer_stats=True` only with `VLLM_HETERO_MOE_STATS=1`, the decode dispatch rule from `VLLM_HETERO_MOE_DECODE_DISPATCH`, an unknown value refused), the env report names the rule |
+| `tests/tools/rdna/test_hetero_recipes.py` | 32 | the launcher: PRINT stanza of both recipes with a stub venv (the stand-in with its committed plan, the interim buses and `RDNA_ROCMINFO_STUB`), bus resolution, disjointness, `--expect-bus`, the `VLLM_HETERO_MOE_STEP_LOG` override, the decode dispatch line (rule, K table, replicas) in the stanza and in the supervisor's log before the hub starts, a bad value refused, a full `serve_rdna.sh` run with stub servers and hub for both recipes (the stub `rocminfo` first on the stand-in's PATH, in the hub and in every server), and the supervisor with stub servers and hubs (ready wait, a dead server, exit codes, SIGTERM, a hub that ignores TERM) |
+| `tests/tools/rdna/test_tp8pp2_hetero_cfg.py` | 49 | the arm harness: slot `HA` (W7800 first, then slot A) refuses a V620 in the hub position and a W7800 in a server position, slot `HV` (hub HIP 1 bus `d4`, servers HIP 2-5) refuses the old layout and misplaced GPUs, slots A, B and AB unchanged, `driver.sh` start-up report of `h1` / `h1v` (default plans), `need_leases` (`a2` + `b4`, foreign holders, requests ignored) and `check_plan` with `driver.sh` sourced (it records the decode dispatch rule: recipe default, `SERVE_ENV`, `EXTRA_OV` and their precedence, `VLLM_HETERO_MOE_SPILL_K` passed on, an unknown rule refused; the T10 plan's K per rule); the `evicted_ms` capture of the hub's engine core and the expert servers (labels, the `timeout` wrapper skipped, the `KFD_EVICT_HETERO` default, the CLI flag, the driver exporting it for `h1` / `h1v` only); the driver's hetero concurrency gate (run, a FAIL reported but not an arm failure, `CONC_GATE=probe` and other configs skip it) |
 | `tests/tools/rdna/test_hetero_conc_gate.py` | 14 | the stand-in concurrency gate (`tools/rdna/hetero_moe/conc_gate.py`) on hand-built arm directories: PASS with token flips only reported, `solo` bit-identical across runs and `solo2` equal to `solo` (a logprob alone breaks it), the digest counters of the hub and every server (bad, unhealed, a missing line, no server; the last counters line wins), the exit codes |
 
 Commands and results:
 
 ```bash
-# Mac: plan, tables, runtime (71 passed with the method file excluded)
-uv run --quiet --no-project --with numpy --with regex --with pytest --with torch python -m pytest \
+# Mac: plan, tables, runtime (100 passed with the method file excluded: plan 44, runtime 56)
+uv run --quiet --no-project --with numpy --with regex --with pytest --with torch --with psutil python -m pytest \
     --noconftest -q -p no:cacheprovider tests/quantization/test_hetero_moe_plan.py \
     tests/quantization/test_hetero_moe_runtime.py
-# Mac: launcher, harness and gate (86 passed: recipes 30, harness 42, gate 14; 157 with the two lines above
+# Mac: launcher, harness and gate (95 passed: recipes 32, harness 49, gate 14; 195 with the two lines above
 # in one run)
 uv run --quiet --no-project --with numpy --with regex --with pytest python -m pytest --noconftest -q \
     -p no:cacheprovider tests/tools/rdna/test_hetero_recipes.py tests/tools/rdna/test_tp8pp2_hetero_cfg.py \
     tests/tools/rdna/test_hetero_conc_gate.py
-# box, exact-SHA tree, CPU only (910 passed on 97634f2553: method 19, plan 33, runtime 38, gate 14 and HxServer's
+# box, exact-SHA tree, CPU only (1071 passed in 455 s on d11682cba9: method 23, plan 44, runtime 56, gate 14,
+# recipes 32, harness 49, ExpertStats' tests/tools/rdna/test_hetero_moe.py 47 and HxServer's
 # tests/distributed/hetero_moe 806; section 13)
 TREE=$PWD nice -n 10 bash tools/rdna/rdna3/cpu_pytest.sh -q -p no:cacheprovider \
     tests/quantization/test_hetero_moe_method.py tests/quantization/test_hetero_moe_plan.py \
     tests/quantization/test_hetero_moe_runtime.py tests/tools/rdna/test_hetero_conc_gate.py \
-    tests/distributed/hetero_moe
+    tests/tools/rdna/test_hetero_recipes.py tests/tools/rdna/test_tp8pp2_hetero_cfg.py \
+    tests/tools/rdna/test_hetero_moe.py tests/distributed/hetero_moe
 ```
 
 `cpu_pytest.sh` of the port branch (a stub `rocminfo`: `aiter` runs `rocminfo` at import and fails without a GPU)
@@ -445,6 +481,38 @@ in `serve.log` (at least 470k tokens), the hub counters (`VLLM_HETERO_MOE_STATS=
 40.2 or 72.3 ms (stop and trace), 2048-token chunk at most 1.5 s with the scalar MoE kernel.
 `KV=10737418240` in the H1 recipe is raised toward 12.1 GiB after the first boot reports the free memory.
 
+**Decode dispatch pair (user decision 16, spec C.5).** Not before S4-H1 and S5-H1 pass on `row`, the default
+that every arm above runs. Then four fresh boots in the order row, primary, primary, row (ABBA) on one tree, with
+the same plan, recipe, capture sizes and servers; only the rule differs. The plan is `$REAL`, the T10 `H1.W1`
+(a plan with replicas: 18,336 of its 24,576 layer-experts have two or more server copies, so `primary` has
+something to do; on a plan without replicas it is a logged no-op), and `VLLM_HETERO_MOE_SPILL_K` stays unset
+because it overrides the K tables of both rules. Each rule runs on its own K table of the plan
+(`runtime.spill_k_by_dispatch`: row `9/17/31/53/87`, primary `9/16/28/48/79`), so the K difference is part of the
+rule, not a confound. Cells: c1, 1k c8 and c16 (ITL and TTFT). The digest gate decides whether an arm is valid
+(`conc_gate.txt` PASS in every arm of the pair); the speed numbers are recorded, not gated:
+
+```bash
+# the rule is the only difference between the arms; every arm is a fresh boot
+for arm in "row a" "primary a" "primary b" "row b"; do
+    set -- $arm
+    OWNER=HubMethod SHA=$SHA CFG=h1 ARM=h1-dd-$1-$2 HOOK=1 QUALITY=0 CONC_REPEAT=4 PLAN=$REAL \
+        CELLS_SPEC="1024:512:1:4:12301 1024:512:8:32:12303 1024:512:16:48:12306" \
+        EXTRA_OV="VLLM_HETERO_MOE_STATS=1 VLLM_HETERO_MOE_DECODE_DISPATCH=$1" \
+        bash tools/rdna/tp8pp2/driver.sh
+done
+```
+
+The spec's model (H1) puts row minus primary at +0.11 ms at c1, +0.87 ms at c8 and +1.82 ms at c16 (the H1
+as-built c8 estimate is 60.0 ms against the 60.8 ms green limit), so compare the two arms of each rule first (A
+against A is the run-to-run spread) and read the median ITL difference between the rules at each width against
+it. Per arm read
+`plan_check.log` (line 2: the rule and its K table), the hub's boot line `hetero MoE decode dispatch <rule>: ...`,
+the last `hetero MoE hx status` line of `serve.log` (`decode dispatch <rule> (forwards: row N, primary M)`: a
+`primary` arm counts its graph replays at the decode widths under `primary` and only its eager steps under
+`row`; a `row` arm has `primary 0`), the digest lines and `conc_gate.txt`. The two rules may differ in the
+concurrency probe's token flips (the rule is not a numerics fix, section 3) and in the server pair counters; they
+must not differ in the digest (0 bad) or the boot self-test. The decision is the user's.
+
 ## 11. Risks
 
 1. **The W7800 hub path has never run on a GPU** (no W7800 is installed). The V620 stand-in ran eager and
@@ -492,6 +560,23 @@ in `serve.log` (at least 470k tokens), the hub counters (`VLLM_HETERO_MOE_STATS=
     `rocminfo` lists first decides [INFERENCE]; set the knob if a V620 comes first.
 13. **The spill path is barely exercised**: 3,155 of 42.8 M not-resident pairs in 6.5k steps (the K defaults
     of section 3 hold at the stand-in's load; the W7800's 130-slot plan has another profile).
+14. **The `primary` rule has run on a GPU once (the V620 stand-in), never on the W7800, and the two rules were
+    never measured against each other.** The stand-in boot of section 13 captured the table copy in the FULL
+    graphs and replayed 5,277 forwards under `primary` with the digest clean and `solo` / `solo2` bit-identical
+    (the stand-in plan has replicas for 79 % of its layer-experts, and the `row` rule's replica dispatch ran there
+    in every earlier arm). The CPU tests prove the table switch, the per-rule K tables and both rules against the
+    loop oracle and ExpertStats' simulator. Open: the speed difference (the ABBA pair of section 10.2; the
+    stand-in arm is one boot with a c1 cell, inside the noise) and the W7800 hub. An eager step at a decode width
+    (a warm-up, an `EAGER=1` arm) keeps `row` while its K table is the `primary` one: a small mismatch the spec
+    accepts.
+15. **No touches-per-expert counter.** The hub and the servers count pairs, not the distinct experts a server
+    streams per step, so the step-time ratios of decision 16 (0.907 for H1, 0.941 for H2) can only be read off
+    ITL and TTFT (HeteroDesign dropped the counter from decision 16 and T14).
+16. **Stage 2 (two hubs).** The knob is read by every hub process, each hub keeps its own tables, and the plan's
+    K tables per rule cover both islands. The concurrency gate reads one hub digest line from `serve.log`, so H2
+    needs per-hub ids. A live placement flip (S8) that changed `n_cold` would have to refresh the row table and
+    its clamped copy (`HubRuntime._rule_tables`); the flip as specified moves hub residents, the server copies
+    stay.
 
 ## 12. Deviations from the spec and agreements
 
@@ -522,8 +607,51 @@ in `serve.log` (at least 470k tokens), the hub counters (`VLLM_HETERO_MOE_STATS=
   after HxServer's hx doc 8.8 and 8.9), and the stand-in's concurrency gate is the digest plus `solo`/`solo2`
   bit-identity with the token flips against the T=3 solo reported as information (`conc_gate.py`, section 10.1):
   the probe's own verdict no longer decides a hetero arm.
+- `VLLM_HETERO_MOE_DECODE_DISPATCH=row|primary` (user decision 16, as HeteroDesign adopted it in the spec's
+  environment table and C.5): a table swap in `HubRuntime.begin_step` with no kernel change, a read-only
+  `HxHub.n_cold_table` property in `hx.py` (HxServer's file; agreed as additive: the table is never rebound
+  because the ctx holds its address), per-rule K tables (`plan.spill_k(rule)` over the plan's
+  `runtime.spill_k_by_dispatch`) and the rule in the plan check, the boot line and the `hx status` line (the
+  `hx_status` words are fixed by the kernel). No touches-per-expert counter was built (HeteroDesign: the ABBA
+  cells are ITL, TTFT and the digest).
 
-## 13. Progress and resume point (2026-11-10)
+## 13. Progress and resume point (2026-11-11)
+
+**Decode dispatch knob (2026-11-11; user decision 16, via Main and HeteroDesign).** `e3d769d920` adds
+`VLLM_HETERO_MOE_DECODE_DISPATCH=row|primary` (sections 3, 7, 8, 10.2 and 12): `row`, the default, adds no op;
+`primary` switches the `n_cold` table in `begin_step` on graph steps. Exact tree `~/vllm-tp8pp2-d11682cba9` (the
+knob plus the merges of `origin/feat/hetero-moe` `db90597095` and `origin/feat/hetero-hx` `357ade87e1`;
+`finish_build.sh`: 199 ops, 0 undefined). CPU tests on it, no GPU: **1071 passed in 455 s** (method 23, plan 44,
+runtime 56, gate 14, recipes 32, harness 49, ExpertStats' `tests/tools/rdna/test_hetero_moe.py` 47 and HxServer's
+806); on the Mac the five hub test files give 195 (plan 44, runtime 56, recipes 32, harness 49, gate 14).
+HeteroDesign's spec cites the commit (`b134a12994`) and agrees with the numbers of the plan check: the T10 plans
+`H1.W1` and `H1.W2` have 18,336 of 24,576 layer-experts with a replica (H2 6,768 of 12,288), K 9/17/31/53/87
+under `row` and 9/16/28/48/79 under `primary` for H1 `W1`.
+
+**Stand-in boot with `primary` (2026-11-11, leases `HubMethod.a2` + `.b4`, 02:39 to 02:51 box time).** One fresh
+compiled boot (`FULL_AND_PIECEWISE`, plan `H1v.W1`, `KV=2 GiB`, `EXTRA_OV=VLLM_HETERO_MOE_DECODE_DISPATCH=primary`,
+`CONC_REPEAT=3`, a c1 cell; box helper `~/w4a8_runs/hetero_hub/dd_arm.sh <sha10> <suffix> [rule]`, arm directory
+`~/w4a8_runs/tp8pp2/arms/h1v-int-dd-primarya`). It proves that the mechanism runs on a GPU; it is not the ABBA
+pair of section 10.2.
+
+- The plan check (line 2 of `plan_check.log`, the driver log) and the launcher's log say `decode dispatch primary:
+  ... spill K 10/21/39/65/110 ... from the cost-model defaults ...; 19484 of 24576 layer-experts with a server
+  copy have a replica`, and so does the hub's boot line. READY in 340 s, probes 3/3, the boot self-test passed
+  (9.54e-04, the value of the `row` arm: the self-test runs eager steps), PPL 4.79 (261 tokens, as with `row`),
+  4 PIECEWISE and 4 FULL graphs captured (the FULL graphs carry the table copy; no capture error).
+- **Gate PASS**: `solo` 8/8 items bit-identical in tokens and logprobs in 4 of 4 runs, `solo2` equal to `solo` in
+  32/32 items, the hub and each of the four servers at 259,008 exchanges with 0 bad, 0 healed, 0 unhealed, 0 late
+  digest words and 0 rescans. The probe's own verdict: PASS at boot and in 3 of 3 repeats (5 to 7 near-tie, 7
+  soft, 34 to 36 identical of 48); the flips against the T=3 solo are information, as before.
+- The last `hx status` line: `steps 5396 ... decode dispatch primary (forwards: row 119, primary 5277)`: the steps
+  at the capture widths ran under `primary`, the eager steps (prefill chunks, warm-ups, the self-test) under
+  `row`. `evicted_ms` +0 for the EngineCore and the four servers, 0 fault markers, 0 amdgpu dmesg faults,
+  junction 72 C at most on the hub and 56 C on the servers.
+- c1 (1024 in, 512 out, 4 prompts): median ITL 45.10 ms (mean 45.10, P99 45.93), TTFT 878 ms, TPOT 20.40 ms,
+  44.05 output tok/s; the `row` arm of the previous tree has 45.29 ms (verify arms below). One boot each on two
+  trees and 4 prompts: no speed claim (the model's c1 difference is 0.11 ms).
+- A first attempt to build the tree under an outer `flock` on the build lock hung: `build_rocm_c.sh` takes the
+  same lock itself, so `finish_build.sh` needs no wrapper.
 
 **Digest tree and gate (2026-11-10, evening; Main's RESUME after HxServer's digest arms).** `decd1dc383`
 merges `origin/feat/hetero-hx` `fc64ca9554` (the digest kernels: `hx_core.cuh` and `hx_ops.cu` changed, so
@@ -669,7 +797,7 @@ comes from KFD sysfs, not amdsmi; a host-side row check of the shared-expert til
 - Sysfs: buses `d1 d4 d9 dc df e2` all sit at `0000:BB:00.0` with `temp2_input` (junction) and
   `mem_info_vram_used`, so `tempwatch.py` and `memwatch.py` work unchanged.
 
-**Resume (2026-11-10, after the verify arms; HubMethod's leases released):**
+**Resume (2026-11-11, after the dispatch knob and its stand-in boot; HubMethod's leases released at 02:51):**
 
 1. Done: the digest tree `97634f2553` is shipped and built; the verify arms above. The box helpers repeat them:
    `keeper.sh` takes `HubMethod.a2` and `.b4` when the lease queue allows, `auto_verify.sh <sha10> <suffix>`
@@ -686,3 +814,9 @@ comes from KFD sysfs, not amdsmi; a host-side row check of the shared-expert til
    lease names first. The recipes keep `VLLM_HX_FLUSH=256` and the deterministic hub MoE until the W7800 path is
    proven; the gate of the first W7800 arm is the same (`conc_gate.txt`), with the hub's digest line from
    `serve.log` and the servers' from `hetero/<id>.log`.
+5. The decode dispatch pair of section 10.2 (ABBA, `row` against `primary`) runs after S4-H1 and S5-H1 pass on
+   `row`, with a T10 `H1` plan (replicas) and `VLLM_HETERO_MOE_SPILL_K` unset; HeteroDesign records the measured
+   pair and refits the model (row minus primary +0.11 / +0.87 / +1.82 ms at c1 / c8 / c16). The box helper
+   `~/w4a8_runs/hetero_hub/dd_arm.sh <sha10> <suffix> [rule]` (with `keeper.sh` holding the leases) repeats the
+   stand-in boot of section 13 for either rule; a `row` boot of tree `d11682cba9` would give the stand-in an A/B
+   at c1 (not run: the stand-in cannot say anything about c8 or c16 on its two-request pool).
