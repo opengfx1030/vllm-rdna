@@ -43,7 +43,8 @@ def _inputs(T, FLA_CHUNK_SIZE, seed=0):
     reason=(
         "Skipped by default: recorded GPU hang, the HIP GDN prefill chain "
         "calls gdn_prefill_kkt_rdna2, which fails then aborts in "
-        "hsa_signal_wait (docs/rdna2/v0.31.0-port-notes.md). To run it, set "
+        "hsa_signal_wait (docs/rdna2/v0.31.0-port-notes.md; recorded before "
+        "the kkt fix 34cc3c21bd, not re-run since). To run it, set "
         "VLLM_RUN_GDN_KKT_HANG_TEST=1 and run this file in its own process."
     ),
 )
