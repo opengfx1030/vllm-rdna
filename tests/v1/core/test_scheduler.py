@@ -3081,6 +3081,44 @@ def test_spec_decode_padding_resumed_request_without_running_requests():
     assert out.scheduled_spec_decode_tokens[resumed.request_id] == [-1] * num_spec
 
 
+@pytest.mark.parametrize(
+    ("opted_in", "marked", "padded"),
+    [
+        # The consumer opted in and the NIXL scheduler marked the request.
+        (True, True, False),
+        # Not opted in: the default keeps the padding.
+        (False, True, True),
+        # Opted in, but a prefix-cache hit in normal serving carries no mark.
+        (True, False, True),
+    ],
+)
+def test_spec_decode_padding_unpadded_resume_step(
+    opted_in: bool, marked: bool, padded: bool
+):
+    """A P/D decoder that sets `unpadded_resume_step` runs the step recomputing the
+    cut prompt token with its single row, as the monolithic engine's last prompt
+    step has; every other loaded or cached request keeps the padding."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=False),
+    )
+    scheduler.unpadded_resume_step = opted_in
+    (resumed,) = create_requests(num_requests=1, num_tokens=33, max_tokens=16)
+    if marked:
+        resumed.kv_transfer_params = {"_remote_blocks_processed": True}
+
+    scheduler.add_request(resumed)
+    out = scheduler.schedule()
+
+    if padded:
+        assert out.num_scheduled_tokens[resumed.request_id] == 1 + num_spec
+        assert out.scheduled_spec_decode_tokens[resumed.request_id] == [-1] * num_spec
+    else:
+        assert out.num_scheduled_tokens[resumed.request_id] == 1
+        assert resumed.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_spec_decode_padding_skipped_for_diffusion():
     """Diffusion spec tokens are the fixed-size denoising canvas, not
     rejectable drafts: a first-decode-step request must keep its 1-token span

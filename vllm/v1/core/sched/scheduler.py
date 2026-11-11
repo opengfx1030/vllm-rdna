@@ -38,6 +38,7 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
+from vllm.v1.core.kv_cache_coordinator import replay_boundaries
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -351,6 +352,41 @@ class Scheduler(SchedulerInterface):
         if self.num_hash_lookahead_tokens:
             # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
             self.use_eagle_block_drop = False
+        # Chunk ends a monolithic engine (no KV connector) would schedule with.
+        # With a connector the engine keeps legacy hashes and the EAGLE block
+        # drop, which moves the replay boundaries one block earlier than that
+        # engine's. A P/D prefiller opts into the monolithic ends for its prompt
+        # split (kv_connector_extra_config `prefill_monolithic_split`) so the
+        # decoder resumes from the state that engine would have held at the cut.
+        self.monolithic_hash_lookahead_tokens = (
+            vllm_config.monolithic_num_hash_lookahead_tokens
+        )
+        self.monolithic_eagle_block_drop = (
+            speculative_config is not None
+            and speculative_config.use_eagle_block_drop()
+            and not self.monolithic_hash_lookahead_tokens
+        )
+        self.prefill_monolithic_split = (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_producer
+            and bool(
+                kv_transfer_config.get_from_extra_config(
+                    "prefill_monolithic_split", False
+                )
+            )
+        )
+        # A P/D decoder resumes a prompt whose KV the connector loaded. Its first
+        # step, the recompute of the cut prompt tokens, is padded like a first
+        # decode step, while the monolithic engine's own last prompt step has one
+        # row. The decoder opts out of the padding for it
+        # (kv_connector_extra_config `unpadded_resume_step`).
+        self.unpadded_resume_step = (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_consumer
+            and bool(
+                kv_transfer_config.get_from_extra_config("unpadded_resume_step", False)
+            )
+        )
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -652,6 +688,20 @@ class Scheduler(SchedulerInterface):
         # Reaching max_tokens finishes the request, so no step verifies the drafts.
         return min_num_output_tokens >= request.max_tokens
 
+    def _is_unpadded_resume_step(self, request: Request) -> bool:
+        """Whether the consumer opted out of the spec-decode padding for this request.
+
+        The NIXL pull scheduler marks a request that arrived with a remote
+        prefill `_remote_blocks_processed`. Requests without the mark, such as
+        prefix-cache hits in normal serving, keep the padding.
+        """
+        params = request.kv_transfer_params
+        return (
+            self.unpadded_resume_step
+            and params is not None
+            and bool(params.get("_remote_blocks_processed"))
+        )
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -679,6 +729,26 @@ class Scheduler(SchedulerInterface):
             return num_new_tokens
 
         block_size = self.mamba_state_block_size or self.cache_config.block_size
+        # A P/D prefiller's prompt was cut by `backoff` trailing tokens that the
+        # decoder recomputes. Split what is left as a monolithic engine splits the
+        # whole prompt, chunk ends included, so the state handed over is the one
+        # that engine holds at the cut.
+        params = request.kv_transfer_params
+        backoff = (
+            params.get("_p_side_backoff", 0)
+            if params and self.prefill_monolithic_split
+            else 0
+        )
+        if backoff:
+            num_tokens = request.num_tokens + backoff
+            num_prompt_tokens = request.num_prompt_tokens + backoff
+            use_eagle_block_drop = self.monolithic_eagle_block_drop
+            num_hash_lookahead_tokens = self.monolithic_hash_lookahead_tokens
+        else:
+            num_tokens = request.num_tokens
+            num_prompt_tokens = request.num_prompt_tokens
+            use_eagle_block_drop = self.use_eagle_block_drop
+            num_hash_lookahead_tokens = self.num_hash_lookahead_tokens
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
@@ -686,18 +756,18 @@ class Scheduler(SchedulerInterface):
             self.hash_block_size if self.mamba_partial_cache_hit else self.block_size
         )
         last_cache_position = get_mamba_prefill_checkpoint_position(
-            request.num_tokens,
+            num_tokens,
             block_size,
-            self.use_eagle_block_drop,
-            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            use_eagle_block_drop,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
 
         end = start + num_new_tokens
         checkpoint_position = get_mamba_prefill_checkpoint_position(
             prefill_end,
             ckpt_block_size,
-            drop_eagle_block=self.use_eagle_block_drop,
-            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            drop_eagle_block=use_eagle_block_drop,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         use_internal_checkpoint = (
             self.mamba_has_prefill_checkpoint_blocks
@@ -734,10 +804,10 @@ class Scheduler(SchedulerInterface):
         next_block_boundary = (start // block_size + 1) * block_size
         tail_boundary = (
             get_mamba_prefill_checkpoint_position(
-                request.num_prompt_tokens,
+                num_prompt_tokens,
                 self.hash_block_size,
-                self.use_eagle_block_drop,
-                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+                use_eagle_block_drop,
+                num_hash_lookahead_tokens=num_hash_lookahead_tokens,
             )
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
@@ -763,7 +833,17 @@ class Scheduler(SchedulerInterface):
             # RDNA: both an identical resend and an extended prompt need a
             # materialized state at their respective retained boundaries.
             *(
-                self.kv_cache_manager.coordinator.get_replay_boundaries(request)
+                (
+                    replay_boundaries(
+                        num_prompt_tokens,
+                        self.kv_cache_manager.coordinator.scheduler_block_size,
+                        use_eagle=use_eagle_block_drop,
+                    )
+                    if backoff
+                    else self.kv_cache_manager.coordinator.get_replay_boundaries(
+                        request
+                    )
+                )
                 if self.mamba_state_block_size is not None
                 and not use_internal_checkpoint
                 else ()
@@ -772,7 +852,7 @@ class Scheduler(SchedulerInterface):
             last_cache_position,
             # Stop at the prompt checkpoint unless the backend saves it internally.
             tail_boundary
-            if last_cache_position < tail_boundary < request.num_prompt_tokens
+            if last_cache_position < tail_boundary < num_prompt_tokens
             else 0,
             # Marconi shared-prefix junction: cache its state so sibling
             # requests sharing the prefix can reuse it.
@@ -1533,6 +1613,7 @@ class Scheduler(SchedulerInterface):
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
+                        and not self._is_unpadded_resume_step(request)
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
