@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+.venv/bin/python -m tools.rdna.mono.qualify_expert_copy --base-url http://127.0.0.1:18766 --model "$SERVED" --tokenizer "$MODEL" --out "$OUT/native-eager" --cells 1k-c1 16k-c1 --arms native

@@ -26,11 +26,14 @@ def determine_expert_map(
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
     num_fused_shared_experts: int = 0,
     return_expert_mask: bool = False,
+    explicit_local_experts: list[int] | None = None,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """Calculates how many experts should be assigned to each rank for EP and
     creates a mapping from global to local expert index. Experts are
     distributed evenly across ranks. Any remaining are assigned to the
-    last rank.
+    last rank. ``explicit_local_experts`` (opt-in, RDNA2 static placement)
+    names this rank's global experts instead; local slot i holds its i-th
+    entry.
 
     Args:
         ep_size: The size of the expert parallel group
@@ -40,6 +43,9 @@ def determine_expert_map(
         expert_placement_strategy: The expert placement strategy.
         num_fused_shared_experts: Number of fused shared experts (for AITER)
         return_expert_mask: Whether to return expert mask for AITER
+        explicit_local_experts: Opt-in RDNA2 static placement: the global
+            expert ids this rank owns, in local slot order. Overrides the
+            strategy and does not support fused shared experts.
 
     Returns:
         tuple[int, Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple containing:
@@ -62,6 +68,18 @@ def determine_expert_map(
     assert ep_size > 0
     if ep_size == 1:
         return (global_num_experts, None, None)
+
+    if explicit_local_experts is not None:
+        if num_fused_shared_experts:
+            raise ValueError(
+                "explicit expert placement does not support fused shared experts"
+            )
+        from vllm.model_executor.layers.fused_moe.rdna_moe_placement import (
+            experts_to_expert_map,
+        )
+
+        expert_map = experts_to_expert_map(explicit_local_experts, global_num_experts)
+        return (len(explicit_local_experts), expert_map, None)
 
     # Distribute experts as evenly as possible to each rank.
     base_experts = global_num_experts // ep_size
@@ -191,6 +209,7 @@ class ExpertMapManager:
         enable_eplb: bool,
         num_fused_shared_experts: int = 0,
         rocm_aiter_enabled: bool = False,
+        layer_name: str = "",
     ):
         """Initialize expert map manager.
 
@@ -207,14 +226,19 @@ class ExpertMapManager:
             num_fused_shared_experts: Number of fused shared experts (for AITER)
             rocm_aiter_enabled: Whether ROCm AITER fusion is enabled
             enable_eplb: Whether expert-parallel load balancing is enabled
+            layer_name: Module name of the layer (keys the opt-in static
+                placement file, ``VLLM_RDNA_MOE_PLACEMENT``)
 
         """
+        self.layer_name = layer_name
         self.global_num_experts = global_num_experts
         self.moe_parallel_config = moe_parallel_config
         self.num_fused_shared_experts = num_fused_shared_experts
         self.rocm_aiter_enabled = rocm_aiter_enabled
         self.top_k = top_k
         self.max_num_batched_tokens = max_num_batched_tokens
+        # Opt-in static placement (VLLM_RDNA_MOE_PLACEMENT); None = strategy.
+        self._explicit_local_experts = None
 
         if moe_parallel_config.use_ep:
             # Determine expert placement strategy before creating manager
@@ -230,6 +254,25 @@ class ExpertMapManager:
         self._placement_strategy = self._determine_placement_strategy(
             placement_strategy
         )
+
+        # Opt-in RDNA2 static placement file overrides the strategy per layer.
+        if moe_parallel_config.use_ep and placement_strategy == "linear":
+            from vllm.model_executor.layers.fused_moe.rdna_moe_placement import (
+                placement_from_env,
+            )
+
+            self._explicit_local_experts = placement_from_env(
+                layer_name, self.ep_rank, global_num_experts
+            )
+            if self._explicit_local_experts is not None:
+                logger.info(
+                    "RDNA MoE static placement for %r (EP rank %d/%d): "
+                    "%d local experts",
+                    layer_name,
+                    self.ep_rank,
+                    self.ep_size,
+                    len(self._explicit_local_experts),
+                )
 
         # Calculate expert mappings
         self._calculate_expert_maps()
@@ -359,13 +402,6 @@ class ExpertMapManager:
             return True
         return self._expert_map[global_id] != -1
 
-    def get_local_expert_ids(self) -> list[int]:
-        """Get list of global IDs for experts on this rank."""
-        if self._expert_map is None:
-            return list(range(self.global_num_experts))
-
-        return torch.where(self._expert_map != -1)[0].tolist()
-
     def update(
         self,
         moe_parallel_config: FusedMoEParallelConfig,
@@ -440,18 +476,22 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
-        (
-            self._local_num_experts,
-            self._expert_map,
-            self._expert_mask,
-        ) = determine_expert_map(
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            global_num_experts=self.global_num_experts,
-            expert_placement_strategy=self._placement_strategy,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            return_expert_mask=self.rocm_aiter_enabled,
-        )
+        device = torch.get_default_device()
+        device = device if device.type != "meta" else torch.device("cpu")
+        with device:
+            (
+                self._local_num_experts,
+                self._expert_map,
+                self._expert_mask,
+            ) = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts,
+                expert_placement_strategy=self._placement_strategy,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                return_expert_mask=self.rocm_aiter_enabled,
+                explicit_local_experts=self._explicit_local_experts,
+            )
 
         self._local_num_experts += self.num_fused_shared_experts
 

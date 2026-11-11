@@ -1,0 +1,3 @@
+cold TTFT 4.37 s, warm TTFT 0.29 s, speedup 15.3x -> PASS
+cold text: '\n\n<think>\nThe user is asking me to summarize a very long text that appears to be a sequence of GPU/computing-related ter'
+warm text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "ker'

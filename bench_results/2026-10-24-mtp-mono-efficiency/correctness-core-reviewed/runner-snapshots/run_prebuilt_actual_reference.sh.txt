@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Actual native HIP reference against the unchanged production O2 Mono core.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+REF="$BASE/dense-native-reference"
+SRC="$BASE/core-inline-serve-tree"
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+OUT="$BASE/dense-native-round-v2-native-reference"
+[[ $(hostname) == par1-cs25 && ! -e $OUT ]]
+[[ -s $BASE/serve-inline-ab/SEQUENCE-RESUME-V2-COMPLETE.txt ]]
+FIXTURE_HELPER="$BASE/large-m-mono-global-validation/validate_global_m_fixture.py"
+FIXTURE_TEST="$SRC/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py"
+# Check all explicit staged diagnostic dependencies before Python/sitecustomize
+# or TunableOp setup can initialize the GPU runtime.
+required=(
+    "$VENV/bin/python"
+    "$REF/validate_actual_rdna_dense_v2.py"
+    "$FIXTURE_HELPER" "$FIXTURE_TEST"
+    "$BASE/core-inline-serving-ab/check_reserved_gpu.py"
+    "$SRC/vllm/__init__.py" "$SRC/vllm/_rocm_C.abi3.so"
+    "$SRC/vllm/_custom_ops.py" "$SRC/vllm/platforms/rocm.py"
+    "$SRC/vllm/model_executor/layers/rdna_ops.py"
+    "$SRC/vllm/model_executor/layers/utils.py"
+    "$SRC/vllm/model_executor/layers/fused_moe/router/fused_topk_router.py"
+    "$SRC/vllm/models/qwen4_exp/amd/ops/hc.py"
+    "$SRC/vllm/models/qwen4_exp/amd/mono_decode_rdna2.py"
+    "$SRC/vllm/models/qwen4_exp/amd/mono/rdna2/k2.py"
+    "$SRC/csrc/rocm/mono_k2_rdna2.cu"
+    "$SRC/csrc/rocm/moe_unquantized_rdna2.cu"
+    "$SRC/tools/rdna2_028/tunableop_env.sh"
+    "$SRC/tunableop/rocm7.14-rocblas5.5/"tunableop_results{0,1,2,3}.csv
+)
+for dependency in "${required[@]}"; do
+    [[ -r $dependency && -f $dependency ]] || {
+        printf 'missing diagnostic dependency: %s\n' "$dependency" >&2
+        exit 1
+    }
+done
+[[ $(sha256sum "$FIXTURE_HELPER" | cut -d' ' -f1) == 4d334bc5f64b6542695ef452789bc1cc56d375a84d022d6ece7a7f5095788f25 ]]
+[[ $(sha256sum "$REF/validate_actual_rdna_dense_v2.py" | cut -d' ' -f1) == 741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca ]]
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -w 90 9
+mkdir "$OUT"
+printf '%s\n' "${required[@]}" > "$OUT/preflight-dependencies.txt"
+"$VENV/bin/python" -S "$BASE/core-inline-serving-ab/check_reserved_gpu.py" > "$OUT/gpu-owners.txt" 2>&1
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES=6
+export VLLM_ROCM_USE_AITER=0 VLLM_RDNA2_MOE_FP32_ACCUM=0
+export ROCM_HOME=/opt/rocm/core-7.14 ROCM_PATH=/opt/rocm/core-7.14 HIP_PATH=/opt/rocm/core-7.14
+export PATH=/opt/rocm/core-7.14/bin:$VENV/bin:$PATH
+export PYTHONPATH="$SRC:$BASE/large-m-mono:$BASE/large-m-mono-validation"
+export VLLM_SOURCE_ROOT="$SRC"
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export PYTORCH_TUNABLEOP_TUNING=0 TUNEOP_REQUIRE_HASH_ROWS=1
+source "$SRC/tools/rdna2_028/tunableop_env.sh"
+configure_tunableop "$SDK_LIB/librocblas.so.5" "$SRC/tunableop"
+[[ $(sha256sum "$REF/validate_actual_rdna_dense_v2.py" | cut -d' ' -f1) == 741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca ]]
+hashes() {
+    sha256sum "$SRC/vllm/_rocm_C.abi3.so" "$SRC/csrc/rocm/mono_k2_rdna2.cu" \
+        "$SRC/csrc/rocm/moe_unquantized_rdna2.cu" \
+        "$SRC/tunableop/rocm7.14-rocblas5.5/"tunableop_results{0,1,2,3}.csv \
+        "$FIXTURE_HELPER" "$FIXTURE_TEST" \
+        "$REF/validate_actual_rdna_dense_v2.py" "$HERE/run_prebuilt_actual_reference.sh"
+}
+hashes > "$OUT/sha256.before"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.before"
+finish() {
+    rc=$?
+    set +e
+    hashes > "$OUT/sha256.after"
+    cat /proc/sys/kernel/random/boot_id > "$OUT/boot.after"
+    cmp "$OUT/sha256.before" "$OUT/sha256.after" || rc=1
+    cmp "$OUT/boot.before" "$OUT/boot.after" || rc=1
+    printf '%s\n' "$rc" > "$OUT/exit-status.txt"
+    exit "$rc"
+}
+trap finish EXIT
+export DENSE_ROUND_V2_BINARY="$BASE/torch-extensions-dense-round-v2/mono_k2_dense_native_rounding_v2_scratch_20261024/mono_k2_dense_native_rounding_v2_scratch_20261024.so"
+export DENSE_ROUND_V2_BINARY_SHA256=837e6ab2ff6c43831bfcaa39e807d8a7916a542039c32d503ee680d9d3bca601
+TRACE="$BASE/dense-native-round-v2-safety-bundled-trace/trace/safety_kernel_trace.csv"
+[[ -s $TRACE && -s $BASE/dense-native-round-v2-safety-bundled-trace/safety.json ]]
+TRACE_SHA=$(sha256sum "$TRACE" | cut -d' ' -f1)
+printf '%s %s\n' "$TRACE_SHA" "$TRACE" > "$OUT/trace.sha256"
+printf '%s %s\n' "$DENSE_ROUND_V2_BINARY_SHA256" "$DENSE_ROUND_V2_BINARY" > "$OUT/candidate.sha256"
+cd /tmp
+status=0
+for rows in 1 3 8 24; do
+    # Preserve independent failures at every requested width, no timing waiver.
+    if timeout -k 10 120 "$VENV/bin/python" "$HERE/run_actual_reference.py" \
+        --harness "$REF/validate_actual_rdna_dense_v2.py" \
+        --harness-sha256 741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca \
+        --kernel-trace "$TRACE" --kernel-trace-sha256 "$TRACE_SHA" \
+        --trace-binary-sha256 "$DENSE_ROUND_V2_BINARY_SHA256" \
+        --repo-root "$SRC" \
+        --expected-core-sha256 25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f \
+        --expected-native-source-sha256 b2cdb9b6a4e5886749ad0530b76f26072f9e38d93c34f8743111160afc09de77 \
+        --rows "$rows" --seed 50124 --warmup 3 --iters 20 \
+        --output "$OUT/M$rows.json" > "$OUT/M$rows.log" 2>&1; then
+        printf 'M%s PASS\n' "$rows"
+    else
+        rc=$?
+        printf 'M%s FAIL exit=%s\n' "$rows" "$rc"
+        printf '%s\n' "$rc" > "$OUT/M$rows.exit-status.txt"
+        status=1
+        # Continue only a preserved, finite eager numerical mismatch. A timeout,
+        # runtime fault or unknown failure ends this GPU window immediately.
+        "$VENV/bin/python" -S - "$OUT/M$rows.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit("runtime failed without numerical evidence; stop")
+data = json.loads(path.read_text())
+if data.get("failed_gate") not in ("eager_output_parity", "eager_topk_parity"):
+    raise SystemExit("failure is not an allowed eager numerical mismatch; stop")
+checks = data["raw_diagnostics"]
+output = checks.get("output_check", checks)
+if output.get("all_finite") is not True:
+    raise SystemExit("nonfinite/unknown output state; stop")
+PY
+    fi
+done
+exit "$status"

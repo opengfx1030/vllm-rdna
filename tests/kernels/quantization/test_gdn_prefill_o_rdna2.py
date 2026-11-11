@@ -35,7 +35,6 @@ from vllm.third_party.flash_linear_attention.ops.chunk_o import (  # noqa: E402
     chunk_fwd_o,
 )
 from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
-    prepare_chunk_indices,
     prepare_chunk_offsets,
 )
 
@@ -168,8 +167,24 @@ def test_gdn_prefill_o_rdna2_parity_varlen(Hg, H, lens):
     for L in lens:
         cu_list.append(cu_list[-1] + L)
     cu = torch.tensor(cu_list, dtype=torch.int32, device=device)
-    chunk_indices = prepare_chunk_indices(cu, BT)
-    chunk_offsets = prepare_chunk_offsets(cu, BT)
+    # prepare_chunk_indices mislabels (i_n, i_t) as soon as a sequence
+    # contributes zero chunks: its `indices.eq(0)` sequence-reset is never
+    # emitted for such a sequence, so every later sequence's i_n is one too
+    # low and the Triton reference reads the wrong sequence (verified: for
+    # lens [0, 64, 64] it returns [[0, 0], [1, 0]], i.e. it hands chunk 0 to
+    # the empty sequence 0). HIP's own `while (chunk_offsets[i_n+1] <= i_t)`
+    # scan over the (correct) chunk_offsets is unaffected. Build the pairs
+    # directly; identical to prepare_chunk_indices whenever no length is 0.
+    n_chunks = [(L + BT - 1) // BT for L in lens]
+    chunk_indices = torch.tensor(
+        [(i, c) for i, n in enumerate(n_chunks) for c in range(n)],
+        dtype=torch.int32,
+        device=device,
+    )
+    # prepare_chunk_offsets' cumsum yields int64; the op requires int32
+    # (the production dispatcher applies the same cast, see
+    # qwen_gdn_linear_attn.py "chunk_offsets = chunk_offsets.to(torch.int32)").
+    chunk_offsets = prepare_chunk_offsets(cu, BT).to(torch.int32)
     T = cu_list[-1]
     gen = torch.Generator(device=device).manual_seed(
         _seed_for("v", Hg, H, T, tuple(lens))

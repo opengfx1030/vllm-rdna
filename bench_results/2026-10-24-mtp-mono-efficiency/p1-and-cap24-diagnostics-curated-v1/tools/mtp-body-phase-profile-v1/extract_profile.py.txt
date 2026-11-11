@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Strict separate target/MTP K2 and outer draft phase extraction; CPU only."""
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import math
+import re
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REFERENCE = HERE.parent / "core-inline-phase-profile-v3/extract_profile.py"
+REFERENCE_SHA = "b22e46df4c2263b089b1f2fe23599ee39ab1675e1fd58d010cb9c6cece6c1f17"
+if hashlib.sha256(REFERENCE.read_bytes()).hexdigest() != REFERENCE_SHA:
+    raise ValueError("frozen target parser changed")
+spec = importlib.util.spec_from_file_location("frozen_phase_v3_parser", REFERENCE)
+v3 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(v3)
+MTP = re.compile(
+    r"mono MTP k2_rdna2 timing dev(?P<dev>\d+) w(?P<width>\d+): "
+    r"region n=(?P<region_n>\d+) (?P<region_us>[\d.]+) us \| "
+    r"kernel n=(?P<kernel_n>\d+) total (?P<kernel_us>[\d.]+) "
+    r"phases (?P<phases>[\d./]+) \| entry spread (?P<entry_spread_us>[\d.]+) "
+    r"wg0 (?P<wg0_us>[\d.]+) \| mark->first (?P<mark_first_us>[\d.]+) "
+    r"mark->last (?P<mark_last_us>[\d.]+) \| "
+    r"scope=mtp_k2_body_plus_ffn_ar k1_attention=unmeasured"
+)
+INTS = {
+    "dev",
+    "width",
+    "region_n",
+    "kernel_n",
+    "rest_n",
+    "attn_n",
+    "linear_ar_n",
+    "qsa_n",
+    "gdn_n",
+}
+
+
+def parse(text):
+    k2, phases, errors = [], [], []
+    for number, line in enumerate(text.splitlines(), 1):
+        worker = v3.TP_WORKER.search(line)
+        rank = int(worker.group("rank")) if worker else None
+        match = MTP.search(line)
+        scope = "mtp" if match else "target"
+        match = match or v3.K2.search(line)
+        if match:
+            row = {"scope": scope, "line": number, "tp_rank": rank, "raw": line}
+            for key, value in match.groupdict().items():
+                if key == "phases":
+                    row["phase_p1_to_p7_us"] = [float(x) for x in value.split("/")]
+                else:
+                    row[key] = int(value) if key in INTS else float(value)
+            values = [v for v in row.values() if isinstance(v, (float, int))]
+            if len(row["phase_p1_to_p7_us"]) != 7 or not all(
+                math.isfinite(v) for v in values + row["phase_p1_to_p7_us"]
+            ):
+                errors.append(f"invalid timing values line{number}")
+            k2.append(row)
+        elif "k2_rdna2 timing dev" in line:
+            errors.append(f"unparsed timing line{number}: {line}")
+        match = v3.PHASE.search(line)
+        if match:
+            phases.append(
+                {
+                    "line": number,
+                    "tp_rank": rank,
+                    "tokens": int(match.group("tokens")),
+                    "n_steps": int(match.group("n")),
+                    "values_ms_or_counts": {
+                        m.group("key"): float(m.group("value"))
+                        for m in v3.KV.finditer(match.group("values"))
+                    },
+                    "raw": line,
+                }
+            )
+    return k2, phases, errors
+
+
+def scope_gate(rows, scope, width, kernel_min, kernel_max):
+    selected = [r for r in rows if r["scope"] == scope and r["width"] == width]
+    counts = {}
+    for rank in range(4):
+        r = [x for x in selected if x["tp_rank"] == rank]
+        counts[str(rank)] = {
+            "region_n": max((x["region_n"] for x in r), default=0),
+            "kernel_n": max((x["kernel_n"] for x in r), default=0),
+        }
+    passed = all(
+        x["region_n"] >= 1 and kernel_min <= x["kernel_n"] <= kernel_max
+        for x in counts.values()
+    )
+    return {
+        "scope": scope,
+        "expected_width": width,
+        "passed": passed,
+        "kernel_min": kernel_min,
+        "kernel_max": kernel_max,
+        "counts_by_tp_rank": counts,
+    }
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--log", type=Path, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--expected-target-width", type=int, choices=(3, 24), required=True)
+    p.add_argument("--expected-mtp-width", type=int, choices=(1, 8), required=True)
+    p.add_argument("--expected-target-kernel-min", type=int, required=True)
+    p.add_argument("--expected-target-kernel-max", type=int, required=True)
+    a = p.parse_args()
+    if a.out.exists():
+        raise ValueError("refusing extracted output overwrite")
+    rows, phases, errors = parse(a.log.read_text(errors="replace"))
+    checks = [
+        scope_gate(
+            rows,
+            "target",
+            a.expected_target_width,
+            a.expected_target_kernel_min,
+            a.expected_target_kernel_max,
+        ),
+        scope_gate(rows, "mtp", a.expected_mtp_width, 1, 2147483647),
+    ]
+    phase_ranks = sorted(
+        {
+            r["tp_rank"]
+            for r in phases
+            if r["tp_rank"] is not None
+            and r["tokens"] == a.expected_target_width
+            and {"forward", "sample", "draft"} <= set(r["values_ms_or_counts"])
+        }
+    )
+    checks.append(
+        {
+            "scope": "outer_phase",
+            "expected_tokens": a.expected_target_width,
+            "tp_ranks": phase_ranks,
+            "passed": phase_ranks == [0, 1, 2, 3],
+        }
+    )
+    flush_ranks = sorted(
+        {
+            int(m.group("rank"))
+            for line in a.log.read_text(errors="replace").splitlines()
+            if (
+                "mono timing sampled flush scopes=target,mtp "
+                "after=draft_event_sync k1_attention=unmeasured"
+            )
+            in line
+            and (m := v3.TP_WORKER.search(line))
+        }
+    )
+    checks.append(
+        {
+            "scope": "sampled_flush_callsite",
+            "tp_ranks": flush_ranks,
+            "passed": flush_ranks == [0, 1, 2, 3],
+        }
+    )
+    latest = {}
+    for row in rows:
+        key = (
+            row["scope"],
+            row["tp_rank"] if row["tp_rank"] is not None else -1,
+            row["dev"],
+            row["width"],
+        )
+        latest[key] = row
+    passed = not errors and all(c["passed"] for c in checks)
+    result = {
+        "status": "PASS" if passed else "FAIL",
+        "diagnostic_only": True,
+        "log": str(a.log),
+        "target_parser_sha256": REFERENCE_SHA,
+        "checks": checks,
+        "parse_errors": errors,
+        "target_k2_snapshots": [r for r in rows if r["scope"] == "target"],
+        "mtp_k2_snapshots": [r for r in rows if r["scope"] == "mtp"],
+        "latest_by_scope_tp_rank_device_width": [latest[k] for k in sorted(latest)],
+        "phase_timer_snapshots": phases,
+        "caveats": [
+            "MTP region is K2 body plus FFN AR only; K1/attention unmeasured.",
+            "Two MTP flag-fill launches outside region bracket perturb execution.",
+            "Outer draft includes post-draft fail-stop collective.",
+            (
+                "Counters are cumulative across startup/probes/cell; "
+                "not throughput qualification."
+            ),
+            (
+                "Legacy target attention/linear-AR debug hooks are not "
+                "newly scoped MTP evidence."
+            ),
+        ],
+    }
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    a.out.write_text(json.dumps(result, indent=2) + "\n")
+    if not passed:
+        raise SystemExit("profile scope/phase gate FAIL; preserved " + str(a.out))
+    print("PROFILE SCOPE PASS target+MTP+outer-phase all TP0..3")
+
+
+if __name__ == "__main__":
+    main()

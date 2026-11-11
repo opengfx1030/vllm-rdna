@@ -1,0 +1,150 @@
+"""Load only the explicitly pinned prebuilt dense scratch; never compile."""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+MODULE = "mono_k2_dense_native_rounding_v2_scratch_20261024"
+PREFIX = "mono_k2_rdna2_dense_native_round_v2"
+_STATE = {}
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load_prebuilt():
+    if "extension" in _STATE:
+        return _STATE["extension"]
+    manifest = json.loads((HERE / "source_manifest.json").read_text())
+    for filename, key in (
+        ("mono_k2_dense_native_rounding.cu", "source_sha256"),
+        ("binding.cpp", "binding_sha256"),
+    ):
+        if sha256(HERE / filename) != manifest[key]:
+            raise RuntimeError(f"scratch manifest mismatch: {filename}")
+    binary = Path(os.environ["DENSE_ROUND_V2_BINARY"]).resolve(strict=True)
+    expected = os.environ["DENSE_ROUND_V2_BINARY_SHA256"]
+    if sha256(binary) != expected:
+        raise RuntimeError("scratch binary hash mismatch before import")
+    if MODULE in sys.modules:
+        extension = sys.modules[MODULE]
+    else:
+        spec = importlib.util.spec_from_file_location(MODULE, binary)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot import exact scratch binary {binary}")
+        extension = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extension)
+        sys.modules[MODULE] = extension
+    origin = Path(extension.__file__).resolve(strict=True)
+    if origin != binary or sha256(origin) != expected:
+        raise RuntimeError("loaded scratch extension origin/hash mismatch")
+    _STATE.update(
+        extension=extension,
+        provenance={
+            "module": MODULE,
+            "binary": str(binary),
+            "loaded_binary": str(origin),
+            "binary_sha256": expected,
+            "manifest": manifest,
+        },
+    )
+    return extension
+
+
+def invoke(
+    mono, res, blk, inj, *, reset, dense, num_wg=2, timeout_ms=2000.0, sentinels=False
+):
+    import torch
+
+    if getattr(mono, "ar_on", False):
+        raise RuntimeError("scratch adapter only supports rank-local output")
+    extension = load_prebuilt()
+    t = mono.t
+    if sentinels:
+        outputs = (
+            torch.full_like(res, 17),
+            torch.full_like(blk, 19),
+            torch.full_like(inj, 23),
+        )
+    else:
+        outputs = (torch.empty_like(res), torch.empty_like(blk), torch.empty_like(inj))
+    residual, out, injection = outputs
+    getattr(extension, PREFIX)(
+        res,
+        blk,
+        inj.contiguous(),
+        t["norm_w"],
+        t["wd"],
+        t["wu"],
+        t["wr"],
+        t["se_w1"],
+        t["se_w2"],
+        t["se_wg"],
+        t["w13"],
+        t["s13"],
+        t["z13"],
+        t["w2"],
+        t["s2"],
+        t["z2"],
+        residual,
+        injection,
+        out,
+        mono.ws,
+        int(getattr(mono, "base", 0)),
+        1,
+        num_wg,
+        float(mono.eps),
+        timeout_ms,
+        reset,
+        dense,
+    )
+    return outputs
+
+
+def run(mono, res, blk, inj):
+    if not mono.dense_mtp or not mono.is_mtp:
+        raise RuntimeError("actual-native adapter requires a dense MTP fixture")
+    return invoke(
+        mono,
+        res,
+        blk,
+        inj,
+        reset=True,
+        dense=True,
+        num_wg=int(os.environ.get("DENSE_ROUND_V2_NUM_WG", "0")),
+    )
+
+
+# The scratch preserves the committed Ctrl ABI and uses the fixture's workspace.
+uses_scratch_workspace = True
+
+
+def check_error(mono, torch):
+    del torch
+    return getattr(load_prebuilt(), PREFIX + "_error")(mono.ws)
+
+
+def read_routes(mono, rows, torch):
+    if not 1 <= rows <= 24:
+        raise ValueError("ordinary Ctrl is bounded to M1..24")
+    ids = getattr(load_prebuilt(), PREFIX + "_topk")(mono.ws)
+    ids = ids[: rows * 10].reshape(rows, 10).to(mono.ws.device).clone()
+    # Same preserved Ctrl as the actual-native harness; M<=8 keeps weights LDS.
+    topk_offset = 20576
+    topw_offset = topk_offset + 24 * 10 * 4
+    raw_ids = mono.ws.view(torch.uint8).narrow(0, topk_offset, rows * 10 * 4)
+    raw_ids = raw_ids.view(torch.int32).reshape(rows, 10)
+    if not torch.equal(ids, raw_ids):
+        raise RuntimeError("scratch top-k accessor/committed Ctrl layout mismatch")
+    weights = None
+    if rows > 8:
+        weights = mono.ws.view(torch.uint8).narrow(0, topw_offset, rows * 10 * 4)
+        weights = weights.view(torch.float32).reshape(rows, 10).clone()
+    return ids, weights

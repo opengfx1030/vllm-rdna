@@ -1,0 +1,16 @@
+[14:45:08] pass 1 start (0 s of 3600)
+[14:54:37] pass 1 rc=0
+[14:54:37] pass 2 start (569 s of 3600)
+[15:04:23] pass 2 rc=0
+[15:04:23] pass 3 start (1155 s of 3600)
+[15:13:52] pass 3 rc=0
+[15:13:52] pass 4 start (1724 s of 3600)
+[15:23:27] pass 4 rc=0
+[15:23:27] pass 5 start (2299 s of 3600)
+[15:33:09] pass 5 rc=0
+[15:33:09] pass 6 start (2881 s of 3600)
+[15:42:47] pass 6 rc=0
+[15:42:47] pass 7 start (3459 s of 3600)
+[15:52:22] pass 7 rc=0
+[15:52:22] passes: 7 in 4034 s
+PASS

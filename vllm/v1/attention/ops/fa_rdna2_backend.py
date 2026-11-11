@@ -4,8 +4,9 @@
 
 Thin wrappers over the ``torch.ops._rocm_C.fa_rdna2_*`` ops built from
 ``csrc/rocm/fa_rdna2.cu``. Each op writes the attention output into ``out``
-([num_tokens, H_q, D] fp16, contiguous); when ``out`` is omitted a new tensor
-is allocated. ``scale`` defaults to ``D ** -0.5``.
+([num_tokens, H_q, D], contiguous); when ``out`` is omitted a new tensor
+with Q's dtype is allocated. The GQA prefill op accepts FP16 or BF16 Q/KV/O;
+the other ops remain FP16. ``scale`` defaults to ``D ** -0.5``.
 
 Usage:
     from vllm.v1.attention.ops import fa_rdna2_backend as fa
@@ -24,6 +25,68 @@ def _prepare(
     if out is None:
         out = torch.empty(Q.shape, dtype=Q.dtype, device=Q.device)
     return float(scale), out
+
+
+def int4_fp16_kernels_available() -> bool:
+    return all(
+        hasattr(torch.ops._rocm_C, name)
+        for name in (
+            "reshape_and_cache_int4_fp16_rdna2",
+            "fa_rdna2_paged_int4_fp16_block",
+        )
+    )
+
+
+def reshape_and_cache_int4_fp16_rdna2(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Write into inline uint8 [2, pages, block_size, heads, record_bytes]."""
+    torch.ops._rocm_C.reshape_and_cache_int4_fp16_rdna2(key, value, cache, slot_mapping)
+
+
+def fa_rdna2_paged_int4_fp16_block(
+    Q: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_query_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    kv_splits: int = 16,
+    sliding_window: int = 0,
+    scale: float | None = None,
+    decode: bool = True,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Read INT4 payloads and raw packed FP16-scale/zero-point words.
+
+    Payloads are uint8 [pages, heads, block_size, D/2]. Scale words are
+    uint16 [pages, heads, block_size, D/32], including their zero-point bits.
+    All cache views may carry padded page strides. Queries and output are FP16.
+    """
+    scale, out = _prepare(Q, scale, out)
+    torch.ops._rocm_C.fa_rdna2_paged_int4_fp16_block(
+        Q,
+        key_cache,
+        value_cache,
+        k_scale,
+        v_scale,
+        block_table,
+        cu_query_lens,
+        seq_lens,
+        block_size,
+        kv_splits,
+        sliding_window,
+        scale,
+        decode,
+        out,
+    )
+    return out
 
 
 def fa_rdna2_decode_paged(
@@ -215,9 +278,10 @@ def fa_rdna2_prefill_paged_varlen_gqa(
 ) -> torch.Tensor:
     """Varlen prefill (HEAD_DIM 128/256) with O and the softmax in registers.
 
-    A CTA takes 16 query rows: 8 rows of 2 q-heads of one GQA group for even
-    group sizes, 16 rows of one q-head otherwise. Arguments and return value
-    as fa_rdna2_prefill_paged_varlen.
+    A CTA takes 16 query rows. BF16 groups divisible by four use four heads
+    and four query positions per CTA; FP16 uses two heads and eight positions
+    for even groups, or one head and 16 positions for odd groups. BF16 Q/KV/O
+    and non-causal symmetric sliding windows are supported.
     """
     scale, out = _prepare(Q, scale, out)
     torch.ops._rocm_C.fa_rdna2_prefill_paged_varlen_gqa(

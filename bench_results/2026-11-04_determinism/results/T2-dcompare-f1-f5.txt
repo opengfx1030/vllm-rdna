@@ -1,0 +1,12 @@
+=== rank 0: fwd 1 (2434 entries) vs fwd 5 (2434 entries)
+  divergent calls: 0 / 774; first SOURCE: None
+  divergent call count by module kind (top 15):
+=== rank 1: fwd 1 (2434 entries) vs fwd 5 (2434 entries)
+  divergent calls: 0 / 774; first SOURCE: None
+  divergent call count by module kind (top 15):
+=== rank 2: fwd 1 (2434 entries) vs fwd 5 (2434 entries)
+  divergent calls: 0 / 774; first SOURCE: None
+  divergent call count by module kind (top 15):
+=== rank 3: fwd 1 (2434 entries) vs fwd 5 (2434 entries)
+  divergent calls: 0 / 774; first SOURCE: None
+  divergent call count by module kind (top 15):

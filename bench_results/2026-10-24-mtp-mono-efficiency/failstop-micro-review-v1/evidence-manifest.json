@@ -1,0 +1,296 @@
+{
+  "schema": "failstop-evidence-manifest-v1",
+  "scope": "curated, response-free and binary-free evidence bundle",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 3420,
+      "sha256": "2d2a407cb632ea054039e6b477cbe50a8b9c85a34391bfacfcdb47095bc98138"
+    },
+    {
+      "path": "check_ordinal_mapping.py.txt",
+      "bytes": 1036,
+      "sha256": "805a3ea95f625d882ec30a4b1fedea1da863052acf3435c3d1bc88c5e59948ac"
+    },
+    {
+      "path": "collective/boot-id.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "collective/boot-id.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "collective/environment.txt",
+      "bytes": 326,
+      "sha256": "bc505634390a8f5fa138fa6e34fa21c1f283e1b32d25fcd53ad3e7d42a346ddc"
+    },
+    {
+      "path": "collective/exit-status.txt",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "collective/rank0.json",
+      "bytes": 5779,
+      "sha256": "d1544a87cdf1d87fc3d2758f0eb2fbf1b2d2aceab34bb202fe9eade21f1121d0"
+    },
+    {
+      "path": "collective/rank1.json",
+      "bytes": 5781,
+      "sha256": "69958c53be2e68369b226d677ccf39f400d46740cf81f0b493a2899bbdd772b0"
+    },
+    {
+      "path": "collective/rank2.json",
+      "bytes": 5786,
+      "sha256": "f1462b6fb252e2dfa47daa89bfc331c20ab6a538da06da90ec261285fb644b54"
+    },
+    {
+      "path": "collective/rank3.json",
+      "bytes": 5780,
+      "sha256": "24a5c2238be409bbe7d424b2c402821fd4d4110d0becc2a06d6a23b4cd5c3a92"
+    },
+    {
+      "path": "collective/source.after.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "collective/source.before.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "collective/summary.json",
+      "bytes": 25824,
+      "sha256": "2fa9955dd5e0157338773a4c956143ceb7ddeb05acfd495ab9b4774c6da7bd64"
+    },
+    {
+      "path": "core-build/boot.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "core-build/boot.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "core-build/build-summary.json",
+      "bytes": 1497,
+      "sha256": "9424f44f0bd64caa1f553db14f5546af86244258fb8c93c63718dd3e19a33b67"
+    },
+    {
+      "path": "core-build/exit-status.txt",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "core-build/gpu-owners.txt",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "core-build/hip-transform-check.json",
+      "bytes": 1318,
+      "sha256": "494cdb2d963cb1e7d39ebb587c7864c4619d8660fc6aca9334f9036585c5545c"
+    },
+    {
+      "path": "core-build/inputs.after",
+      "bytes": 3318,
+      "sha256": "c334d61edaccf2d22ecaac5d3779e01e94c79923a55dcf9edb5825c948074531"
+    },
+    {
+      "path": "core-build/inputs.before",
+      "bytes": 3318,
+      "sha256": "c334d61edaccf2d22ecaac5d3779e01e94c79923a55dcf9edb5825c948074531"
+    },
+    {
+      "path": "core-build/resources.json",
+      "bytes": 3180,
+      "sha256": "eaf7e462bd8caaf2e153d0bb0801147a7bbe14e9f0ac570fee97186fe075c48c"
+    },
+    {
+      "path": "direct-suite/boot.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "direct-suite/boot.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "direct-suite/exit-status.txt",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "direct-suite/inputs.after",
+      "bytes": 379,
+      "sha256": "c978cb7a7e4f4dffba8caae754c63048cfe43f11c1eeb80c7991ff030e469ac3"
+    },
+    {
+      "path": "direct-suite/inputs.before",
+      "bytes": 379,
+      "sha256": "c978cb7a7e4f4dffba8caae754c63048cfe43f11c1eeb80c7991ff030e469ac3"
+    },
+    {
+      "path": "direct-suite/overlay.after",
+      "bytes": 62,
+      "sha256": "cdf51ae93d644ceaca63a9bb180491cf60249f36e39f8ffeff4e1701ecb7d2ee"
+    },
+    {
+      "path": "direct-suite/overlay.before",
+      "bytes": 62,
+      "sha256": "cdf51ae93d644ceaca63a9bb180491cf60249f36e39f8ffeff4e1701ecb7d2ee"
+    },
+    {
+      "path": "direct-suite/pytest.log",
+      "bytes": 1105,
+      "sha256": "96d1a85aa43fffd4d7ee16ea54bc0ffd1231f677fff7dd50a871c3a2da7a4cb4"
+    },
+    {
+      "path": "direct-suite/summary.md",
+      "bytes": 703,
+      "sha256": "436179e94ebbe5c6c97e25183cc1c86b84d8d216bf62937602b7b485577cf901"
+    },
+    {
+      "path": "harness-history/attempt-history.md",
+      "bytes": 1618,
+      "sha256": "aaeee4ad367358fe3c4e9368a0a662958e18f7f4b8ae0eec5c0a04a97fb85c49"
+    },
+    {
+      "path": "harness-history/attempt1/boot-id.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "harness-history/attempt1/boot-id.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "harness-history/attempt1/environment.txt",
+      "bytes": 326,
+      "sha256": "bc505634390a8f5fa138fa6e34fa21c1f283e1b32d25fcd53ad3e7d42a346ddc"
+    },
+    {
+      "path": "harness-history/attempt1/exit-status.txt",
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "path": "harness-history/attempt1/source.after.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "harness-history/attempt1/source.before.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "harness-history/attempt2/boot-id.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "harness-history/attempt2/boot-id.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "harness-history/attempt2/environment.txt",
+      "bytes": 326,
+      "sha256": "bc505634390a8f5fa138fa6e34fa21c1f283e1b32d25fcd53ad3e7d42a346ddc"
+    },
+    {
+      "path": "harness-history/attempt2/exit-status.txt",
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "path": "harness-history/attempt2/source.after.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "harness-history/attempt2/source.before.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "harness-history/attempt3/boot-id.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "harness-history/attempt3/boot-id.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "harness-history/attempt3/environment.txt",
+      "bytes": 326,
+      "sha256": "bc505634390a8f5fa138fa6e34fa21c1f283e1b32d25fcd53ad3e7d42a346ddc"
+    },
+    {
+      "path": "harness-history/attempt3/exit-status.txt",
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "path": "harness-history/attempt3/source.after.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "harness-history/attempt3/source.before.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "harness-history/attempt4/boot-id.after",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "harness-history/attempt4/boot-id.before",
+      "bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "harness-history/attempt4/environment.txt",
+      "bytes": 326,
+      "sha256": "bc505634390a8f5fa138fa6e34fa21c1f283e1b32d25fcd53ad3e7d42a346ddc"
+    },
+    {
+      "path": "harness-history/attempt4/exit-status.txt",
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "path": "harness-history/attempt4/source.after.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "harness-history/attempt4/source.before.sha256",
+      "bytes": 1545,
+      "sha256": "9b0a3d2e85890531d9a901b50aa3f130ce8cfab39bfbe3b95909c1cf90e777b9"
+    },
+    {
+      "path": "harness-history/run_tp4.sh.txt",
+      "bytes": 4045,
+      "sha256": "13c3a09c504ae77e2e64b563d3710241bea59fb5ab06d7517fe93aea02ab0a33"
+    },
+    {
+      "path": "harness-history/tp4_health_collective.py.txt",
+      "bytes": 26714,
+      "sha256": "f675f56595d780a39c27288b81710c15d468b5b555251756ec30a522335e69eb"
+    }
+  ]
+}

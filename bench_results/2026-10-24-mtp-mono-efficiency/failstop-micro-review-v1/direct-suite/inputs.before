@@ -1,0 +1,2 @@
+6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/vllm/_rocm_C.abi3.so
+f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py

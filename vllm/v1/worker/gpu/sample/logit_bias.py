@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
@@ -18,6 +19,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 MAX_NUM_ALLOWED_TOKEN_IDS = 1024
+
+# gfx10x (RDNA2) HIP port of _bias_kernel. The HIP kernel keeps the saved
+# allowed-token logits in registers, so the list width is capped; wider lists
+# stay on the Triton path.
+_ON_RDNA2 = on_rdna2_hip()
+_BIAS_MAX_BLOCK_SIZE = 4096
 MAX_NUM_LOGIT_BIAS_TOKENS = 1024
 MAX_NUM_STOP_TOKEN_IDS = 128
 
@@ -324,6 +331,30 @@ def apply_logit_bias(
         )
     )
     LOGITS_BLOCK_SIZE = 8192
+    if _ON_RDNA2 and BLOCK_SIZE <= _BIAS_MAX_BLOCK_SIZE:
+        torch.ops._rocm_C.logit_bias_rdna2(
+            logits,
+            logits.stride(0),
+            vocab_size,
+            expanded_idx_mapping,
+            num_allowed_token_ids,
+            allowed_token_ids,
+            allowed_token_ids.stride(0),
+            num_logit_bias,
+            logit_bias_token_ids,
+            logit_bias_token_ids.stride(0),
+            logit_bias,
+            logit_bias.stride(0),
+            pos,
+            min_lens,
+            num_stop_token_ids,
+            restore_when_all_masked,
+            stop_token_ids,
+            stop_token_ids.stride(0),
+            BLOCK_SIZE,
+            check_all_masked_rows,
+        )
+        return
     _bias_kernel[(num_tokens,)](
         logits,
         logits.stride(0),

@@ -1,0 +1,245 @@
+{
+  "configuration": {
+    "branch": "codex/rdna2-awq-moe-offloading",
+    "base_commit": "afc3735bf93d841397740b07eb3ef7aad6a21855",
+    "remote_host": "par1-cs25",
+    "hip_gpus": [
+      6,
+      7
+    ],
+    "tp": 2,
+    "mtp": 2,
+    "expert_slots": 96,
+    "policy": "lfu_lru",
+    "native_cpu_kv_gib": 16,
+    "max_model_len": 32768,
+    "max_batched_tokens": 4096,
+    "max_seqs": 8,
+    "deterministic_dense": true,
+    "graph_mode": "segmented FULL_AND_PIECEWISE",
+    "dtype": "float16",
+    "quantization": "compressed-tensors symmetric W4A16",
+    "group_size": 128,
+    "model_snapshot": "0939125b929543a783ce700c90e36dd1a575c00c"
+  },
+  "scope": "Evidence combined across named isolated runs with the same target configuration; not one continuous benchmark run and not a baseline speedup comparison.",
+  "core_kv": {
+    "source": "tp2-32k-kv-proof.json",
+    "passed": true,
+    "identical_tokens": 32,
+    "max_token_logprob_delta": 0.0,
+    "loaded_bytes": 289669120.0
+  },
+  "normal_eos_concurrency": {
+    "source": "tp2-padding-concurrency.json",
+    "verdict_source": "tp2-padding-qualified-summary.txt",
+    "passed": true,
+    "comparisons": 44,
+    "hard_failures": 0
+  },
+  "performance_cells": [
+    {
+      "name": "bench-16384x1024-c1",
+      "source_run": "~/w4a8_runs/moe-offload/tp2-qualified-long/long",
+      "source_sha256": "fdf52b88b8d6417b53e53417f8268e59a1df3d0fca9a3a26ec000da671308795",
+      "metrics_sha256": "ebdbbeae41cda35e66964166e153106d95af09095b5b9883e7be98186e575394",
+      "completed": 1,
+      "failed": 0,
+      "actual_input_tokens": [
+        16384
+      ],
+      "actual_output_tokens": [
+        1024
+      ],
+      "duration_seconds": 51.80464448499697,
+      "output_throughput": 19.766567460887767,
+      "mean_ttft_ms": 17307.460682000965,
+      "forced_ignore_eos": true,
+      "output_quality_warnings": [
+        {
+          "request": 0,
+          "garbage": null,
+          "repetition_warning": "repeated 24-char span"
+        }
+      ],
+      "counter_deltas": {
+        "vllm:num_preemptions": 0.0,
+        "vllm:kv_offload_load_bytes": 0.0,
+        "vllm:kv_offload_store_bytes": 926941184.0,
+        "vllm:kv_offload_load_time": 0.0,
+        "vllm:kv_offload_store_time": 0.31500807762145994
+      },
+      "peak_cache_usage": {
+        "vllm:kv_offload_cpu_cache_usage_perc": 0.037162162162162164,
+        "vllm:kv_cache_usage_perc": 0.21739130434782605
+      },
+      "metric_sample_errors": 0
+    },
+    {
+      "name": "bench-16384x1024-c8",
+      "source_run": "~/w4a8_runs/moe-offload/tp2-qualified-long/long",
+      "source_sha256": "cb7fa2afa845286bf91cdab58837e24987d079e80b044db103f779c87d00e9a4",
+      "metrics_sha256": "d53bcc05d38c41ab200991988e1267d1ad0b9378bce7df66fadacb3a75f5b495",
+      "completed": 8,
+      "failed": 0,
+      "actual_input_tokens": [
+        16384,
+        16384,
+        16384,
+        16384,
+        16384,
+        16384,
+        16384,
+        16384
+      ],
+      "actual_output_tokens": [
+        1024,
+        1024,
+        1024,
+        1024,
+        1024,
+        1024,
+        1024,
+        1024
+      ],
+      "duration_seconds": 306.6058180849941,
+      "output_throughput": 26.71834491323677,
+      "mean_ttft_ms": 106260.38888587663,
+      "forced_ignore_eos": true,
+      "output_quality_warnings": [
+        {
+          "request": 0,
+          "garbage": null,
+          "repetition_warning": "repeated 24-char span"
+        },
+        {
+          "request": 3,
+          "garbage": null,
+          "repetition_warning": "repeated 24-char span"
+        },
+        {
+          "request": 4,
+          "garbage": "non-Latin script 733/795",
+          "repetition_warning": "repeated 24-char span"
+        },
+        {
+          "request": 5,
+          "garbage": "non-Latin script 1190/1200",
+          "repetition_warning": "repeated 24-char span"
+        },
+        {
+          "request": 7,
+          "garbage": "empty",
+          "repetition_warning": "repeated 24-char span"
+        }
+      ],
+      "counter_deltas": {
+        "vllm:num_preemptions": 0.0,
+        "vllm:kv_offload_load_bytes": 0.0,
+        "vllm:kv_offload_store_bytes": 7415529472.0,
+        "vllm:kv_offload_load_time": 0.0,
+        "vllm:kv_offload_store_time": 2.481739624023438
+      },
+      "peak_cache_usage": {
+        "vllm:kv_offload_cpu_cache_usage_perc": 0.04054054054054054,
+        "vllm:kv_cache_usage_perc": 1.0
+      },
+      "metric_sample_errors": 0
+    },
+    {
+      "name": "bench-32256x256-c1",
+      "command": [
+        "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/bin/python",
+        "-m",
+        "vllm.entrypoints.cli.main",
+        "bench",
+        "serve",
+        "--backend",
+        "openai",
+        "--endpoint",
+        "/v1/completions",
+        "--base-url",
+        "http://127.0.0.1:18766",
+        "--model",
+        "flash-next",
+        "--tokenizer",
+        "/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c",
+        "--dataset-name",
+        "random",
+        "--random-input-len",
+        "32256",
+        "--random-output-len",
+        "256",
+        "--random-range-ratio",
+        "0.0",
+        "--num-prompts",
+        "1",
+        "--max-concurrency",
+        "1",
+        "--request-rate",
+        "inf",
+        "--temperature",
+        "0",
+        "--ignore-eos",
+        "--seed",
+        "805378780",
+        "--save-result",
+        "--save-detailed",
+        "--result-dir",
+        "/home/chenco_adm/w4a8_runs/moe-offload/tp2-32k-tail/long",
+        "--result-filename",
+        "bench-32256x256-c1.json",
+        "--disable-tqdm"
+      ],
+      "forced_ignore_eos": true,
+      "requested_input_tokens": 32256,
+      "input_length_relative_tolerance": 0.01,
+      "max_context_tokens": 32768,
+      "requested_output_tokens": 256,
+      "actual_input_tokens": [
+        32256
+      ],
+      "actual_output_tokens": [
+        256
+      ],
+      "headline": "bench-32256x256-c1           prefill    957.2 tok/s/req (agg   957.2) | decode  30.08 tok/s/req (agg out    6.07) | TTFT   33.70 s | ITL med    61.1 ms mean    71.8 ms | ok 1",
+      "output_quality_warnings": [],
+      "counter_deltas": {
+        "vllm:num_preemptions": 0.0,
+        "vllm:kv_offload_load_bytes": 0.0,
+        "vllm:kv_offload_store_bytes": 1100742656.0,
+        "vllm:kv_offload_load_time": 0.0,
+        "vllm:kv_offload_store_time": 0.37174482154846195
+      },
+      "peak_cache_usage": {
+        "vllm:kv_cache_usage_perc": 0.2681159420289855,
+        "vllm:kv_offload_cpu_cache_usage_perc": 0.02702702702702703
+      },
+      "metric_sample_errors": 0
+    }
+  ],
+  "normal_eos_32k_retrieval": {
+    "source": "32k-tail/qualification.json",
+    "marker_found": true,
+    "usage": {
+      "prompt_tokens": 32256,
+      "total_tokens": 32329,
+      "completion_tokens": 73,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "created_cache_tokens": null,
+        "multimodal_tokens": null
+      },
+      "completion_tokens_details": null
+    },
+    "text": "\n\n<think>\nThe user is asking me to return the deployment marker that was given at the start of the message. Let me find it.\n\nThe deployment marker stated at the beginning is: ORBITAL_FENCE_4729\n\nThey want only that exact marker, without explanation.\n</think>\n\nORBITAL_FENCE_4729",
+    "finish_reason": "stop"
+  },
+  "limitations": [
+    "Forced random fixed-length outputs include whitespace/repetition warnings and do not establish semantic correctness.",
+    "Native CPU KV parity was tested with an approximately 4k prompt; the 32k request and retrieval are separate long-context checks.",
+    "No controlled resident-versus-offload speedup comparison or whole-workload optimum is claimed.",
+    "Predictive prefetch, adaptive expert/KV rebudgeting, and new active-context paging are not implemented."
+  ],
+  "passed": true
+}

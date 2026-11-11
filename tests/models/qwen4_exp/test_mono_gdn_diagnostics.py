@@ -1,0 +1,275 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""GDN accepted-index fail-stop and opt-in GPU diagnostics (no serving sync).
+
+Run GPU diagnostic cases in a fresh process with VLLM_RDNA_GDN_DIAGNOSTICS=1;
+the native specialization is selected once per process, before the first op.
+"""
+
+import ast
+import os
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import Mock
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_gdn_setup_logs_layer_scratch_mapping_once(monkeypatch, enabled):
+    torch = pytest.importorskip("torch")
+    monkeypatch.setenv("VLLM_RDNA_GDN_DIAGNOSTICS", "1" if enabled else "0")
+    tree = ast.parse(
+        (_ROOT / "vllm/models/qwen4_exp/amd/mono/rdna2/gdn.py").read_text()
+    )
+    cls = next(
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MonoGDN"
+    )
+    setup = next(
+        n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "setup"
+    )
+    logger = Mock()
+    namespace: dict[str, Any] = {
+        "os": os,
+        "logger": logger,
+        "torch": SimpleNamespace(
+            device=torch.device,
+            float16=torch.float16,
+            uint8=torch.uint8,
+            int32=torch.int32,
+            empty=torch.empty,
+            zeros=torch.zeros,
+            ops=SimpleNamespace(
+                _rocm_C=SimpleNamespace(
+                    mono_gdn_rdna2_scratch_bytes=lambda *args: 1028,
+                )
+            ),
+        ),
+    }
+    exec(
+        compile(ast.Module(body=[setup], type_ignores=[]), "gdn.py", "exec"), namespace
+    )
+    layer = SimpleNamespace(
+        prefix="model.layers.1.linear_attn",
+        num_k_heads=1,
+        num_v_heads=1,
+        tp_size=1,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        conv1d=SimpleNamespace(weight=torch.ones(384, 1, 4), bias=None),
+        norm=SimpleNamespace(activation="silu"),
+    )
+    mono = SimpleNamespace(layer=layer, cache=None)
+    cache = namespace["setup"](mono, torch.device("cpu"))
+    assert namespace["setup"](mono, torch.device("cpu")) is cache
+    assert logger.info.call_count == int(enabled)
+    if enabled:
+        assert logger.info.call_args.args[1:3] == (
+            layer.prefix,
+            hex(cache[4].data_ptr()),
+        )
+
+
+@pytest.fixture
+def gpu_case():
+    torch = pytest.importorskip("torch")
+    if torch.version.hip is None or not torch.cuda.is_available():
+        pytest.skip("requires HIP gfx10x and the rebuilt Mono GDN op")
+    if not torch.cuda.get_device_properties(0).gcnArchName.startswith("gfx10"):
+        pytest.skip("requires gfx10x")
+    from vllm import _custom_ops  # noqa: F401
+
+    if not hasattr(torch.ops._rocm_C, "mono_gdn_rdna2"):
+        pytest.skip("requires rebuilt Mono GDN op")
+    device = "cuda"
+    m, h, hv, slots = 3, 1, 1, 4
+    qkvz = torch.full((m, 512), 0.125, dtype=torch.float16, device=device)
+    ba = torch.zeros((m, 2), dtype=torch.float16, device=device)
+    cw = torch.zeros((384, 4), dtype=torch.float16, device=device)
+    cw[:, -1] = 1
+    cb = torch.empty(0, dtype=torch.float16, device=device)
+    conv = torch.zeros((slots, 384, 5), dtype=torch.float16, device=device)
+    ssm = torch.zeros((slots, hv, 128, 128), dtype=torch.float32, device=device)
+    alog = torch.zeros(hv, dtype=torch.float32, device=device)
+    dtb = torch.zeros_like(alog)
+    norm = torch.ones(128, dtype=torch.float16, device=device)
+    sidx = torch.tensor([[1, 2, 3]], dtype=torch.int32, device=device)
+    nacc = torch.ones(1, dtype=torch.int32, device=device)
+    qsl = torch.tensor([0, 3], dtype=torch.int32, device=device)
+    out = torch.empty((m, 128), dtype=torch.float16, device=device)
+    scratch = torch.zeros(
+        torch.ops._rocm_C.mono_gdn_rdna2_scratch_bytes(m, hv, h),
+        dtype=torch.uint8,
+        device=device,
+    )
+    return torch, [
+        qkvz,
+        ba,
+        cw,
+        cb,
+        conv,
+        ssm,
+        alog,
+        dtb,
+        norm,
+        sidx,
+        nacc,
+        qsl,
+        out,
+        scratch,
+        h,
+        128**-0.5,
+        1e-6,
+        0,
+    ]
+
+
+def _launch(torch, args):
+    torch.ops._rocm_C.mono_gdn_rdna2(*args)
+    torch.accelerator.synchronize()
+
+
+def _diagnostics():
+    return os.environ.get("VLLM_RDNA_GDN_DIAGNOSTICS") == "1"
+
+
+def test_gdn_valid_spec_matches_independent_recurrence(gpu_case):
+    torch, args = gpu_case
+    _launch(torch, args)
+    cv = (0.125 * torch.sigmoid(torch.tensor(0.125, device="cuda"))).half().float()
+    k = cv.expand(128)
+    k = k / torch.sqrt((k * k).sum() + 1e-6)
+    q = k * (128**-0.5)
+    state = torch.zeros((128, 128), device="cuda")
+    reference = []
+    for step in range(3):
+        state *= 0.5
+        delta = (cv - state @ k) * 0.5
+        state += delta[:, None] * k[None, :]
+        core = (state @ q).half().float()
+        normalized = core * torch.rsqrt((core * core).mean() + 1e-6) * cv
+        reference.append(normalized.half())
+        torch.testing.assert_close(args[5][step + 1, 0], state, atol=1e-5, rtol=1e-3)
+    torch.testing.assert_close(args[12], torch.stack(reference), atol=1e-3, rtol=1e-3)
+    if _diagnostics():
+        assert args[13][-4:].view(torch.int32).item() == 0
+
+
+@pytest.mark.parametrize("accepted", [0, 4, -1])
+@pytest.mark.parametrize("padded", [False, True])
+def test_gdn_invalid_accepted_index_never_reads_state(gpu_case, accepted, padded):
+    torch, args = gpu_case
+    args[10].fill_(accepted)
+    if padded:
+        args[9].zero_()
+    before_conv, before_ssm = args[4].clone(), args[5].clone()
+    _launch(torch, args)
+    assert torch.equal(args[4], before_conv) and torch.equal(args[5], before_ssm)
+    if padded:
+        assert bool((args[12] == 0).all())
+    else:
+        assert bool(torch.isnan(args[12]).all())
+    if _diagnostics():
+        assert args[13][-4:].view(torch.int32).item() == (0 if padded else 1)
+
+
+@pytest.mark.parametrize("kind", ["prior_nan", "input_nan", "cast_overflow"])
+def test_gdn_diagnostics_observes_nonfinite_under_real_compile_flags(gpu_case, kind):
+    if not _diagnostics():
+        pytest.skip("launch fresh pytest with VLLM_RDNA_GDN_DIAGNOSTICS=1")
+    torch, args = gpu_case
+    if kind == "prior_nan":
+        args[5][1].fill_(float("nan"))
+        expected = 4
+    elif kind == "input_nan":
+        args[0][:, :384].fill_(float("nan"))
+        expected = 3
+    else:
+        # Finite FP32 state produces finite recurrence outputs larger than FP16.
+        args[5][1].fill_(1e8)
+        expected = 8
+    _launch(torch, args)
+    assert args[13][-4:].view(torch.int32).item() == expected
+    # Clear poisoned state and prove the per-launch first-error flag resets.
+    args[0].fill_(0.125)
+    args[4].zero_()
+    args[5].zero_()
+    _launch(torch, args)
+    assert args[13][-4:].view(torch.int32).item() == 0
+    assert bool(torch.isfinite(args[12]).all())
+
+
+def test_gdn_diagnostic_flag_resets_on_graph_replay(gpu_case):
+    if not _diagnostics():
+        pytest.skip("launch fresh pytest with VLLM_RDNA_GDN_DIAGNOSTICS=1")
+    torch, args = gpu_case
+    _launch(torch, args)  # Initialize native host dispatch before capture.
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        torch.ops._rocm_C.mono_gdn_rdna2(*args)
+    args[10].zero_()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert args[13][-4:].view(torch.int32).item() == 1
+    assert bool(torch.isnan(args[12]).all())
+    args[10].fill_(1)
+    args[4].zero_()
+    args[5].zero_()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert args[13][-4:].view(torch.int32).item() == 0
+    assert bool(torch.isfinite(args[12]).all())
+
+
+@pytest.mark.parametrize("core_value", [2**-20, 2**-14, 8192, 65504])
+def test_gdn_finite_core_normalizes_across_fp16_range(gpu_case, core_value):
+    """Preserve tiny squared sums and avoid overflow for finite large cores.
+
+    Orthogonal q/k leave the FP32 state unchanged: beta=0 and exp(A_log)
+    negligible. The8192 case formerly made Q32 squared-sum total2**65 wrap.
+    """
+    torch, args = gpu_case
+    args[0].zero_()
+    args[0][:, :2] = 1  # q lives in channels0,1.
+    args[0][:, 128 + 2] = 1  # k lives in channel2, orthogonal to q/state.
+    args[0][:, 384:] = 1  # SiLU gate.
+    args[1][:, 0] = -65504  # b -> beta=0, with finite FP16 input.
+    args[6].fill_(-100)  # A=exp(-100), so FP32 decay rounds1.
+    args[5][1, 0, :, 0] = core_value * 16
+
+    # Independent FP32 recurrence and RMS normalization, with the same FP16
+    # conv/core materialization as the native operator, but no integer SSQ.
+    cq = torch.nn.functional.silu(args[0][0, :128].float()).half().float()
+    ck = torch.nn.functional.silu(args[0][0, 128:256].float()).half().float()
+    q = cq * torch.rsqrt((cq * cq).sum() + 1e-6) * (128**-0.5)
+    k = ck * torch.rsqrt((ck * ck).sum() + 1e-6)
+    state = args[5][1, 0].clone()
+    beta = torch.sigmoid(args[1][0, 0].float())
+    decay = torch.exp(
+        -args[6][0].exp() * torch.nn.functional.softplus(args[1][0, 1].float())
+    )
+    reference = []
+    core_values = []
+    for _ in range(3):
+        state *= decay
+        state += ((-state @ k) * beta)[:, None] * k[None, :]
+        core = (state @ q).half().float()
+        core_values.append(core)
+        reference.append(
+            (
+                core
+                * torch.rsqrt((core * core).mean() + 1e-6)
+                * torch.nn.functional.silu(args[0][0, 384:].float())
+            ).half()
+        )
+    assert bool((torch.stack(core_values) == core_value).all())
+    expected = torch.stack(reference)
+    assert bool(torch.isfinite(expected).all())
+    _launch(torch, args)
+    assert bool(torch.isfinite(args[12]).all())
+    if _diagnostics():
+        assert args[13][-4:].view(torch.int32).item() == 0
+    torch.testing.assert_close(args[12], expected, rtol=1e-3, atol=2**-24)

@@ -1,0 +1,9 @@
+[10:39:18] topk start
+[10:46:56] topk rc=0
+[10:46:56] suite start
+[11:11:44] suite rc=0
+[11:11:44] tfkld start
+[11:19:51] tfkld rc=0
+[11:19:51] topk repeat start
+[11:20:48] topk repeat rc=0
+PASS

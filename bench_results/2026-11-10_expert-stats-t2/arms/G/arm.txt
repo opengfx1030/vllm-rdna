@@ -1,0 +1,6 @@
+arm=G try=1 desc=stats ON (fused), top-k id trace of layers 0,12,24,36,47
+sha=46868fb5f7e41ff3136dd33d4acbe59db212e66d tree=/home/chenco_adm/vllm-expstats-46868fb5f7
+stats_env=VLLM_EXPERT_STATS_DIR=/home/chenco_adm/w4a8_runs/expert-stats-t10b/arms/G/stats VLLM_EXPERT_STATS_INTERVAL_S=30 VLLM_EXPERT_STATS_KERNEL=fused VLLM_EXPERT_STATS_TRACE_LAYERS=0,12,24,36,47 VLLM_EXPERT_STATS_TRACE_STEPS=8192 cells=1024:512:8 hook_s=300
+load=1.90 7.49 8.35 aer=19 date=2026-11-10T11:53:14+01:00
+memlock=unlimited
+rc=0 aer_end=19 end=2026-11-10T12:12:38+01:00

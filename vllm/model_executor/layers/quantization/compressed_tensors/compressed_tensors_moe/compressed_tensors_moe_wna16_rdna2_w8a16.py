@@ -145,7 +145,6 @@ class CompressedTensorsWNA16RDNA2W8A16MoEMethod(CompressedTensorsWNA16MoEMethod)
         act_dtype = layer.w13_weight_scale.dtype
 
         N_gate_up = layer.w13_weight_packed.shape[2]
-        hidden_size = layer.w2_weight_packed.shape[2]
         intermediate = N_gate_up // 2
 
         max_decode_tokens = 16
@@ -160,12 +159,6 @@ class CompressedTensorsWNA16RDNA2W8A16MoEMethod(CompressedTensorsWNA16MoEMethod)
         layer.rdna2_act_buf = torch.empty(
             buf_size,
             intermediate,
-            dtype=act_dtype,
-            device=device,
-        )
-        layer.rdna2_out_buf = torch.zeros(
-            max_decode_tokens,
-            hidden_size,
             dtype=act_dtype,
             device=device,
         )

@@ -1,0 +1,24 @@
+{
+  "status": "PASS",
+  "gates": {
+    "PROBE PASS": true,
+    "PPL PROBE PASS": true,
+    "PREFIX PASS": true,
+    "CONCURRENCY PASS": true,
+    "LOAD HOOK rc=0 PASS": true,
+    "PROBE-AFTER-LOAD PASS": true,
+    "fault markers in serve.log: 0": true,
+    "new amdgpu dmesg faults: 0": true
+  },
+  "source_and_boot_before_after_equal": true,
+  "all8cell_requests_succeeded": true,
+  "concurrency_counts": {
+    "failing": 0,
+    "near_tie": 17,
+    "soft": 0,
+    "solo_noise": 0,
+    "identical": 31,
+    "total": 48
+  },
+  "caveat": "Normal-EOS concurrency gate has stated near-tie policy; this is not strict token identity."
+}

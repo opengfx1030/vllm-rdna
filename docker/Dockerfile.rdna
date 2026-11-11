@@ -1,0 +1,112 @@
+# Build from the checkout at context "."; Git metadata is intentionally excluded.
+# Compute VLLM_VERSION with setuptools-scm before invoking the build.
+ARG BASE_IMAGE=docker.io/blivioniag/rocm-rdna:7.14.0@sha256:d725cc41d02fed9bcc9ac4622480be29e406a0f4296b0108209c4981de1f4860
+
+# Keep this target COPY-only so CI can inspect the exact source without building.
+FROM ${BASE_IMAGE} AS source
+WORKDIR /src/vllm
+COPY . .
+
+FROM source AS final
+ARG VLLM_VERSION
+ARG MAX_JOBS=2
+ARG PYTORCH_ROCM_ARCH=gfx1030;gfx1100;gfx1101;gfx1150;gfx1151;gfx1200;gfx1201
+
+ENV VLLM_TARGET_DEVICE=rocm \
+    VLLM_USE_PRECOMPILED=0 \
+    VLLM_USE_PRECOMPILED_RUST=0 \
+    ENABLE_CK=0 \
+    VLLM_ROCM_USE_AITER=0 \
+    FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+    ROCM_HOME=/opt/rocm \
+    PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH} \
+    MAX_JOBS=${MAX_JOBS} \
+    CARGO_BUILD_JOBS=${MAX_JOBS}
+
+# env_override.py loads libtorch_cpu before torch: use the wheel SDK first to
+# avoid loading both the system and wheel copies of HIP/LLVM into one process.
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/_rocm_sdk_libraries/lib:/usr/local/lib/python3.12/dist-packages/_rocm_sdk_core/lib:/usr/local/lib/python3.12/dist-packages/_rocm_sdk_core/lib/llvm/lib:/opt/rocm/lib
+
+# Follow the repository's lookup-only default. Online tuning can be enabled by
+# the operator; never seed build-specific solver IDs onto an unqualified GPU.
+ENV TORCH_BLAS_PREFER_HIPBLASLT=0 \
+    PYTORCH_TUNABLEOP_ENABLED=1 \
+    PYTORCH_TUNABLEOP_TUNING=0 \
+    PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0 \
+    PYTORCH_TUNABLEOP_FILENAME=/root/.cache/tunableop/tunableop_results.csv
+
+# rocm_smi's CMake configuration requires libdrm headers. Rust's vendored
+# OpenSSL build also needs a C toolchain, make and Perl; uv is already in base.
+RUN : "${VLLM_VERSION:?Pass VLLM_VERSION computed from this checkout with setuptools-scm}" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential=12.9ubuntu3 \
+        libdrm-dev=2.4.113-2~ubuntu0.22.04.1 \
+        perl=5.34.0-3ubuntu1.9 \
+        pkg-config=0.29.2-1ubuntu3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /root/.cache/tunableop
+
+# The published base has no Rust toolchain. Pin the installer, then honor the
+# source-owned toolchain (currently 1.95) for both the CLI and parser extension.
+ENV CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup \
+    PATH=/root/.cargo/bin:${PATH}
+RUN curl --proto '=https' --tlsv1.2 -fsSL \
+        https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
+        -o /tmp/rustup-init \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain none --no-modify-path \
+    && rm /tmp/rustup-init \
+    && toolchain="$(python -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')" \
+    && rustup toolchain install "${toolchain}" --profile minimal --no-self-update \
+    && rustup default "${toolchain}"
+
+# Preserve every base torch-stack distribution, including Triton's local build
+# suffix. Do not install requirements/build/rocm.txt: its Triton pin differs
+# from the published base. The base already supplies CMake, Ninja, wheel,
+# packaging and Jinja2; only the missing/incompatible build helpers are added.
+RUN python - <<'PY'
+from importlib.metadata import version
+from pathlib import Path
+
+constraints = [f"{name}=={version(name)}" for name in (
+    "torch", "torchvision", "torchaudio", "triton",
+)]
+constraints += [
+    "setuptools==79.0.1",
+    "setuptools-scm==9.2.2",
+    "setuptools-rust==1.11.1",
+]
+Path("/tmp/rdna-constraints.txt").write_text("\n".join(constraints) + "\n")
+PY
+RUN uv pip install --system --no-cache --constraint /tmp/rdna-constraints.txt \
+        setuptools==79.0.1 setuptools-scm==9.2.2 setuptools-rust==1.11.1
+
+# Resolve all source-declared runtime requirements while constraining the base
+# stack, and compile in place against its torch (no isolated torch download).
+# The source contains native HIP causal-conv1d kernels; no legacy package/patch.
+# Keep the version override build-local, not in the resulting runtime ENV.
+# nice 19: the image builder shares its host with GPU benchmarks.
+RUN VLLM_VERSION_OVERRIDE="${VLLM_VERSION}" VLLM_REQUIRE_RUST_FRONTEND=1 \
+        nice -n 19 uv pip install --system --no-cache --verbose --constraint /tmp/rdna-constraints.txt \
+        --extra-index-url https://repo.amd.com/rocm/whl-multi-arch/ \
+        --index-strategy unsafe-best-match \
+        --no-build-isolation --editable . \
+    && rm /tmp/rdna-constraints.txt
+
+ARG VLLM_COMMIT
+ARG IMAGE_TAG=nightly
+LABEL org.opencontainers.image.title="vllm-rdna" \
+      org.opencontainers.image.source="https://github.com/opengfx1030/vllm-rdna" \
+      org.opencontainers.image.version="${VLLM_VERSION}" \
+      org.opencontainers.image.revision="${VLLM_COMMIT}" \
+      org.opencontainers.image.ref.name="${IMAGE_TAG}" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      io.opengfx1030.vllm.source-sha="${VLLM_COMMIT}"
+
+# Never run from the CLI source directory: its openai.py shadows the SDK.
+WORKDIR /app
+EXPOSE 8000
+ENTRYPOINT ["python", "-m", "vllm.entrypoints.cli.main"]
+CMD ["--help"]

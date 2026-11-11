@@ -1,4 +1,4 @@
-# V620 FP16 TunableOp profiles
+# V620 TunableOp profiles
 
 Build-specific, **lookup-only** TunableOp solver rows for the gfx1030 serving
 stack on 4× Radeon PRO V620. They were generated with the matching ROCm wheel
@@ -11,14 +11,17 @@ one visible folder per rocBLAS build, selected at launch.
 ## Profiles
 
 | Profile | rocBLAS | ROCm / torch | `librocblas.so.5` sha256[:12] | rows / rank | Status |
-|---|---|---|---:|---:|---|
-| `rocm7.14-rocblas5.5/` | `5.5.0.cd957402` | `7.14.60850` / `2.12.0+rocm7.14.0` | `f30bb442e9b5` | **1766** | canonical (serving build, `venv-7.14.0_0.28.0`) |
-| `rocm10-rocblas5.6/` | `5.6.0.8d1ae90e` | `7.15.26333` / `2.13.0+rocm10.0.0` | `c27e2252cc7a` | 70 | **thin, needs its own capture campaign** |
+| --- | --- | --- | ---: | ---: | --- |
+| `rocm7.14-rocblas5.5/` | `5.5.0.cd957402` | `7.14.60850` / `2.12.0+rocm7.14.0` | `f30bb442e9b5` | **3330** (2738 + 592 TP8 shapes; ranks 0-7) | canonical (`venv-7.14.0_0.28.0` and `_0.31.0`) |
+| `rocm10-rocblas5.6/` | `5.6.0.8d1ae90e` | `7.15.26333` / `2.13.0+rocm10.0.0` | `d05939967b5f` | **139** | **qualified for build `d05939967b5f`** (55 prefill + 84 decode/MTP) |
 
-The canonical profile covers all three serving families:
+The canonical profile covers these serving families:
 
 * **Flash-Next** — `Qwen3.8-Flash-Next-AWQ-W4A16`, MTP=0 and MTP=2 (includes the
   M ≤ 8 decode shapes and the M = 16/24/32 MTP-verify shapes).
+* **Flash-Next DFlash2** — 94 BF16 regular draft GEMMs, including 36 two-token
+  graph shapes tuned independently on HIP 6–9;
+  the target remains FP16. Strided-batched BF16 shapes retain rocBLAS defaults.
 * **27B AWQ dense** — the dense projection shapes at the aligned prefill grid.
 * **EXL3 27B** — `Qwen3.8-27B-exl3-3.00bpw` (K = 5120/1536/4352; 0 collisions
   with the Flash-Next K set).
@@ -52,7 +55,7 @@ configure_tunableop <librocblas.so.5 path> <tunableop dir> [profile]
 
 A healthy auto-selecting start logs:
 
-```
+```text
 TunableOp profile rocm7.14-rocblas5.5 auto-selected for rocBLAS build f30bb442e9b5.
 TunableOp lookup enabled for profile rocm7.14-rocblas5.5 (rocBLAS f30bb442e9b5; rows: <tree>/tunableop/rocm7.14-rocblas5.5); tuning off ...
 ```
@@ -72,10 +75,10 @@ the selected rows path; harvest into the profile directory when validated).
   helper uses it automatically when the selected build has no rows, and it is
   where online tuning writes.
 
-All serve launchers under `scripts/` (through `scripts/rdna_launcher_common.sh`)
-and the in-tree bench/capture drivers go through this helper (or the
-`tools/rdna2/` mirror); a launcher with a `TUNABLEOP=0` opt-out sets
-`PYTORCH_TUNABLEOP_ENABLED=0` and writes nothing.
+All serve launchers under `tools/rdna/` (through
+`tools/rdna/rdna_launcher_common.sh`) and the in-tree bench/capture drivers
+go through this helper (or the `tools/rdna2/` mirror); a launcher with a
+`TUNABLEOP=0` opt-out sets `PYTORCH_TUNABLEOP_ENABLED=0` and writes nothing.
 
 ## Cache-aligned prefill
 
@@ -84,6 +87,16 @@ intermediate chunk ends to an 800-token recurrent-state grid. With a 4,096-token
 scheduling budget, ordinary chunks therefore contain 4,000 tokens. Exact-shape
 lookup cannot use 4,096-token rows for these chunks; the table carries the five
 multiples of 800 up to 4,000 (and 1,024/2,048/3,072 for the 1,024 grid).
+
+**The live launcher resolves to `--block-size 1024 --max-num-batched-tokens 2048`**, so the
+chunks that actually run are M = 1,024 and 2,048. It also sets
+`VLLM_RDNA_DYNAMIC_PREFILL=1`, whose chunk-cap ladder is `RUNGS = (256, 512, 1024)` with
+`LPT_SHARED = 512`; the scheduler then sets `num_new_tokens = long_prefill_token_threshold`
+whenever more than one request is eligible, so at ≥4 eligible requests a **512-token** chunk
+reaches the GEMMs (M = 512), and 256 at 8. `check_v620_tuning.py` takes only
+`--block-size`/`--max-num-batched-tokens` and cannot express this, so those rows are carried
+explicitly: M = 256/512 for all seven dense shapes, and they are worth 4x on the large-K
+shapes (10240x2560: 4.33 ms heuristic -> 1.22 ms).
 
 Use `--block-size 1024` with the 4,096-token MTP2 scheduling budget to retain
 4,096-token ordinary chunks. Keep cache-aligned scheduling enabled; disabling it
@@ -122,3 +135,38 @@ proof) see `tools/rdna2_028/tunableop_rows_pipeline.sh`,
 `tools/rdna2_028/curate_tunableop_rows.py` and the per-campaign sections in
 `bench_results/`. Freeze the result into `tunableop/<profile-name>/`, then add
 the profile to `profiles.json`.
+
+## Missing prefill GEMMs (offline tune + harvest)
+
+A solo-prefill census (`PYTORCH_TUNABLEOP_RECORD_UNTUNED=1`) can surface prefill
+GEMM shapes that the shipped profile does not cover. The harness under
+`tools/rdna/prof/` diffs the census against a profile, tunes the missing keys on
+idle GPUs, merges the rows into all four per-rank files, and verifies the
+lookup in offline mode:
+
+```bash
+tools/rdna/prof/tune_missing_gemms.sh missing --census census.csv
+# one GPU, or N GPUs on disjoint slices (--shard I/N)
+VENV=<venv> tools/rdna/prof/tune_missing_gemms.sh tune \
+  --census census.csv --gpu 4 --shard 0/3 --out scratch/s0
+VENV=<venv> tools/rdna/prof/tune_missing_gemms.sh tune \
+  --census census.csv --gpu 5 --shard 1/3 --out scratch/s1
+# merge into a COPY of tunableop/ (point TUNABLEOP_ROOT at it to A/B in serving)
+tools/rdna/prof/tune_missing_gemms.sh harvest \
+  --rows-dir <copy>/tunableop --profile rocm7.14-rocblas5.5 \
+  --tuned scratch/s0/tunableop_results0.csv \
+  --tuned scratch/s1/tunableop_results0.csv
+VENV=<venv> tools/rdna/prof/tune_missing_gemms.sh verify \
+  --rows-dir <copy>/tunableop --profile rocm7.14-rocblas5.5 \
+  --census census.csv --gpu 4
+```
+
+`missing` is CPU-only. `tune` and `verify` require an explicit `--gpu`, refuse
+HIP devices 0 and 1, and check through torch that the card has less than 1 GiB
+in use before starting. `--dry-run` prints the plan without touching a GPU or
+writing files. `harvest` refuses to merge when a tuned file's validators differ
+from the profile's, keeps existing rows untouched, and updates `provenance.json`
+and `profiles.json`. Freeze the harvested rows into the tree's `tunableop/` only
+after an end-to-end A/B shows they win: tuned rows are chosen per shape in
+isolation, and the shipped profile keeps a row only when it beats the rocBLAS
+heuristic by at least 3 %.

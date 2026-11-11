@@ -123,6 +123,7 @@ def paged_attention_rocm(
     v_scale: torch.Tensor,
     fp8_out_scale: torch.Tensor | None = None,
     mfma_type: str = "fp8" if envs.VLLM_ROCM_FP8_MFMA_PAGE_ATTN else "f16",
+    use_interleaved_v_cache: bool = False,
 ) -> None:
     torch.ops._rocm_C.paged_attention(
         out,
@@ -145,6 +146,7 @@ def paged_attention_rocm(
         v_scale,
         fp8_out_scale,
         mfma_type,
+        use_interleaved_v_cache,
     )
 
 
@@ -257,6 +259,17 @@ def rms_norm(
         torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
+def gemma_rms_norm(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    """RDNA: out = input * rstd * (1 + weight), (1 + weight) rounded to fp16
+    first, as one kernel. fp16 only, contiguous 2D input."""
+    torch.ops._rocm_C.gemma_rms_norm(out, input, weight, epsilon)
+
+
 # Fused vocab-parallel embedding lookup
 # (see csrc/.../vocab_parallel_embedding_kernels.cu).
 def vocab_parallel_embedding(
@@ -357,6 +370,17 @@ def fused_add_rms_norm(
         torch.ops._rocm_C.fused_add_rms_norm(input, residual, weight, epsilon)
     else:
         torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def muse_spark_mul_tanh_soft_cap(
+    x: torch.Tensor,
+    multiplier: float,
+    soft_cap_temp: float,
+) -> torch.Tensor:
+    """Cast to FP32 and apply ``temp * tanh(x * multiplier / temp)`` in one pass."""
+    out = torch.empty_like(x, dtype=torch.float32)
+    torch.ops._C.muse_spark_mul_tanh_soft_cap(out, x, multiplier, soft_cap_temp)
+    return out
 
 
 def fused_qk_norm_rope(
@@ -687,9 +711,10 @@ def gptq_gemm_rdna2(
     b_scales: torch.Tensor,
     b_g_idx: torch.Tensor,
     use_v2_format: bool,
+    deterministic: bool = False,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.gptq_gemm_rdna2(
-        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format, deterministic
     )
 
 
@@ -792,21 +817,98 @@ def qsa_compress_groups_rdna2(
     )
 
 
-def qsa_mqa_paged_rdna2(
-    q_fp16: torch.Tensor,
-    kv_cache: torch.Tensor,
-    weights: torch.Tensor,
-    context_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-    max_model_len: int,
+def qsa_sparse_paged_attention_rdna2(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    return torch.ops._rocm_C.qsa_sparse_paged_attention_rdna2(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        out,
+    )
+
+
+def qsa_sparse_paged_attention_int4_rdna2(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Sparse GQA attention over a packed INT4 + FP16 block-scale KV cache.
+
+    ``k_cache``/``v_cache`` are the payload views and ``k_scale``/``v_scale``
+    the scale views onto the tail of the same records.
+    """
+    return torch.ops._rocm_C.qsa_sparse_paged_attention_int4_rdna2(
+        q,
+        k_cache,
+        v_cache,
+        k_scale,
+        v_scale,
+        logical_indices,
+        block_table,
+        token_to_req,
+        out,
+    )
+
+
+def qsa_expand_indices_rdna2(
+    block_indices: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_to_req: torch.Tensor,
+    compress_ratio: int,
+    token_topk: int,
+    out: torch.Tensor | None = None,
+    canonical_order: bool = False,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.qsa_expand_indices_rdna2(
+        block_indices,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        compress_ratio,
+        token_topk,
+        out,
+        canonical_order,
+    )
+
+
+def qsa_mqa_paged_rdna2(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    compress_ratio: int,
+    num_columns: int,
+    score_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._rocm_C.qsa_mqa_paged_rdna2(
-        q_fp16,
-        kv_cache,
-        weights,
-        context_lens,
-        block_tables,
-        torch.tensor(max_model_len, dtype=torch.int64),
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        compress_ratio,
+        num_columns,
+        score_scale,
     )
 
 
@@ -883,9 +985,10 @@ def gptq_gemm_rdna2_prefill(
     b_scales: torch.Tensor,
     b_g_idx: torch.Tensor,
     use_v2_format: bool,
+    deterministic: bool = False,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.gptq_gemm_rdna2_prefill(
-        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format, deterministic
     )
 
 
@@ -913,37 +1016,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         b_scales: torch.Tensor,
         b_g_idx: torch.Tensor,
         use_v2_format: bool,
-    ) -> torch.Tensor:
-        return torch.empty(
-            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
-        )
-
-
-def gptq_gemm_rdna2_prefill_direct(
-    a: torch.Tensor,
-    b_q_weight: torch.Tensor,
-    b_qzeros: torch.Tensor,
-    b_scales: torch.Tensor,
-    b_g_idx: torch.Tensor,
-    use_v2_format: bool,
-) -> torch.Tensor:
-    return torch.ops._rocm_C.gptq_gemm_rdna2_prefill_direct(
-        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
-    )
-
-
-if hasattr(torch.ops, "_rocm_C") and hasattr(
-    torch.ops._rocm_C, "gptq_gemm_rdna2_prefill_direct"
-):
-
-    @register_fake("_rocm_C::gptq_gemm_rdna2_prefill_direct")
-    def _gptq_gemm_rdna2_prefill_direct_fake(
-        a: torch.Tensor,
-        b_q_weight: torch.Tensor,
-        b_qzeros: torch.Tensor,
-        b_scales: torch.Tensor,
-        b_g_idx: torch.Tensor,
-        use_v2_format: bool,
+        deterministic: bool = False,
     ) -> torch.Tensor:
         return torch.empty(
             (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
@@ -960,6 +1033,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna2
         b_scales: torch.Tensor,
         b_g_idx: torch.Tensor,
         use_v2_format: bool,
+        deterministic: bool = False,
     ) -> torch.Tensor:
         return torch.empty(
             (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
@@ -1020,9 +1094,10 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "w4a8_gemm_rdna2
 
 # RDNA2 MoE accumulation mode. False (default): fp16 packed-CAS atomics,
 # order-dependent at fp16 precision but faster. True (opt-in via
-# VLLM_RDNA2_MOE_FP32_ACCUM=1): fp32 atomics into a cached fp32 scratch plus
-# a single fp32->fp16 cast — run-to-run stable in practice. Resolved once at
-# import; per-call override with fp32_accum=True/False.
+# VLLM_RDNA2_MOE_FP32_ACCUM=1): fp32 atomics into an fp32 scratch plus a
+# single fp32->fp16 cast; the fp32 adds still round in arrival order, so it is
+# not run-to-run deterministic (VLLM_RDNA2_MOE_DETERMINISTIC is). Resolved once
+# at import; per-call override with fp32_accum=True/False.
 _RDNA2_MOE_FP32_ACCUM = envs.VLLM_RDNA2_MOE_FP32_ACCUM
 
 
@@ -1041,6 +1116,7 @@ def moe_gptq_gemm_rdna2(
     mul_topk_weight: bool,
     output_topk: int = 0,
     fp32_accum: bool | None = None,
+    use_v2_format: bool = False,
 ) -> None:
     # Schema dispatch in torch 2.12 enforces ScalarType::Float on the
     # unannotated Tensor argument for `topk_weights` (it is the only
@@ -1066,7 +1142,24 @@ def moe_gptq_gemm_rdna2(
         mul_topk_weight,
         output_topk,
         fp32_accum,
+        use_v2_format,
     )
+
+
+def moe_fixedpoint_to_half_rdna2(
+    accumulator: torch.Tensor, output: torch.Tensor
+) -> None:
+    """Finalize int64[rows,N+1] via FP32 into FP16; status rows become NaN."""
+    torch.ops._rocm_C.moe_fixedpoint_to_half_rdna2(accumulator, output)
+
+
+if hasattr(torch.ops._rocm_C, "moe_fixedpoint_to_half_rdna2"):
+
+    @register_fake("_rocm_C::moe_fixedpoint_to_half_rdna2")
+    def _moe_fixedpoint_to_half_rdna2_fake(
+        accumulator: torch.Tensor, output: torch.Tensor
+    ) -> None:
+        pass
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2"):
@@ -1087,6 +1180,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_r
         mul_topk_weight: bool,
         output_topk: int = 0,
         fp32_accum: bool = True,
+        use_v2_format: bool = False,
     ) -> None:
         return
 
@@ -1301,6 +1395,323 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna
         size_m: int,
         size_n: int,
         size_k: int,
+    ) -> None:
+        return
+
+
+# rdna_hint_flex (HadamardINT2-FP16 spec v3.2) weight kernels for RDNA2 (gfx1030).
+# `w` is the flat per-row buffer dict of one rdna_hint_flex tensor (see
+# vllm/model_executor/layers/quantization/utils/rdna_hint_flex_utils.py).
+def rdna_hint_flex_linear_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    transform: bool,
+    decode_max_m: int,
+    mode: int = 0,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(
+        x,
+        col_scale,
+        had,
+        codes,
+        code_off,
+        blk_params,
+        param_off,
+        row_consts,
+        row_nbits,
+        row_block,
+        transform,
+        decode_max_m,
+        mode,
+    )
+
+
+def rdna_hint_flex_moe_rdna2(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    w13: dict[str, torch.Tensor],
+    w13_transform: bool,
+    w2: dict[str, torch.Tensor],
+    w2_transform: bool,
+    num_experts: int,
+    intermediate: int,
+    mode: int = 0,
+    decode_max_m: int = 48,
+) -> torch.Tensor:
+    """Routed experts on stacked rdna_hint_flex tensors (see the op comment in
+    csrc/rocm/rdna_hint_flex_rdna2.cu)."""
+    f = ("codes", "code_off", "blk_params", "param_off", "row_consts",
+         "row_nbits", "row_block", "col_scale", "had")  # fmt: skip
+    return torch.ops._rocm_C.rdna_hint_flex_moe_rdna2(
+        x,
+        topk_ids,
+        topk_weights,
+        *(w13[k] for k in f),
+        w13_transform,
+        *(w2[k] for k in f),
+        w2_transform,
+        num_experts,
+        intermediate,
+        mode,
+        decode_max_m,
+    )
+
+
+def rdna_hint_flex_gemm_rdna2(
+    x: torch.Tensor, w: dict[str, torch.Tensor], out: torch.Tensor
+) -> None:
+    """Fused decode-in-GEMM (prefill) on an already transformed activation."""
+    torch.ops._rocm_C.rdna_hint_flex_gemm_rdna2(
+        x, w["codes"], w["code_off"], w["blk_params"], w["param_off"],
+        w["row_consts"], w["row_nbits"], w["row_block"], out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_act_quant64_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    transform: bool,
+    xq: torch.Tensor,
+    sx: torch.Tensor,
+    sq16: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_act_quant64_rdna2(
+        x, col_scale, had, transform, xq, sx, sq16
+    )
+
+
+def rdna_hint_flex_i8gemm_rdna2(
+    xq: torch.Tensor,
+    sx: torch.Tensor,
+    sq16: torch.Tensor,
+    w: dict[str, torch.Tensor],
+    out: torch.Tensor,
+    tile: int = 0,
+) -> None:
+    """I8 prefill GEMM (activation scale per 64 columns)."""
+    torch.ops._rocm_C.rdna_hint_flex_i8gemm_rdna2(
+        xq, sx, sq16, w["codes"], w["code_off"], w["blk_params"],
+        w["param_off"], w["row_consts"], w["row_nbits"], w["row_block"], out,
+        tile,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_moe_transform_rdna2(
+    x: torch.Tensor,
+    src_div: int,
+    expert: torch.Tensor,
+    w: dict[str, torch.Tensor],
+    transform: bool,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_moe_transform_rdna2(
+        x, src_div, expert, w["col_scale"], w["had"], transform, out
+    )
+
+
+def rdna_hint_flex_moe_gemm_rdna2(
+    x: torch.Tensor,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    ntpp: torch.Tensor,
+    w: dict[str, torch.Tensor],
+    n_out: int,
+    out: torch.Tensor,
+) -> None:
+    """Grouped expert GEMM over moe_align_block_size(block 64) pairs."""
+    torch.ops._rocm_C.rdna_hint_flex_moe_gemm_rdna2(
+        x, sorted_ids, expert_ids, ntpp, w["codes"], w["code_off"],
+        w["blk_params"], w["param_off"], w["row_consts"], w["row_nbits"],
+        w["row_block"], n_out, out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_act_quant_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    transform: bool,
+    xq: torch.Tensor,
+    sx: torch.Tensor,
+    sumq: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_act_quant_rdna2(
+        x, col_scale, had, transform, xq, sx, sumq
+    )
+
+
+def rdna_hint_flex_gemv_i8_rdna2(
+    xq: torch.Tensor,
+    sx: torch.Tensor,
+    sumq: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_gemv_i8_rdna2(
+        xq, sx, sumq, codes, code_off, blk_params, param_off, row_consts,
+        row_nbits, row_block, out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_gemv_rdna2(
+    x: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_gemv_rdna2(
+        x, codes, code_off, blk_params, param_off, row_consts, row_nbits,
+        row_block, out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_dequant_rdna2(
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_dequant_rdna2(
+        codes, code_off, blk_params, param_off, row_consts, row_nbits,
+        row_block, out,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_act_transform_rdna2(
+    x: torch.Tensor, col_scale: torch.Tensor, had: torch.Tensor, out: torch.Tensor
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_act_transform_rdna2(x, col_scale, had, out)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "rdna_hint_flex_linear_rdna2"
+):
+
+    @register_fake("_rocm_C::rdna_hint_flex_linear_rdna2")
+    def _rdna_hint_flex_linear_rdna2_fake(
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        transform: bool,
+        decode_max_m: int,
+        mode: int,
+    ) -> torch.Tensor:
+        return x.new_empty((x.size(0), row_nbits.size(0)))
+
+    @register_fake("_rocm_C::rdna_hint_flex_moe_rdna2")
+    def _rdna_hint_flex_moe_rdna2_fake(x: torch.Tensor, *args) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @register_fake("_rocm_C::rdna_hint_flex_gemm_rdna2")
+    def _rdna_hint_flex_gemm_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_act_quant64_rdna2")
+    def _rdna_hint_flex_act_quant64_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_i8gemm_rdna2")
+    def _rdna_hint_flex_i8gemm_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_moe_transform_rdna2")
+    def _rdna_hint_flex_moe_transform_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_moe_gemm_rdna2")
+    def _rdna_hint_flex_moe_gemm_rdna2_fake(*args) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_act_quant_rdna2")
+    def _rdna_hint_flex_act_quant_rdna2_fake(
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        transform: bool,
+        xq: torch.Tensor,
+        sx: torch.Tensor,
+        sumq: torch.Tensor,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_gemv_i8_rdna2")
+    def _rdna_hint_flex_gemv_i8_rdna2_fake(
+        xq: torch.Tensor,
+        sx: torch.Tensor,
+        sumq: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_gemv_rdna2")
+    def _rdna_hint_flex_gemv_rdna2_fake(
+        x: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_dequant_rdna2")
+    def _rdna_hint_flex_dequant_rdna2_fake(
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::rdna_hint_flex_act_transform_rdna2")
+    def _rdna_hint_flex_act_transform_rdna2_fake(
+        x: torch.Tensor, col_scale: torch.Tensor, had: torch.Tensor, out: torch.Tensor
     ) -> None:
         return
 
@@ -2968,9 +3379,16 @@ def wvSplitK(
 
 
 def rdna_ar_init(
-    rank: int, world: int, device_ids: torch.Tensor, max_bytes: int, shm_name: str
+    rank: int,
+    world: int,
+    device_ids: torch.Tensor,
+    max_bytes: int,
+    shm_name: str,
+    gate_bytes: int = 0,
 ) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_ar_init(rank, world, device_ids, max_bytes, shm_name)
+    return torch.ops._rocm_C.rdna_ar_init(
+        rank, world, device_ids, max_bytes, shm_name, gate_bytes
+    )
 
 
 def rdna_ar_connect(handle: int, handles: torch.Tensor) -> None:
@@ -2983,6 +3401,42 @@ def rdna_ar_can(handle: int, t: torch.Tensor) -> bool:
 
 def rdna_ar_all_reduce(handle: int, t: torch.Tensor) -> torch.Tensor:
     return torch.ops._rocm_C.rdna_ar_all_reduce(handle, t)
+
+
+def rdna_ar_hier_init(
+    handle: int,
+    island_of_rank: torch.Tensor,
+    owners: int,
+    min_kb: int,
+    algo: int,
+    blocks: int,
+    gate_kb: int,
+) -> None:
+    torch.ops._rocm_C.rdna_ar_hier_init(
+        handle, island_of_rank, owners, min_kb, algo, blocks, gate_kb
+    )
+
+
+def rdna_ar_all_reduce_algo(
+    handle: int, t: torch.Tensor, algo: int, blocks: int
+) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_ar_all_reduce_algo(handle, t, algo, blocks)
+
+
+def rdna_ar_can_all_gather(handle: int, t: torch.Tensor) -> bool:
+    return torch.ops._rocm_C.rdna_ar_can_all_gather(handle, t)
+
+
+def rdna_ar_all_gather(handle: int, t: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_ar_all_gather(handle, t)
+
+
+def rdna_ar_can_argmax(handle: int, vals: torch.Tensor, idx: torch.Tensor) -> bool:
+    return torch.ops._rocm_C.rdna_ar_can_argmax(handle, vals, idx)
+
+
+def rdna_ar_argmax(handle: int, vals: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_ar_argmax(handle, vals, idx)
 
 
 def rdna_ar_timed_out(handle: int) -> bool:
@@ -3032,8 +3486,10 @@ def gemv_i8_rdna2(
     return torch.ops._rocm_C.gemv_i8_rdna2(x, w, scale, bias)
 
 
-def rdna_gemv_act(x, w, scale, act_cols, act_scale) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_gemv_act(x, w, scale, act_cols, act_scale)
+def rdna_gemv_act(
+    x, w, scale, act_cols, act_scale, inj_cols
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._rocm_C.rdna_gemv_act(x, w, scale, act_cols, act_scale, inj_cols)
 
 
 def rdna_hc_up_gate_mix(lora, w, scale, xn, hc_count) -> torch.Tensor:
@@ -3052,12 +3508,46 @@ def rdna_hc_mix_prefill(
     return torch.ops._rocm_C.rdna_hc_mix_prefill(xn, w_down, w_up, lora_rank, hc_count)
 
 
-def rdna_se_gate_up_silu(x, w, scale) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_se_gate_up_silu(x, w, scale)
+def rdna_gemm_smallm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """fp16 y = x @ w.T for up to 32 rows through one ticketed split-K kernel."""
+    return torch.ops._rocm_C.rdna_gemm_smallm(x, w)
 
 
-def rdna_se_down_gated(act, w, scale, x, w_gate) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_se_down_gated(act, w, scale, x, w_gate)
+def rdna_se_gate_up_tile(x, w, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shared-expert gate_up for 8 < M <= 32: (silu(g) * u, sigmoid gate)."""
+    return torch.ops._rocm_C.rdna_se_gate_up_tile(x, w, w_gate)
+
+
+def rdna_se_down_tile(act, w, gate) -> torch.Tensor:
+    """Shared-expert down for 8 < M <= 32: gate[m] * (act[m] @ w.T), fp16."""
+    return torch.ops._rocm_C.rdna_se_down_tile(act, w, gate)
+
+
+def rdna_se_gate_up_silu(x, w, scale, w_gate) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._rocm_C.rdna_se_gate_up_silu(x, w, scale, w_gate)
+
+
+def rdna_se_down_gated(act, w, scale, gate) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_se_down_gated(act, w, scale, gate)
+
+
+def rdna_moe_route_zero(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    expert_map: torch.Tensor | None,
+    zero1: torch.Tensor,
+    zero2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """moe_align_block_size for <= 1024 routed entries, plus zero1/zero2 = 0.
+
+    One launch instead of align + count_and_sort + two fills. Invalid ids
+    (negative, >= num_experts, or unmapped by ``expert_map``) are skipped.
+    The order of tokens inside an expert is the flat index.
+    """
+    return torch.ops._rocm_C.rdna_moe_route_zero(
+        topk_ids, block_size, num_experts, expert_map, zero1, zero2
+    )
 
 
 def moe_skinny_int4_decode(
@@ -3112,6 +3602,29 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g
         return torch.empty(
             (num_tokens, out_features), dtype=in_b.dtype, device=in_b.device
         )
+
+
+def mxfp4_w4a8_gemv_rdna3(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    # a: [M, K] fp16/bf16 with 1 <= M <= 8; b_q: [N, K/2] uint8 E2M1;
+    # b_scale: [N, K/32] uint8 E8M0. Returns [M, N] in a.dtype.
+    return torch.ops._rocm_C.mxfp4_w4a8_gemv_rdna3(a, b_q, b_scale)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "mxfp4_w4a8_gemv_rdna3"
+):
+
+    @register_fake("_rocm_C::mxfp4_w4a8_gemv_rdna3")
+    def _mxfp4_w4a8_gemv_rdna3_fake(
+        a: torch.Tensor,
+        b_q: torch.Tensor,
+        b_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty((a.size(0), b_q.size(0)), dtype=a.dtype, device=a.device)
 
 
 def wvSplitKrc(
@@ -3175,6 +3688,32 @@ def moe_align_block_size(
         experts_ids,
         num_tokens_post_pad,
         expert_map,
+        scatter_idx,
+    )
+
+
+def fused_globalize_align_block_size(
+    topk_idx: torch.Tensor,
+    psum: torch.Tensor,
+    rank_expert_offset: int,
+    global_num_experts: int,
+    local_num_experts: int,
+    block_size: int,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+    scatter_idx: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.fused_globalize_align_block_size(
+        topk_idx,
+        psum,
+        rank_expert_offset,
+        global_num_experts,
+        local_num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
         scatter_idx,
     )
 
@@ -3380,6 +3919,11 @@ def grouped_topk(
         raise NotImplementedError(
             "The fused grouped_topk kernel is only available on CUDA and XPU platforms"
         )
+    if scores.shape[0] == 0:
+        return (
+            scores.new_empty((0, topk), dtype=torch.float32),
+            scores.new_empty((0, topk), dtype=torch.int32),
+        )
     return torch.ops._moe_C.grouped_topk(
         scores,
         num_expert_group,
@@ -3512,6 +4056,7 @@ def reshape_and_cache(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    interleaved_v: bool = False,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache(
         key,
@@ -3522,6 +4067,7 @@ def reshape_and_cache(
         kv_cache_dtype,
         k_scale,
         v_scale,
+        interleaved_v,
     )
 
 
@@ -3544,6 +4090,125 @@ def reshape_and_cache_flash(
         kv_cache_dtype,
         k_scale,
         v_scale,
+    )
+
+
+def reshape_and_cache_int4_fp16_rdna2(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Write K/V into a packed INT4 + FP16 block-scale KV cache.
+
+    ``cache`` is the ``[2, pages, slots, heads, record_bytes]`` view of the
+    packed cache; the writer quantizes each record to INT4 and stores the
+    FP16 per-32-channel block scales in the record tail.
+    """
+    torch.ops._rocm_C.reshape_and_cache_int4_fp16_rdna2(
+        key,
+        value,
+        cache,
+        slot_mapping,
+    )
+
+
+def fused_qknorm_rope_cache(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    eps: float,
+    norm_weight_bias: float = 0.0,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fuse per-head RMSNorm, partial NeoX RoPE and KV insertion.
+
+    Norm weights may be FP32 independently of QKV. A zero rotary dimension
+    skips RoPE; norm outputs are rounded to QKV dtype before rotation.
+    """
+    if rotary_dim < 0 or rotary_dim > head_dim or rotary_dim % 8:
+        raise ValueError("rotary_dim must be a multiple of 8 in [0, head_dim]")
+    q = qkv.new_empty((qkv.shape[0], num_q_heads * head_dim))
+    k = qkv.new_empty((qkv.shape[0], num_kv_heads * head_dim))
+    v = torch.empty_like(k)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    torch.ops._C.fused_qknorm_rope_cache(
+        q,
+        k,
+        v,
+        qkv,
+        q_weight,
+        k_weight,
+        cos,
+        sin,
+        positions,
+        slot_mapping,
+        key_cache,
+        value_cache,
+        head_dim,
+        num_q_heads,
+        num_kv_heads,
+        rotary_dim // 2,
+        eps,
+        norm_weight_bias,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+    return q, k, v
+
+
+def fused_muse_spark_qknorm_rope_kv_insert(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    eps: float,
+    cos_sin_cache: torch.Tensor | None = None,
+    rotary_dim: int = 0,
+    slot_mapping: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+    block_size: int = 0,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    q_fp8_out: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+) -> None:
+    """In-place weightless QK RMSNorm + GPT-J RoPE, optionally writing k/v to cache.
+
+    When ``kv_cache`` is given, the caller must skip the attention layer's own KV write.
+    With ``q_fp8_out``, write scaled E4M3 Q there instead of rewriting Q in ``qkv``.
+    """
+    torch.ops._C.fused_muse_spark_qknorm_rope_kv_insert(
+        qkv,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        eps,
+        cos_sin_cache,
+        rotary_dim,
+        slot_mapping,
+        kv_cache,
+        block_size,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+        q_fp8_out,
+        q_scale,
     )
 
 
@@ -3571,6 +4236,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     skip_index_branch: bool = False,
     q_fp8_out: torch.Tensor | None = None,
     q_fp8_scale: float = 1.0,
+    kv_k_scale: torch.Tensor | None = None,
+    kv_v_scale: torch.Tensor | None = None,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -3594,7 +4261,14 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     attention's flat TMA descriptor.
 
     If ``q_fp8_out`` is given, the same normalized q is also written in FP8
-    E4M3 using ``q_fp8_scale`` as its dequantization scale.
+    E4M3 using ``q_fp8_scale`` as its dequantization scale. Without ``q_out``,
+    q is then written only in FP8 and the q slice of ``qkv`` is left as is.
+
+    ``kv_cache_dtype="nvfp4"`` quantizes k/v into the packed HND
+    ``[num_blocks, 2 * num_kv_heads, block_size, 72]`` uint8 cache using the
+    device dequantization scales ``kv_k_scale``/``kv_v_scale``. Slot
+    ``2 * head + side`` (K = 0, V = 1) holds that head's E2M1 data followed by
+    its E4M3 block scales, so every head is one contiguous run of the page.
 
     When ``skip_index_branch`` is true, sparse rows still keep their packed
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
@@ -3625,6 +4299,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         skip_index_branch,
         q_fp8_out,
         q_fp8_scale,
+        kv_k_scale,
+        kv_v_scale,
     )
 
 
@@ -3720,10 +4396,18 @@ def concat_and_cache_mla(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
     scale: torch.Tensor,
+    skip_scale: bool = False,
 ) -> None:
-    torch.ops._C_cache_ops.concat_and_cache_mla(
-        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
-    )
+    if current_platform.is_xpu():
+        if skip_scale:
+            raise NotImplementedError("skip_scale is not supported on XPU")
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+        )
+    else:
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
+        )
 
 
 def concat_and_cache_mla_grouped(
@@ -4294,6 +4978,13 @@ def weight_packed_linear_cpu(
     return output
 
 
+class CPUActMethod(IntEnum):
+    SILU_AND_MUL = 0
+    SWIGLU = 1
+    GELU_AND_MUL = 2
+    GELU_TANH_AND_MUL = 3
+
+
 class CPUQuantMethod(IntEnum):
     UNQUANT = 0
     INT8_W8A8 = 1
@@ -4340,6 +5031,7 @@ def fused_experts_cpu(
     limit: float | None = None,
     is_vnni: bool = True,
     a1_scale: torch.Tensor | None = None,
+    act_method: CPUActMethod = CPUActMethod.SILU_AND_MUL,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -4360,6 +5052,7 @@ def fused_experts_cpu(
         alpha,
         limit,
         is_vnni,
+        act_method,
     )
 
 
@@ -4650,7 +5343,7 @@ def causal_conv1d_fwd_cpu(
     cache_indices: torch.Tensor | None,
     has_initial_state: torch.Tensor | None,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_fwd_cpu(
         x,
@@ -4662,7 +5355,7 @@ def causal_conv1d_fwd_cpu(
         has_initial_state,
         silu_activation,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -4673,7 +5366,7 @@ def causal_conv1d_update_cpu(
     bias: torch.Tensor | None,
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
-    is_vnni: bool,
+    is_weight_packed: bool,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
@@ -4685,7 +5378,7 @@ def causal_conv1d_update_cpu(
         num_accepted_tokens,
         conv_state_indices,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -5434,12 +6127,6 @@ def cpu_gemm_wna16(
         isa_hint,
     )
     out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
-    return out
-
-
-def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
-    out = torch.empty_like(input)
-    torch.ops._C.activation_lut_bf16(out, input, activation)
     return out
 
 

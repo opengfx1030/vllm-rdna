@@ -1,0 +1,166 @@
+{
+  "scope": "CPU analysis of qualified device FP32 P1 trace; no serving-speed claim",
+  "trace_boot": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "native_repeat_boot": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "source_cross_run_native_xn_exact": true,
+  "same_input_eager_graph_fp32_and_route_stable": true,
+  "measured_scale_sufficient_to_reproduce_full_xn": true,
+  "caveat": "Measured rrms is sufficient only if full-XN prediction is bit exact; changed-input record has no archived full-XN reference. This does not prove a route repair or serving gain.",
+  "records": [
+    {
+      "label": "eager_seed250252",
+      "native_sum_fp32": 3129.26806640625,
+      "global_sum_fp32": 3129.267822265625,
+      "sum_difference_global_minus_native": -0.000244140625,
+      "sum_ulp_distance": 1,
+      "native_rrms_fp32": 0.9044788479804993,
+      "global_rrms_fp32": 0.904478907585144,
+      "rrms_difference_global_minus_native": 5.960464477539063e-08,
+      "rrms_ulp_distance": 1,
+      "index1690_native_xn": 0.98828125,
+      "index1690_global_xn": 0.98876953125,
+      "global_route_ids_row104": [
+        0,
+        17,
+        112,
+        250,
+        278,
+        369,
+        387,
+        443,
+        468,
+        489
+      ],
+      "native_xn_prediction": {
+        "separate": {
+          "exact": false,
+          "mismatch_count": 1,
+          "first_mismatch_indices": [
+            1189
+          ],
+          "index1690_predicted": 0.98828125,
+          "index1690_actual": 0.98828125
+        },
+        "fma": {
+          "exact": true,
+          "mismatch_count": 0,
+          "first_mismatch_indices": [],
+          "index1690_predicted": 0.98828125,
+          "index1690_actual": 0.98828125
+        }
+      },
+      "global_xn_prediction": {
+        "separate": {
+          "exact": false,
+          "mismatch_count": 1,
+          "first_mismatch_indices": [
+            1189
+          ],
+          "index1690_predicted": 0.98876953125,
+          "index1690_actual": 0.98876953125
+        },
+        "fma": {
+          "exact": true,
+          "mismatch_count": 0,
+          "first_mismatch_indices": [],
+          "index1690_predicted": 0.98876953125,
+          "index1690_actual": 0.98876953125
+        }
+      },
+      "both_full_xn_reproduced": true
+    },
+    {
+      "label": "graph_seed250252",
+      "native_sum_fp32": 3129.26806640625,
+      "global_sum_fp32": 3129.267822265625,
+      "sum_difference_global_minus_native": -0.000244140625,
+      "sum_ulp_distance": 1,
+      "native_rrms_fp32": 0.9044788479804993,
+      "global_rrms_fp32": 0.904478907585144,
+      "rrms_difference_global_minus_native": 5.960464477539063e-08,
+      "rrms_ulp_distance": 1,
+      "index1690_native_xn": 0.98828125,
+      "index1690_global_xn": 0.98876953125,
+      "global_route_ids_row104": [
+        0,
+        17,
+        112,
+        250,
+        278,
+        369,
+        387,
+        443,
+        468,
+        489
+      ],
+      "native_xn_prediction": {
+        "separate": {
+          "exact": false,
+          "mismatch_count": 1,
+          "first_mismatch_indices": [
+            1189
+          ],
+          "index1690_predicted": 0.98828125,
+          "index1690_actual": 0.98828125
+        },
+        "fma": {
+          "exact": true,
+          "mismatch_count": 0,
+          "first_mismatch_indices": [],
+          "index1690_predicted": 0.98828125,
+          "index1690_actual": 0.98828125
+        }
+      },
+      "global_xn_prediction": {
+        "separate": {
+          "exact": false,
+          "mismatch_count": 1,
+          "first_mismatch_indices": [
+            1189
+          ],
+          "index1690_predicted": 0.98876953125,
+          "index1690_actual": 0.98876953125
+        },
+        "fma": {
+          "exact": true,
+          "mismatch_count": 0,
+          "first_mismatch_indices": [],
+          "index1690_predicted": 0.98876953125,
+          "index1690_actual": 0.98876953125
+        }
+      },
+      "both_full_xn_reproduced": true
+    },
+    {
+      "label": "graph_seed250253",
+      "native_sum_fp32": 3325.756591796875,
+      "global_sum_fp32": 3325.756591796875,
+      "sum_difference_global_minus_native": 0.0,
+      "sum_ulp_distance": 0,
+      "native_rrms_fp32": 0.8773534893989563,
+      "global_rrms_fp32": 0.8773534893989563,
+      "rrms_difference_global_minus_native": 0.0,
+      "rrms_ulp_distance": 0,
+      "index1690_native_xn": 0.0992431640625,
+      "index1690_global_xn": 0.0992431640625,
+      "global_route_ids_row104": [
+        24,
+        54,
+        85,
+        238,
+        263,
+        264,
+        371,
+        386,
+        457,
+        462
+      ]
+    }
+  ],
+  "sources": {
+    "bench_results/2026-10-24-mtp-mono-efficiency/p1-boundary-trace-v2-results/result.json": "0e94b40bbdc1fbb18432fe9afc3711c68173756ca98513255f8fb6f5f6c84991",
+    "bench_results/2026-10-24-mtp-mono-efficiency/native-m128-repeat-v1-results/result.json": "0044699c7699ea3c3978d6677a22cccafe604957eaf0191c11a909e85d9951fe",
+    "bench_results/2026-10-24-mtp-mono-efficiency/full-m-m128-route-diagnostic-v2-results/snapshot-seed250252.json": "d05ee9e51f1350fd5016795a14a10da22519a5725848b52865daf11fd7845ba6",
+    "/Users/kletorch/Projects/infrastructure/gfx1030_optimized/vllm-rdna-mtp-mono/bench_results/2026-10-24-mtp-mono-efficiency/native-m128-repeat-v1/analyze_p1.py": "58ae8e433ccadd5657006270b5db45f3172c29eab677cd5ff24c480dde3414df"
+  }
+}

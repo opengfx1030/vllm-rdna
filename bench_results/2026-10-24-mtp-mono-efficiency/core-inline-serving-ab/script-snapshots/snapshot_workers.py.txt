@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Read actual TP4 worker library mappings and selected non-secret settings."""
+import argparse, hashlib,json,re
+from pathlib import Path
+p=argparse.ArgumentParser();p.add_argument('--serve-log',type=Path,required=True);p.add_argument('--expected-tree',type=Path,required=True);p.add_argument('--expected-core-sha',required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+assert not a.output.exists(),'refusing overwrite'
+workers={int(rank):int(pid) for rank,pid in re.findall(r'Worker_TP(\d+)_EP\d+ pid=(\d+)',a.serve_log.read_text(errors='replace'))}
+assert set(workers)=={0,1,2,3},workers
+keep=['HIP_VISIBLE_DEVICES','GPU_MAX_HW_QUEUES','VLLM_TREE','VLLM_CACHE_ROOT','PYTORCH_TUNABLEOP_FILENAME','PYTORCH_TUNABLEOP_TUNING','PYTORCH_TUNABLEOP_ENABLED']
+topology=Path('/sys/class/kfd/kfd/topology/nodes')
+gpu_ids=[int((n/'gpu_id').read_text()) for n in sorted(topology.iterdir(),key=lambda p:int(p.name)) if int((n/'gpu_id').read_text())]
+assert len(gpu_ids)==10,gpu_ids
+records=[]
+for rank,pid in sorted(workers.items()):
+ root=Path('/proc')/str(pid)
+ env=dict(part.split(b'=',1) for part in (root/'environ').read_bytes().split(b'\0') if b'=' in part)
+ settings={k:env.get(k.encode(),b'').decode(errors='replace') for k in keep}
+ # Worker process titles can overwrite the initial environment buffer exposed
+ # by procfs; use physical KFD queue ownership as the device check.
+ queues=Path('/sys/class/kfd/kfd/proc')/str(pid)/'queues'
+ queue_gpus=[int(x.read_text()) for x in queues.glob('*/gpuid')]
+ assert queue_gpus and set(queue_gpus)=={gpu_ids[rank+6]},(rank,queue_gpus,gpu_ids)
+
+ paths={line.split()[-1] for line in (root/'maps').read_text().splitlines() if '/vllm/_rocm_C.abi3.so' in line}
+ assert len(paths)==1,paths
+ core=Path(next(iter(paths)));assert core.resolve()==(a.expected_tree/'vllm/_rocm_C.abi3.so').resolve(),core
+ sha=hashlib.sha256(core.read_bytes()).hexdigest();assert sha==a.expected_core_sha,sha
+ records.append({'tp_rank':rank,'pid':pid,'loaded_core_path':str(core),'loaded_core_sha256':sha,'initial_environment_snapshot':settings,'physical_queue_gpu_ids':queue_gpus,'expected_physical_gpu_id':gpu_ids[rank+6]})
+d={'boot':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'workers':records,'all_four_core_mappings_verified':True,'all_four_physical_queue_owners_verified':True,'gpu_ids_in_unremapped_kfd_order':gpu_ids}
+a.output.write_text(json.dumps(d,indent=2)+'\n');print(json.dumps(d,indent=2))

@@ -28,15 +28,15 @@ import gc
 import logging
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Any, ClassVar, TypeVar
 
 import torch
 
 import vllm.envs as envs
+from vllm.compilation.cudagraph_pool import capture_pool
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
@@ -97,8 +97,6 @@ def eager_break_during_capture(fn: F) -> F:
             ...
     """
     rdna = on_rdna_family()
-    if not is_breakable_cudagraph_enabled() and not rdna:
-        return fn
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -114,18 +112,55 @@ def eager_break_during_capture(fn: F) -> F:
             if mode == CUDAGraphMode.FULL and not rdna:
                 return fn(*args, **kwargs)
 
-        # Weak-ref args so replay lambdas do not pin graph-pool slots across
-        # batch descriptors. RDNA: keep strong refs -- inductor temps backing
-        # GDN/FA inputs are not always graph-pool owned, and weak refs dangle
-        # into capture-time dummy activations (27B AWQ TP=2 `full.env` decoded
-        # " is is is" after a correct prefill with weak refs).
-        if rdna:
-            return capture.add_eager(functools.partial(fn, *args, **kwargs))
-        weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
-        weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
-        return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
+        return _break_out(capture, fn, args, kwargs, rdna)
 
     return wrapper  # type: ignore[return-value]
+
+
+def eager_break_during_piecewise_capture(fn: F) -> F:
+    """Like :func:`eager_break_during_capture`, but only splits PIECEWISE
+    (mixed / prefill) segments; FULL captures record the op inline.
+
+    For ops that are replay-safe in FULL uniform-decode graphs (their
+    metadata lives in persistent buffers) but read a per-request layout that
+    a PIECEWISE segment would freeze at capture time. FULL captures run the
+    forward with runtime mode NONE inside the capture, so only an explicit
+    PIECEWISE runtime mode breaks.
+    """
+    rdna = on_rdna_family()
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        capture = BreakableCUDAGraphCapture.current()
+        if (
+            capture is None
+            or not capture._capturing
+            or not is_forward_context_available()
+            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
+        ):
+            return fn(*args, **kwargs)
+        return _break_out(capture, fn, args, kwargs, rdna)
+
+    return wrapper  # type: ignore[return-value]
+
+
+def _break_out(
+    capture: BreakableCUDAGraphCapture,
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    rdna: bool,
+) -> Any:
+    # Weak-ref args so replay lambdas do not pin graph-pool slots across
+    # batch descriptors. RDNA: keep strong refs -- inductor temps backing
+    # GDN/FA inputs are not always graph-pool owned, and weak refs dangle
+    # into capture-time dummy activations (27B AWQ TP=2 `full.env` decoded
+    # " is is is" after a correct prefill with weak refs).
+    if rdna:
+        return capture.add_eager(functools.partial(fn, *args, **kwargs))
+    weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
+    weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
+    return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +203,12 @@ class BreakableCUDAGraphCapture:
         """
         return self._capturing
 
-    def __init__(self, pool: Any | None = None) -> None:
+    def __init__(
+        self, pool: Any | None = None, *, publish_replay_context: bool = False
+    ) -> None:
         self.pool = pool
+        self.publish_replay_context = publish_replay_context
+        self.replaying = False
         self.segments: list[Callable[[], Any]] = []
         self._num_graphs: int = 0
         self._num_eager_breaks: int = 0
@@ -231,8 +270,20 @@ class BreakableCUDAGraphCapture:
     # --- replay ----------------------------------------------------------
 
     def replay(self) -> None:
-        for r in self.segments:
-            r()
+        if not self.publish_replay_context:
+            for r in self.segments:
+                r()
+            return
+        previous = getattr(self._tls, "active", None)
+        previous_replaying = self.replaying
+        self.replaying = True
+        self._tls.active = self
+        try:
+            for r in self.segments:
+                r()
+        finally:
+            self._tls.active = previous
+            self.replaying = previous_replaying
 
     # --- introspection ---------------------------------------------------
 
@@ -295,6 +346,9 @@ class BreakableCUDAGraphWrapper:
         runnable: Callable[..., Any],
         vllm_config: VllmConfig,
         runtime_mode: CUDAGraphMode | None = None,
+        *,
+        publish_replay_context: bool = False,
+        key_fn: Callable[..., Hashable] | None = None,
     ) -> None:
         # runtime_mode=None matches any non-NONE dispatch mode; entries
         # are keyed by BatchDescriptor, which already encodes batch
@@ -302,11 +356,13 @@ class BreakableCUDAGraphWrapper:
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.runtime_mode = runtime_mode
+        self.publish_replay_context = publish_replay_context
+        self.key_fn = key_fn
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
 
-        self.entries: dict[BatchDescriptor, _BreakableEntry] = {}
+        self.entries: dict[Hashable, _BreakableEntry] = {}
         BreakableCUDAGraphWrapper._all_instances.add(self)
 
         logger.info_once("Breakable CUDA graph enabled")
@@ -351,10 +407,14 @@ class BreakableCUDAGraphWrapper:
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None
-        entry = self.entries.get(batch_descriptor)
+        # Python control flow (e.g. MTP module selection) must not share graphs.
+        key: Hashable = batch_descriptor
+        if self.key_fn is not None:
+            key = (batch_descriptor, self.key_fn(*args, **kwargs))
+        entry = self.entries.get(key)
         if entry is None:
             entry = _BreakableEntry(batch_descriptor=batch_descriptor)
-            self.entries[batch_descriptor] = entry
+            self.entries[key] = entry
 
         if entry.capture is None:
             return self._capture(entry, args, kwargs)
@@ -388,11 +448,6 @@ class BreakableCUDAGraphWrapper:
 
         entry.input_addresses = self._collect_tensor_addresses(args, kwargs)
 
-        if self.graph_pool is not None:
-            set_graph_pool_id(self.graph_pool)
-        else:
-            set_graph_pool_id(current_platform.graph_pool_handle())
-
         # Match torch.cuda.graph()'s pre-capture cleanup, which we bypass.
         # Skip it when gc is disabled: bulk capture runs under
         # freeze_gc_for_cudagraph_capture, which already did this cleanup,
@@ -404,8 +459,13 @@ class BreakableCUDAGraphWrapper:
         # pre-capture prefetches are complete and don't leak into the graph.
         get_offloader().sync_prev_onload()
 
-        capture = BreakableCUDAGraphCapture(pool=self.graph_pool)
-        with capture:
+        with (
+            capture_pool(self.graph_pool, self.vllm_config) as pool,
+            BreakableCUDAGraphCapture(
+                pool=pool,
+                publish_replay_context=self.publish_replay_context,
+            ) as capture,
+        ):
             output = self.runnable(*args, **kwargs)
             # Join the offloader's copy stream while we still hold the last
             # segment open, so the join is captured into the graph (otherwise

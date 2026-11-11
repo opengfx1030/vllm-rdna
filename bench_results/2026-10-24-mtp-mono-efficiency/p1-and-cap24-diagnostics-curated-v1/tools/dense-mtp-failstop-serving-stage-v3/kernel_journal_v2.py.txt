@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Fail-closed kernel-journal check for isolated engine fault qualification."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+from pathlib import Path
+
+TRAP = re.compile(
+    r"(amdgpu.*(?:gpu reset|gpu fault|vm fault|page fault|ring .*timeout|trap)"
+    r"|kfd.*(?:trap|fault)|UTCL2|AER|Hardware Error|PCIe Bus Error)",
+    re.IGNORECASE,
+)
+
+
+def read_records() -> list[dict]:
+    result = subprocess.run(
+        ["sudo", "-n", "journalctl", "-k", "-b", "--no-pager", "--quiet", "-o", "json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lines = result.stdout.splitlines()
+    if not lines:
+        raise RuntimeError("kernel journal is empty or unavailable")
+    records = [json.loads(line) for line in lines]
+    if not all(
+        isinstance(record, dict)
+        and record.get("_TRANSPORT") == "kernel"
+        and isinstance(record.get("__CURSOR"), str)
+        and isinstance(record.get("MESSAGE"), str)
+        for record in records
+    ):
+        raise RuntimeError("kernel journal lacked real kernel records/cursors")
+    return records
+
+
+def check_append_only(before: list[dict], after: list[dict]) -> int:
+    if not before or not after:
+        raise RuntimeError("kernel-journal snapshot is empty")
+    old_cursors = [record["__CURSOR"] for record in before]
+    new_cursors = [record["__CURSOR"] for record in after]
+    if new_cursors[: len(old_cursors)] != old_cursors:
+        raise RuntimeError("kernel journal changed non-append-only")
+    additions = after[len(before) :]
+    faults = [
+        record["MESSAGE"] for record in additions if TRAP.search(record["MESSAGE"])
+    ]
+    if faults:
+        raise RuntimeError(f"new GPU trap/reset in kernel journal: {faults[:5]}")
+    return len(additions)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=("snapshot", "check"))
+    parser.add_argument("--before", type=Path, required=True)
+    parser.add_argument("--after", type=Path)
+    args = parser.parse_args()
+    if args.action == "snapshot":
+        if args.after is not None:
+            parser.error("snapshot accepts only --before")
+        args.before.write_text(json.dumps(read_records(), indent=2) + "\n")
+        return
+    if args.after is None:
+        parser.error("check requires --after")
+    # A fresh privileged read proves access is still available at the end.
+    args.after.write_text(json.dumps(read_records(), indent=2) + "\n")
+    additions = check_append_only(
+        json.loads(args.before.read_text()), json.loads(args.after.read_text())
+    )
+    print(f"PASS privileged kernel journal: {additions} new records, no GPU fault")
+
+
+if __name__ == "__main__":
+    main()

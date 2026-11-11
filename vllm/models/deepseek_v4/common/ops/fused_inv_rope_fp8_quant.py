@@ -263,7 +263,7 @@ class FusedInvRopeFP8QuantKernel(
             nope_dim=head_dim - rope_dim,
             rope_dim=rope_dim,
             quant_group_size=128,
-            tma_aligned_scales=capability.major >= 10,
+            tma_aligned_scales=current_platform.is_cuda() and capability.major >= 10,
             launch_pdl=current_platform.is_arch_support_pdl(),
             quantize=True,
         )

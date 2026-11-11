@@ -1,0 +1,173 @@
+{
+  "schema": "correctness-core-serving-reviewed-manifest-v1",
+  "source_bundle": "../correctness-core-serving-ab",
+  "retained_file_count": 33,
+  "retained_bytes": 208129,
+  "files": [
+    {
+      "path": "README.md",
+      "size_bytes": 4887,
+      "sha256": "dca7ff478b9120fce9a75a319e7caa2cf4905759ffadc907a4eabb46cc046e3e"
+    },
+    {
+      "path": "analysis/arm-gates.csv",
+      "size_bytes": 72,
+      "sha256": "8120c04301fe30f2959c28be2c2d811087ed265927f50d22585f0f9b4e8ddc47"
+    },
+    {
+      "path": "analysis/cross-arm-logprob-parity.txt",
+      "size_bytes": 1228,
+      "sha256": "b418ef1ee03d27933bfaa729790e07897b3c4894b0bd529e5826ef7857ed0acd"
+    },
+    {
+      "path": "analysis/per-cell-analysis.csv",
+      "size_bytes": 5220,
+      "sha256": "f70ac69fd4f9e756722b8cf198f6cba843d573f1b67f47bc0bd48d113d663ca9"
+    },
+    {
+      "path": "analysis/per-cell-comparison.csv",
+      "size_bytes": 7809,
+      "sha256": "66647af6a2ce6a3937e948630deea280d272bd4018c7461fd25a3bd5bdcdf7e0"
+    },
+    {
+      "path": "analysis/per-request-analysis.csv",
+      "size_bytes": 45219,
+      "sha256": "580b68a3972f618d662f0aef4985f0d37ea66bbf9d98186b7c265b8ce18f8f76"
+    },
+    {
+      "path": "analysis/per-request-comparison.csv",
+      "size_bytes": 54086,
+      "sha256": "e5dc3e5969333c317ad98400827fa75bf66f7a329b627adc44ffab311781e69c"
+    },
+    {
+      "path": "analysis/provenance-validation.json",
+      "size_bytes": 1064,
+      "sha256": "9727d5ff1520d99e3aaf6b4bdc12ae36771ccbe2da31411868a5373a0f21c68d"
+    },
+    {
+      "path": "analysis/whole-run-analysis.csv",
+      "size_bytes": 397,
+      "sha256": "ce18465510d6f60719e3481d22b1016d4a933c411f01badfd7a4ebad51c27ac8"
+    },
+    {
+      "path": "analysis/whole-run-comparison.csv",
+      "size_bytes": 2731,
+      "sha256": "845c158602a4cc7b4b6376618802b017e45ebd5f16f9d68bf8b86ac74f27dae9"
+    },
+    {
+      "path": "arms/01-old/ARM-PASS.txt",
+      "size_bytes": 241,
+      "sha256": "40ccaabe1f2f6368ed6d5870056cf669c076b90c23183a1f7fc2a073777c9d14"
+    },
+    {
+      "path": "arms/01-old/arm-provenance.txt",
+      "size_bytes": 596,
+      "sha256": "35ee8b0072cdd2a970a0ea9439ae316fd6ee7dad564bf75d187af48e0a4d1336"
+    },
+    {
+      "path": "arms/01-old/boot-id.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "arms/01-old/boot-id.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "arms/01-old/config.env",
+      "size_bytes": 1368,
+      "sha256": "6a4c728bd12b75121b24b6ae141c8d449383e744118a89125398eb9fc916e0a3"
+    },
+    {
+      "path": "arms/01-old/serve-gates.filtered.txt",
+      "size_bytes": 1926,
+      "sha256": "cb9a40c3a3bc37b6a06519490e02d4841439fb5b0e24e0d041fe9c71e7287620"
+    },
+    {
+      "path": "arms/01-old/sha256.after",
+      "size_bytes": 3449,
+      "sha256": "490f3fe8020efea04f6e25afca9c77cf8418d07f66267bdcabb782475eec9476"
+    },
+    {
+      "path": "arms/01-old/sha256.before",
+      "size_bytes": 3449,
+      "sha256": "490f3fe8020efea04f6e25afca9c77cf8418d07f66267bdcabb782475eec9476"
+    },
+    {
+      "path": "arms/01-old/worker-provenance.json",
+      "size_bytes": 3717,
+      "sha256": "5f7520c348b9cd41a5799493e2a51ee93e059a6ec85dba4f5c3a7bdff31f6c43"
+    },
+    {
+      "path": "arms/02-new/ARM-PASS.txt",
+      "size_bytes": 242,
+      "sha256": "551a72766f021abe390b302b3e531739d1f11a3c57f648645b9bcf457bfdc5ba"
+    },
+    {
+      "path": "arms/02-new/arm-provenance.txt",
+      "size_bytes": 608,
+      "sha256": "5be2e64ba030c3f76fafd5d751fdcbf940f998bddb3c789999809d7f6356d516"
+    },
+    {
+      "path": "arms/02-new/boot-id.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "arms/02-new/boot-id.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "arms/02-new/config.env",
+      "size_bytes": 1391,
+      "sha256": "7bcdb5fca25c43fdde3a5d0a21b474a1432d73b0a10779641a1a7db6c6681fe5"
+    },
+    {
+      "path": "arms/02-new/serve-gates.filtered.txt",
+      "size_bytes": 1926,
+      "sha256": "94a4178b6609b285c0b7d14f9ac65a25d0b6d1e2a3f1c9872360b9b1a653012b"
+    },
+    {
+      "path": "arms/02-new/sha256.after",
+      "size_bytes": 3592,
+      "sha256": "ed3ed5d72a7777d7192557f53ba693a026df15e91286893467b08f4e7a6bcc5d"
+    },
+    {
+      "path": "arms/02-new/sha256.before",
+      "size_bytes": 3592,
+      "sha256": "ed3ed5d72a7777d7192557f53ba693a026df15e91286893467b08f4e7a6bcc5d"
+    },
+    {
+      "path": "arms/02-new/worker-provenance.json",
+      "size_bytes": 3805,
+      "sha256": "de392ba680d403108df8c1f512379383e2ca47f50881d4895e276bb1d58540f5"
+    },
+    {
+      "path": "intended-evidence-files.txt",
+      "size_bytes": 1104,
+      "sha256": "f025e3b6629335e7c4de4b4333ae23f9511df2bff9ca4fdd4adeb46e2e219d16"
+    },
+    {
+      "path": "kernel-window-audit.json",
+      "size_bytes": 436,
+      "sha256": "5ca50a6b299cf703047a516960b21440f48ab15a679d0bd815246d9cef86e550"
+    },
+    {
+      "path": "source-input-hashes.json",
+      "size_bytes": 14631,
+      "sha256": "af6e191333eb92f2ef155384308a07f60f68570261c9be24ce3cfd2e746d62e2"
+    },
+    {
+      "path": "tools/source-snapshots/analyze_pair_v1.py.txt",
+      "size_bytes": 25398,
+      "sha256": "62f766cf1007aef0e4c6f45d1fbc7a56819949c0cb45a85c241c4d59951436cb"
+    },
+    {
+      "path": "tools/source-snapshots/validate_pair_provenance_v1.py.txt",
+      "size_bytes": 13797,
+      "sha256": "d6e5c1f514066cbef2596590a996a1543c00f3fe9ffef9c0c17c53aecea8bb09"
+    }
+  ]
+}

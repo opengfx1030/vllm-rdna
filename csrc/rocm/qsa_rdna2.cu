@@ -29,6 +29,7 @@
 // Opt-in: VLLM_RDNA_QSA_HIP=1 + on_gfx10x() in the Python dispatcher.
 
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 
@@ -39,6 +40,8 @@
 #include <cuda_fp16.h>
 
 #include "rocm/ops.h"  // paged_mqa_logits_decode_rdna2
+// Packed INT4 + FP16 block-scale KV cache layout and its dequant helpers.
+#include "int4_kv_layout_common.cuh"
 
 namespace {
 
@@ -63,21 +66,8 @@ __global__ void qsa_store_cache_rows_kernel(
     char* __restrict__ cache, int num_rows, int num_blocks,
     int64_t stride_rows_row, int64_t stride_rows_dim,
     int64_t stride_cache_block, int64_t stride_cache_token,
-    int64_t stride_cache_dim,
-    int PAGE_SIZE, int WIDTH, int elem_bytes) {
-  const int row = blockIdx.x;
-  if (row >= num_rows) return;
-  const int64_t slot = slots[row];
-  const bool valid = (slot >= 0) && (slot < (int64_t)num_blocks * PAGE_SIZE);
-  if (!valid) return;
-  const int64_t safe_slot = slot;
-  const int block_id = (int)(safe_slot / PAGE_SIZE);
-  const int token = (int)(safe_slot % PAGE_SIZE);
-
-  char* cache_ptr = cache + (size_t)block_id * stride_cache_block
-      + (size_t)token * stride_cache_token;
-  const char* row_ptr = rows + (size_t)row * stride_rows_row;
-
+    int64_t stride_cache_dim, int PAGE_SIZE, int WIDTH, int elem_bytes,
+    int rows_per_block) {
   // The vectorized stride-1 path is only valid when both the row width and
   // the cache width are dense (element stride == 1). The server passes a
   // transposed ``canonical_qsa_rope_positions`` view whose last-dim stride is
@@ -85,14 +75,33 @@ __global__ void qsa_store_cache_rows_kernel(
   const int elems_per_vec = 16 / elem_bytes;
   const bool row_dense = (stride_rows_dim == elem_bytes);
   const bool cache_dense = (stride_cache_dim == elem_bytes);
-  const int vec_count = (row_dense && cache_dense) ? WIDTH / elems_per_vec : 0;
-  for (int v = threadIdx.x; v < vec_count; v += blockDim.x) {
-    const uint4 row_v = ld_u4(
-        reinterpret_cast<const uint4*>(row_ptr + (size_t)v * 16));
-    st_u4(reinterpret_cast<uint4*>(cache_ptr + (size_t)v * 16), row_v);
+  const bool vec_exact = (WIDTH % elems_per_vec) == 0;
+  if (row_dense && cache_dense && vec_exact && WIDTH >= elems_per_vec) {
+    // Dense path: vec_count threads cover one row, so a block spans
+    // blockDim.x / vec_count rows. One row per block left 240 of 256 threads
+    // idle and cost ~2.5x the Triton kernel.
+    const int vec_count = WIDTH / elems_per_vec;
+    const int row = blockIdx.x * rows_per_block + threadIdx.x / vec_count;
+    if (row >= num_rows) return;
+    const int64_t slot = slots[row];
+    if ((slot < 0) || (slot >= (int64_t)num_blocks * PAGE_SIZE)) return;
+    char* cache_ptr = cache + (size_t)(slot / PAGE_SIZE) * stride_cache_block +
+                      (size_t)(slot % PAGE_SIZE) * stride_cache_token;
+    const char* row_ptr = rows + (size_t)row * stride_rows_row;
+    const int v = threadIdx.x % vec_count;
+    st_u4(reinterpret_cast<uint4*>(cache_ptr + (size_t)v * 16),
+          ld_u4(reinterpret_cast<const uint4*>(row_ptr + (size_t)v * 16)));
+    return;
   }
-  const int tail_start = vec_count * elems_per_vec;
-  for (int i = tail_start + threadIdx.x; i < WIDTH; i += blockDim.x) {
+
+  const int row = blockIdx.x;
+  if (row >= num_rows) return;
+  const int64_t slot = slots[row];
+  if ((slot < 0) || (slot >= (int64_t)num_blocks * PAGE_SIZE)) return;
+  char* cache_ptr = cache + (size_t)(slot / PAGE_SIZE) * stride_cache_block +
+                    (size_t)(slot % PAGE_SIZE) * stride_cache_token;
+  const char* row_ptr = rows + (size_t)row * stride_rows_row;
+  for (int i = threadIdx.x; i < WIDTH; i += blockDim.x) {
     const char* src = row_ptr + (size_t)i * stride_rows_dim;
     char* dst = cache_ptr + (size_t)i * stride_cache_dim;
     if (elem_bytes == 2) {
@@ -105,9 +114,8 @@ __global__ void qsa_store_cache_rows_kernel(
   }
 }
 
-void qsa_store_cache_rows(
-    const at::Tensor& rows, const at::Tensor& slots, at::Tensor& cache,
-    int64_t page_size, int64_t width) {
+void qsa_store_cache_rows(const at::Tensor& rows, const at::Tensor& slots,
+                          at::Tensor& cache, int64_t page_size, int64_t width) {
   TORCH_CHECK(rows.is_cuda() && slots.is_cuda() && cache.is_cuda(),
               "qsa_store_cache_rows_rdna2: all tensors on CUDA/HIP");
   TORCH_CHECK(rows.scalar_type() == cache.scalar_type(),
@@ -133,14 +141,19 @@ void qsa_store_cache_rows(
   const int64_t stride_cache_token = cache.stride(1) * elem_bytes;
   const int64_t stride_cache_dim = cache.stride(3) * elem_bytes;
 
-  qsa_store_cache_rows_kernel<256><<<num_rows, 256, 0, stream>>>(
+  const int elems_per_vec = 16 / elem_bytes;
+  const bool dense = (stride_rows_dim == elem_bytes) &&
+                     (stride_cache_dim == elem_bytes) &&
+                     (width % elems_per_vec == 0) && (width >= elems_per_vec);
+  const int vec_count = dense ? (int)(width / elems_per_vec) : 1;
+  const int rows_per_block = dense ? (256 / vec_count) : 1;
+  const int grid = (num_rows + rows_per_block - 1) / rows_per_block;
+  qsa_store_cache_rows_kernel<256><<<grid, 256, 0, stream>>>(
       reinterpret_cast<const char*>(rows.const_data_ptr()),
       slots.const_data_ptr<int64_t>(),
-      reinterpret_cast<char*>(cache.mutable_data_ptr()),
-      num_rows, num_blocks,
-      stride_rows_row, stride_rows_dim,
-      stride_cache_block, stride_cache_token, stride_cache_dim,
-      (int)page_size, (int)width, elem_bytes);
+      reinterpret_cast<char*>(cache.mutable_data_ptr()), num_rows, num_blocks,
+      stride_rows_row, stride_rows_dim, stride_cache_block, stride_cache_token,
+      stride_cache_dim, (int)page_size, (int)width, elem_bytes, rows_per_block);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -154,72 +167,64 @@ void qsa_store_cache_rows(
 
 template <int BLOCK_D, int COMPRESS_RATIO>
 __global__ void qsa_compress_groups_kernel(
-    const half* __restrict__ raw_keys, const int64_t* __restrict__ raw_positions,
+    const half* __restrict__ raw_keys,
+    const int64_t* __restrict__ raw_positions,
     const half* __restrict__ compressor_state_cache,
     const int64_t* __restrict__ rope_cache,
     const int* __restrict__ compressor_state_table,
     const int* __restrict__ token_to_req,
     const int* __restrict__ query_start_loc,
     const int64_t* __restrict__ logical_positions,
-    const int64_t* __restrict__ compressed_slots,
-    half* __restrict__ pooled, int64_t* __restrict__ first_positions,
-    int stride_raw_row, int stride_raw_dim,
-    int stride_raw_positions_row, int stride_raw_positions_dim,
-    int stride_compressor_state_block, int stride_compressor_state_token,
-    int stride_compressor_state_dim,
-    int stride_rope_block, int stride_rope_token, int stride_rope_dim,
-    int stride_compressor_state_table_req,
-    int stride_pooled_row, int stride_pooled_dim,
-    int stride_positions_row, int stride_positions_dim,
-    int num_rows, int num_compressor_state_blocks, int num_requests,
-    int COMPRESSOR_STATE_SIZE, int HEAD_DIM,
-    int LOAD_ROPE_POSITIONS, int DEBUG) {
+    const int64_t* __restrict__ compressed_slots, half* __restrict__ pooled,
+    int64_t* __restrict__ first_positions, int64_t stride_raw_row,
+    int64_t stride_raw_dim, int64_t stride_raw_positions_row,
+    int64_t stride_raw_positions_dim, int64_t stride_compressor_state_block,
+    int64_t stride_compressor_state_token, int64_t stride_compressor_state_dim,
+    int64_t stride_rope_block, int64_t stride_rope_token,
+    int64_t stride_rope_dim, int64_t stride_compressor_state_table_req,
+    int64_t stride_pooled_row, int64_t stride_pooled_dim,
+    int64_t stride_positions_row, int64_t stride_positions_dim, int num_rows,
+    int num_compressor_state_blocks, int num_requests,
+    int COMPRESSOR_STATE_SIZE, int HEAD_DIM, int LOAD_ROPE_POSITIONS,
+    int DEBUG) {
   const int row = blockIdx.x;
   if (row >= num_rows) return;
 
   const int request = token_to_req[row];
   const bool valid_request = (request >= 0) && (request < num_requests);
   const int safe_request = min(max(request, 0), num_requests - 1);
-  const int query_row_start = valid_request
-      ? query_start_loc[safe_request] : 0;
-  const int query_row_end = valid_request
-      ? query_start_loc[safe_request + 1] : 0;
+  const int query_row_start = valid_request ? query_start_loc[safe_request] : 0;
+  const int query_row_end =
+      valid_request ? query_start_loc[safe_request + 1] : 0;
   const int64_t end_position = logical_positions[row];
   const int64_t compressed_slot = compressed_slots[row];
   const int64_t chunk_start_position = end_position - (row - query_row_start);
   const int compressor_state_block =
-      valid_request
-          ? compressor_state_table[safe_request]
-          : -1;
+      valid_request ? compressor_state_table[safe_request] : -1;
   const bool valid_compressor_state_block =
-      (compressor_state_block >= 0)
-      && (compressor_state_block < num_compressor_state_blocks);
+      (compressor_state_block >= 0) &&
+      (compressor_state_block < num_compressor_state_blocks);
   const bool valid_row =
-      valid_request
-      && (row >= query_row_start)
-      && (row < query_row_end)
-      && (end_position >= COMPRESS_RATIO - 1)
-      && (compressed_slot >= 0);
+      valid_request && (row >= query_row_start) && (row < query_row_end) &&
+      (end_position >= COMPRESS_RATIO - 1) && (compressed_slot >= 0);
   const int safe_compressor_block = max(compressor_state_block, 0);
 
-  float acc[BLOCK_D];
+  // One thread per output dim. A per-thread ``float acc[BLOCK_D]`` array
+  // spilled to local memory, and every thread in the block recomputed the whole
+  // row.
+  for (int b = threadIdx.x; b < HEAD_DIM; b += blockDim.x) {
+    float acc = 0.f;
 #pragma unroll
-  for (int b = 0; b < BLOCK_D; b++) acc[b] = 0.f;
-
-#pragma unroll
-  for (int go = 0; go < COMPRESS_RATIO; go++) {
-    const int64_t position = end_position - (COMPRESS_RATIO - 1 - go);
-    const bool use_raw = position >= chunk_start_position;
-    const int raw_row =
-        (int)(query_row_start + position - chunk_start_position);
-    const bool raw_ok = valid_row && use_raw
-        && (raw_row >= query_row_start)
-        && (raw_row < query_row_end)
-        && (raw_row < num_rows);
-    const bool state_ok = valid_row && !use_raw && valid_compressor_state_block;
-#pragma unroll
-    for (int b = 0; b < BLOCK_D; b++) {
-      if (b >= HEAD_DIM) continue;
+    for (int go = 0; go < COMPRESS_RATIO; go++) {
+      const int64_t position = end_position - (COMPRESS_RATIO - 1 - go);
+      const bool use_raw = position >= chunk_start_position;
+      const int raw_row =
+          (int)(query_row_start + position - chunk_start_position);
+      const bool raw_ok = valid_row && use_raw &&
+                          (raw_row >= query_row_start) &&
+                          (raw_row < query_row_end) && (raw_row < num_rows);
+      const bool state_ok =
+          valid_row && !use_raw && valid_compressor_state_block;
       float v = 0.f;
       if (raw_ok) {
         v = __half2float(
@@ -227,78 +232,69 @@ __global__ void qsa_compress_groups_kernel(
       } else if (state_ok) {
         const int tok = (int)(position % COMPRESSOR_STATE_SIZE);
         v = __half2float(
-            compressor_state_cache[
-                safe_compressor_block * stride_compressor_state_block
-                + tok * stride_compressor_state_token
-                + b * stride_compressor_state_dim]);
+            compressor_state_cache[safe_compressor_block *
+                                       stride_compressor_state_block +
+                                   tok * stride_compressor_state_token +
+                                   b * stride_compressor_state_dim]);
       }
-      acc[b] += v;
+      acc += v;
     }
+    pooled[row * stride_pooled_row + b * stride_pooled_dim] =
+        __float2half(acc / float(COMPRESS_RATIO));
   }
 
-  // Store pooled = acc / COMPRESS_RATIO
-#pragma unroll
-  for (int b = 0; b < BLOCK_D; b++) {
-    if (b < HEAD_DIM) {
-      pooled[row * stride_pooled_row + b * stride_pooled_dim] =
-          __float2half(acc[b] / float(COMPRESS_RATIO));
-    }
-  }
-
-  // First-position tail (3 dims; we just write 0..min(3,BLOCK_D)).
+  // First-position tail: threads 0..2 own one dim each.
   const int64_t first_position = end_position - COMPRESS_RATIO + 1;
-  if (LOAD_ROPE_POSITIONS != 0) {
-    const bool first_from_raw = first_position >= chunk_start_position;
-    const int raw_first_row =
-        (int)(query_row_start + first_position - chunk_start_position);
-    const bool raw_first_ok = valid_row && first_from_raw
-        && (raw_first_row >= query_row_start)
-        && (raw_first_row < query_row_end)
-        && (raw_first_row < num_rows);
-    const bool state_first_ok = valid_row && !first_from_raw
-        && valid_compressor_state_block;
-#pragma unroll
-    for (int p = 0; p < 4; p++) {
-      if (p >= 3) continue;
+  if (threadIdx.x < 3) {
+    const int p = (int)threadIdx.x;
+    if (LOAD_ROPE_POSITIONS != 0) {
+      const bool first_from_raw = first_position >= chunk_start_position;
+      const int raw_first_row =
+          (int)(query_row_start + first_position - chunk_start_position);
+      const bool raw_first_ok =
+          valid_row && first_from_raw && (raw_first_row >= query_row_start) &&
+          (raw_first_row < query_row_end) && (raw_first_row < num_rows);
+      const bool state_first_ok =
+          valid_row && !first_from_raw && valid_compressor_state_block;
       int64_t v = 0;
       if (raw_first_ok) {
-        v = raw_positions[raw_first_row * stride_raw_positions_row
-                          + p * stride_raw_positions_dim];
+        v = raw_positions[raw_first_row * stride_raw_positions_row +
+                          p * stride_raw_positions_dim];
       } else if (state_first_ok) {
         const int tok = (int)(first_position % COMPRESSOR_STATE_SIZE);
-        v = rope_cache[safe_compressor_block * stride_rope_block
-                       + tok * stride_rope_token
-                       + p * stride_rope_dim];
+        v = rope_cache[safe_compressor_block * stride_rope_block +
+                       tok * stride_rope_token + p * stride_rope_dim];
       }
-      first_positions[row * stride_positions_row + p * stride_positions_dim] = v;
-    }
-  } else {
-#pragma unroll
-    for (int p = 0; p < 4; p++) {
-      if (p >= 3) continue;
+      first_positions[row * stride_positions_row + p * stride_positions_dim] =
+          v;
+    } else {
       first_positions[row * stride_positions_row + p * stride_positions_dim] =
           valid_row ? first_position : (int64_t)0;
     }
   }
-  if (DEBUG) {
+  __syncthreads();
+  if (DEBUG && threadIdx.x == 0) {
     const int64_t v0 = first_positions[row * stride_positions_row + 0];
     const int64_t v1 = first_positions[row * stride_positions_row + 1];
     const int64_t v2 = first_positions[row * stride_positions_row + 2];
-    const bool bad = (v0 < 0) || (v0 > 1000000) || (v1 < 0) || (v1 > 1000000)
-        || (v2 < 0) || (v2 > 1000000);
+    const bool bad = (v0 < 0) || (v0 > 1000000) || (v1 < 0) || (v1 > 1000000) ||
+                     (v2 < 0) || (v2 > 1000000);
     if (bad) {
-      const int64_t r0 = rope_cache[safe_compressor_block * stride_rope_block
-                                    + (int)(first_position % COMPRESSOR_STATE_SIZE)
-                                        * stride_rope_token
-                                    + 0 * stride_rope_dim];
-      const int64_t r1 = rope_cache[safe_compressor_block * stride_rope_block
-                                    + (int)(first_position % COMPRESSOR_STATE_SIZE)
-                                        * stride_rope_token
-                                    + 1 * stride_rope_dim];
-      const int64_t r2 = rope_cache[safe_compressor_block * stride_rope_block
-                                    + (int)(first_position % COMPRESSOR_STATE_SIZE)
-                                        * stride_rope_token
-                                    + 2 * stride_rope_dim];
+      const int64_t r0 =
+          rope_cache[safe_compressor_block * stride_rope_block +
+                     (int)(first_position % COMPRESSOR_STATE_SIZE) *
+                         stride_rope_token +
+                     0 * stride_rope_dim];
+      const int64_t r1 =
+          rope_cache[safe_compressor_block * stride_rope_block +
+                     (int)(first_position % COMPRESSOR_STATE_SIZE) *
+                         stride_rope_token +
+                     1 * stride_rope_dim];
+      const int64_t r2 =
+          rope_cache[safe_compressor_block * stride_rope_block +
+                     (int)(first_position % COMPRESSOR_STATE_SIZE) *
+                         stride_rope_token +
+                     2 * stride_rope_dim];
       printf(
           "[QSA-KBAD] row=%d end=%lld chunk_start=%lld first_pos=%lld "
           "from_raw=%d raw_row=%d blk=%d tok=%d valid=%d "
@@ -317,16 +313,20 @@ __global__ void qsa_compress_groups_kernel(
 void qsa_compress_groups(
     const at::Tensor& raw_keys, const at::Tensor& raw_positions,
     const at::Tensor& compressor_state_cache, const at::Tensor& rope_cache,
-    const at::Tensor& compressor_state_table,
-    const at::Tensor& token_to_req, const at::Tensor& query_start_loc,
-    const at::Tensor& logical_positions, const at::Tensor& compressed_slots,
-    at::Tensor& pooled, at::Tensor& first_positions,
-    int64_t compress_ratio, int64_t compressor_state_size,
-    int64_t head_dim, bool load_rope_positions) {
+    const at::Tensor& compressor_state_table, const at::Tensor& token_to_req,
+    const at::Tensor& query_start_loc, const at::Tensor& logical_positions,
+    const at::Tensor& compressed_slots, at::Tensor& pooled,
+    at::Tensor& first_positions, int64_t compress_ratio,
+    int64_t compressor_state_size, int64_t head_dim, bool load_rope_positions) {
   TORCH_CHECK(raw_keys.is_cuda(), "raw_keys must be CUDA");
   TORCH_CHECK(pooled.is_cuda(), "pooled must be CUDA");
   TORCH_CHECK(first_positions.is_cuda(), "first_positions must be CUDA");
   TORCH_CHECK(raw_keys.scalar_type() == at::kHalf, "raw_keys fp16 only");
+  TORCH_CHECK(
+      head_dim <= 128,
+      "qsa_compress_groups_rdna2: head_dim <= 128 only (the kernel pads "
+      "to BLOCK_D=128 and would silently drop wider rows); got ",
+      head_dim);
   TORCH_CHECK(pooled.scalar_type() == at::kHalf, "pooled fp16 only");
   TORCH_CHECK(first_positions.scalar_type() == at::kLong,
               "first_positions int64 only");
@@ -339,8 +339,7 @@ void qsa_compress_groups(
                 "raw_positions int64 only");
   }
   if (rope_cache.defined()) {
-    TORCH_CHECK(rope_cache.scalar_type() == at::kLong,
-                "rope_cache int64 only");
+    TORCH_CHECK(rope_cache.scalar_type() == at::kLong, "rope_cache int64 only");
   }
   int64_t num_rows_i = raw_keys.size(0);
   num_rows_i = std::min<int64_t>(num_rows_i, logical_positions.size(0));
@@ -375,18 +374,19 @@ void qsa_compress_groups(
         "[QSA-H] num_rows=%d cr=%lld cs=%lld hd=%lld stream=%p dev=%d "
         "fp=%p pooled=%p rk=%p\n",
         num_rows, (long long)compress_ratio, (long long)compressor_state_size,
-        (long long)head_dim, (void*)stream,
-        raw_keys.get_device(), (void*)first_positions.data_ptr(),
-        (void*)pooled.data_ptr(), (void*)raw_keys.data_ptr());
+        (long long)head_dim, (void*)stream, raw_keys.get_device(),
+        (void*)first_positions.data_ptr(), (void*)pooled.data_ptr(),
+        (void*)raw_keys.data_ptr());
   }
   auto launch = [&](auto cr_const) {
     constexpr int CR = decltype(cr_const)::value;
     qsa_compress_groups_kernel<BLOCK_D, CR><<<num_rows, 128, 0, stream>>>(
         reinterpret_cast<const half*>(raw_keys.const_data_ptr()),
-        raw_positions.defined()
-            ? raw_positions.const_data_ptr<int64_t>() : nullptr,
+        raw_positions.defined() ? raw_positions.const_data_ptr<int64_t>()
+                                : nullptr,
         compressor_state_cache.defined()
-            ? reinterpret_cast<const half*>(compressor_state_cache.const_data_ptr())
+            ? reinterpret_cast<const half*>(
+                  compressor_state_cache.const_data_ptr())
             : nullptr,
         rope_cache.defined() ? rope_cache.const_data_ptr<int64_t>() : nullptr,
         compressor_state_table.const_data_ptr<int>(),
@@ -395,32 +395,35 @@ void qsa_compress_groups(
         logical_positions.const_data_ptr<int64_t>(),
         compressed_slots.const_data_ptr<int64_t>(),
         reinterpret_cast<half*>(pooled.mutable_data_ptr()),
-        first_positions.mutable_data_ptr<int64_t>(),
-        (int)raw_keys.stride(0),
-        (int)raw_keys.stride(2),
-        raw_positions.defined() ? (int)raw_positions.stride(0) : 0,
-        raw_positions.defined() ? (int)raw_positions.stride(2) : 0,
-        (int)compressor_state_cache.stride(0),
-        (int)compressor_state_cache.stride(1),
-        (int)compressor_state_cache.stride(3),
-        rope_cache.defined() ? (int)rope_cache.stride(0) : 0,
-        rope_cache.defined() ? (int)rope_cache.stride(1) : 0,
-        rope_cache.defined() ? (int)rope_cache.stride(3) : 0,
-        (int)compressor_state_table.stride(0),
-        (int)pooled.stride(0),
-        (int)pooled.stride(2),
-        (int)first_positions.stride(0),
-        (int)first_positions.stride(1),
-        num_rows, num_compressor_state_blocks, num_requests,
-        (int)compressor_state_size, (int)head_dim,
-        load_rope_positions ? 1 : 0, qsa_dbg ? 1 : 0);
+        first_positions.mutable_data_ptr<int64_t>(), raw_keys.stride(0),
+        raw_keys.stride(2),
+        raw_positions.defined() ? raw_positions.stride(0) : 0,
+        raw_positions.defined() ? raw_positions.stride(2) : 0,
+        compressor_state_cache.stride(0), compressor_state_cache.stride(1),
+        compressor_state_cache.stride(3),
+        rope_cache.defined() ? rope_cache.stride(0) : 0,
+        rope_cache.defined() ? rope_cache.stride(1) : 0,
+        rope_cache.defined() ? rope_cache.stride(3) : 0,
+        compressor_state_table.stride(0), pooled.stride(0), pooled.stride(2),
+        first_positions.stride(0), first_positions.stride(1), num_rows,
+        num_compressor_state_blocks, num_requests, (int)compressor_state_size,
+        (int)head_dim, load_rope_positions ? 1 : 0, qsa_dbg ? 1 : 0);
   };
-  if (compress_ratio == 1) { launch(std::integral_constant<int, 1>{}); }
-  else if (compress_ratio == 2) { launch(std::integral_constant<int, 2>{}); }
-  else if (compress_ratio == 4) { launch(std::integral_constant<int, 4>{}); }
-  else if (compress_ratio == 8) { launch(std::integral_constant<int, 8>{}); }
-  else if (compress_ratio == 16) { launch(std::integral_constant<int, 16>{}); }
-  else { TORCH_CHECK(false, "qsa_compress_groups_rdna2: compress_ratio in {1,2,4,8,16} only"); }
+  if (compress_ratio == 1) {
+    launch(std::integral_constant<int, 1>{});
+  } else if (compress_ratio == 2) {
+    launch(std::integral_constant<int, 2>{});
+  } else if (compress_ratio == 4) {
+    launch(std::integral_constant<int, 4>{});
+  } else if (compress_ratio == 8) {
+    launch(std::integral_constant<int, 8>{});
+  } else if (compress_ratio == 16) {
+    launch(std::integral_constant<int, 16>{});
+  } else {
+    TORCH_CHECK(
+        false,
+        "qsa_compress_groups_rdna2: compress_ratio in {1,2,4,8,16} only");
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -430,41 +433,1702 @@ void qsa_compress_groups(
 // Public host wrappers.
 // ---------------------------------------------------------------------------
 
-void qsa_store_cache_rows_rdna2(
-    torch::Tensor rows, torch::Tensor slots, torch::Tensor cache,
-    const at::Tensor& page_size, const at::Tensor& width) {
-  qsa_store_cache_rows(rows, slots, cache,
-                       page_size.item<int64_t>(), width.item<int64_t>());
+void qsa_store_cache_rows_rdna2(torch::Tensor rows, torch::Tensor slots,
+                                torch::Tensor cache,
+                                const at::Tensor& page_size,
+                                const at::Tensor& width) {
+  qsa_store_cache_rows(rows, slots, cache, page_size.item<int64_t>(),
+                       width.item<int64_t>());
 }
 
 void qsa_compress_groups_rdna2(
     torch::Tensor raw_keys, torch::Tensor raw_positions,
     torch::Tensor compressor_state_cache, torch::Tensor rope_cache,
-    torch::Tensor compressor_state_table,
-    torch::Tensor token_to_req, torch::Tensor query_start_loc,
-    torch::Tensor logical_positions, torch::Tensor compressed_slots,
-    torch::Tensor pooled, torch::Tensor first_positions,
-    const at::Tensor& compress_ratio, const at::Tensor& compressor_state_size,
-    const at::Tensor& head_dim, bool load_rope_positions) {
-  qsa_compress_groups(
-      raw_keys, raw_positions, compressor_state_cache, rope_cache,
-      compressor_state_table, token_to_req, query_start_loc,
-      logical_positions, compressed_slots,
-      pooled, first_positions,
-      compress_ratio.item<int64_t>(), compressor_state_size.item<int64_t>(),
-      head_dim.item<int64_t>(), load_rope_positions);
+    torch::Tensor compressor_state_table, torch::Tensor token_to_req,
+    torch::Tensor query_start_loc, torch::Tensor logical_positions,
+    torch::Tensor compressed_slots, torch::Tensor pooled,
+    torch::Tensor first_positions, const at::Tensor& compress_ratio,
+    const at::Tensor& compressor_state_size, const at::Tensor& head_dim,
+    bool load_rope_positions) {
+  qsa_compress_groups(raw_keys, raw_positions, compressor_state_cache,
+                      rope_cache, compressor_state_table, token_to_req,
+                      query_start_loc, logical_positions, compressed_slots,
+                      pooled, first_positions, compress_ratio.item<int64_t>(),
+                      compressor_state_size.item<int64_t>(),
+                      head_dim.item<int64_t>(), load_rope_positions);
 }
 
-at::Tensor qsa_mqa_paged_rdna2(
-    torch::Tensor q_fp16, torch::Tensor kv_cache, torch::Tensor weights,
-    torch::Tensor context_lens, torch::Tensor block_tables,
-    const at::Tensor& max_model_len) {
-  // The shape contract for qsa_mqa_paged is identical to
-  // paged_mqa_logits_decode_rdna2 (a single Q head, MQA K layout, single KV
-  // head). Re-use the existing indexer kernel; if a future QSA shape
-  // diverges (e.g. multi-head Q like the splitk kernel) we'll need a
-  // dedicated kernel here.
-  return paged_mqa_logits_decode_rdna2(
-      q_fp16, kv_cache, weights, context_lens, block_tables,
-      max_model_len.item<int64_t>(), /*block_flat=*/false);
+// ---------------------------------------------------------------------------
+// qsa_mqa_paged_rdna2: QSA indexer scoring, exact parity with the Triton
+// `_qsa_mqa_paged_kernel` in vllm/models/qwen4_exp/amd/ops/qsa.py.
+//
+// The previous implementation delegated to `paged_mqa_logits_decode_rdna2`
+// (the DeepSeek V4 indexer), whose contract is different in every respect:
+// fp8 e4m3 q/K with per-slot dequant scales, H == 64 and D == 128 only,
+// per-head weights, `block_tables` indexed by row, visibility from
+// `context_lens`, and no `visible_blocks` output. QSA needs fp16, H = 4,
+// D = 128, unit weights, a request-indirected page table, visibility derived
+// from `compress_ratio`, and the `visible_blocks` side channel, so it gets a
+// dedicated kernel here.
+//
+// One thread per output column, BLOCK_N columns per CTA.
+// ---------------------------------------------------------------------------
+namespace {
+
+typedef _Float16 f16x2 __attribute__((ext_vector_type(2)));
+
+template <int BLOCK_N, typename TPos, typename TSeq>
+__global__ void qsa_mqa_paged_kernel(
+    const half* __restrict__ q, const half* __restrict__ k_cache,
+    const int32_t* __restrict__ page_table,
+    const int32_t* __restrict__ token_to_req,
+    const TPos* __restrict__ query_positions,
+    const TSeq* __restrict__ sequence_lengths,
+    int32_t* __restrict__ visible_blocks, float* __restrict__ logits,
+    int64_t stride_q_row, int64_t stride_q_head, int64_t stride_q_dim,
+    int64_t stride_cache_block, int64_t stride_cache_token,
+    int64_t stride_cache_dim, int64_t stride_table_req,
+    int64_t stride_table_page, int64_t stride_logits_row, int num_rows,
+    int num_columns, int num_pages, int num_requests, int table_width,
+    int page_size, int num_heads, int head_dim, int compress_ratio,
+    float score_divisor) {
+  const int row = blockIdx.x;
+  if (row >= num_rows) return;
+  const int col = (int)blockIdx.y * BLOCK_N + (int)threadIdx.x;
+
+  const int32_t request = token_to_req[row];
+  const bool valid_request = (request >= 0) && (request < num_requests);
+  const int safe_request = min(max(request, 0), num_requests - 1);
+  const int64_t query_position = (int64_t)query_positions[row];
+  const int64_t sequence_length =
+      valid_request ? (int64_t)sequence_lengths[safe_request] : 0;
+  const int64_t visible = min((query_position + 1) / compress_ratio,
+                              sequence_length / compress_ratio);
+  if (blockIdx.y == 0 && threadIdx.x == 0) {
+    visible_blocks[row] = (int32_t)visible;
+  }
+  if (col >= num_columns) return;
+
+  const int logical_page = col / page_size;
+  const int page_offset = col % page_size;
+  bool valid = valid_request && (col < visible) && (logical_page < table_width);
+  int32_t physical_page = -1;
+  if (valid) {
+    const int safe_logical_page = min(logical_page, table_width - 1);
+    physical_page = page_table[safe_request * stride_table_req +
+                               safe_logical_page * stride_table_page];
+    valid = (physical_page >= 0) && (physical_page < num_pages);
+  }
+
+  float score = 0.0f;
+  if (valid) {
+    const half* k_row = k_cache + (int64_t)physical_page * stride_cache_block +
+                        (int64_t)page_offset * stride_cache_token;
+    const half* q_row = q + (int64_t)row * stride_q_row;
+    // Dense contiguous rows: two MACs per instruction via v_dot2. The indexer
+    // layout is [rows, heads, head_dim] contiguous with head_dim even, so this
+    // is the production path; anything else falls back to scalar half loads.
+    // The dense path takes 128 bits at a time and keeps four independent
+    // fdot2 accumulator chains. The previous form issued one 4-byte load per
+    // f16x2 operand (512 loads per column per row) and accumulated all 64
+    // fdot2 of a head into a single register, so the dot was a 64-deep
+    // dependent chain. That is why HIP lost to Triton once most columns were
+    // visible: the early-chunk win came only from skipping masked columns, and
+    // the dense case was simply a worse kernel.
+    const bool dense = (stride_q_dim == 1) && (stride_cache_dim == 1) &&
+                       (stride_q_head % 8 == 0) &&
+                       (stride_cache_token % 8 == 0) && (head_dim % 8 == 0) &&
+                       ((reinterpret_cast<uintptr_t>(k_row) |
+                         reinterpret_cast<uintptr_t>(q_row)) %
+                            16 ==
+                        0);
+    for (int h = 0; h < num_heads; ++h) {
+      const half* q_head = q_row + (int64_t)h * stride_q_head;
+      float dot = 0.0f;
+      if (dense) {
+        const uint4* q_vec = reinterpret_cast<const uint4*>(q_head);
+        const uint4* k_vec = reinterpret_cast<const uint4*>(k_row);
+        float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+#pragma unroll
+        for (int d8 = 0; d8 < head_dim / 8; ++d8) {
+          const uint4 qq = q_vec[d8];
+          const uint4 kk = k_vec[d8];
+          const f16x2* qh = reinterpret_cast<const f16x2*>(&qq);
+          const f16x2* kh = reinterpret_cast<const f16x2*>(&kk);
+#pragma unroll
+          for (int j = 0; j < 4; ++j) {
+            acc[j] = __builtin_amdgcn_fdot2(qh[j], kh[j], acc[j], false);
+          }
+        }
+        dot = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+      } else {
+        for (int d = 0; d < head_dim; ++d) {
+          dot += __half2float(q_head[(int64_t)d * stride_q_dim]) *
+                 __half2float(k_row[(int64_t)d * stride_cache_dim]);
+        }
+      }
+      score += fmaxf(dot, 0.0f);
+    }
+    score /= score_divisor;
+  }
+  const float neg_inf = __int_as_float(0xff800000);
+  logits[(int64_t)row * stride_logits_row + col] = valid ? score : neg_inf;
+}
+
+template <typename TPos, typename TSeq>
+void qsa_mqa_paged_launch(const at::Tensor& q, const at::Tensor& k_cache,
+                          const at::Tensor& page_table,
+                          const at::Tensor& token_to_req,
+                          const at::Tensor& query_positions,
+                          const at::Tensor& sequence_lengths,
+                          at::Tensor& visible_blocks, at::Tensor& logits,
+                          int64_t compress_ratio, double score_divisor,
+                          cudaStream_t stream) {
+  constexpr int kBlockN = 128;
+  const int num_rows = q.size(0);
+  const int num_columns = logits.size(1);
+  const dim3 grid(num_rows, (num_columns + kBlockN - 1) / kBlockN);
+  qsa_mqa_paged_kernel<kBlockN, TPos, TSeq><<<grid, kBlockN, 0, stream>>>(
+      reinterpret_cast<const half*>(q.const_data_ptr()),
+      reinterpret_cast<const half*>(k_cache.const_data_ptr()),
+      page_table.const_data_ptr<int32_t>(),
+      token_to_req.const_data_ptr<int32_t>(),
+      query_positions.const_data_ptr<TPos>(),
+      sequence_lengths.const_data_ptr<TSeq>(),
+      visible_blocks.mutable_data_ptr<int32_t>(),
+      logits.mutable_data_ptr<float>(), q.stride(0), q.stride(1), q.stride(2),
+      k_cache.stride(0), k_cache.stride(1), k_cache.stride(3),
+      page_table.stride(0), page_table.stride(1), logits.stride(0), num_rows,
+      num_columns, k_cache.size(0), page_table.size(0), page_table.size(1),
+      k_cache.size(1), q.size(1), q.size(2), (int)compress_ratio,
+      (float)score_divisor);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+}  // namespace
+
+std::tuple<at::Tensor, at::Tensor> qsa_mqa_paged_rdna2(
+    const at::Tensor& q, const at::Tensor& k_cache,
+    const at::Tensor& page_table, const at::Tensor& token_to_req,
+    const at::Tensor& query_positions, const at::Tensor& sequence_lengths,
+    int64_t compress_ratio, int64_t num_columns, double score_scale) {
+  TORCH_CHECK(q.is_cuda() && k_cache.is_cuda() && page_table.is_cuda() &&
+                  token_to_req.is_cuda() && query_positions.is_cuda() &&
+                  sequence_lengths.is_cuda(),
+              "qsa_mqa_paged_rdna2: all tensors on CUDA/HIP");
+  TORCH_CHECK(
+      q.scalar_type() == at::kHalf && k_cache.scalar_type() == at::kHalf,
+      "qsa_mqa_paged_rdna2: fp16 q/k_cache only");
+  TORCH_CHECK(q.dim() == 3,
+              "qsa_mqa_paged_rdna2: q must be [rows, heads, dim]");
+  TORCH_CHECK(
+      k_cache.dim() == 4 && k_cache.size(2) == 1 &&
+          k_cache.size(3) == q.size(2),
+      "qsa_mqa_paged_rdna2: k_cache must be [pages, page, 1, head_dim]");
+  TORCH_CHECK(page_table.scalar_type() == at::kInt &&
+                  token_to_req.scalar_type() == at::kInt,
+              "qsa_mqa_paged_rdna2: page_table/token_to_req int32 only");
+  TORCH_CHECK(page_table.dim() == 2,
+              "qsa_mqa_paged_rdna2: page_table must be 2D");
+  TORCH_CHECK(token_to_req.numel() == q.size(0),
+              "qsa_mqa_paged_rdna2: token_to_req must have one entry per row");
+  TORCH_CHECK(
+      query_positions.numel() == q.size(0),
+      "qsa_mqa_paged_rdna2: query_positions must have one entry per row");
+  TORCH_CHECK(
+      sequence_lengths.numel() == page_table.size(0),
+      "qsa_mqa_paged_rdna2: sequence_lengths must match page_table rows");
+  TORCH_CHECK(compress_ratio > 0, "qsa_mqa_paged_rdna2: compress_ratio > 0");
+  TORCH_CHECK(num_columns >= 0, "qsa_mqa_paged_rdna2: num_columns >= 0");
+  TORCH_CHECK(score_scale > 0.0, "qsa_mqa_paged_rdna2: score_scale > 0");
+
+  const auto pos_dtype = query_positions.scalar_type();
+  const auto seq_dtype = sequence_lengths.scalar_type();
+  TORCH_CHECK(
+      (pos_dtype == at::kLong || pos_dtype == at::kInt) &&
+          (seq_dtype == at::kLong || seq_dtype == at::kInt),
+      "qsa_mqa_paged_rdna2: query_positions/sequence_lengths must be int32 "
+      "or int64");
+
+  const int64_t rows = q.size(0);
+  auto logits =
+      at::empty({rows, num_columns}, at::dtype(at::kFloat).device(q.device()));
+  auto visible_blocks =
+      at::empty({rows}, at::dtype(at::kInt).device(q.device()));
+  if (rows == 0 || num_columns == 0 || page_table.size(0) == 0) {
+    return {logits, visible_blocks};
+  }
+
+  const at::cuda::OptionalCUDAGuard guard(q.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (pos_dtype == at::kLong && seq_dtype == at::kInt) {
+    qsa_mqa_paged_launch<int64_t, int32_t>(
+        q, k_cache, page_table, token_to_req, query_positions, sequence_lengths,
+        visible_blocks, logits, compress_ratio, score_scale, stream);
+  } else if (pos_dtype == at::kLong) {
+    qsa_mqa_paged_launch<int64_t, int64_t>(
+        q, k_cache, page_table, token_to_req, query_positions, sequence_lengths,
+        visible_blocks, logits, compress_ratio, score_scale, stream);
+  } else if (seq_dtype == at::kInt) {
+    qsa_mqa_paged_launch<int32_t, int32_t>(
+        q, k_cache, page_table, token_to_req, query_positions, sequence_lengths,
+        visible_blocks, logits, compress_ratio, score_scale, stream);
+  } else {
+    qsa_mqa_paged_launch<int32_t, int64_t>(
+        q, k_cache, page_table, token_to_req, query_positions, sequence_lengths,
+        visible_blocks, logits, compress_ratio, score_scale, stream);
+  }
+  return {logits, visible_blocks};
+}
+
+// ---------------------------------------------------------------------------
+// qsa_expand_indices_rdna2: expand compressed block indices into token indices
+// and compact the causal tail of the open group. Port of the Triton
+// `_expand_qsa_indices_kernel` in vllm/models/qwen4_exp/amd/ops/qsa.py.
+//
+// output_width = token_topk + compress_ratio - 1, block_topk =
+// token_topk / compress_ratio. One thread per output element; slots that are
+// neither an expanded block entry nor a valid tail entry are written as -1.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Columns per thread. The op is dominated by the per-row preamble and by the
+// workgroup dispatch rate (the production grid is rows * 9 workgroups of 256
+// threads), so a thread covering four strided columns cuts both by 4. Measured
+// on gfx1030 at ratio 4 / topk 512: 4 is the knee (2 leaves ~6 us on the table
+// at rows=2048, 8 costs ~0.3 us at rows<=24).
+constexpr int kColsPerThread = 4;
+
+template <typename TPos, typename TSeq, int CRE>
+__global__ void qsa_expand_indices_kernel(
+    const int32_t* __restrict__ block_indices,
+    const TPos* __restrict__ query_positions,
+    const TSeq* __restrict__ sequence_lengths,
+    const int32_t* __restrict__ token_to_req, int32_t* __restrict__ out,
+    int64_t stride_blocks_row, int64_t stride_blocks_column,
+    int64_t stride_out_row, int64_t stride_out_column, int rows,
+    int num_requests, int block_topk, int cr_rt, int output_width,
+    bool canonical_order) {
+  // compress_ratio as a compile-time constant turns the four runtime integer
+  // divisions in the per-thread preamble (two of them int64) into shifts, which
+  // is what Triton's COMPRESS_RATIO constexpr already gives its kernel. The
+  // generic runtime path is kept for ratios outside the instantiated set.
+  constexpr int CR = CRE;
+  const int compress_ratio = (CR > 0) ? CR : cr_rt;
+  const int row = blockIdx.x;
+  if (row >= rows) return;
+  // Radix top-k returns an unordered set using atomic append positions.
+  // Canonicalize just the 512 selected IDs, not the context-sized logits,
+  // so identical inputs feed attention in identical reduction order. The
+  // optional path preserves the standalone expansion's original ordering.
+  __shared__ int ordered[512];
+  if (canonical_order) {
+    for (int i = threadIdx.x; i < 512; i += blockDim.x) {
+      int block = i < block_topk
+                      ? block_indices[(int64_t)row * stride_blocks_row +
+                                      (int64_t)i * stride_blocks_column]
+                      : -1;
+      ordered[i] = block < 0 ? INT_MAX : block;
+    }
+    __syncthreads();
+    for (int width = 2; width <= 512; width <<= 1) {
+      for (int distance = width >> 1; distance; distance >>= 1) {
+        for (int i = threadIdx.x; i < 512; i += blockDim.x) {
+          int peer = i ^ distance;
+          if (peer > i) {
+            int a = ordered[i], b = ordered[peer];
+            bool ascending = (i & width) == 0;
+            if ((a > b) == ascending) {
+              ordered[i] = b;
+              ordered[peer] = a;
+            }
+          }
+        }
+        __syncthreads();
+      }
+    }
+  }
+  const int col_base =
+      (int)blockIdx.y * (blockDim.x * kColsPerThread) + (int)threadIdx.x;
+
+  const int64_t query_position = (int64_t)query_positions[row];
+  const int32_t request = token_to_req[row];
+  const bool valid_request = (request >= 0) && (request < num_requests);
+  const int safe_request = min(max((int)request, 0), num_requests - 1);
+  const int64_t sequence_length =
+      valid_request ? (int64_t)sequence_lengths[safe_request] : 0;
+  const int64_t complete_blocks = min(min((query_position + 1) / compress_ratio,
+                                          sequence_length / compress_ratio),
+                                      (int64_t)block_topk);
+  const int expanded_count = (int)complete_blocks * compress_ratio;
+  const int tail_start =
+      (int)((query_position + 1) / compress_ratio) * compress_ratio;
+  const int tail_count = (int)((query_position + 1) - tail_start);
+
+  // Each thread owns kColsPerThread columns strided by blockDim.x: the stores
+  // stay fully coalesced, while the per-row preamble above and the workgroup
+  // count are both kColsPerThread times smaller. The strided form measured far
+  // better than giving one thread a whole contiguous rank (that layout writes
+  // 4 bytes every 16 within a warp and loses store coalescing).
+#pragma unroll
+  for (int o = 0; o < kColsPerThread; o++) {
+    const int col = col_base + o * (int)blockDim.x;
+    if (col >= output_width) continue;
+    int token = -1;
+    if (col < expanded_count) {
+      // Expanded block entry. Guarded exactly like Triton's masked load, so a
+      // zero block_topk never reads (its expanded_count is 0 and nothing takes
+      // this branch).
+      const int block_rank = col / compress_ratio;
+      const int offset = col - block_rank * compress_ratio;
+      const int safe_rank = min(block_rank, block_topk - 1);
+      const int64_t block =
+          canonical_order
+              ? (ordered[safe_rank] == INT_MAX ? -1 : ordered[safe_rank])
+              : block_indices[(int64_t)row * stride_blocks_row +
+                              (int64_t)safe_rank * stride_blocks_column];
+      token = block < 0 ? -1 : (int)(block * compress_ratio + offset);
+    } else {
+      // Compaction of the causal tail of the open group.
+      const int tail_offset = col - expanded_count;
+      if ((tail_offset < tail_count) && (tail_offset < compress_ratio - 1)) {
+        token = tail_start + tail_offset;
+      }
+    }
+    const bool valid = (token >= 0) && ((int64_t)token < sequence_length);
+    out[(int64_t)row * stride_out_row + (int64_t)col * stride_out_column] =
+        valid ? token : -1;
+  }
+}
+
+}  // namespace
+
+torch::Tensor qsa_expand_indices_rdna2(
+    const at::Tensor& block_indices, const at::Tensor& query_positions,
+    const at::Tensor& sequence_lengths, const at::Tensor& token_to_req,
+    int64_t compress_ratio, int64_t token_topk, c10::optional<at::Tensor> out,
+    bool canonical_order) {
+  TORCH_CHECK(block_indices.scalar_type() == at::kInt,
+              "qsa_expand_indices_rdna2: block_indices int32 only");
+  TORCH_CHECK(block_indices.dim() == 2,
+              "qsa_expand_indices_rdna2: block_indices must be 2D");
+  TORCH_CHECK(token_to_req.scalar_type() == at::kInt,
+              "qsa_expand_indices_rdna2: token_to_req int32 only");
+  TORCH_CHECK(compress_ratio > 0,
+              "qsa_expand_indices_rdna2: compress_ratio > 0");
+  TORCH_CHECK(token_topk >= 0, "qsa_expand_indices_rdna2: token_topk >= 0");
+  TORCH_CHECK(compress_ratio == 0 || token_topk % compress_ratio == 0,
+              "qsa_expand_indices_rdna2: token_topk must be divisible by "
+              "compress_ratio");
+
+  const int64_t rows = block_indices.size(0);
+  const int64_t block_topk = token_topk / compress_ratio;
+  const int64_t output_width = token_topk + compress_ratio - 1;
+  TORCH_CHECK(block_indices.size(1) == block_topk,
+              "qsa_expand_indices_rdna2: block_indices must be [rows, "
+              "token_topk / compress_ratio]");
+  TORCH_CHECK(query_positions.numel() == rows,
+              "qsa_expand_indices_rdna2: query_positions must have one entry "
+              "per row");
+  TORCH_CHECK(token_to_req.numel() == rows,
+              "qsa_expand_indices_rdna2: token_to_req must have one entry per "
+              "row");
+  TORCH_CHECK(sequence_lengths.dim() == 1 && sequence_lengths.numel() > 0,
+              "qsa_expand_indices_rdna2: sequence_lengths must be nonempty 1D");
+  const auto pos_dtype = query_positions.scalar_type();
+  const auto seq_dtype = sequence_lengths.scalar_type();
+  TORCH_CHECK((pos_dtype == at::kLong || pos_dtype == at::kInt) &&
+                  (seq_dtype == at::kLong || seq_dtype == at::kInt),
+              "qsa_expand_indices_rdna2: query_positions/sequence_lengths must "
+              "be int32 or int64");
+
+  at::Tensor result;
+  if (out.has_value() && out->defined()) {
+    result = *out;
+    TORCH_CHECK(result.scalar_type() == at::kInt,
+                "qsa_expand_indices_rdna2: out int32 only");
+    TORCH_CHECK(result.dim() == 2 && result.size(0) == rows &&
+                    result.size(1) == output_width,
+                "qsa_expand_indices_rdna2: out must be [rows, token_topk + "
+                "compress_ratio - 1]");
+  } else {
+    result = at::empty({rows, output_width},
+                       at::dtype(at::kInt).device(block_indices.device()));
+  }
+  if (rows == 0 || output_width == 0) return result;
+
+  constexpr int kColumnBlock = 256;
+  TORCH_CHECK(
+      !canonical_order || (block_topk > 0 && block_topk <= 512),
+      "qsa_expand_indices_rdna2: canonical ordering requires 1..512 blocks");
+  const at::cuda::OptionalCUDAGuard guard(block_indices.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const int64_t num_requests = sequence_lengths.numel();
+  dim3 grid((unsigned)rows,
+            (unsigned)((output_width + kColumnBlock * kColsPerThread - 1) /
+                       (kColumnBlock * kColsPerThread)));
+
+  auto launch_one = [&](auto pos_tag, auto seq_tag, auto cr_tag) {
+    using TPos = decltype(pos_tag);
+    using TSeq = decltype(seq_tag);
+    constexpr int CRE = decltype(cr_tag)::value;
+    qsa_expand_indices_kernel<TPos, TSeq, CRE>
+        <<<grid, kColumnBlock, 0, stream>>>(
+            block_indices.const_data_ptr<int32_t>(),
+            reinterpret_cast<const TPos*>(query_positions.const_data_ptr()),
+            reinterpret_cast<const TSeq*>(sequence_lengths.const_data_ptr()),
+            token_to_req.const_data_ptr<int32_t>(),
+            result.mutable_data_ptr<int32_t>(), block_indices.stride(0),
+            block_indices.stride(1), result.stride(0), result.stride(1),
+            (int)rows, (int)num_requests, (int)block_topk, (int)compress_ratio,
+            (int)output_width, canonical_order);
+  };
+  auto launch = [&](auto pos_tag, auto seq_tag) {
+    switch ((int)compress_ratio) {
+      case 1:
+        launch_one(pos_tag, seq_tag, std::integral_constant<int, 1>{});
+        break;
+      case 2:
+        launch_one(pos_tag, seq_tag, std::integral_constant<int, 2>{});
+        break;
+      case 4:
+        launch_one(pos_tag, seq_tag, std::integral_constant<int, 4>{});
+        break;
+      case 8:
+        launch_one(pos_tag, seq_tag, std::integral_constant<int, 8>{});
+        break;
+      case 16:
+        launch_one(pos_tag, seq_tag, std::integral_constant<int, 16>{});
+        break;
+      default:
+        launch_one(pos_tag, seq_tag, std::integral_constant<int, 0>{});
+        break;
+    }
+  };
+  if (pos_dtype == at::kLong && seq_dtype == at::kInt) {
+    launch((int64_t)0, (int32_t)0);
+  } else if (pos_dtype == at::kLong) {
+    launch((int64_t)0, (int64_t)0);
+  } else if (seq_dtype == at::kInt) {
+    launch((int32_t)0, (int32_t)0);
+  } else {
+    launch((int32_t)0, (int64_t)0);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// qsa_sparse_paged_attention_rdna2: the QSA sparse paged GQA attention
+// (split-k) and its reduction. Ports `_qsa_sparse_paged_gqa_splitk_kernel` and
+// `_qsa_merge_splitk_kernel` in vllm/models/qwen4_exp/amd/ops/qsa.py.
+//
+// One program per (row, kv_head, split). Each group of GROUP_SIZE query heads
+// shares one KV head; a warp owns one query head, and each lane owns the
+// columns lane, lane+32, ... so the online softmax max/sum is a warp shuffle
+// reduction and needs no LDS round trip. Scores pair over HEAD_DIM (k is
+// token-major with dim contiguous, exactly as the paged cache stores it);
+// P @ V pairs over the column instead, so v is read scalar per column (the
+// transposed-fdot2 variant is an optimisation left for later).
+// ---------------------------------------------------------------------------
+namespace {
+
+// The sparse-attention kernel runs one warp per query head, so its block size
+// follows group_size (6 for this model at TP4: 24 query heads / 4 ranks, and
+// max(1, 2 kv heads / 4) = 1 kv head per rank). QSA_MAX_GROUP bounds the LDS
+// probability tile and the launch bounds.
+constexpr int QSA_MAX_GROUP = 8;
+constexpr int QSA_MAX_THREADS = QSA_MAX_GROUP * 32;
+// LDS row stride for the staged K/V tiles: 8 halves of padding so the row start
+// stays 16-byte aligned (uint4 loads) and the strided rows do not all land in
+// the same bank. Two sizes: the 128-wide tile keeps three workgroups per CU,
+// the 256-wide one (the production head_dim) needs ~39 KB and drops to one, so
+// it is only instantiated when the head is that wide.
+constexpr int QSA_LDS_DIM_128 = 128 + 8;
+constexpr int QSA_LDS_DIM_256 = 256 + 8;
+
+__device__ __forceinline__ float qsa_exp2(float x) { return exp2f(x); }
+
+template <int BLOCK_N, int LDS_DIM, typename TIdx, bool IS_INT4 = false>
+__global__ void __launch_bounds__(QSA_MAX_THREADS)
+    qsa_sparse_paged_gqa_splitk_kernel(
+        const half* __restrict__ q, const half* __restrict__ k_cache,
+        const half* __restrict__ v_cache,
+        const TIdx* __restrict__ logical_indices,
+        const int32_t* __restrict__ block_table,
+        const int32_t* __restrict__ token_to_req,
+        float* __restrict__ partial_output, float* __restrict__ partial_lse,
+        half* __restrict__ output, int64_t stride_q_row, int64_t stride_q_head,
+        int64_t stride_k_block, int64_t stride_k_token, int64_t stride_k_head,
+        int64_t stride_v_block, int64_t stride_v_token, int64_t stride_v_head,
+        int64_t stride_indices_row, int64_t stride_table_req,
+        int64_t stride_output_row, int64_t stride_output_head, int num_rows,
+        int64_t num_cache_blocks, int num_requests, int topk, int page_size,
+        int page_table_width, int group_size, int head_dim, int num_query_heads,
+        int num_splits, int num_tiles, int single_split, int vec8,
+        vllm::int4_kv::Int4KvArg<IS_INT4> int4 = {}) {
+  const int row = blockIdx.x;
+  const int kv_head = blockIdx.y;
+  const int split_id = blockIdx.z;
+  const int warp = (int)threadIdx.x >> 5;
+  const int lane = (int)threadIdx.x & 31;
+  if (row >= num_rows) return;
+
+  const int first_head = kv_head * group_size;
+  const int last_head = min(first_head + group_size, num_query_heads);
+
+  const int32_t request = token_to_req[row];
+  const bool valid_request = (request >= 0) && (request < num_requests);
+  const int safe_request = min(max((int)request, 0), num_requests - 1);
+  const int64_t table_row = (int64_t)safe_request * stride_table_req;
+
+  // Each lane owns ACC_DIMS contiguous dims, so 32 lanes cover 128 dims with 4
+  // and the production 256 with 8.
+  constexpr int ACC_DIMS = (LDS_DIM > QSA_LDS_DIM_128) ? 8 : 4;
+  const int nwarps = (int)(blockDim.x >> 5);
+
+  // The index -> logical page -> physical page resolution does not depend on
+  // the query head, so warp 0 resolves it once per tile into LDS and the whole
+  // group shares it. Both loops used to redo it per column in every warp.
+  __shared__ int64_t s_koff[BLOCK_N];
+  __shared__ int64_t s_voff[BLOCK_N];
+  // Scale-tail bases. Only the INT4 path reads them: the FP16 cache has no
+  // separate scale region, so the arrays stay size 1 there.
+  __shared__ int64_t s_kscale[IS_INT4 ? BLOCK_N : 1];
+  __shared__ int64_t s_vscale[IS_INT4 ? BLOCK_N : 1];
+  // Probabilities, kept as fp16 to match Triton's `probabilities.to(dtype)`.
+  __shared__ half s_p[QSA_MAX_GROUP][BLOCK_N];
+  // This tile's K and V, staged once and shared by every warp in the group.
+  __shared__ half s_k[BLOCK_N][LDS_DIM];
+  __shared__ half s_v[BLOCK_N][LDS_DIM];
+  // This warp's query row, staged once per head: the score loop re-reads it for
+  // every column, so it must not be a global load there.
+  __shared__ half s_q[QSA_MAX_GROUP][LDS_DIM];
+
+  const int tile_begin = split_id * num_tiles / num_splits;
+  const int tile_end = (split_id + 1) * num_tiles / num_splits;
+
+  // One warp per query head, but group_size is not bounded by the warp count:
+  // gfx1030 TP4 gives 6 query heads to 1 KV head, so every warp walks the heads
+  // `warp, warp + NWARPS, ...`. All warps run the same iteration count even
+  // when they run out of heads, because the tile loop contains barriers.
+  const int head_iters = (group_size + nwarps - 1) / nwarps;
+
+  for (int hi = 0; hi < head_iters; ++hi) {
+    const int head = first_head + warp + hi * nwarps;
+    const bool active = head < last_head;
+
+    const half* q_row =
+        active ? q + (int64_t)row * stride_q_row + (int64_t)head * stride_q_head
+               : q;
+    if (active) {
+      if (vec8 != 0) {
+        for (int i = lane; i < (head_dim >> 3); i += 32) {
+          *reinterpret_cast<uint4*>(&s_q[warp][8 * i]) =
+              *reinterpret_cast<const uint4*>(q_row + 8 * i);
+        }
+      } else {
+        for (int i = lane; i < head_dim; i += 32) {
+          s_q[warp][i] = q_row[i];
+        }
+      }
+    }
+
+    float running_max = -1.0e20f;
+    float running_sum = 0.0f;
+    float acc[ACC_DIMS];
+#pragma unroll
+    for (int k = 0; k < ACC_DIMS; ++k) acc[k] = 0.0f;
+
+    for (int tile = tile_begin; tile < tile_end; ++tile) {
+      const int tile_col0 = tile * BLOCK_N;
+      if (warp == 0) {
+        for (int c = lane; c < BLOCK_N; c += 32) {
+          const int col = tile_col0 + c;
+          int32_t logical_token = -1;
+          if (col < topk) {
+            logical_token = (int32_t)
+                logical_indices[(int64_t)row * stride_indices_row + col];
+          }
+          const int32_t safe_token = max(logical_token, 0);
+          const int logical_page = safe_token / page_size;
+          const int page_offset = safe_token % page_size;
+          bool valid = valid_request && (logical_token >= 0) &&
+                       (logical_page < page_table_width);
+          int32_t physical_page = -1;
+          if (valid) {
+            physical_page = block_table[table_row + min(logical_page,
+                                                        page_table_width - 1)];
+            valid = (physical_page >= 0) && (physical_page < num_cache_blocks);
+          }
+          if constexpr (IS_INT4) {
+            // The packed cache is viewed as [pages, heads, slots, channels]
+            // and the descriptor carries byte strides in that order, so the
+            // record base is page + head + slot. The scale words live in the
+            // tail of the same record and have their own strides.
+            s_koff[c] = valid
+                            ? (int64_t)physical_page * int4.data_stride[0][0] +
+                                  (int64_t)kv_head * int4.data_stride[0][1] +
+                                  (int64_t)page_offset * int4.data_stride[0][2]
+                            : (int64_t)-1;
+            s_kscale[c] =
+                valid ? (int64_t)physical_page * int4.scale_stride[0][0] +
+                            (int64_t)kv_head * int4.scale_stride[0][1] +
+                            (int64_t)page_offset * int4.scale_stride[0][2]
+                      : (int64_t)-1;
+            s_voff[c] = valid
+                            ? (int64_t)physical_page * int4.data_stride[1][0] +
+                                  (int64_t)kv_head * int4.data_stride[1][1] +
+                                  (int64_t)page_offset * int4.data_stride[1][2]
+                            : (int64_t)-1;
+            s_vscale[c] =
+                valid ? (int64_t)physical_page * int4.scale_stride[1][0] +
+                            (int64_t)kv_head * int4.scale_stride[1][1] +
+                            (int64_t)page_offset * int4.scale_stride[1][2]
+                      : (int64_t)-1;
+          } else {
+            s_koff[c] = valid ? (int64_t)physical_page * stride_k_block +
+                                    (int64_t)page_offset * stride_k_token +
+                                    (int64_t)kv_head * stride_k_head
+                              : (int64_t)-1;
+            s_voff[c] = valid ? (int64_t)physical_page * stride_v_block +
+                                    (int64_t)page_offset * stride_v_token +
+                                    (int64_t)kv_head * stride_v_head
+                              : (int64_t)-1;
+          }
+        }
+      }
+      __syncthreads();
+
+      // Stage this tile's K and V into LDS once for the whole group. Without
+      // this each of the group_size warps re-reads the same rows from global
+      // (6x on this model), and the loads are the measured bottleneck.
+      const int nthreads = (int)blockDim.x;
+      if constexpr (IS_INT4) {
+        // The packed record is dequantized into the same fp16 LDS tile the
+        // FP16 path fills, so the softmax/dot-product code below is shared.
+        // Only the load differs: 4 payload bytes plus one scale word per 8
+        // channels, instead of one 16-byte fp16 load. The 8-wide path needs
+        // the record bases 4-byte aligned, which the layout reports.
+        if (int4.vector8) {
+          const int n8 = head_dim >> 3;
+          const int chunks = BLOCK_N * n8;
+          for (int i = (int)threadIdx.x; i < chunks; i += nthreads) {
+            const int c = i / n8;
+            const int j = i - c * n8;
+            const int d = 8 * j;
+            const int64_t koff = s_koff[c];
+            uint4 kv = make_uint4(0u, 0u, 0u, 0u);
+            if (koff >= 0) {
+              kv = vllm::int4_kv::int4_eight_from_rows(
+                  reinterpret_cast<const uint8_t*>(k_cache) + koff,
+                  int4.scales[0] + s_kscale[c], int4.scale_stride[0][3], d);
+            }
+            *reinterpret_cast<uint4*>(&s_k[c][d]) = kv;
+            const int64_t voff = s_voff[c];
+            uint4 vv = make_uint4(0u, 0u, 0u, 0u);
+            if (voff >= 0) {
+              vv = vllm::int4_kv::int4_eight_from_rows(
+                  reinterpret_cast<const uint8_t*>(v_cache) + voff,
+                  int4.scales[1] + s_vscale[c], int4.scale_stride[1][3], d);
+            }
+            *reinterpret_cast<uint4*>(&s_v[c][d]) = vv;
+          }
+        } else {
+          for (int i = (int)threadIdx.x; i < BLOCK_N * head_dim;
+               i += nthreads) {
+            const int c = i / head_dim;
+            const int d = i - c * head_dim;
+            const int64_t koff = s_koff[c];
+            s_k[c][d] =
+                (koff >= 0)
+                    ? vllm::int4_kv::int4_half_from_rows(
+                          reinterpret_cast<const uint8_t*>(k_cache) + koff,
+                          int4.scales[0] + s_kscale[c], int4.data_stride[0][3],
+                          int4.scale_stride[0][3], d)
+                    : __float2half(0.0f);
+            const int64_t voff = s_voff[c];
+            s_v[c][d] =
+                (voff >= 0)
+                    ? vllm::int4_kv::int4_half_from_rows(
+                          reinterpret_cast<const uint8_t*>(v_cache) + voff,
+                          int4.scales[1] + s_vscale[c], int4.data_stride[1][3],
+                          int4.scale_stride[1][3], d)
+                    : __float2half(0.0f);
+          }
+        }
+      } else if (vec8 != 0) {
+        const int n8 = head_dim >> 3;
+        const int chunks = BLOCK_N * n8;
+        for (int i = (int)threadIdx.x; i < chunks; i += nthreads) {
+          const int c = i / n8;
+          const int j = i - c * n8;
+          const int64_t koff = s_koff[c];
+          uint4 kv = make_uint4(0u, 0u, 0u, 0u);
+          if (koff >= 0) {
+            kv = *reinterpret_cast<const uint4*>(k_cache + koff + 8 * j);
+          }
+          *reinterpret_cast<uint4*>(&s_k[c][8 * j]) = kv;
+          const int64_t voff = s_voff[c];
+          uint4 vv = make_uint4(0u, 0u, 0u, 0u);
+          if (voff >= 0) {
+            vv = *reinterpret_cast<const uint4*>(v_cache + voff + 8 * j);
+          }
+          *reinterpret_cast<uint4*>(&s_v[c][8 * j]) = vv;
+        }
+      } else {
+        for (int i = (int)threadIdx.x; i < BLOCK_N * head_dim; i += nthreads) {
+          const int c = i / head_dim;
+          const int d = i - c * head_dim;
+          const int64_t koff = s_koff[c];
+          s_k[c][d] = (koff >= 0) ? k_cache[koff + d] : __float2half(0.0f);
+          const int64_t voff = s_voff[c];
+          s_v[c][d] = (voff >= 0) ? v_cache[voff + d] : __float2half(0.0f);
+        }
+      }
+      __syncthreads();
+
+      // Warp-level softmax statistics for this tile; every lane computes its
+      // own columns' scores first, so max/sum need one shuffle reduction each.
+      float col_score[BLOCK_N / 32 > 0 ? BLOCK_N / 32 : 1];
+      // Softmax is computed in the log2 domain. Scale each score before the
+      // max reduction so `p = score - max` subtracts two values from the same
+      // domain: scaling a -1e20 masked score after the max leaves a rounding
+      // residue that exp2 turns into inf.
+      const float scale_log2 =
+          (float)(1.4426950408889634 / sqrt((double)head_dim));
+      float lane_max = -1.0e20f;
+      int n_cols = 0;
+      for (int c = lane; c < BLOCK_N; c += 32, ++n_cols) {
+        float score = -INFINITY;
+        const int64_t koff = s_koff[c];
+        if (active && (koff >= 0)) {
+          const half* k_row = &s_k[c][0];
+          float dot = 0.0f;
+          if (vec8 != 0) {
+            // 8 halves (four fdot2) per 16-byte load instead of one fdot2 per
+            // 4-byte load. Same accumulation order, so results are unchanged.
+            const uint4* k4 = reinterpret_cast<const uint4*>(k_row);
+            const uint4* q4 = reinterpret_cast<const uint4*>(&s_q[warp][0]);
+            const int n8 = head_dim >> 3;
+            for (int i = 0; i < n8; ++i) {
+              const uint4 kv = k4[i];
+              const uint4 qv = q4[i];
+              dot = __builtin_amdgcn_fdot2(
+                  *reinterpret_cast<const half2*>(&kv.x),
+                  *reinterpret_cast<const half2*>(&qv.x), dot, false);
+              dot = __builtin_amdgcn_fdot2(
+                  *reinterpret_cast<const half2*>(&kv.y),
+                  *reinterpret_cast<const half2*>(&qv.y), dot, false);
+              dot = __builtin_amdgcn_fdot2(
+                  *reinterpret_cast<const half2*>(&kv.z),
+                  *reinterpret_cast<const half2*>(&qv.z), dot, false);
+              dot = __builtin_amdgcn_fdot2(
+                  *reinterpret_cast<const half2*>(&kv.w),
+                  *reinterpret_cast<const half2*>(&qv.w), dot, false);
+            }
+          } else {
+#pragma unroll 4
+            for (int d2 = 0; d2 < head_dim / 2; ++d2) {
+              dot = __builtin_amdgcn_fdot2(
+                  *reinterpret_cast<const half2*>(k_row + 2 * d2),
+                  *reinterpret_cast<const half2*>(&s_q[warp][2 * d2]), dot,
+                  false);
+            }
+          }
+          score = dot;
+        }
+        const float scaled = score * scale_log2;
+        col_score[n_cols] = scaled;
+        lane_max = fmaxf(lane_max, scaled);
+      }
+#pragma unroll
+      for (int s = 16; s > 0; s >>= 1) {
+        lane_max = fmaxf(lane_max, __shfl_xor(lane_max, s));
+      }
+      // Rescale the running statistics and accumulator onto the new maximum.
+      const float next_max = fmaxf(running_max, lane_max);
+      const float alpha = qsa_exp2(running_max - next_max);
+      running_sum *= alpha;
+#pragma unroll
+      for (int k = 0; k < ACC_DIMS; ++k) acc[k] *= alpha;
+      running_max = next_max;
+
+      float lane_sum = 0.0f;
+      n_cols = 0;
+      for (int c = lane; c < BLOCK_N; c += 32, ++n_cols) {
+        const float p = col_score[n_cols] - next_max;
+        const float prob = qsa_exp2(p);
+        lane_sum += prob;
+        s_p[warp][c] = __float2half_rn(prob);
+      }
+#pragma unroll
+      for (int s = 16; s > 0; s >>= 1) {
+        lane_sum += __shfl_xor(lane_sum, s);
+      }
+      running_sum += lane_sum;
+      __syncthreads();
+
+      // P @ V: this lane owns the contiguous dims [ACC_DIMS*lane,
+      // ACC_DIMS*(lane+1)). An invalid column has p == 0 exactly (its score is
+      // -1e20) and its staged V row is zero-filled, so the loop needs no
+      // per-column validity test and can be unrolled to keep several LDS reads
+      // in flight.
+      const int cols_here = max(0, min(BLOCK_N, topk - tile_col0));
+      if (active) {
+#pragma unroll 4
+        for (int c = 0; c < cols_here; ++c) {
+          const float p = __half2float(s_p[warp][c]);
+          const half* v_row = &s_v[c][0];
+          const int d0 = ACC_DIMS * lane;
+          if ((vec8 != 0) && (d0 + ACC_DIMS <= head_dim)) {
+            // One 16-byte LDS read covers all of this lane's dims; the 8-dim
+            // case needs the wider load (and is the only one that is 16-byte
+            // aligned, since d0 is 8*lane then).
+            if constexpr (ACC_DIMS > 4) {
+              const uint4 vv = *reinterpret_cast<const uint4*>(v_row + d0);
+              const half2 h0 = *reinterpret_cast<const half2*>(&vv.x);
+              const half2 h1 = *reinterpret_cast<const half2*>(&vv.y);
+              const half2 h2 = *reinterpret_cast<const half2*>(&vv.z);
+              const half2 h3 = *reinterpret_cast<const half2*>(&vv.w);
+              acc[0] += p * __half2float(__low2half(h0));
+              acc[1] += p * __half2float(__high2half(h0));
+              acc[2] += p * __half2float(__low2half(h1));
+              acc[3] += p * __half2float(__high2half(h1));
+              acc[4] += p * __half2float(__low2half(h2));
+              acc[5] += p * __half2float(__high2half(h2));
+              acc[6] += p * __half2float(__low2half(h3));
+              acc[7] += p * __half2float(__high2half(h3));
+            } else {
+              const uint2 vv = *reinterpret_cast<const uint2*>(v_row + d0);
+              const half2 lo = *reinterpret_cast<const half2*>(&vv.x);
+              const half2 hi = *reinterpret_cast<const half2*>(&vv.y);
+              acc[0] += p * __half2float(__low2half(lo));
+              acc[1] += p * __half2float(__high2half(lo));
+              acc[2] += p * __half2float(__low2half(hi));
+              acc[3] += p * __half2float(__high2half(hi));
+            }
+          } else {
+#pragma unroll
+            for (int k = 0; k < ACC_DIMS; ++k) {
+              const int d = d0 + k;
+              if (d < head_dim) acc[k] += p * __half2float(v_row[d]);
+            }
+          }
+        }
+      }
+      __syncthreads();
+    }
+
+    if (!active) continue;
+
+    const bool has_values = running_sum > 0.0f;
+    float normalized[ACC_DIMS];
+#pragma unroll
+    for (int k = 0; k < ACC_DIMS; ++k) {
+      normalized[k] = has_values ? acc[k] / fmaxf(running_sum, 1.0e-20f) : 0.0f;
+    }
+    if (single_split != 0) {
+#pragma unroll
+      for (int k = 0; k < ACC_DIMS; ++k) {
+        const int d = ACC_DIMS * lane + k;
+        if (d < head_dim) {
+          output[(int64_t)row * stride_output_row +
+                 (int64_t)head * stride_output_head + d] =
+              __float2half_rn(normalized[k]);
+        }
+      }
+      continue;
+    }
+    const int64_t partial_base =
+        ((int64_t)split_id * num_rows + row) * num_query_heads + head;
+#pragma unroll
+    for (int k = 0; k < ACC_DIMS; ++k) {
+      const int d = ACC_DIMS * lane + k;
+      if (d < head_dim) {
+        partial_output[partial_base * head_dim + d] = normalized[k];
+      }
+    }
+    if (lane == 0) {
+      partial_lse[(int64_t)((split_id * num_rows + row)) * num_query_heads +
+                  head] =
+          has_values ? running_max + log2f(fmaxf(running_sum, 1.0e-20f))
+                     : -INFINITY;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pipelined variant of the sparse-attention kernel for the production geometry
+// (head_dim 256, fp16 cache, 4/6/8 query heads per kv head). Same tile order
+// and softmax as qsa_sparse_paged_gqa_splitk_kernel, restructured because its
+// per-tile "resolve -> stage -> score -> P.V" chain left the CU idle between
+// phases. Ablations at rows 2048, ctx 8192, topk 2048 (8.6 ms per call): index
+// resolve 1.3 ms, K/V staging 2.7 ms, QK 2.0 ms, P.V 2.5 ms, none of it
+// overlapped. Here
+//   * every key's cache offset is resolved up front by all threads (one
+//     dependent-load latency per block instead of one per tile);
+//   * the next tile's K/V rows are loaded into registers while the current
+//     tile is scored and written to LDS after it (two barriers per tile);
+//   * q lives in registers, so the score loop never re-reads it from LDS;
+//   * V is staged as half2 (key 2m, key 2m + 1) pairs, so P.V is one fdot2
+//     per dim and key pair instead of two converts and two FMAs.
+// Scores and the softmax statistics are bit-identical to the legacy kernel;
+// P.V differs only in how fdot2 associates the two products of a key pair.
+constexpr int QSA_PIPE_HD = 256;
+constexpr int QSA_PIPE_N8 = QSA_PIPE_HD / 8;  // 16-byte chunks per K/V row
+constexpr int QSA_PIPE_BLOCK_N = 32;          // one key per lane
+// Keys one block resolves up front (8 KB of LDS offsets).
+constexpr int QSA_PIPE_MAX_KEYS = 2048;
+
+__device__ __forceinline__ uint32_t qsa_pack_lo16(uint32_t a, uint32_t b) {
+  return (a & 0xffffu) | (b << 16);
+}
+__device__ __forceinline__ uint32_t qsa_pack_hi16(uint32_t a, uint32_t b) {
+  return (a >> 16) | (b & 0xffff0000u);
+}
+
+// The lanes of one warp exchange probabilities through LDS.
+__device__ __forceinline__ void qsa_wave_sync() {
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+  __builtin_amdgcn_wave_barrier();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+}
+
+template <int NWARPS, typename TIdx>
+__global__ void __launch_bounds__(QSA_MAX_THREADS)
+    qsa_sparse_paged_gqa_pipe_kernel(
+        const half* __restrict__ q, const half* __restrict__ k_cache,
+        const half* __restrict__ v_cache,
+        const TIdx* __restrict__ logical_indices,
+        const int32_t* __restrict__ block_table,
+        const int32_t* __restrict__ token_to_req,
+        float* __restrict__ partial_output, float* __restrict__ partial_lse,
+        half* __restrict__ output, int64_t stride_q_row, int64_t stride_q_head,
+        int64_t stride_cache_block, int64_t stride_cache_token,
+        int64_t stride_cache_head, int64_t stride_indices_row,
+        int64_t stride_table_req, int64_t stride_output_row,
+        int64_t stride_output_head, int num_rows, int64_t num_cache_blocks,
+        int num_requests, int topk, int page_size, int page_table_width,
+        int group_size, int num_query_heads, int num_splits, int num_tiles,
+        int single_split) {
+  constexpr int BLOCK_N = QSA_PIPE_BLOCK_N;
+  constexpr int PAIRS = BLOCK_N / 2;
+  constexpr int NT = NWARPS * 32;
+  constexpr int ITEMS = PAIRS * QSA_PIPE_N8;  // (key pair, 16-byte chunk)
+  constexpr int ROUNDS = (ITEMS + NT - 1) / NT;
+  constexpr int LDS_DIM = QSA_LDS_DIM_256;
+  constexpr int ACC_DIMS = 8;
+  // (1 / ln 2) / sqrt(head_dim), in the log2 domain like the legacy kernel.
+  constexpr float scale_log2 = (float)(1.4426950408889634 / 16.0);
+
+  const int row = blockIdx.x;
+  const int kv_head = blockIdx.y;
+  const int split_id = blockIdx.z;
+  const int warp = (int)threadIdx.x >> 5;
+  const int lane = (int)threadIdx.x & 31;
+  if (row >= num_rows) return;
+
+  const int first_head = kv_head * group_size;
+  const int head = first_head + warp;
+  const bool active = head < num_query_heads;
+
+  const int32_t request = token_to_req[row];
+  const bool valid_request = (request >= 0) && (request < num_requests);
+  const int safe_request = min(max((int)request, 0), num_requests - 1);
+  const int64_t table_row = (int64_t)safe_request * stride_table_req;
+
+  const int tile_begin = split_id * num_tiles / num_splits;
+  const int tile_end = (split_id + 1) * num_tiles / num_splits;
+  const int n_tiles = tile_end - tile_begin;
+
+  __shared__ int32_t s_off[QSA_PIPE_MAX_KEYS];
+  __shared__ half s_p[NWARPS][BLOCK_N];
+  __shared__ __attribute__((aligned(16))) half s_k[BLOCK_N][LDS_DIM];
+  // V as half2 (key 2m, key 2m + 1) pairs: lane l owns dims [8l, 8l + 8), whose
+  // 32 bytes sit in s_vlo (dims 0-3) and s_vhi (dims 4-7) so that each 16-byte
+  // read of the 32 lanes is one contiguous 512 bytes.
+  __shared__ uint4 s_vlo[ITEMS];
+  __shared__ uint4 s_vhi[ITEMS];
+
+  // The whole q row in registers: each lane scores a different key against it.
+  uint4 qreg[QSA_PIPE_N8];
+  {
+    const uint4* q4 = reinterpret_cast<const uint4*>(
+        q + (int64_t)row * stride_q_row +
+        (int64_t)(active ? head : first_head) * stride_q_head);
+#pragma unroll
+    for (int i = 0; i < QSA_PIPE_N8; ++i) qreg[i] = q4[i];
+  }
+
+  // Index -> logical page -> physical page for every key of this block. The
+  // host guarantees n_tiles * BLOCK_N <= QSA_PIPE_MAX_KEYS and that K and V
+  // share their strides, so one offset serves both caches.
+  const int key_begin = tile_begin * BLOCK_N;
+  const int n_keys = n_tiles * BLOCK_N;
+  for (int i = (int)threadIdx.x; i < n_keys; i += NT) {
+    const int col = key_begin + i;
+    int32_t logical_token = -1;
+    if (col < topk) {
+      logical_token =
+          (int32_t)logical_indices[(int64_t)row * stride_indices_row + col];
+    }
+    const int32_t safe_token = max(logical_token, 0);
+    const int logical_page = safe_token / page_size;
+    const int page_offset = safe_token - logical_page * page_size;
+    bool valid = valid_request && (logical_token >= 0) &&
+                 (logical_page < page_table_width);
+    int32_t physical_page = -1;
+    if (valid) {
+      physical_page =
+          block_table[table_row + min(logical_page, page_table_width - 1)];
+      valid = (physical_page >= 0) && (physical_page < num_cache_blocks);
+    }
+    s_off[i] = valid ? (int32_t)((int64_t)physical_page * stride_cache_block +
+                                 (int64_t)page_offset * stride_cache_token +
+                                 (int64_t)kv_head * stride_cache_head)
+                     : -1;
+  }
+  __syncthreads();
+
+  // Register staging of one tile: thread -> (key pair m, chunk j) items, so a
+  // warp reads 512 contiguous bytes of each of the pair's two K and V rows.
+  uint4 rk0[ROUNDS], rk1[ROUNDS], rv0[ROUNDS], rv1[ROUNDS];
+  auto prefetch = [&](int tile_local) {
+    const int32_t* offs = s_off + tile_local * BLOCK_N;
+#pragma unroll
+    for (int r = 0; r < ROUNDS; ++r) {
+      const int item = (int)threadIdx.x + r * NT;
+      uint4 a = make_uint4(0u, 0u, 0u, 0u);
+      uint4 b = a, c = a, d = a;
+      if (item < ITEMS) {
+        const int m = item / QSA_PIPE_N8;
+        const int j = item % QSA_PIPE_N8;
+        const int32_t off0 = offs[2 * m];
+        const int32_t off1 = offs[2 * m + 1];
+        if (off0 >= 0) {
+          a = *reinterpret_cast<const uint4*>(k_cache + off0 + 8 * j);
+          c = *reinterpret_cast<const uint4*>(v_cache + off0 + 8 * j);
+        }
+        if (off1 >= 0) {
+          b = *reinterpret_cast<const uint4*>(k_cache + off1 + 8 * j);
+          d = *reinterpret_cast<const uint4*>(v_cache + off1 + 8 * j);
+        }
+      }
+      rk0[r] = a;
+      rk1[r] = b;
+      rv0[r] = c;
+      rv1[r] = d;
+    }
+  };
+  auto store = [&]() {
+#pragma unroll
+    for (int r = 0; r < ROUNDS; ++r) {
+      const int item = (int)threadIdx.x + r * NT;
+      if (item < ITEMS) {
+        const int m = item / QSA_PIPE_N8;
+        const int j = item % QSA_PIPE_N8;
+        *reinterpret_cast<uint4*>(&s_k[2 * m][8 * j]) = rk0[r];
+        *reinterpret_cast<uint4*>(&s_k[2 * m + 1][8 * j]) = rk1[r];
+        const uint4 v0 = rv0[r];
+        const uint4 v1 = rv1[r];
+        uint4 lo, hi;
+        lo.x = qsa_pack_lo16(v0.x, v1.x);
+        lo.y = qsa_pack_hi16(v0.x, v1.x);
+        lo.z = qsa_pack_lo16(v0.y, v1.y);
+        lo.w = qsa_pack_hi16(v0.y, v1.y);
+        hi.x = qsa_pack_lo16(v0.z, v1.z);
+        hi.y = qsa_pack_hi16(v0.z, v1.z);
+        hi.z = qsa_pack_lo16(v0.w, v1.w);
+        hi.w = qsa_pack_hi16(v0.w, v1.w);
+        s_vlo[item] = lo;
+        s_vhi[item] = hi;
+      }
+    }
+  };
+
+  float running_max = -1.0e20f;
+  float running_sum = 0.0f;
+  float acc[ACC_DIMS];
+#pragma unroll
+  for (int k = 0; k < ACC_DIMS; ++k) acc[k] = 0.0f;
+
+  prefetch(0);
+  store();
+  __syncthreads();
+  for (int t = 0; t < n_tiles; ++t) {
+    const bool has_next = (t + 1) < n_tiles;
+    if (has_next) prefetch(t + 1);
+
+    // Scores: lane = key column. An invalid key (or a lane past topk) scores
+    // -inf, so its probability is exactly 0 and its staged V row is zero.
+    float score = -INFINITY;
+    if (active && (s_off[t * BLOCK_N + lane] >= 0)) {
+      const uint4* k4 = reinterpret_cast<const uint4*>(&s_k[lane][0]);
+      float dot = 0.0f;
+#pragma unroll
+      for (int i = 0; i < QSA_PIPE_N8; ++i) {
+        const uint4 kv = k4[i];
+        dot = __builtin_amdgcn_fdot2(
+            *reinterpret_cast<const half2*>(&kv.x),
+            *reinterpret_cast<const half2*>(&qreg[i].x), dot, false);
+        dot = __builtin_amdgcn_fdot2(
+            *reinterpret_cast<const half2*>(&kv.y),
+            *reinterpret_cast<const half2*>(&qreg[i].y), dot, false);
+        dot = __builtin_amdgcn_fdot2(
+            *reinterpret_cast<const half2*>(&kv.z),
+            *reinterpret_cast<const half2*>(&qreg[i].z), dot, false);
+        dot = __builtin_amdgcn_fdot2(
+            *reinterpret_cast<const half2*>(&kv.w),
+            *reinterpret_cast<const half2*>(&qreg[i].w), dot, false);
+      }
+      score = dot;
+    }
+    const float scaled = score * scale_log2;
+    float lane_max = fmaxf(-1.0e20f, scaled);
+#pragma unroll
+    for (int s = 16; s > 0; s >>= 1) {
+      lane_max = fmaxf(lane_max, __shfl_xor(lane_max, s));
+    }
+    const float next_max = fmaxf(running_max, lane_max);
+    const float alpha = qsa_exp2(running_max - next_max);
+    running_sum *= alpha;
+#pragma unroll
+    for (int k = 0; k < ACC_DIMS; ++k) acc[k] *= alpha;
+    running_max = next_max;
+
+    const float prob = qsa_exp2(scaled - next_max);
+    s_p[warp][lane] = __float2half_rn(prob);
+    float lane_sum = prob;
+#pragma unroll
+    for (int s = 16; s > 0; s >>= 1) {
+      lane_sum += __shfl_xor(lane_sum, s);
+    }
+    running_sum += lane_sum;
+    qsa_wave_sync();
+
+    if (active) {
+#pragma unroll
+      for (int m = 0; m < PAIRS; ++m) {
+        const half2 pp = *reinterpret_cast<const half2*>(&s_p[warp][2 * m]);
+        const uint4 lo = s_vlo[m * QSA_PIPE_N8 + lane];
+        const uint4 hi = s_vhi[m * QSA_PIPE_N8 + lane];
+        acc[0] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&lo.x),
+                                        pp, acc[0], false);
+        acc[1] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&lo.y),
+                                        pp, acc[1], false);
+        acc[2] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&lo.z),
+                                        pp, acc[2], false);
+        acc[3] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&lo.w),
+                                        pp, acc[3], false);
+        acc[4] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&hi.x),
+                                        pp, acc[4], false);
+        acc[5] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&hi.y),
+                                        pp, acc[5], false);
+        acc[6] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&hi.z),
+                                        pp, acc[6], false);
+        acc[7] = __builtin_amdgcn_fdot2(*reinterpret_cast<const half2*>(&hi.w),
+                                        pp, acc[7], false);
+      }
+    }
+    __syncthreads();
+    if (has_next) store();
+    __syncthreads();
+  }
+
+  if (!active) return;
+
+  const bool has_values = running_sum > 0.0f;
+  float normalized[ACC_DIMS];
+#pragma unroll
+  for (int k = 0; k < ACC_DIMS; ++k) {
+    normalized[k] = has_values ? acc[k] / fmaxf(running_sum, 1.0e-20f) : 0.0f;
+  }
+  if (single_split != 0) {
+#pragma unroll
+    for (int k = 0; k < ACC_DIMS; ++k) {
+      output[(int64_t)row * stride_output_row +
+             (int64_t)head * stride_output_head + ACC_DIMS * lane + k] =
+          __float2half_rn(normalized[k]);
+    }
+    return;
+  }
+  const int64_t partial_base =
+      ((int64_t)split_id * num_rows + row) * num_query_heads + head;
+#pragma unroll
+  for (int k = 0; k < ACC_DIMS; ++k) {
+    partial_output[partial_base * QSA_PIPE_HD + ACC_DIMS * lane + k] =
+        normalized[k];
+  }
+  if (lane == 0) {
+    partial_lse[(int64_t)((split_id * num_rows + row)) * num_query_heads +
+                head] = has_values
+                            ? running_max + log2f(fmaxf(running_sum, 1.0e-20f))
+                            : -INFINITY;
+  }
+}
+
+__global__ void qsa_merge_splitk_kernel(
+    const float* __restrict__ partial_output,
+    const float* __restrict__ partial_lse, half* __restrict__ output,
+    int64_t stride_output_row, int64_t stride_output_head, int num_rows,
+    int num_query_heads, int num_splits, int head_dim) {
+  const int row = blockIdx.x;
+  const int head = blockIdx.y;
+  const int d = (int)threadIdx.x;
+  if ((row >= num_rows) || (head >= num_query_heads) || (d >= head_dim)) return;
+
+  // The per-split log-sum-exp is identical for every thread in the block, and
+  // the split loop is the whole cost of this kernel on small batches (it was
+  // 66 us of 110 us at rows=3): stage the lse once in LDS and give the weighted
+  // sum four independent accumulator chains instead of one 64-deep chain.
+  extern __shared__ float s_lse[];
+  const int64_t lse_base = (int64_t)row * num_query_heads + head;
+  const int64_t lse_stride = (int64_t)num_rows * num_query_heads;
+  for (int s = (int)threadIdx.x; s < num_splits; s += (int)blockDim.x) {
+    s_lse[s] = partial_lse[(int64_t)s * lse_stride + lse_base];
+  }
+  __syncthreads();
+
+  float lse_max0 = -INFINITY;
+  float lse_max1 = -INFINITY;
+  float lse_max2 = -INFINITY;
+  float lse_max3 = -INFINITY;
+  int s = 0;
+  for (; s + 3 < num_splits; s += 4) {
+    lse_max0 = fmaxf(lse_max0, s_lse[s]);
+    lse_max1 = fmaxf(lse_max1, s_lse[s + 1]);
+    lse_max2 = fmaxf(lse_max2, s_lse[s + 2]);
+    lse_max3 = fmaxf(lse_max3, s_lse[s + 3]);
+  }
+  for (; s < num_splits; ++s) lse_max0 = fmaxf(lse_max0, s_lse[s]);
+  const float lse_max =
+      fmaxf(fmaxf(lse_max0, lse_max1), fmaxf(lse_max2, lse_max3));
+
+  float denominator = 0.0f;
+  float merged = 0.0f;
+  if (lse_max > -INFINITY) {
+    float den1 = 0.0f;
+    float den2 = 0.0f;
+    float den3 = 0.0f;
+    float mer1 = 0.0f;
+    float mer2 = 0.0f;
+    float mer3 = 0.0f;
+    const float* pout = partial_output + lse_base * head_dim + d;
+    const int64_t pout_stride = lse_stride * head_dim;
+    s = 0;
+    for (; s + 3 < num_splits; s += 4) {
+      const float w0 = qsa_exp2(s_lse[s] - lse_max);
+      const float w1 = qsa_exp2(s_lse[s + 1] - lse_max);
+      const float w2 = qsa_exp2(s_lse[s + 2] - lse_max);
+      const float w3 = qsa_exp2(s_lse[s + 3] - lse_max);
+      denominator += w0;
+      den1 += w1;
+      den2 += w2;
+      den3 += w3;
+      merged += pout[(int64_t)s * pout_stride] * w0;
+      mer1 += pout[(int64_t)(s + 1) * pout_stride] * w1;
+      mer2 += pout[(int64_t)(s + 2) * pout_stride] * w2;
+      mer3 += pout[(int64_t)(s + 3) * pout_stride] * w3;
+    }
+    for (; s < num_splits; ++s) {
+      const float w = qsa_exp2(s_lse[s] - lse_max);
+      denominator += w;
+      merged += pout[(int64_t)s * pout_stride] * w;
+    }
+    denominator += (den1 + den2) + den3;
+    merged += (mer1 + mer2) + mer3;
+  }
+  output[(int64_t)row * stride_output_row + (int64_t)head * stride_output_head +
+         d] = __float2half_rn(denominator > 0.0f ? merged / denominator : 0.0f);
+}
+
+}  // namespace
+
+// Tile and split-K overrides for benchmarks and A/Bs (VLLM_RDNA_QSA_BLOCK_N,
+// VLLM_RDNA_QSA_SPLITS). Read on every call so an in-process sweep can change
+// them; unset or invalid keeps the production choice.
+static int qsa_env_int(const char* name, int fallback) {
+  const char* s = ::getenv(name);
+  if (s == nullptr || *s == '\0') return fallback;
+  char* end = nullptr;
+  const long v = std::strtol(s, &end, 10);
+  if (end == s || *end != '\0' || v < 0 || v > 4096) return fallback;
+  return (int)v;
+}
+
+// Split-K count for the pipelined kernel. Two of its blocks (group_size warps,
+// 245 VGPRs, 42 KB of LDS) fit on a WGP, so 2 * multiProcessorCount blocks
+// run at once and a launch costs ceil(blocks / concurrent) waves of (fixed +
+// per-tile) time plus the merge launch. The constants were fit on a V620
+// split sweep (rows 3..64, topk 2048, 16k context): 3.5 us fixed per block,
+// 2.0 us per 32-key tile, 8 us for the merge. The legacy ladder's 64 splits at
+// small row counts are up to 2x slower than the optimum for this kernel,
+// because its per-block prologue costs more than its per-tile work saves.
+// min_splits keeps every block under the LDS offset-table capacity.
+static int64_t qsa_pipe_pick_splits(int64_t programs, int64_t num_tiles,
+                                    int64_t min_splits, int64_t concurrent) {
+  const int64_t max_splits =
+      std::max<int64_t>(min_splits, std::min<int64_t>(num_tiles, 64));
+  int64_t best = min_splits;
+  double best_cost = 1e300;
+  for (int64_t s = min_splits; s <= max_splits; ++s) {
+    const int64_t tiles = (num_tiles + s - 1) / s;
+    const int64_t waves = (programs * s + concurrent - 1) / concurrent;
+    const double cost = (double)waves * (3.5 + 2.0 * (double)tiles) + 8.0;
+    // A larger split count must win by 3 % to displace a smaller one (the
+    // model is good to a few percent): fewer splits mean fewer partial
+    // buffers and no merge pass.
+    if (cost < best_cost * 0.97) {
+      best = s;
+      best_cost = cost;
+    }
+  }
+  return best;
+}
+
+// The shared implementation behind the fp16 and the packed-INT4 entry
+// points. The two differ only in how the K/V tile is read: the FP16 cache
+// is loaded straight into LDS, the packed record is dequantized into the
+// same fp16 LDS tile. Everything downstream (dot product, online softmax,
+// split-K merge) is shared.
+template <bool IS_INT4>
+static torch::Tensor qsa_sparse_paged_attention_rdna2_impl(
+    const at::Tensor& q, const at::Tensor& k_cache, const at::Tensor& v_cache,
+    const at::Tensor& logical_indices, const at::Tensor& block_table,
+    const at::Tensor& token_to_req, c10::optional<at::Tensor> out,
+    const vllm::int4_kv::Int4KvArg<IS_INT4>& int4_layout) {
+  TORCH_CHECK(q.scalar_type() == at::kHalf,
+              "qsa_sparse_paged_attention_rdna2: q must be fp16");
+  TORCH_CHECK(q.dim() == 3, "qsa_sparse_paged_attention_rdna2: q must be 3D");
+  TORCH_CHECK(k_cache.dim() == 4 && v_cache.sizes() == k_cache.sizes(),
+              "qsa_sparse_paged_attention_rdna2: k_cache/v_cache must share a "
+              "4D shape");
+  TORCH_CHECK(
+      logical_indices.dim() == 2 && logical_indices.size(0) == q.size(0),
+      "qsa_sparse_paged_attention_rdna2: logical_indices must be "
+      "[rows, topk]");
+  TORCH_CHECK(logical_indices.scalar_type() == at::kInt ||
+                  logical_indices.scalar_type() == at::kLong,
+              "qsa_sparse_paged_attention_rdna2: logical_indices must be int32 "
+              "or int64");
+  TORCH_CHECK(
+      block_table.scalar_type() == at::kInt &&
+          token_to_req.scalar_type() == at::kInt,
+      "qsa_sparse_paged_attention_rdna2: block_table/token_to_req int32 "
+      "only");
+  TORCH_CHECK(token_to_req.numel() == q.size(0),
+              "qsa_sparse_paged_attention_rdna2: token_to_req must have one "
+              "entry per row");
+  TORCH_CHECK(
+      q.stride(2) == 1 && k_cache.stride(3) == 1 && v_cache.stride(3) == 1,
+      "qsa_sparse_paged_attention_rdna2: q/K/V must be contiguous in the "
+      "last dim");
+  TORCH_CHECK(logical_indices.stride(1) == 1 && block_table.stride(1) == 1,
+              "qsa_sparse_paged_attention_rdna2: indices/block_table must be "
+              "contiguous in the last dim");
+  TORCH_CHECK(
+      logical_indices.size(1) > 0 && k_cache.size(0) > 0 &&
+          k_cache.size(1) > 0 && k_cache.size(2) > 0 &&
+          block_table.size(0) > 0 && block_table.size(1) > 0,
+      "qsa_sparse_paged_attention_rdna2: cache, table and selection must "
+      "be nonempty");
+
+  at::Tensor result;
+  if (out.has_value() && out->defined()) {
+    result = *out;
+    TORCH_CHECK(
+        result.sizes() == q.sizes() && result.scalar_type() == at::kHalf,
+        "qsa_sparse_paged_attention_rdna2: out must match q");
+    TORCH_CHECK(
+        result.stride(2) == 1,
+        "qsa_sparse_paged_attention_rdna2: out must be contiguous in the "
+        "last dim");
+  } else {
+    result = at::empty_like(q);
+  }
+  const int64_t rows = q.size(0);
+  if (rows == 0) return result;
+
+  const int64_t num_query_heads = q.size(1);
+  const int64_t head_dim = q.size(2);
+  // The fp16 cache is [blocks, page_size, kv_heads, head_dim]; the packed
+  // cache is [pages, heads, slots, channels] so its head and slot dims swap.
+  const int64_t num_kv_heads = IS_INT4 ? k_cache.size(1) : k_cache.size(2);
+  TORCH_CHECK(
+      num_kv_heads > 0 && num_query_heads % num_kv_heads == 0,
+      "qsa_sparse_paged_attention_rdna2: query heads must be a multiple "
+      "of kv heads (GQA)");
+  const int64_t group_size = num_query_heads / num_kv_heads;
+  TORCH_CHECK(group_size >= 1,
+              "qsa_sparse_paged_attention_rdna2: group_size must be >= 1");
+  const int64_t topk = logical_indices.size(1);
+  const int64_t page_size = IS_INT4 ? k_cache.size(2) : k_cache.size(1);
+  const int64_t page_table_width = block_table.size(1);
+  const int64_t num_requests = block_table.size(0);
+  const int64_t num_cache_blocks = k_cache.size(0);
+
+  // Tiling choice only -- any BLOCK_N is correct. BLOCK_N is capped at 32
+  // because the staged K/V tile costs 2 * BLOCK_N * LDS_DIM halves of LDS:
+  // BLOCK_N=64 needs ~35 KB at head_dim 128 and drops the kernel to one
+  // workgroup per CU, which measured worse than the load redundancy it removes.
+  // head_dim 256 needs ~39 KB at BLOCK_N=32, so that width also runs at one
+  // workgroup per CU.
+  const int64_t base_programs = rows * num_kv_heads;
+  int block_n = 32;
+  {
+    const int env_block_n = qsa_env_int("VLLM_RDNA_QSA_BLOCK_N", 0);
+    if (env_block_n == 16 || env_block_n == 32 ||
+        (env_block_n == 64 && head_dim <= 128)) {
+      block_n = env_block_n;
+    }
+  }
+  // The staged K/V tiles live in LDS rows of QSA_LDS_DIM_{128,256} halves.
+  TORCH_CHECK(head_dim <= 256,
+              "qsa_sparse_paged_attention_rdna2: head_dim must be <= 256");
+  // The 8-wide (16-byte) load paths need every address they touch to be
+  // 16-byte aligned. That holds whenever head_dim and every cache stride is a
+  // multiple of 8 halves; otherwise the kernel falls back to half2 loads.
+  // The packed-INT4 path loads the query the same way, but its K/V tile is
+  // gated by the layout's own 4-byte alignment report, so the cache strides
+  // (byte strides here) must not be mixed into the query's test.
+  bool vec8 = (head_dim % 8 == 0) && (q.stride(0) % 8 == 0) &&
+              (q.stride(1) % 8 == 0) &&
+              ((reinterpret_cast<uintptr_t>(q.const_data_ptr()) & 15) == 0);
+  if constexpr (!IS_INT4) {
+    vec8 =
+        vec8 && (k_cache.stride(0) % 8 == 0) && (k_cache.stride(1) % 8 == 0) &&
+        (k_cache.stride(2) % 8 == 0) && (v_cache.stride(0) % 8 == 0) &&
+        (v_cache.stride(1) % 8 == 0) && (v_cache.stride(2) % 8 == 0) &&
+        ((reinterpret_cast<uintptr_t>(k_cache.const_data_ptr()) & 15) == 0) &&
+        ((reinterpret_cast<uintptr_t>(v_cache.const_data_ptr()) & 15) == 0);
+  }
+
+  // The pipelined kernel covers the production geometry (see its comment): the
+  // legacy kernel serves everything else and every explicit BLOCK_N override.
+  // K and V must share strides so that one 32-bit element offset addresses
+  // both caches. VLLM_RDNA_QSA_PIPE=0 restores the legacy kernel.
+  bool pipe_ok = false;
+  if constexpr (!IS_INT4) {
+    const int64_t max_elem = (k_cache.size(0) - 1) * k_cache.stride(0) +
+                             (k_cache.size(1) - 1) * k_cache.stride(1) +
+                             (k_cache.size(2) - 1) * k_cache.stride(2) +
+                             head_dim;
+    pipe_ok = qsa_env_int("VLLM_RDNA_QSA_PIPE", 1) != 0 && vec8 &&
+              head_dim == QSA_PIPE_HD && block_n == QSA_PIPE_BLOCK_N &&
+              (group_size == 4 || group_size == 6 || group_size == 8) &&
+              k_cache.stride(0) == v_cache.stride(0) &&
+              k_cache.stride(1) == v_cache.stride(1) &&
+              k_cache.stride(2) == v_cache.stride(2) &&
+              max_elem < (int64_t)INT_MAX;
+  }
+
+  const at::cuda::OptionalCUDAGuard guard(q.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  int target_splits = 1;
+  if (base_programs <= 24) {
+    target_splits = 64;
+  } else if (base_programs <= 32) {
+    target_splits = 16;
+  } else if (base_programs <= 64) {
+    target_splits = 8;
+  } else if (base_programs <= 128) {
+    target_splits = 4;
+  } else if (base_programs <= 256) {
+    target_splits = 8;
+  } else if (base_programs <= 512) {
+    target_splits = 4;
+  }
+  const int env_splits = qsa_env_int("VLLM_RDNA_QSA_SPLITS", 0);
+  if (env_splits > 0) target_splits = env_splits;
+  const int64_t num_tiles = (topk + block_n - 1) / block_n;
+  int64_t max_useful_splits = 1;
+  while (max_useful_splits * 2 <= num_tiles) max_useful_splits *= 2;
+  int64_t num_splits = std::min<int64_t>(max_useful_splits, target_splits);
+  // The pipelined kernel resolves up to QSA_PIPE_MAX_KEYS keys per block, so
+  // it needs enough splits to stay under that. It picks its own split count
+  // (cost model above) unless VLLM_RDNA_QSA_SPLITS is set, in which case an
+  // override that leaves a block over the capacity runs the legacy kernel.
+  bool use_pipe = false;
+  if (pipe_ok) {
+    constexpr int64_t kMaxTiles = QSA_PIPE_MAX_KEYS / QSA_PIPE_BLOCK_N;
+    if (env_splits > 0) {
+      use_pipe = (num_tiles + num_splits - 1) / num_splits <= kMaxTiles;
+    } else {
+      const int64_t concurrent =
+          2 *
+          (int64_t)at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+      num_splits = qsa_pipe_pick_splits(base_programs, num_tiles,
+                                        (num_tiles + kMaxTiles - 1) / kMaxTiles,
+                                        concurrent);
+      use_pipe = true;
+    }
+  }
+  TORCH_CHECK(num_splits >= 1 && num_tiles >= 1, "internal tiling error");
+
+  at::Tensor partial_output;
+  at::Tensor partial_lse;
+  float* partial_output_ptr = nullptr;
+  float* partial_lse_ptr = nullptr;
+  if (num_splits > 1) {
+    partial_output = at::empty({num_splits, rows, num_query_heads, head_dim},
+                               at::dtype(at::kFloat).device(q.device()));
+    partial_lse = at::empty({num_splits, rows, num_query_heads},
+                            at::dtype(at::kFloat).device(q.device()));
+    partial_output_ptr = partial_output.mutable_data_ptr<float>();
+    partial_lse_ptr = partial_lse.mutable_data_ptr<float>();
+  }
+  dim3 grid((unsigned)rows, (unsigned)num_kv_heads, (unsigned)num_splits);
+  const unsigned attn_threads =
+      (unsigned)(std::min<int64_t>(group_size, (int64_t)QSA_MAX_GROUP) * 32);
+  half* out_ptr = reinterpret_cast<half*>(result.mutable_data_ptr());
+
+  auto launch = [&](auto idx_tag) {
+    using TIdx = decltype(idx_tag);
+    auto* idx_ptr =
+        reinterpret_cast<const TIdx*>(logical_indices.const_data_ptr());
+    if constexpr (!IS_INT4) {
+      if (use_pipe) {
+#define QSA_PIPE_LAUNCH(NW)                                                  \
+  qsa_sparse_paged_gqa_pipe_kernel<NW, TIdx><<<grid, NW * 32, 0, stream>>>(  \
+      reinterpret_cast<const half*>(q.const_data_ptr()),                     \
+      reinterpret_cast<const half*>(k_cache.const_data_ptr()),               \
+      reinterpret_cast<const half*>(v_cache.const_data_ptr()), idx_ptr,      \
+      block_table.const_data_ptr<int32_t>(),                                 \
+      token_to_req.const_data_ptr<int32_t>(), partial_output_ptr,            \
+      partial_lse_ptr, out_ptr, q.stride(0), q.stride(1), k_cache.stride(0), \
+      k_cache.stride(1), k_cache.stride(2), logical_indices.stride(0),       \
+      block_table.stride(0), result.stride(0), result.stride(1), (int)rows,  \
+      num_cache_blocks, (int)num_requests, (int)topk, (int)page_size,        \
+      (int)page_table_width, (int)group_size, (int)num_query_heads,          \
+      (int)num_splits, (int)num_tiles, (num_splits == 1) ? 1 : 0)
+        if (group_size == 4) {
+          QSA_PIPE_LAUNCH(4);
+        } else if (group_size == 6) {
+          QSA_PIPE_LAUNCH(6);
+        } else {
+          QSA_PIPE_LAUNCH(8);
+        }
+#undef QSA_PIPE_LAUNCH
+        return;
+      }
+    }
+#define QSA_ATTN_LAUNCH(BN, LD)                                               \
+  qsa_sparse_paged_gqa_splitk_kernel<BN, LD, TIdx, IS_INT4>                   \
+      <<<grid, attn_threads, 0, stream>>>(                                    \
+          reinterpret_cast<const half*>(q.const_data_ptr()),                  \
+          reinterpret_cast<const half*>(k_cache.const_data_ptr()),            \
+          reinterpret_cast<const half*>(v_cache.const_data_ptr()), idx_ptr,   \
+          block_table.const_data_ptr<int32_t>(),                              \
+          token_to_req.const_data_ptr<int32_t>(), partial_output_ptr,         \
+          partial_lse_ptr, out_ptr, q.stride(0), q.stride(1),                 \
+          k_cache.stride(0), k_cache.stride(1), k_cache.stride(2),            \
+          v_cache.stride(0), v_cache.stride(1), v_cache.stride(2),            \
+          logical_indices.stride(0), block_table.stride(0), result.stride(0), \
+          result.stride(1), (int)rows, num_cache_blocks, (int)num_requests,   \
+          (int)topk, (int)page_size, (int)page_table_width, (int)group_size,  \
+          (int)head_dim, (int)num_query_heads, (int)num_splits,               \
+          (int)num_tiles, (num_splits == 1) ? 1 : 0, vec8 ? 1 : 0,            \
+          int4_layout)
+    if (head_dim <= 128) {
+      if (block_n <= 16) {
+        QSA_ATTN_LAUNCH(16, QSA_LDS_DIM_128);
+      } else if (block_n <= 32) {
+        QSA_ATTN_LAUNCH(32, QSA_LDS_DIM_128);
+      } else {
+        QSA_ATTN_LAUNCH(64, QSA_LDS_DIM_128);
+      }
+    } else {
+      // 64 columns of 256-wide LDS rows need 74 KB and do not fit.
+      TORCH_CHECK(block_n <= 32,
+                  "internal tiling error: BLOCK_N > 32 at head_dim 256");
+      if (block_n <= 16) {
+        QSA_ATTN_LAUNCH(16, QSA_LDS_DIM_256);
+      } else {
+        QSA_ATTN_LAUNCH(32, QSA_LDS_DIM_256);
+      }
+    }
+#undef QSA_ATTN_LAUNCH
+  };
+  if (logical_indices.scalar_type() == at::kInt) {
+    launch((int32_t)0);
+  } else {
+    launch((int64_t)0);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  if (num_splits > 1) {
+    const int64_t merge_threads =
+        std::min<int64_t>(1024, ((head_dim + 31) / 32) * 32);
+    dim3 merge_grid((unsigned)rows, (unsigned)num_query_heads);
+    qsa_merge_splitk_kernel<<<merge_grid, (unsigned)merge_threads,
+                              (size_t)num_splits * sizeof(float), stream>>>(
+        partial_output_ptr, partial_lse_ptr, out_ptr, result.stride(0),
+        result.stride(1), (int)rows, (int)num_query_heads, (int)num_splits,
+        (int)head_dim);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  return result;
+}
+
+// fp16 main KV cache. The public entry point keeps the fp16-only contract:
+// a packed or otherwise quantized cache has a different record layout and
+// must use the INT4 entry point below rather than be read as fp16.
+torch::Tensor qsa_sparse_paged_attention_rdna2(
+    const at::Tensor& q, const at::Tensor& k_cache, const at::Tensor& v_cache,
+    const at::Tensor& logical_indices, const at::Tensor& block_table,
+    const at::Tensor& token_to_req, c10::optional<at::Tensor> out) {
+  TORCH_CHECK(
+      k_cache.scalar_type() == at::kHalf && v_cache.scalar_type() == at::kHalf,
+      "qsa_sparse_paged_attention_rdna2 is fp16-only (gfx1030)");
+  vllm::int4_kv::NoInt4KvLayout unused{};
+  return qsa_sparse_paged_attention_rdna2_impl<false>(
+      q, k_cache, v_cache, logical_indices, block_table, token_to_req, out,
+      unused);
+}
+
+// Packed INT4 + FP16 block-scale main KV cache. `k_cache`/`v_cache` are the
+// payload views [pages, heads, slots, D/2] and `k_scale`/`v_scale` are the
+// matching scale views [pages, heads, slots, D/32]; the scale words are a
+// window onto the tail of the same physical records, so they carry their own
+// strides. The dequantized values land in the same fp16 LDS tile the fp16
+// path fills, so the attention math is identical.
+torch::Tensor qsa_sparse_paged_attention_int4_rdna2(
+    const at::Tensor& q, const at::Tensor& k_cache, const at::Tensor& v_cache,
+    const at::Tensor& k_scale, const at::Tensor& v_scale,
+    const at::Tensor& logical_indices, const at::Tensor& block_table,
+    const at::Tensor& token_to_req, c10::optional<at::Tensor> out) {
+  TORCH_CHECK(
+      k_cache.scalar_type() == at::kByte && v_cache.scalar_type() == at::kByte,
+      "qsa_sparse_paged_attention_int4_rdna2: packed cache must be "
+      "uint8");
+  TORCH_CHECK(k_scale.scalar_type() == torch::kUInt16 ||
+                  k_scale.scalar_type() == torch::kInt16 ||
+                  k_scale.scalar_type() == torch::kHalf,
+              "qsa_sparse_paged_attention_int4_rdna2: scale words must be "
+              "16-bit raw values");
+  const int64_t head_dim = q.size(2);
+  TORCH_CHECK(k_cache.dim() == 4 && k_cache.sizes() == v_cache.sizes(),
+              "qsa_sparse_paged_attention_int4_rdna2: k_cache/v_cache must be "
+              "4D and share a shape");
+  TORCH_CHECK(k_scale.dim() == 4 && k_scale.sizes() == v_scale.sizes(),
+              "qsa_sparse_paged_attention_int4_rdna2: k_scale/v_scale must be "
+              "4D and share a shape");
+  TORCH_CHECK(k_cache.size(3) == head_dim / 2,
+              "qsa_sparse_paged_attention_int4_rdna2: packed cache must hold "
+              "D/2 payload bytes per record");
+  TORCH_CHECK(k_scale.size(3) == head_dim / 32,
+              "qsa_sparse_paged_attention_int4_rdna2: scale view must hold "
+              "D/32 scale words per record");
+  TORCH_CHECK(k_cache.size(0) == k_scale.size(0) &&
+                  k_cache.size(1) == k_scale.size(1) &&
+                  k_cache.size(2) == k_scale.size(2),
+              "qsa_sparse_paged_attention_int4_rdna2: the scale view must "
+              "cover the same pages, heads and slots as the payload");
+  const auto layout =
+      vllm::int4_kv::make_layout(k_cache, v_cache, k_scale, v_scale);
+  return qsa_sparse_paged_attention_rdna2_impl<true>(
+      q, k_cache, v_cache, logical_indices, block_table, token_to_req, out,
+      layout);
 }

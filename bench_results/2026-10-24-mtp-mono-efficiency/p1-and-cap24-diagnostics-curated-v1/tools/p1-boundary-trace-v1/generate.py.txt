@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Generate disposable P1 sum/rrms traces from pinned native and global kernels."""
+
+import hashlib
+import json
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
+NATIVE_SOURCE = ROOT / "csrc/rocm/hc_rdna2.cu"
+GLOBAL_SOURCE = HERE.parent / "large-m-mono-global-quant-router-half-trace-v1/mono_k2_global_quant_router_half_trace.cu"
+GLOBAL_BINDING = HERE.parent / "large-m-mono-global-quant-router-half-trace-v1/binding.cpp"
+PINS = {
+    "native_source": "a01bf43fe5563cff8ab3d26086cb293bf1130878d494870b6a4bcf65e556880e",
+    "global_source": "a03041f587a4837d28d56c25062c85635ecf422cf455020bf2307a8d10c5df1e",
+    "global_binding": "9783e80505b4dc8833350271175f408b17e22446e1cb803a1cd96268bc5f46ca",
+}
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def once(source, old, new, label):
+    if source.count(old) != 1:
+        raise ValueError(f"{label}: expected one anchor, saw {source.count(old)}")
+    return source.replace(old, new, 1)
+
+
+def native(source):
+    start = source.index("template <int K>\n__global__ void __launch_bounds__(1024, 1) hc_combine_norm_onepass_kernel(")
+    end = source.index("void hc_combine_norm(const at::Tensor& residual", start)
+    head, kernel, tail = source[:start], source[start:end], source[end:]
+    kernel = once(kernel, "int W_SHARED, float EPS) {", "int W_SHARED, float EPS, float* diag) {", "native kernel arg")
+    kernel = once(
+        kernel,
+        "  const float rrms = rsqrtf(block_sum_bcast(ss) / float(HC_DIM) + EPS);",
+        "  const float sum = block_sum_bcast(ss);\n"
+        "  const float rrms = rsqrtf(sum / float(HC_DIM) + EPS);\n"
+        "  if (row == 104 && stream == 0 && threadIdx.x == 0) {\n"
+        "    diag[0] = sum;\n    diag[1] = rrms;\n  }",
+        "native P1 sum/rrms store",
+    )
+    source = head + kernel + tail
+    start = source.index("void hc_combine_norm(const at::Tensor& residual")
+    end = source.index("\n}  // namespace", start)
+    head, host, tail = source[:start], source[start:end], source[end:]
+    host = once(host, "double eps) {", "double eps, float* diag) {", "native host arg")
+    host = once(
+        host,
+        "  const int HC_DIM = DIM / hc_count;",
+        "  const int HC_DIM = DIM / hc_count;\n"
+        "  TORCH_CHECK(N == 128 && HC_DIM == 2560 && hc_count == 4,\n"
+        "              \"P1 trace is exact M128/H2560/HC4 only\");",
+        "native fixture guard",
+    )
+    host = once(
+        host,
+        "  const int threads = slots / k;",
+        "  const int threads = slots / k;\n"
+        "  TORCH_CHECK(vec && k == 1 && threads == 320 && diag != nullptr,\n"
+        "              \"P1 trace requires native aligned onepass K1/320 threads\");",
+        "native dispatch guard",
+    )
+    for k in (1, 2):
+        old = f"hc_combine_norm_onepass_kernel<{k}><<<grid, (unsigned)threads, 0, stream>>>(\n          bp, rp, jp, wp, op, yp, HC_DIM, (int)hc_count, W_SHARED, (float)eps);"
+        new = old.replace("(float)eps);", "(float)eps, diag);")
+        host = once(host, old, new, f"native launch K{k}")
+    source = head + host + tail
+    names = (
+        "hc_grouped_gemma_rmsnorm_rdna2", "hc_silu_rdna2",
+        "hc_gate_mix_rdna2", "hc_combine_rdna2", "hc_combine_norm_rdna2",
+    )
+    for name in names:
+        source = source.replace(name + "(", name + "_p1trace(")
+    start = source.index("void hc_combine_norm_rdna2_p1trace(")
+    head, wrapper = source[:start], source[start:]
+    wrapper = once(
+        wrapper,
+        "                           int64_t hc_count, double eps) {",
+        "                           int64_t hc_count, double eps,\n"
+        "                           torch::Tensor diag) {",
+        "native public wrapper arg",
+    )
+    wrapper = once(
+        wrapper,
+        "  hc_combine_norm(residual, block_output, injection_logits, norm_weight, out, y,\n"
+        "                  hc_count, eps);",
+        "  TORCH_CHECK(diag.is_cuda() && diag.device() == residual.device() &&\n"
+        "                  diag.scalar_type() == at::kFloat && diag.is_contiguous() &&\n"
+        "                  diag.numel() == 2, \"P1 trace requires fp32[2] diag\");\n"
+        "  hc_combine_norm(residual, block_output, injection_logits, norm_weight, out, y,\n"
+        "                  hc_count, eps, diag.data_ptr<float>());",
+        "native wrapper call",
+    )
+    return head + wrapper
+
+
+def global_trace(source, binding):
+    old_prefix = "global_quant_router_half_trace"
+    new_prefix = "global_quant_router_half_p1trace"
+    source = source.replace(old_prefix, new_prefix)
+    binding = binding.replace(old_prefix, new_prefix)
+    source = once(
+        source,
+        "  int* diagnostic_route_ids;  // diagnostic-only [total_M,10], no workspace alias",
+        "  int* diagnostic_route_ids;  // diagnostic-only [total_M,10], no workspace alias\n"
+        "  float* diagnostic_p1;  // diagnostic-only [sum,rrms] row104 stream0",
+        "global Params trace pointer",
+    )
+    start = source.index("mono_ffn_kernel_global_chunked(const Params p_total)")
+    end = source.index("\n}  // namespace", start)
+    head, kernel, tail = source[:start], source[start:end], source[end:]
+    kernel = once(
+        kernel,
+        "    const float rrms = rsqrtf(tot / H + p.eps);",
+        "    const float rrms = rsqrtf(tot / H + p.eps);\n"
+        "    if (p.diagnostic_p1 && chunk_base + m == 104 && c == 0 && tid == 0) {\n"
+        "      p.diagnostic_p1[0] = tot;\n"
+        "      p.diagnostic_p1[1] = rrms;\n"
+        "    }",
+        "global P1 sum/rrms store",
+    )
+    source = head + kernel + tail
+    start = source.index("static void mono_launch(")
+    end = source.index("\n// E1:", start)
+    head, host, tail = source[:start], source[start:end], source[end:]
+    host = once(
+        host,
+        "                        torch::Tensor* diagnostic_route_ids = nullptr) {",
+        "                        torch::Tensor* diagnostic_route_ids = nullptr,\n"
+        "                        torch::Tensor* diagnostic_p1 = nullptr) {",
+        "global host arg",
+    )
+    host = once(
+        host,
+        "  p.res = reinterpret_cast<const half*>(res.data_ptr());",
+        "  if (diagnostic_p1 != nullptr) {\n"
+        "    TORCH_CHECK(chunked && !dense_mtp && M == 128 && H == 2560 &&\n"
+        "                diagnostic_p1->is_cuda() &&\n"
+        "                diagnostic_p1->device() == res.device() &&\n"
+        "                diagnostic_p1->scalar_type() == at::kFloat &&\n"
+        "                diagnostic_p1->is_contiguous() &&\n"
+        "                diagnostic_p1->numel() == 2,\n"
+        "                \"P1 trace requires global quantized M128 H2560 fp32[2]\");\n"
+        "    p.diagnostic_p1 = diagnostic_p1->data_ptr<float>();\n"
+        "  }\n"
+        "  p.res = reinterpret_cast<const half*>(res.data_ptr());",
+        "global host diag validation",
+    )
+    host = once(
+        host,
+        "                   bool dense_mtp, torch::Tensor& diagnostic_route_ids) {",
+        "                   bool dense_mtp, torch::Tensor& diagnostic_route_ids,\n"
+        "                   torch::Tensor& diagnostic_p1) {",
+        "global public trace arg",
+    )
+    host = once(
+        host,
+        "              reset_control, dense_mtp, true, &diagnostic_route_ids);",
+        "              reset_control, dense_mtp, true, &diagnostic_route_ids,\n"
+        "              &diagnostic_p1);",
+        "global public call",
+    )
+    source = head + host + tail
+    binding = once(
+        binding,
+        "double eps, double timeout_ms, bool reset_control, bool dense_mtp, torch::Tensor& diagnostic_route_ids);",
+        "double eps, double timeout_ms, bool reset_control, bool dense_mtp,\n"
+        "    torch::Tensor& diagnostic_route_ids, torch::Tensor& diagnostic_p1);",
+        "global binding signature",
+    )
+    return source, binding
+
+
+def main():
+    for path, key in ((NATIVE_SOURCE, "native_source"),
+                      (GLOBAL_SOURCE, "global_source"),
+                      (GLOBAL_BINDING, "global_binding")):
+        if sha(path) != PINS[key]:
+            raise RuntimeError(f"source pin mismatch {path}")
+    outputs = {
+        "native_trace.cu": native(NATIVE_SOURCE.read_text()),
+        "native_binding.cpp": """#include <torch/extension.h>\nvoid hc_combine_norm_rdna2_p1trace(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, torch::Tensor);\nPYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def(\"hc_combine_norm_rdna2_p1trace\", &hc_combine_norm_rdna2_p1trace); }\n""",
+    }
+    outputs["global_trace.cu"], outputs["global_binding.cpp"] = global_trace(
+        GLOBAL_SOURCE.read_text(), GLOBAL_BINDING.read_text())
+    generated = HERE / "generated"
+    for name, content in outputs.items():
+        path = generated / name
+        if path.exists():
+            raise FileExistsError(path)
+        path.write_text(content)
+    manifest = {
+        "purpose": "disposable P1 row104 stream0 actual FP32 sum and rrms trace",
+        "source_pins": PINS,
+        "generated_sha256": {name: sha(generated / name) for name in outputs},
+        "native_extra_cuda_cflags": ["-O2"],
+        "global_extra_cuda_cflags": ["-O3"],
+        "production_modified": False,
+        "runtime_qualified": False,
+    }
+    (HERE / "source_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(json.dumps(manifest, indent=2))
+
+
+if __name__ == "__main__":
+    main()

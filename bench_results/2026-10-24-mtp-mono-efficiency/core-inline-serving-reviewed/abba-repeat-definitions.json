@@ -1,0 +1,26 @@
+{
+  "input": "bench_results/2026-10-24-mtp-mono-efficiency/core-inline-serving-reviewed/per-cell-analysis.csv",
+  "cells_found": [
+    "1024x512-c1",
+    "1024x512-c8",
+    "16384x1024-c1",
+    "16384x1024-c8"
+  ],
+  "arms_found": [
+    "01-control",
+    "02-candidate",
+    "03-candidate",
+    "04-control"
+  ],
+  "records_written": 364,
+  "missing_pair_metrics": [],
+  "definitions": {
+    "paired_delta": "Candidate minus control for pairs 02-01 and 03-04. Rate percentages use the matching control as denominator. Time deltas are also in ms; acceptance deltas are percentage points.",
+    "within_arm_repeat_spread": "Second occurrence minus first: 04-01 for control and 03-02 for candidate. Relative spread divides by the arithmetic mean of those two runs.",
+    "two_repeat_mean_comparison": "Descriptive arithmetic mean of two candidate runs versus two control runs; not a confidence interval or significance test.",
+    "prefill_rate": "prefill_tokps_per_request_mean is the arithmetic mean of per-request input_tokens/TTFT. The TTFT-derived wave value is a proxy, not throughput.",
+    "aggregate_rates": "whole_run_* rates are summed tokens divided by summed timed-cell duration. decode_tokps_pooled_* is total output tokens divided by summed request decode windows; these differ from arithmetic means of per-request rates.",
+    "acceptance": "Per-run and per-position rates use percentage-point deltas. The two-repeat weighted row is 100*sum(accepted_tokens)/sum(draft_tokens); the mean-comparison row is the arithmetic mean of run percentages.",
+    "inference_limit": "Serving runs are the experimental units. Two repeats per variant yield only two paired contrasts and descriptive repeat spread; no request-level bootstrap or statistical confidence is computed."
+  }
+}

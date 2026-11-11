@@ -86,6 +86,7 @@ def _late_peer_worker(
     from vllm.distributed.device_communicators.rdna_all_reduce import (
         RdnaOneShotAllReduce,
         describe_abort,
+        describe_late,
     )
 
     comm = RdnaOneShotAllReduce(dist.group.WORLD, torch.device("cuda", rank))
@@ -94,20 +95,31 @@ def _late_peer_worker(
     comm.all_reduce(inp)  # warm, both on time
     torch.accelerator.synchronize()
     dist.barrier()
+    live = 0
     if rank == 1:
         time.sleep(late_s)
     out = comm.all_reduce(inp)
+    if rank == 0 and not wait_ms:
+        # While the GPU spins, the live record (bit 1) names the peer we wait
+        # for and says it has not announced (bit 2 clear): its own flag slot,
+        # read over P2P, is behind.
+        deadline = time.monotonic() + late_s - 0.5
+        while time.monotonic() < deadline and not live:
+            code = int(comm._ops.rdna_ar_slow_info(comm.handle))
+            if code & 0x2:
+                live = code
+            time.sleep(0.05)
     torch.accelerator.synchronize()
     code = int(comm._ops.rdna_ar_timeout_info(comm.handle))
     result = (code, bool((out == world * (world + 1) / 2).all()))
     gathered: list = [None] * world
     dist.all_gather_object(gathered, result)
     if wait_ms:
-        # A wait past the configured bound still aborts with a clear record
-        # carrying the measured wall-clock wait (16 ms units).
+        # A wait past an explicit bound still aborts with a clear record
+        # carrying the measured wall-clock wait (16 ms units) and the cause.
         assert gathered[0][0] != 0, gathered
         msg = describe_abort(gathered[0][0], 0)
-        assert "peer rank 1's flag never arrived" in msg
+        assert "peer rank 1 never reached it" in msg, msg
         waited = int(msg.split("~")[1].split(" ms")[0])
         assert int(wait_ms) - 16 <= waited <= int(wait_ms) + 200, msg
     else:
@@ -115,13 +127,13 @@ def _late_peer_worker(
             (describe_abort(c, r) if c else "ok", ok)
             for r, (c, ok) in enumerate(gathered)
         ]
-        # The on-time rank recorded the late peer with the real wait (~late_s).
         if rank == 0:
-            from vllm.distributed.device_communicators.rdna_all_reduce import (
-                describe_late,
-            )
-
-            late = describe_late(int(comm._ops.rdna_ar_slow_info(comm.handle)), 0)
+            assert live, "no live record while waiting for the late peer"
+            assert (live >> 12) & 0xF == 1 and not live & 0x4, hex(live)
+            # The final record (no live bit) carries the real wait (~late_s).
+            final = int(comm._ops.rdna_ar_slow_info(comm.handle))
+            assert not final & 0x2, hex(final)
+            late = describe_late(final, 0)
             waited = int(late.split("~")[1].split(" ms")[0])
             assert late_s * 1000 - 500 <= waited <= late_s * 1000 + 1500, late
     dist.destroy_process_group()
@@ -139,10 +151,70 @@ def _late_peer_worker(
 @pytest.mark.parametrize("late_s,wait_ms", [(5.0, ""), (2.0, "300")])
 def test_rdna_ar_late_peer(tmp_path, late_s, wait_ms):
     """A peer that is legitimately seconds late must not wedge the collective
-    (default bound); an explicit small VLLM_RDNA_AR_WAIT_MS still aborts."""
+    (default bound) and shows up in the live record meanwhile; an explicit
+    small VLLM_RDNA_AR_WAIT_MS still aborts, naming the stalled peer."""
     mp.spawn(
         _late_peer_worker,
         args=(2, 29519, str(tmp_path), late_s, wait_ms),
         nprocs=2,
         join=True,
     )
+
+
+def _sticky_abort_worker(rank: int, world: int, port: int, cache_root: str) -> None:
+    """Rank 1 is late on one collective (rank 0 times out), then drops out.
+
+    Rank 0's later collectives must not wait the bound again (inside a graph
+    step that would add up to the engine timeout): they return at once with
+    out == in and leave the abort record for rdna_ar_check()."""
+    import time
+
+    os.environ.update(
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(port),
+        VLLM_CACHE_ROOT=cache_root,
+        VLLM_RDNA_AR_WAIT_MS="1000",
+    )
+    torch.accelerator.set_device_index(rank)
+    dist.init_process_group("gloo", rank=rank, world_size=world)
+    import vllm._custom_ops  # noqa: F401  (registers _rocm_C)
+    from vllm.distributed.device_communicators.rdna_all_reduce import (
+        RdnaOneShotAllReduce,
+    )
+
+    comm = RdnaOneShotAllReduce(dist.group.WORLD, torch.device("cuda", rank))
+    assert not comm.disabled
+    inp = torch.full((4096,), float(rank + 1), dtype=torch.float16, device="cuda")
+    comm.all_reduce(inp)
+    torch.accelerator.synchronize()
+    dist.barrier()
+    if rank == 1:
+        time.sleep(3.0)  # past rank 0's 1 s bound
+    comm.all_reduce(inp)
+    torch.accelerator.synchronize()
+    if rank == 0:
+        assert comm._ops.rdna_ar_timeout_info(comm.handle) != 0
+        t0 = time.monotonic()
+        outs = [comm.all_reduce(inp) for _ in range(5)]  # rank 1 never joins
+        torch.accelerator.synchronize()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.5, f"later collectives re-waited: {elapsed:.2f} s"
+        for out in outs:
+            assert bool((out == inp).all())
+        with pytest.raises(RuntimeError, match="rdna_ar wedged"):
+            comm.check()
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    not (
+        torch.cuda.is_available()
+        and torch.accelerator.device_count() >= 2
+        and on_rdna2()
+    ),
+    reason="needs 2 gfx10x GPUs",
+)
+@pytest.mark.skipif(not _has_rdna_ar(), reason="rdna_ar op not built")
+def test_rdna_ar_abort_is_sticky(tmp_path):
+    mp.spawn(_sticky_abort_worker, args=(2, 29521, str(tmp_path)), nprocs=2, join=True)

@@ -16,7 +16,6 @@ gptq_gemm_rdna2_prefill_1 = torch.ops._rocm_C.gptq_gemm_rdna2_prefill.default(y,
 gptq_gemm_rdna2_prefill_2 = vllm__custom_ops_gptq_gemm_rdna2_prefill(z, w)
 gptq_gemm_rdna2 = torch.ops._rocm_C.gptq_gemm_rdna2.default(z, w)
 gptq_gemm = torch.ops._C.gptq_gemm.default(z, w, True, False, 4)
-direct = torch.ops._rocm_C.gptq_gemm_rdna2_prefill_direct.default(z, w)
 rdna2_w4a16_gemm = torch.ops.vllm.rdna2_w4a16_gemm.default(z, w, 6144, True, 4)
 w4a8_gemm_rdna2 = torch.ops._rocm_C.w4a8_gemm_rdna2.default(z, w, False)
 """

@@ -1,0 +1,17 @@
+import os, pathlib, shlex, subprocess
+root=pathlib.Path('/home/chenco_adm/w4a8_runs/moe-offload/batch-copy-probe/native')
+venv='/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv'
+py=venv+'/bin/python'
+source=root/'source/rdna_expert_cache.cu'
+subprocess.run([py,'/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/cmake/hipify.py','-p',str(root/'source'),'-o',str(root/'hipified'),str(source)],cwd=root,check=True)
+cmd=subprocess.check_output(['/home/chenco_adm/.local/bin/ninja','-C','/home/chenco_adm/w4a8_runs/moe-offload/guarded-fixedpoint-build/native-build','-t','commands','CMakeFiles/_rocm_C.dir/csrc/rocm/rdna_allreduce.hip.o'],text=True).strip().splitlines()[-1]
+args=shlex.split(cmd)
+if args[0]=='ccache':args=args[1:]
+for flag,name in [('-MT','scratch.o'),('-MF',str(root/'scratch.o.d')),('-o',str(root/'scratch.o'))]:args[args.index(flag)+1]=name
+args[-1]=str(root/'source/rdna_expert_cache.hip')
+print(shlex.join(args),flush=True)
+subprocess.run(args,cwd=root,check=True)
+s=venv+'/lib/python3.12/site-packages'
+link=['/opt/rocm/core-7.14/bin/hipcc','-shared',str(root/'scratch.o'),'-o',str(root/'native_copy.so'),'-L'+s+'/torch/lib','-lc10','-lc10_hip','-ltorch_cpu','-ltorch_hip','-ltorch','-ltorch_python','-L'+s+'/_rocm_sdk_core/lib/core/lib','-lamdhip64','-ldl']
+print(shlex.join(link),flush=True)
+subprocess.run(link,cwd=root,check=True)

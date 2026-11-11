@@ -1,0 +1,10 @@
+enforce_eager': True
+cudagraph_mode=none and --kernel_config.enable_jit_warmup=False
+(APIServer pid=3037706) INFO 10-29 01:10:03 [vllm.py:865] Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out.
+(APIServer pid=3037706) INFO 10-29 01:10:03 [kernel.py:419] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c'
+enforce_eager=True
+cudagraph_mode': <CUDAGraphMode.NONE: 0>
+cudagraph_mode=none and --kernel_config.enable_jit_warmup=False
+(Worker_TP0_EP0 pid=3045364) INFO 10-29 01:14:13 [kernel.py:419] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c'
+cudagraph_mode=none and --kernel_config.enable_jit_warmup=False
+(EngineCore pid=3044169) INFO 10-29 01:15:00 [kernel.py:419] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c'

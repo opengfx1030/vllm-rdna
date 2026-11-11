@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Offload A/B report from serve-{T0,T1,N1,N0}/: cells table (decode tok/s, ITL, TTFT, acceptance), derived step period, greedy equality.
+#   bash ab_report.sh [ARMS...]   (default: T0 T1 N1 N0)   -> stdout (also $LANE/AB.md)
+source "$(dirname "$0")/env.sh"
+cd "$LANE" || exit 1
+ARMS=${*:-T0 T1 N1 N0}
+{
+    echo "## offload A/B ($(date '+%F %T'))"
+    for a in $ARMS; do
+        [[ -s serve-$a/summary.txt ]] || { echo "- $a: no summary yet"; continue; }
+        echo "- $a: $(sed -n 2,4p serve-$a/arm-info.txt | tr '\n' ' ' | cut -c1-260)"
+    done
+    args=()
+    for a in $ARMS; do
+        for c in 1 4; do
+            f=serve-$a/bench-1024x512-c$c.json
+            [[ -s $f ]] && args+=("$a-c$c=$f")
+        done
+    done
+    echo
+    python3 cellsum.py --md "${args[@]}"
+    echo
+    echo "step period (derived) = acceptance length / decode tok/s per request:"
+    python3 - "${args[@]}" <<'PY'
+import json, sys
+for a in sys.argv[1:]:
+    label, _, path = a.partition("=")
+    d = json.load(open(path))
+    tpot = d.get("mean_tpot_ms", 0.0)
+    acc = d.get("spec_decode_acceptance_length", 0.0)
+    print(f"  {label}: mean TPOT {tpot:.2f} ms, acc len {acc:.3f}, step period ~ {tpot * acc:.1f} ms; ITL p50 {d.get('median_itl_ms', 0):.1f} ms")
+PY
+    echo
+    echo "greedy equality vs T0:"
+    for a in $ARMS; do
+        [[ $a == T0 || ! -s serve-$a/greedy.json || ! -s serve-T0/greedy.json ]] && continue
+        python3 greedy_probe.py --compare serve-T0/greedy.json serve-$a/greedy.json
+    done
+    for a in $ARMS; do
+        [[ -s serve-$a/greedy.json ]] && echo "  $a sha256 $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["sha256"][:16], "seq==conc", d["seq_eq_conc"])' serve-$a/greedy.json)"
+    done
+} | tee AB.md

@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.models.qwen4_exp.common.ple_pp import rdna_ple_pp_unsupported_reason
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -32,13 +33,21 @@ class Qwen4ExpModelState(MambaHybridModelState):
             self.ngram_eos_token_id = 0
             return
 
-        if vllm_config.parallel_config.pipeline_parallel_size > 1:
-            raise RuntimeError(
-                "N-gram PLE embedding currently requires "
-                "pipeline_parallel_size=1 because non-first pipeline ranks do "
-                "not receive the raw input_ids required by PLE. Please run "
-                "with PP=1."
-            )
+        # Only the first pipeline stage receives the raw input_ids the n-gram
+        # PLE lookup needs; RDNA allows PP > 1 when every PLE layer lives on
+        # that stage (see ple_pp). Later stages take the no-PLE path.
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        reason = rdna_ple_pp_unsupported_reason(config, pp_size)
+        if reason is not None:
+            raise RuntimeError(reason)
+        if pp_size > 1:
+            from vllm.distributed import get_pp_group
+
+            if not get_pp_group().is_first_rank:
+                self.uses_ngram_embedding = False
+                self.ngram_context_len = 0
+                self.ngram_eos_token_id = 0
+                return
 
         self.ngram_context_len = int(config.ngram_size) - 1
         if self.ngram_context_len <= 0:

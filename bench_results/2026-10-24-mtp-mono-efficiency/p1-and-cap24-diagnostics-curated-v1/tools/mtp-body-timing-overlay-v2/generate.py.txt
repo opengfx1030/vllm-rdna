@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Add sampled post-draft timing readback to frozen v1's three-file overlay."""
+
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
+V1 = HERE.parent / "mtp-body-timing-overlay-v1"
+V1_GENERATOR_SHA = "a5f46f7b53f69ae0828c3c540ada4af324caf05e255883405970d6fdf639f81c"
+if hashlib.sha256((V1 / "generate.py").read_bytes()).hexdigest() != V1_GENERATOR_SHA:
+    raise ValueError("frozen v1 generator changed")
+spec = importlib.util.spec_from_file_location(
+    "frozen_mtp_timing_v1", V1 / "generate.py"
+)
+v1 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(v1)
+PREFIX = v1.PREFIX
+PHASE = "vllm/v1/worker/gpu/phase_timer.py"
+BASE = {PREFIX + name: value for name, value in v1.BASE.items()}
+BASE[PHASE] = "15c23af808931d8f2eedb130a476b8f6530f4aa301b3c72ee98e0e29050b78d7"
+sha = v1.sha
+
+
+def transform(relative, text):
+    if relative == PHASE:
+        return v1.replace(
+            text,
+            "        done[-1][1][-1][1].synchronize()\n",
+            """        done[-1][1][-1][1].synchronize()
+        # Diagnostic overlay: completed end-of-draft event already covers K2,
+        # its flag-off fill and the post-draft fault collective. No extra
+        # explicit device synchronization; never run this inside graph capture.
+        from vllm.models.qwen4_exp.amd.mono.rdna2 import OPTS
+
+        if OPTS.timing:
+            from vllm.models.qwen4_exp.amd.mono.rdna2 import debug
+
+            debug.log_stats("model", sampled=True)
+            debug.log_stats("mtp", sampled=True)
+            if not getattr(self, "_mono_stats_flush_logged", False):
+                logger.info("mono timing sampled flush scopes=target,mtp "
+                            "after=draft_event_sync k1_attention=unmeasured")
+                self._mono_stats_flush_logged = True
+""",
+        )
+    s = v1.transform(Path(relative).name, text)
+    if relative == PREFIX + "debug.py":
+        s = v1.replace(
+            s,
+            "_mtp_last_log = [0.0]",
+            (
+                "_mtp_last_log = [0.0]\n"
+                "_seen_positive_widths: set[tuple[str, int, int]] = set()"
+            ),
+        )
+        s = v1.replace(
+            s,
+            'def log_stats(scope: str = "model"):',
+            'def log_stats(scope: str = "model", *, sampled: bool = False):',
+        )
+        s = v1.replace(
+            s,
+            """    if now - throttle[0] < 30.0:
+        return
+    throttle[0] = now
+    for idx, st in registry.items():
+        a = st.view(-1, STAT_COLS).cpu()""",
+            """    due = now - throttle[0] >= 30.0
+    if not due and not sampled:
+        return
+    # Sampled calls happen only after PhaseTimer's existing synchronization.
+    # Readback is diagnostic overhead outside body/draft event intervals.
+    snapshots = [(idx, st.view(-1, STAT_COLS).cpu())
+                 for idx, st in registry.items()]
+    positive = {(scope, idx, w) for idx, a in snapshots
+                for w in range(1, STAT_ROWS)
+                if a[w, 0].item() or a[w, 12].item()}
+    if not positive or (not due and positive <= _seen_positive_widths):
+        return
+    # First positive observation of a new width is always emitted. Existing
+    # widths retain the 30-second throttle; no eager-call polling is added.
+    _seen_positive_widths.update(positive)
+    throttle[0] = now
+    for idx, a in snapshots:""",
+        )
+    return s
+
+
+def main():
+    m = {
+        "diagnostic_only": True,
+        "default_timing_false_gpu_extras": 0,
+        "core_sha256": (
+            "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed"
+        ),
+        "frozen_v1_generator_sha256": V1_GENERATOR_SHA,
+        "changes": {},
+    }
+    for rel, original in BASE.items():
+        source = ROOT / rel
+        if sha(source) != original:
+            raise ValueError(f"healthy source differs: {rel}")
+        target = HERE / "candidate-overlay" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(transform(rel, source.read_text()))
+        m["changes"][rel] = {"original": original, "candidate": sha(target)}
+    (HERE / "source-manifest.json").write_text(json.dumps(m, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()

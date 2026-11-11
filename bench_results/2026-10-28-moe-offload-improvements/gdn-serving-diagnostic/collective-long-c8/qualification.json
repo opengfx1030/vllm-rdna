@@ -1,0 +1,435 @@
+{
+  "passed": true,
+  "scope": "same-server copy A/B; expert residency retained across arms",
+  "counter_scope": "measured requests only; client ready-check request disabled after worker RPC readiness check; no client warmup requests",
+  "semantic_quality": "run normal-EOS/PPL/prefix gates separately",
+  "cells": [
+    {
+      "cell": "16k-c8",
+      "arm": 0,
+      "copy_mode": "native",
+      "before": [
+        {
+          "caches": 48,
+          "debug_timing": false,
+          "post_step_checks": "collective",
+          "copy_modes": [
+            "native"
+          ],
+          "expert_demands": 5470303,
+          "expert_misses": 614205,
+          "committed_passes": 305642,
+          "copied_bytes": 1568433888000,
+          "native_copy_calls": 62291,
+          "batch_copy_calls": 62291,
+          "map_uploads": 269415,
+          "device_bytes": 11767037952,
+          "host_bytes": 31378685952
+        },
+        {
+          "caches": 48,
+          "debug_timing": false,
+          "post_step_checks": "collective",
+          "copy_modes": [
+            "native"
+          ],
+          "expert_demands": 5329864,
+          "expert_misses": 642966,
+          "committed_passes": 305554,
+          "copied_bytes": 1641877977600,
+          "native_copy_calls": 63785,
+          "batch_copy_calls": 63785,
+          "map_uploads": 267907,
+          "device_bytes": 11767037952,
+          "host_bytes": 31378685952
+        }
+      ],
+      "after": [
+        {
+          "caches": 48,
+          "debug_timing": false,
+          "post_step_checks": "collective",
+          "copy_modes": [
+            "native"
+          ],
+          "expert_demands": 7100246,
+          "expert_misses": 910677,
+          "committed_passes": 346703,
+          "copied_bytes": 2325504787200,
+          "native_copy_calls": 101112,
+          "batch_copy_calls": 101112,
+          "map_uploads": 310475,
+          "device_bytes": 11767037952,
+          "host_bytes": 31378685952
+        },
+        {
+          "caches": 48,
+          "debug_timing": false,
+          "post_step_checks": "collective",
+          "copy_modes": [
+            "native"
+          ],
+          "expert_demands": 6984849,
+          "expert_misses": 958476,
+          "committed_passes": 346712,
+          "copied_bytes": 2447564313600,
+          "native_copy_calls": 102970,
+          "batch_copy_calls": 102970,
+          "map_uploads": 309063,
+          "device_bytes": 11767037952,
+          "host_bytes": 31378685952
+        }
+      ],
+      "deltas": [
+        {
+          "expert_demands": 1629943,
+          "expert_misses": 296472,
+          "committed_passes": 41061,
+          "copied_bytes": 757070899200,
+          "native_copy_calls": 38821,
+          "batch_copy_calls": 38821,
+          "map_uploads": 41060,
+          "pass_expert_hit_fraction": 0.8181089768169807
+        },
+        {
+          "expert_demands": 1654985,
+          "expert_misses": 315510,
+          "committed_passes": 41158,
+          "copied_bytes": 805686336000,
+          "native_copy_calls": 39185,
+          "batch_copy_calls": 39185,
+          "map_uploads": 41156,
+          "pass_expert_hit_fraction": 0.8093577887412877
+        }
+      ],
+      "benchmark": {
+        "name": "bench-16384x1024-c8",
+        "command": [
+          "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/bin/python",
+          "-m",
+          "vllm.entrypoints.cli.main",
+          "bench",
+          "serve",
+          "--backend",
+          "openai",
+          "--endpoint",
+          "/v1/completions",
+          "--base-url",
+          "http://127.0.0.1:18766",
+          "--model",
+          "flash-next",
+          "--tokenizer",
+          "/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c",
+          "--dataset-name",
+          "random",
+          "--random-input-len",
+          "16384",
+          "--random-output-len",
+          "1024",
+          "--random-range-ratio",
+          "0.0",
+          "--num-prompts",
+          "8",
+          "--max-concurrency",
+          "8",
+          "--request-rate",
+          "inf",
+          "--temperature",
+          "0",
+          "--ignore-eos",
+          "--seed",
+          "12345",
+          "--save-result",
+          "--save-detailed",
+          "--result-dir",
+          "/home/chenco_adm/w4a8_runs/moe-offload/gdn-fp32-diagnostic/run/collective-long-c8/16k-c8-0-native",
+          "--result-filename",
+          "bench-16384x1024-c8.json",
+          "--disable-tqdm",
+          "--ready-check-timeout-sec",
+          "0"
+        ],
+        "forced_ignore_eos": true,
+        "requested_input_tokens": 16384,
+        "input_length_relative_tolerance": 0.01,
+        "max_context_tokens": 32768,
+        "requested_output_tokens": 1024,
+        "actual_input_tokens": [
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384
+        ],
+        "actual_output_tokens": [
+          1024,
+          1024,
+          1024,
+          1024,
+          1024,
+          1024,
+          1024,
+          1024
+        ],
+        "headline": "bench-16384x1024-c8          prefill    188.2 tok/s/req (agg   713.5) | decode   8.68 tok/s/req (agg out   34.46) | TTFT   87.07 s | ITL med   157.5 ms mean   243.6 ms | ok 8",
+        "output_quality_warnings": [
+          {
+            "request": 3,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          },
+          {
+            "request": 4,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          },
+          {
+            "request": 5,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          },
+          {
+            "request": 7,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          }
+        ],
+        "counter_deltas": {
+          "vllm:num_preemptions": 0.0,
+          "vllm:kv_offload_load_bytes": 637272064.0,
+          "vllm:kv_offload_store_bytes": 6488588288.0,
+          "vllm:kv_offload_load_time": 0.05067514038085935,
+          "vllm:kv_offload_store_time": 2.1647149972915654,
+          "vllm:external_prefix_cache_queries": 131072.0,
+          "vllm:external_prefix_cache_hits": 14336.0,
+          "vllm:prefix_cache_queries": 131072.0,
+          "vllm:prefix_cache_hits": 0.0
+        },
+        "peak_cache_usage": {
+          "vllm:kv_cache_usage_perc": 1.0,
+          "vllm:kv_offload_cpu_cache_usage_perc": 0.04054054054054054
+        },
+        "metric_sample_errors": 0
+      }
+    },
+    {
+      "cell": "16k-c8",
+      "arm": 1,
+      "copy_mode": "tensor",
+      "before": [
+        {
+          "caches": 48,
+          "debug_timing": false,
+          "post_step_checks": "collective",
+          "copy_modes": [
+            "tensor"
+          ],
+          "expert_demands": 7100246,
+          "expert_misses": 910677,
+          "committed_passes": 346703,
+          "copied_bytes": 2325504787200,
+          "native_copy_calls": 101112,
+          "batch_copy_calls": 101112,
+          "map_uploads": 310475,
+          "device_bytes": 11767037952,
+          "host_bytes": 31378685952
+        },
+        {
+          "caches": 48,
+          "debug_timing": false,
+          "post_step_checks": "collective",
+          "copy_modes": [
+            "tensor"
+          ],
+          "expert_demands": 6984849,
+          "expert_misses": 958476,
+          "committed_passes": 346712,
+          "copied_bytes": 2447564313600,
+          "native_copy_calls": 102970,
+          "batch_copy_calls": 102970,
+          "map_uploads": 309063,
+          "device_bytes": 11767037952,
+          "host_bytes": 31378685952
+        }
+      ],
+      "after": [
+        {
+          "caches": 48,
+          "debug_timing": false,
+          "post_step_checks": "collective",
+          "copy_modes": [
+            "tensor"
+          ],
+          "expert_demands": 8692918,
+          "expert_misses": 1138586,
+          "committed_passes": 398980,
+          "copied_bytes": 2907493209600,
+          "native_copy_calls": 101112,
+          "batch_copy_calls": 101112,
+          "map_uploads": 360518,
+          "device_bytes": 11767037952,
+          "host_bytes": 31378685952
+        },
+        {
+          "caches": 48,
+          "debug_timing": false,
+          "post_step_checks": "collective",
+          "copy_modes": [
+            "tensor"
+          ],
+          "expert_demands": 8575849,
+          "expert_misses": 1203213,
+          "committed_passes": 399009,
+          "copied_bytes": 3072524716800,
+          "native_copy_calls": 102970,
+          "batch_copy_calls": 102970,
+          "map_uploads": 358959,
+          "device_bytes": 11767037952,
+          "host_bytes": 31378685952
+        }
+      ],
+      "deltas": [
+        {
+          "expert_demands": 1592672,
+          "expert_misses": 227909,
+          "committed_passes": 52277,
+          "copied_bytes": 581988422400,
+          "native_copy_calls": 0,
+          "batch_copy_calls": 0,
+          "map_uploads": 50043,
+          "pass_expert_hit_fraction": 0.8569014837957847
+        },
+        {
+          "expert_demands": 1591000,
+          "expert_misses": 244737,
+          "committed_passes": 52297,
+          "copied_bytes": 624960403200,
+          "native_copy_calls": 0,
+          "batch_copy_calls": 0,
+          "map_uploads": 49896,
+          "pass_expert_hit_fraction": 0.846174104336895
+        }
+      ],
+      "benchmark": {
+        "name": "bench-16384x1024-c8",
+        "command": [
+          "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/.venv/bin/python",
+          "-m",
+          "vllm.entrypoints.cli.main",
+          "bench",
+          "serve",
+          "--backend",
+          "openai",
+          "--endpoint",
+          "/v1/completions",
+          "--base-url",
+          "http://127.0.0.1:18766",
+          "--model",
+          "flash-next",
+          "--tokenizer",
+          "/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c",
+          "--dataset-name",
+          "random",
+          "--random-input-len",
+          "16384",
+          "--random-output-len",
+          "1024",
+          "--random-range-ratio",
+          "0.0",
+          "--num-prompts",
+          "8",
+          "--max-concurrency",
+          "8",
+          "--request-rate",
+          "inf",
+          "--temperature",
+          "0",
+          "--ignore-eos",
+          "--seed",
+          "12345",
+          "--save-result",
+          "--save-detailed",
+          "--result-dir",
+          "/home/chenco_adm/w4a8_runs/moe-offload/gdn-fp32-diagnostic/run/collective-long-c8/16k-c8-1-tensor",
+          "--result-filename",
+          "bench-16384x1024-c8.json",
+          "--disable-tqdm",
+          "--ready-check-timeout-sec",
+          "0"
+        ],
+        "forced_ignore_eos": true,
+        "requested_input_tokens": 16384,
+        "input_length_relative_tolerance": 0.01,
+        "max_context_tokens": 32768,
+        "requested_output_tokens": 1024,
+        "actual_input_tokens": [
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384
+        ],
+        "actual_output_tokens": [
+          1024,
+          1024,
+          1024,
+          1024,
+          1024,
+          1024,
+          1024,
+          1024
+        ],
+        "headline": "bench-16384x1024-c8          prefill    337.5 tok/s/req (agg   794.7) | decode   7.16 tok/s/req (agg out   33.62) | TTFT   48.55 s | ITL med   284.8 ms mean   296.8 ms | ok 8",
+        "output_quality_warnings": [
+          {
+            "request": 1,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          },
+          {
+            "request": 3,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          },
+          {
+            "request": 4,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          },
+          {
+            "request": 5,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          },
+          {
+            "request": 6,
+            "garbage": null,
+            "repetition_warning": "repeated 24-char span"
+          }
+        ],
+        "counter_deltas": {
+          "vllm:num_preemptions": 0.0,
+          "vllm:kv_offload_load_bytes": 5098176512.0,
+          "vllm:kv_offload_store_bytes": 0.0,
+          "vllm:kv_offload_load_time": 0.5873168678283692,
+          "vllm:kv_offload_store_time": 0.0,
+          "vllm:external_prefix_cache_queries": 131072.0,
+          "vllm:external_prefix_cache_hits": 114688.0,
+          "vllm:prefix_cache_queries": 131072.0,
+          "vllm:prefix_cache_hits": 0.0
+        },
+        "peak_cache_usage": {
+          "vllm:kv_cache_usage_perc": 0.9855072463768116,
+          "vllm:kv_offload_cpu_cache_usage_perc": 0.037162162162162164
+        },
+        "metric_sample_errors": 0
+      }
+    }
+  ]
+}

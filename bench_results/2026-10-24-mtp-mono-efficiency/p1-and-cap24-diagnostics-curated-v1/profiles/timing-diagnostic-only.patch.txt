@@ -1,0 +1,191 @@
+--- a/vllm/models/qwen4_exp/amd/mono/rdna2/debug.py
++++ b/vllm/models/qwen4_exp/amd/mono/rdna2/debug.py
+@@ -21,11 +21,14 @@
+ logger = init_logger(__name__)
+ 
+ STATS: dict[int, torch.Tensor] = {}
++MTP_STATS: dict[int, torch.Tensor] = {}
+ STAT_COLS = 36
+ STAT_ROWS = MAX_ROWS + 1
+ STAT_WORDS = (STAT_ROWS + 1) * STAT_COLS
+ _TICKS_PER_US = 100.0  # wall_clock64 runs at 100 MHz on V620
+ _last_log = [0.0]
++_mtp_last_log = [0.0]
++_seen_positive_widths: set[tuple[str, int, int]] = set()
+ _WRAPPED = [False]
+ 
+ 
+@@ -40,14 +43,47 @@
+     return (sxy - sx * sy / n) / (vx * vy) ** 0.5
+ 
+ 
+-def log_stats():
++def statistics(scope: str = "model"):
++    """Separate workspace stats; no automatic migration between scopes."""
++    if scope == "model":
++        return STATS
++    if scope == "mtp":
++        return MTP_STATS
++    raise ValueError(f"unknown timing scope: {scope}")
++
++
++def mtp_kernel_timing(st: torch.Tensor, enabled: bool) -> None:
++    """Diagnostic-only captured flag fill, once before/after each MTP K2.
++
++    K1 shares the MTP workspace but returns before the timing epilogue. Keep
++    its native entry stamps disabled so K2 cannot inherit K1 entry_min/max.
++    The two fills add diagnostic launches; callers guard on timing=True.
++    """
++    st[STAT_ROWS * STAT_COLS + 3].fill_(int(enabled))
++
++
++def log_stats(scope: str = "model", *, sampled: bool = False):
+     """Per-width means (us) of the serve timing, all devices of this process."""
+     now = time.monotonic()
+-    if now - _last_log[0] < 30.0:
++    registry = statistics(scope)
++    throttle = _mtp_last_log if scope == "mtp" else _last_log
++    due = now - throttle[0] >= 30.0
++    if not due and not sampled:
+         return
+-    _last_log[0] = now
+-    for idx, st in STATS.items():
+-        a = st.view(-1, STAT_COLS).cpu()
++    # Sampled calls happen only after PhaseTimer's existing synchronization.
++    # Readback is diagnostic overhead outside body/draft event intervals.
++    snapshots = [(idx, st.view(-1, STAT_COLS).cpu())
++                 for idx, st in registry.items()]
++    positive = {(scope, idx, w) for idx, a in snapshots
++                for w in range(1, STAT_ROWS)
++                if a[w, 0].item() or a[w, 12].item()}
++    if not positive or (not due and positive <= _seen_positive_widths):
++        return
++    # First positive observation of a new width is always emitted. Existing
++    # widths retain the 30-second throttle; no eager-call polling is added.
++    _seen_positive_widths.update(positive)
++    throttle[0] = now
++    for idx, a in snapshots:
+         for w in range(1, STAT_ROWS):
+             r = a[w].tolist()
+             n, nm, ng = r[0], r[12], r[16]
+@@ -55,6 +91,16 @@
+                 continue
+             us = lambda v, k: v / k / _TICKS_PER_US if k else 0.0  # noqa: E731
+             ph = "/".join(f"{us(r[i], n):.1f}" for i in range(1, 8))
++            if scope == "mtp":
++                logger.info(
++                    "mono MTP k2_rdna2 timing dev%d w%d: region n=%d %.1f us | "
++                    "kernel n=%d total %.1f phases %s | entry spread %.1f "
++                    "wg0 %.1f | mark->first %.1f mark->last %.1f | "
++                    "scope=mtp_k2_body_plus_ffn_ar k1_attention=unmeasured",
++                    idx, w, nm, us(r[13], nm), n, us(r[9], n), ph,
++                    us(r[8], n), us(r[10], n), us(r[14], n), us(r[15], n),
++                )
++                continue
+             logger.info(
+                 "mono k2_rdna2 timing dev%d w%d: region n=%d %.1f us | kernel n=%d "
+                 "total %.1f phases %s | entry spread %.1f wg0 %.1f | mark->first %.1f "
+--- a/vllm/models/qwen4_exp/amd/mono/rdna2/layout.py
++++ b/vllm/models/qwen4_exp/amd/mono/rdna2/layout.py
+@@ -84,9 +84,11 @@
+         st[sc + 0] = -1  # entry_min
+         st[sc + 5] = OPTS.k2_sleep
+         st[sc + 6] = OPTS.k2_flags
+-        if OPTS.timing and scope == "model":
+-            st[sc + 3] = 1  # enabled
+-            debug.STATS[idx] = st
++        if OPTS.timing and scope in ("model", "mtp"):
++            # MTP K1 shares this arena and lacks a final stats epilogue.
++            # Only its K2 body enables native timing around the actual call.
++            st[sc + 3] = int(scope == "model")
++            debug.statistics(scope)[idx] = st
+     return ws
+ 
+ 
+--- a/vllm/models/qwen4_exp/amd/mono/rdna2/k2.py
++++ b/vllm/models/qwen4_exp/amd/mono/rdna2/k2.py
+@@ -139,30 +139,39 @@
+             md,
+             "mono kernel" if use else "modules",
+         )
+-    timed = OPTS.timing and fits and md != "eager" and not mono.is_mtp
+-    st = debug.STATS.get(hidden_states.device.index) if timed else None
+-    if OPTS.timing and not mono.is_mtp and not torch.cuda.is_current_stream_capturing():
+-        debug.log_stats()
+-    if st is not None:
+-        mark = torch.ops._rocm_C.mono_k2_rdna2_mark
+-        qsa = getattr(layer, "layer_type", "") != "linear_attention"
+-        mark(st, 5, m | (32 if qsa else 0))  # attention done
+-        mark(st, 0 if mono.first else 2, m)
+-    if use:
+-        from vllm.distributed import tensor_model_parallel_all_reduce
++    timed = OPTS.timing and fits and md != "eager"
++    scope = "mtp" if mono.is_mtp else "model"
++    st = debug.statistics(scope).get(hidden_states.device.index) if timed else None
++    if OPTS.timing and not torch.cuda.is_current_stream_capturing():
++        debug.log_stats(scope)
++    try:
++        if st is not None:
++            mark = torch.ops._rocm_C.mono_k2_rdna2_mark
++            qsa = getattr(layer, "layer_type", "") != "linear_attention"
++            if mono.is_mtp:
++                debug.mtp_kernel_timing(st, True)
++            else:
++                mark(st, 5, m | (32 if qsa else 0))  # target attention done
++            # MTP records only K2 body+FFN AR, never a gap or K1/attention span.
++            mark(st, 0 if mono.is_mtp or mono.first else 2, m)
++        if use:
++            from vllm.distributed import tensor_model_parallel_all_reduce
+ 
+-        res_out, partial, inj_out = run(mono, hidden_states, attn_out, injection)
+-        if ar_fused(partial):  # the kernel already all-reduced it
+-            result = res_out, partial, inj_out
++            res_out, partial, inj_out = run(mono, hidden_states, attn_out, injection)
++            if ar_fused(partial):  # the kernel already all-reduced it
++                result = res_out, partial, inj_out
++            else:
++                result = res_out, tensor_model_parallel_all_reduce(partial), inj_out
+         else:
+-            result = res_out, tensor_model_parallel_all_reduce(partial), inj_out
+-    else:
+-        hs, block_input, inj = layer.mlp_hyper_connection.combine_and_mix(
+-            hidden_states, attn_out, injection
+-        )
+-        result = hs, layer.mlp(block_input), inj
+-    if st is not None:
+-        torch.ops._rocm_C.mono_k2_rdna2_mark(st, 1, m)
++            hs, block_input, inj = layer.mlp_hyper_connection.combine_and_mix(
++                hidden_states, attn_out, injection
++            )
++            result = hs, layer.mlp(block_input), inj
++        if st is not None:
++            torch.ops._rocm_C.mono_k2_rdna2_mark(st, 1, m)
++    finally:
++        if st is not None and mono.is_mtp:
++            debug.mtp_kernel_timing(st, False)
+     return result
+ 
+ 
+--- a/vllm/v1/worker/gpu/phase_timer.py
++++ b/vllm/v1/worker/gpu/phase_timer.py
+@@ -94,6 +94,20 @@
+     def flush(self) -> None:
+         done, self.done = self.done, []
+         done[-1][1][-1][1].synchronize()
++        # Diagnostic overlay: completed end-of-draft event already covers K2,
++        # its flag-off fill and the post-draft fault collective. No extra
++        # explicit device synchronization; never run this inside graph capture.
++        from vllm.models.qwen4_exp.amd.mono.rdna2 import OPTS
++
++        if OPTS.timing:
++            from vllm.models.qwen4_exp.amd.mono.rdna2 import debug
++
++            debug.log_stats("model", sampled=True)
++            debug.log_stats("mtp", sampled=True)
++            if not getattr(self, "_mono_stats_flush_logged", False):
++                logger.info("mono timing sampled flush scopes=target,mtp "
++                            "after=draft_event_sync k1_attention=unmeasured")
++                self._mono_stats_flush_logged = True
+         # Per token count: name -> per-step totals (a name can repeat in a step,
+         # e.g. one mark per layer).
+         stats: dict[int, dict[str, list[float]]] = {}

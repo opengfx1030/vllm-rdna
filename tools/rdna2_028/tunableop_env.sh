@@ -26,12 +26,11 @@
 # Lookup only by default (PYTORCH_TUNABLEOP_TUNING=0); set TUNING=1 to re-tune
 # shapes missing from the table. Rows are never written to /tmp or the run CWD.
 #
-# configure_mtp_tunableop is an alias so existing callers do not break.
 # configure_v620_tunableop keeps the historical strict behaviour (lookup is
 # disabled unless this build's four rank files exist; no per-user fallback).
 
 # Print "<name>\t<dir>\t<lib_sha256>" for every profile in the registry.
-# Empty (and non-zero) when the registry is absent or unparseable.
+# Empty (and non-zero) when the registry is absent or unparsable.
 _tunableop_profiles() {
     local registry=$1
     [ -r "$registry" ] || return 1
@@ -125,6 +124,18 @@ configure_tunableop() {
         fi
     done
 
+    # Ranks 4 and up (TP*PP > 4: TP8, TP4xPP2 stage 1) have their own rank files. torch opens
+    # tunableop_results<device ordinal>.csv, and a worker whose file is missing runs the default
+    # rocBLAS heuristic without a word (only PYTORCH_TUNABLEOP_VERBOSE=1 prints "could not open").
+    local ranks=${TUNABLEOP_RANKS:-4} missing_high=""
+    for ((rank = 4; rank < ranks; rank++)); do
+        [[ -s $rows_dir/tunableop_results$rank.csv ]] || missing_high+=" $rank"
+    done
+    if [[ -n $missing_high ]]; then
+        printf 'WARNING: TunableOp rows missing for rank(s)%s at %s: those workers run the default rocBLAS heuristic.\n' \
+            "$missing_high" "$rows_dir" >&2
+    fi
+
     tune_state=off
     [[ $PYTORCH_TUNABLEOP_TUNING == 1 ]] && tune_state=enabled
     export PYTORCH_TUNABLEOP_FILENAME=$rows_dir/tunableop_results.csv
@@ -143,11 +154,6 @@ configure_tunableop() {
         printf 'TunableOp lookup enabled for rocBLAS build %s (rows: %s); tuning %s.\n' \
             "$library_id" "$rows_dir" "$tune_state" >&2
     fi
-}
-
-# Alias kept for the MTP/Flash-Next launchers and other existing callers.
-configure_mtp_tunableop() {
-    configure_tunableop "$@"
 }
 
 # Historical V620 entry point: same as the generic helper but strict about the

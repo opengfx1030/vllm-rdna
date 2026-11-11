@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
-from vllm.platforms.rdna import on_rdna_family
+from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
@@ -21,8 +21,12 @@ logger = init_logger(__name__)
 # concurrent in-flight steps (engine batch_queue_size).
 _DEFAULT_MAX_CONCURRENCY = 2
 
+# Elements copied per program in `_apply_write_kernel`.
+_WRITE_BLOCK_SIZE = 1024
+
 
 _ON_RDNA = on_rdna_family()
+_ON_RDNA2 = on_rdna2_hip()
 
 
 def set_default_max_concurrency(n: int) -> None:
@@ -58,8 +62,8 @@ class NonUvaBuffer:
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         if n is None:
-            return self._uva.copy_(self.cpu)
-        return self._uva[:n].copy_(self.cpu[:n])
+            return self._uva.copy_(self.cpu, non_blocking=True)
+        return self._uva[:n].copy_(self.cpu[:n], non_blocking=True)
 
 
 class UvaBufferPool:
@@ -170,6 +174,7 @@ class StagedWriteTensor:
         self._staged_write_starts: list[int] = []
         self._staged_write_contents: list[int | float] = []
         self._staged_write_cu_lens: list[int] = []
+        self._staged_write_max_len = 0
 
         new_buffer = partial(UvaBufferPool, max_concurrency=max_concurrency)
 
@@ -200,8 +205,11 @@ class StagedWriteTensor:
             return
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(start)
+        prev_len = len(self._staged_write_contents)
         self._staged_write_contents.extend(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        cu_len = len(self._staged_write_contents)
+        self._staged_write_cu_lens.append(cu_len)
+        self._staged_write_max_len = max(self._staged_write_max_len, cu_len - prev_len)
 
     def stage_write_elem(self, index: int, x: int) -> None:
         assert index >= 0
@@ -209,6 +217,7 @@ class StagedWriteTensor:
         self._staged_write_starts.append(0)
         self._staged_write_contents.append(x)
         self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        self._staged_write_max_len = max(self._staged_write_max_len, 1)
 
     def apply_write(self) -> None:
         n = len(self._staged_write_indices)
@@ -251,17 +260,27 @@ class StagedWriteTensor:
                 self._staged_write_contents
             )
 
-        _apply_write_kernel[(n,)](
-            self.gpu,
-            self.gpu.stride(0),
-            indices_ptr,
-            starts_ptr,
-            write_contents,
-            cu_lens_ptr,
-            None,
-            BLOCK_SIZE=1024,
-            MULTI_GROUP=False,
-        )
+        if _ON_RDNA2:
+            torch.ops._rocm_C.apply_write_rdna2(
+                self.gpu,
+                self.gpu.stride(0),
+                indices_ptr,
+                starts_ptr,
+                write_contents,
+                cu_lens_ptr,
+            )
+        else:
+            _apply_write_kernel[(n, _num_write_chunks(self._staged_write_max_len))](
+                self.gpu,
+                self.gpu.stride(0),
+                indices_ptr,
+                starts_ptr,
+                write_contents,
+                cu_lens_ptr,
+                None,
+                BLOCK_SIZE=_WRITE_BLOCK_SIZE,
+                MULTI_GROUP=False,
+            )
         self.clear_staged_writes()
 
     def clear_staged_writes(self) -> None:
@@ -269,6 +288,7 @@ class StagedWriteTensor:
         self._staged_write_starts.clear()
         self._staged_write_contents.clear()
         self._staged_write_cu_lens.clear()
+        self._staged_write_max_len = 0
 
 
 class FusedStagedWriter:
@@ -303,6 +323,7 @@ class FusedStagedWriter:
         starts: list[int] = []
         contents: list[int | float] = []
         cu_lens: list[int] = []
+        max_len = 0
 
         for group_id, t in enumerate(tensors):
             n = len(t._staged_write_indices)
@@ -315,6 +336,7 @@ class FusedStagedWriter:
             content_base = len(contents)
             contents.extend(t._staged_write_contents)
             cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
+            max_len = max(max_len, t._staged_write_max_len)
 
         if not group_ids:
             return
@@ -345,19 +367,35 @@ class FusedStagedWriter:
             cu_lens_ptr = self.cu_lens.copy_to_uva(cu_lens)
         contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
 
-        _apply_write_kernel[(n,)](
-            output_ptrs,
-            output_strides,
-            indices_ptr,
-            starts_ptr,
-            contents_gpu,
-            cu_lens_ptr,
-            group_ids_ptr,
-            BLOCK_SIZE=1024,
-            MULTI_GROUP=True,
-        )
+        if _ON_RDNA2:
+            torch.ops._rocm_C.fused_apply_write_rdna2(
+                output_ptrs,
+                output_strides,
+                indices_ptr,
+                starts_ptr,
+                contents_gpu,
+                cu_lens_ptr,
+                group_ids_ptr,
+            )
+        else:
+            _apply_write_kernel[(n, _num_write_chunks(max_len))](
+                output_ptrs,
+                output_strides,
+                indices_ptr,
+                starts_ptr,
+                contents_gpu,
+                cu_lens_ptr,
+                group_ids_ptr,
+                BLOCK_SIZE=_WRITE_BLOCK_SIZE,
+                MULTI_GROUP=True,
+            )
         for t in tensors:
             t.clear_staged_writes()
+
+
+def _num_write_chunks(max_len: int) -> int:
+    # One program per _WRITE_BLOCK_SIZE-element chunk.
+    return max(triton.cdiv(max_len, _WRITE_BLOCK_SIZE), 1)
 
 
 @triton.jit
@@ -373,7 +411,7 @@ def _apply_write_kernel(
     MULTI_GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    row_idx = tl.load(write_indices_ptr + pid)
+    row_idx = tl.load(write_indices_ptr + pid).to(tl.int64)
     start_idx = tl.load(write_starts_ptr + pid)
 
     cu_start = tl.load(write_cu_lens_ptr + pid - 1) if pid > 0 else 0
@@ -391,11 +429,10 @@ def _apply_write_kernel(
         row_stride = output_stride
     row_ptr += row_idx * row_stride + start_idx
 
-    for i in range(0, content_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < content_len
-        content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
-        tl.store(row_ptr + block, content, mask=mask)
+    block = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < content_len
+    content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
+    tl.store(row_ptr + block, content, mask=mask)
 
 
 @triton.jit

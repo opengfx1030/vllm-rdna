@@ -1,0 +1,421 @@
+LOADED /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so 25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+__ test_quantized_target_router_half_boundary_matches_native[3-200000-100000] __
+
+router_boundary_layer = {'norm_w': tensor([ 0.0098, -0.0323, -0.1823,  ...,  0.1118,  0.0818,  0.0012],
+       device='cuda:0', dtype=torch.fl...      [ 0.0330, -0.0155,  0.0281,  ..., -0.0615, -0.0449, -0.0284]],
+       device='cuda:0', dtype=torch.float16), ...}
+M = 3, first_delta = 200000, second_delta = 100000
+
+    @pytest.mark.parametrize(
+        ("M", "first_delta", "second_delta"),
+        ((3, 200_000, 100_000), (7, 100_000, 200_000), (24, 100_000, 200_000)),
+    )
+    def test_quantized_target_router_half_boundary_matches_native(
+        router_boundary_layer, M, first_delta, second_delta
+    ):
+        """The quantized target Mono route IDs must match native FP16 router logits.
+    
+        The layer seed and changed input seed deltas pin the historical failures.
+        Every graph replay is also checked against a fresh eager candidate and
+        today's module path; a near tie is not an exemption for different IDs.
+        """
+        from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+    
+        L = router_boundary_layer
+        ws_bytes = int(
+            torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(H, R, ND, E, ISE, INTER)
+        )
+        ws = torch.zeros(ws_bytes + 8192, dtype=torch.uint8, device=DEV)
+        mono = SimpleNamespace(
+            t=L,
+            ws=ws,
+            base=0,
+            eps=EPS,
+            is_mtp=False,
+            dense_mtp=False,
+        )
+    
+        def check(candidate, res, blk, inj, label):
+            actual, actual_residual, actual_injection, actual_ids, _ = _today_ffn(
+                L, res, blk, inj, return_routes=True
+            )
+            torch.accelerator.synchronize()
+            error = torch.ops._rocm_C.mono_k2_rdna2_error(ws).tolist()
+            assert error[0] == 0, f"{label}: sticky record {error[:3]}"
+    
+            # Native fused_topk and Mono may use different slot ordering; selected
+            # expert IDs must match exactly as sets for every row.
+            # Ctrl has eight 32-bit words, eight 64-bit timestamps and the
+            # wg_done[10][256] 64-bit debug array before topk_id. The standalone
+            # C++ topk helper is not registered as a production Torch operator.
+            topk_offset = 8 * 4 + 8 * 8 + 10 * 256 * 8
+            mono_ids = ws.narrow(0, topk_offset, M * TOPK * 4).view(torch.int32)
+            mono_ids = mono_ids.view(M, TOPK).sort(dim=-1).values
+            actual_ids = actual_ids.sort(dim=-1).values
+            assert torch.equal(mono_ids, actual_ids), (
+                f"{label}: router expert IDs differ; "
+                f"Mono={mono_ids.tolist()} native={actual_ids.tolist()}"
+            )
+    
+            got_residual, got_ffn, got_injection = candidate
+            max_ffn_error = (got_ffn.float() - actual.float()).abs().max().item()
+            assert max_ffn_error < 5e-3, f"{label}: FFN max abs error {max_ffn_error:.6g}"
+            assert torch.equal(got_residual, actual_residual), f"{label}: residual differs"
+            injection_error = (
+                (got_injection.float() - actual_injection.float()).abs().max().item()
+            )
+            assert injection_error < 5e-3, (
+                f"{label}: injection max abs error {injection_error:.6g}"
+            )
+    
+        # Start with the same base input family as the strict scratch sweep.
+        res, blk, inj = _inputs(M, 50124 + M)
+        check(k2.run(mono, res, blk, inj), res, blk, inj, "initial eager")
+    
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_outputs = k2.run(mono, res, blk, inj)
+    
+        for delta in (first_delta, second_delta):
+            changed = _inputs(M, 50124 + delta + M)
+            for dst, src in zip((res, blk, inj), changed, strict=True):
+                dst.copy_(src)
+            torch.accelerator.synchronize()
+    
+            eager_candidate = k2.run(mono, res, blk, inj)
+>           check(eager_candidate, res, blk, inj, f"fresh eager seed+{delta}")
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py:377: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+candidate = (tensor([[-2.3984,  0.1263,  0.6812,  ..., -0.7144,  0.4563, -1.0576],
+        [ 0.1097, -0.2290, -0.8311,  ...,  0.93...2.2227,  0.6143,  0.0476],
+        [ 1.0684,  0.2089, -1.2539,  0.4688]], device='cuda:0',
+       dtype=torch.float16))
+res = tensor([[-1.7881, -0.1459, -0.2747,  ..., -0.2778, -0.1511, -1.0771],
+        [ 0.1598,  0.0777, -0.8242,  ...,  1.617...3],
+        [ 0.6948,  0.3093,  0.2600,  ..., -1.5938,  0.7920, -0.3926]],
+       device='cuda:0', dtype=torch.float16)
+blk = tensor([[-0.6387,  0.2847,  0.9995,  ..., -0.4097,  0.5698,  0.0183],
+        [-0.0555, -0.3398, -0.0078,  ..., -0.572...3],
+        [ 0.4749, -1.1064, -0.1276,  ..., -0.4067, -0.3767,  0.1986]],
+       device='cuda:0', dtype=torch.float16)
+inj = tensor([[-0.3494,  0.9873, -1.0469,  0.5293],
+        [-0.7812,  1.4551, -0.6221,  1.5596],
+        [-0.8481, -1.0010, -0.2234, -1.5098]], device='cuda:0',
+       dtype=torch.float16)
+label = 'fresh eager seed+200000'
+
+    def check(candidate, res, blk, inj, label):
+        actual, actual_residual, actual_injection, actual_ids, _ = _today_ffn(
+            L, res, blk, inj, return_routes=True
+        )
+        torch.accelerator.synchronize()
+        error = torch.ops._rocm_C.mono_k2_rdna2_error(ws).tolist()
+        assert error[0] == 0, f"{label}: sticky record {error[:3]}"
+    
+        # Native fused_topk and Mono may use different slot ordering; selected
+        # expert IDs must match exactly as sets for every row.
+        # Ctrl has eight 32-bit words, eight 64-bit timestamps and the
+        # wg_done[10][256] 64-bit debug array before topk_id. The standalone
+        # C++ topk helper is not registered as a production Torch operator.
+        topk_offset = 8 * 4 + 8 * 8 + 10 * 256 * 8
+        mono_ids = ws.narrow(0, topk_offset, M * TOPK * 4).view(torch.int32)
+        mono_ids = mono_ids.view(M, TOPK).sort(dim=-1).values
+        actual_ids = actual_ids.sort(dim=-1).values
+>       assert torch.equal(mono_ids, actual_ids), (
+            f"{label}: router expert IDs differ; "
+            f"Mono={mono_ids.tolist()} native={actual_ids.tolist()}"
+        )
+E       AssertionError: fresh eager seed+200000: router expert IDs differ; Mono=[[135, 174, 197, 199, 285, 315, 346, 362, 386, 453], [46, 54, 76, 86, 140, 191, 380, 398, 478, 510], [33, 36, 53, 119, 124, 149, 190, 210, 257, 363]] native=[[135, 174, 197, 199, 284, 285, 315, 362, 386, 453], [46, 54, 76, 86, 140, 191, 380, 398, 478, 510], [33, 36, 53, 119, 124, 149, 190, 210, 257, 363]]
+E       assert False
+E        +  where False = <built-in method equal of type object at 0x7fe11dd3ad80>(tensor([[135, 174, 197, 199, 285, 315, 346, 362, 386, 453],\n        [ 46,  54,  76,  86, 140, 191, 380, 398, 478, 510],\n        [ 33,  36,  53, 119, 124, 149, 190, 210, 257, 363]], device='cuda:0',\n       dtype=torch.int32), tensor([[135, 174, 197, 199, 284, 285, 315, 362, 386, 453],\n        [ 46,  54,  76,  86, 140, 191, 380, 398, 478, 510],\n        [ 33,  36,  53, 119, 124, 149, 190, 210, 257, 363]], device='cuda:0',\n       dtype=torch.int32))
+E        +    where <built-in method equal of type object at 0x7fe11dd3ad80> = torch.equal
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py:346: AssertionError
+------------------------------ Captured log setup ------------------------------
+ERROR    vllm.model_executor.layers.fused_moe.config:config.py:34 Failed to import Triton kernels. Please make sure your triton version is compatible. Error: cannot import name 'is_hip_gfx1250' from 'triton.language.target_info' (/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/triton/language/target_info.py)
+__ test_quantized_target_router_half_boundary_matches_native[7-100000-200000] __
+
+router_boundary_layer = {'norm_w': tensor([ 0.0098, -0.0323, -0.1823,  ...,  0.1118,  0.0818,  0.0012],
+       device='cuda:0', dtype=torch.fl...      [ 0.0330, -0.0155,  0.0281,  ..., -0.0615, -0.0449, -0.0284]],
+       device='cuda:0', dtype=torch.float16), ...}
+M = 7, first_delta = 100000, second_delta = 200000
+
+    @pytest.mark.parametrize(
+        ("M", "first_delta", "second_delta"),
+        ((3, 200_000, 100_000), (7, 100_000, 200_000), (24, 100_000, 200_000)),
+    )
+    def test_quantized_target_router_half_boundary_matches_native(
+        router_boundary_layer, M, first_delta, second_delta
+    ):
+        """The quantized target Mono route IDs must match native FP16 router logits.
+    
+        The layer seed and changed input seed deltas pin the historical failures.
+        Every graph replay is also checked against a fresh eager candidate and
+        today's module path; a near tie is not an exemption for different IDs.
+        """
+        from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+    
+        L = router_boundary_layer
+        ws_bytes = int(
+            torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(H, R, ND, E, ISE, INTER)
+        )
+        ws = torch.zeros(ws_bytes + 8192, dtype=torch.uint8, device=DEV)
+        mono = SimpleNamespace(
+            t=L,
+            ws=ws,
+            base=0,
+            eps=EPS,
+            is_mtp=False,
+            dense_mtp=False,
+        )
+    
+        def check(candidate, res, blk, inj, label):
+            actual, actual_residual, actual_injection, actual_ids, _ = _today_ffn(
+                L, res, blk, inj, return_routes=True
+            )
+            torch.accelerator.synchronize()
+            error = torch.ops._rocm_C.mono_k2_rdna2_error(ws).tolist()
+            assert error[0] == 0, f"{label}: sticky record {error[:3]}"
+    
+            # Native fused_topk and Mono may use different slot ordering; selected
+            # expert IDs must match exactly as sets for every row.
+            # Ctrl has eight 32-bit words, eight 64-bit timestamps and the
+            # wg_done[10][256] 64-bit debug array before topk_id. The standalone
+            # C++ topk helper is not registered as a production Torch operator.
+            topk_offset = 8 * 4 + 8 * 8 + 10 * 256 * 8
+            mono_ids = ws.narrow(0, topk_offset, M * TOPK * 4).view(torch.int32)
+            mono_ids = mono_ids.view(M, TOPK).sort(dim=-1).values
+            actual_ids = actual_ids.sort(dim=-1).values
+            assert torch.equal(mono_ids, actual_ids), (
+                f"{label}: router expert IDs differ; "
+                f"Mono={mono_ids.tolist()} native={actual_ids.tolist()}"
+            )
+    
+            got_residual, got_ffn, got_injection = candidate
+            max_ffn_error = (got_ffn.float() - actual.float()).abs().max().item()
+            assert max_ffn_error < 5e-3, f"{label}: FFN max abs error {max_ffn_error:.6g}"
+            assert torch.equal(got_residual, actual_residual), f"{label}: residual differs"
+            injection_error = (
+                (got_injection.float() - actual_injection.float()).abs().max().item()
+            )
+            assert injection_error < 5e-3, (
+                f"{label}: injection max abs error {injection_error:.6g}"
+            )
+    
+        # Start with the same base input family as the strict scratch sweep.
+        res, blk, inj = _inputs(M, 50124 + M)
+        check(k2.run(mono, res, blk, inj), res, blk, inj, "initial eager")
+    
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_outputs = k2.run(mono, res, blk, inj)
+    
+        for delta in (first_delta, second_delta):
+            changed = _inputs(M, 50124 + delta + M)
+            for dst, src in zip((res, blk, inj), changed, strict=True):
+                dst.copy_(src)
+            torch.accelerator.synchronize()
+    
+            eager_candidate = k2.run(mono, res, blk, inj)
+>           check(eager_candidate, res, blk, inj, f"fresh eager seed+{delta}")
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py:377: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+candidate = (tensor([[-0.9277,  1.6670, -1.6963,  ...,  0.1565, -0.9092, -0.9834],
+        [-0.4824,  0.7573,  0.1348,  ..., -1.08...0.0870,  0.6318, -0.4512],
+        [-1.8555, -0.5776,  0.4751, -0.8999]], device='cuda:0',
+       dtype=torch.float16))
+res = tensor([[-0.8882,  1.7764, -1.6699,  ...,  0.1433, -0.4792, -1.1182],
+        [-0.3293, -0.1907,  0.2957,  ..., -0.545...9],
+        [ 0.2317,  1.4541, -0.2961,  ...,  0.3003, -1.3486,  0.8228]],
+       device='cuda:0', dtype=torch.float16)
+blk = tensor([[-0.0376, -0.1040, -0.0252,  ...,  0.0176, -0.5747,  0.1803],
+        [-0.1268,  0.7856, -0.1333,  ..., -0.524...6],
+        [ 0.1542,  0.4111, -0.4380,  ..., -0.1600,  0.8457,  0.6323]],
+       device='cuda:0', dtype=torch.float16)
+inj = tensor([[ 0.3777,  0.5908,  0.9844, -2.0625],
+        [ 1.6777,  0.0302, -0.4558,  0.1829],
+        [-0.1532, -0.4851,... 1.2725, -0.5435,  1.2158],
+        [-0.7090, -0.2205, -0.7485,  0.7451]], device='cuda:0',
+       dtype=torch.float16)
+label = 'fresh eager seed+100000'
+
+    def check(candidate, res, blk, inj, label):
+        actual, actual_residual, actual_injection, actual_ids, _ = _today_ffn(
+            L, res, blk, inj, return_routes=True
+        )
+        torch.accelerator.synchronize()
+        error = torch.ops._rocm_C.mono_k2_rdna2_error(ws).tolist()
+        assert error[0] == 0, f"{label}: sticky record {error[:3]}"
+    
+        # Native fused_topk and Mono may use different slot ordering; selected
+        # expert IDs must match exactly as sets for every row.
+        # Ctrl has eight 32-bit words, eight 64-bit timestamps and the
+        # wg_done[10][256] 64-bit debug array before topk_id. The standalone
+        # C++ topk helper is not registered as a production Torch operator.
+        topk_offset = 8 * 4 + 8 * 8 + 10 * 256 * 8
+        mono_ids = ws.narrow(0, topk_offset, M * TOPK * 4).view(torch.int32)
+        mono_ids = mono_ids.view(M, TOPK).sort(dim=-1).values
+        actual_ids = actual_ids.sort(dim=-1).values
+>       assert torch.equal(mono_ids, actual_ids), (
+            f"{label}: router expert IDs differ; "
+            f"Mono={mono_ids.tolist()} native={actual_ids.tolist()}"
+        )
+E       AssertionError: fresh eager seed+100000: router expert IDs differ; Mono=[[4, 64, 69, 207, 239, 350, 368, 390, 423, 493], [1, 101, 105, 136, 175, 216, 250, 259, 336, 420], [105, 202, 210, 316, 338, 362, 375, 384, 425, 496], [25, 161, 180, 306, 318, 381, 410, 432, 489, 493], [31, 239, 253, 276, 354, 359, 366, 411, 446, 491], [2, 11, 88, 107, 290, 349, 353, 428, 492, 510], [12, 32, 164, 203, 222, 246, 379, 450, 504, 510]] native=[[4, 64, 69, 207, 239, 350, 368, 390, 423, 493], [1, 101, 105, 136, 175, 216, 250, 259, 336, 420], [105, 202, 210, 316, 338, 362, 375, 384, 425, 496], [25, 161, 180, 306, 318, 381, 410, 432, 489, 493], [31, 239, 253, 276, 354, 359, 366, 411, 446, 491], [2, 11, 88, 107, 290, 334, 353, 428, 492, 510], [12, 32, 164, 203, 222, 246, 379, 450, 504, 510]]
+E       assert False
+E        +  where False = <built-in method equal of type object at 0x7fe11dd3ad80>(tensor([[  4,  64,  69, 207, 239, 350, 368, 390, 423, 493],\n        [  1, 101, 105, 136, 175, 216, 250, 259, 336, 420]...428, 492, 510],\n        [ 12,  32, 164, 203, 222, 246, 379, 450, 504, 510]], device='cuda:0',\n       dtype=torch.int32), tensor([[  4,  64,  69, 207, 239, 350, 368, 390, 423, 493],\n        [  1, 101, 105, 136, 175, 216, 250, 259, 336, 420]...428, 492, 510],\n        [ 12,  32, 164, 203, 222, 246, 379, 450, 504, 510]], device='cuda:0',\n       dtype=torch.int32))
+E        +    where <built-in method equal of type object at 0x7fe11dd3ad80> = torch.equal
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py:346: AssertionError
+_ test_quantized_target_router_half_boundary_matches_native[24-100000-200000] __
+
+router_boundary_layer = {'norm_w': tensor([ 0.0098, -0.0323, -0.1823,  ...,  0.1118,  0.0818,  0.0012],
+       device='cuda:0', dtype=torch.fl...      [ 0.0330, -0.0155,  0.0281,  ..., -0.0615, -0.0449, -0.0284]],
+       device='cuda:0', dtype=torch.float16), ...}
+M = 24, first_delta = 100000, second_delta = 200000
+
+    @pytest.mark.parametrize(
+        ("M", "first_delta", "second_delta"),
+        ((3, 200_000, 100_000), (7, 100_000, 200_000), (24, 100_000, 200_000)),
+    )
+    def test_quantized_target_router_half_boundary_matches_native(
+        router_boundary_layer, M, first_delta, second_delta
+    ):
+        """The quantized target Mono route IDs must match native FP16 router logits.
+    
+        The layer seed and changed input seed deltas pin the historical failures.
+        Every graph replay is also checked against a fresh eager candidate and
+        today's module path; a near tie is not an exemption for different IDs.
+        """
+        from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+    
+        L = router_boundary_layer
+        ws_bytes = int(
+            torch.ops._rocm_C.mono_k2_rdna2_workspace_bytes(H, R, ND, E, ISE, INTER)
+        )
+        ws = torch.zeros(ws_bytes + 8192, dtype=torch.uint8, device=DEV)
+        mono = SimpleNamespace(
+            t=L,
+            ws=ws,
+            base=0,
+            eps=EPS,
+            is_mtp=False,
+            dense_mtp=False,
+        )
+    
+        def check(candidate, res, blk, inj, label):
+            actual, actual_residual, actual_injection, actual_ids, _ = _today_ffn(
+                L, res, blk, inj, return_routes=True
+            )
+            torch.accelerator.synchronize()
+            error = torch.ops._rocm_C.mono_k2_rdna2_error(ws).tolist()
+            assert error[0] == 0, f"{label}: sticky record {error[:3]}"
+    
+            # Native fused_topk and Mono may use different slot ordering; selected
+            # expert IDs must match exactly as sets for every row.
+            # Ctrl has eight 32-bit words, eight 64-bit timestamps and the
+            # wg_done[10][256] 64-bit debug array before topk_id. The standalone
+            # C++ topk helper is not registered as a production Torch operator.
+            topk_offset = 8 * 4 + 8 * 8 + 10 * 256 * 8
+            mono_ids = ws.narrow(0, topk_offset, M * TOPK * 4).view(torch.int32)
+            mono_ids = mono_ids.view(M, TOPK).sort(dim=-1).values
+            actual_ids = actual_ids.sort(dim=-1).values
+            assert torch.equal(mono_ids, actual_ids), (
+                f"{label}: router expert IDs differ; "
+                f"Mono={mono_ids.tolist()} native={actual_ids.tolist()}"
+            )
+    
+            got_residual, got_ffn, got_injection = candidate
+            max_ffn_error = (got_ffn.float() - actual.float()).abs().max().item()
+            assert max_ffn_error < 5e-3, f"{label}: FFN max abs error {max_ffn_error:.6g}"
+            assert torch.equal(got_residual, actual_residual), f"{label}: residual differs"
+            injection_error = (
+                (got_injection.float() - actual_injection.float()).abs().max().item()
+            )
+            assert injection_error < 5e-3, (
+                f"{label}: injection max abs error {injection_error:.6g}"
+            )
+    
+        # Start with the same base input family as the strict scratch sweep.
+        res, blk, inj = _inputs(M, 50124 + M)
+        check(k2.run(mono, res, blk, inj), res, blk, inj, "initial eager")
+    
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_outputs = k2.run(mono, res, blk, inj)
+    
+        for delta in (first_delta, second_delta):
+            changed = _inputs(M, 50124 + delta + M)
+            for dst, src in zip((res, blk, inj), changed, strict=True):
+                dst.copy_(src)
+            torch.accelerator.synchronize()
+    
+            eager_candidate = k2.run(mono, res, blk, inj)
+>           check(eager_candidate, res, blk, inj, f"fresh eager seed+{delta}")
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py:377: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+candidate = (tensor([[ 1.7002e+00, -3.8013e-01, -1.8691e+00,  ..., -1.7881e+00,
+          1.5986e+00, -9.1016e-01],
+        [ 1.04...0.3538, -0.5884, -1.9453],
+        [-0.4631,  1.6074,  0.4116,  1.0859]], device='cuda:0',
+       dtype=torch.float16))
+res = tensor([[ 1.0225,  0.2416, -1.7412,  ..., -1.3301,  2.0059, -0.8525],
+        [ 1.5400,  0.4778, -1.9209,  ..., -0.527...2],
+        [ 1.3086,  0.5625, -0.4419,  ...,  1.5020,  0.1859, -0.3442]],
+       device='cuda:0', dtype=torch.float16)
+blk = tensor([[ 0.6543, -0.6006, -0.1237,  ..., -0.4932, -0.4382, -0.0623],
+        [-0.5137, -0.2891,  0.4761,  ...,  0.176...8],
+        [-0.0471,  0.0813, -0.2649,  ...,  0.6929,  0.2747,  0.8950]],
+       device='cuda:0', dtype=torch.float16)
+inj = tensor([[ 0.2822, -0.5391, -0.8140, -0.5728],
+        [-0.2981,  0.1400,  0.5425, -0.7559],
+        [-0.4634,  0.1226,...-0.0168, -0.7847,  0.1261],
+        [ 0.7217, -1.0986,  1.4473,  1.2744]], device='cuda:0',
+       dtype=torch.float16)
+label = 'fresh eager seed+100000'
+
+    def check(candidate, res, blk, inj, label):
+        actual, actual_residual, actual_injection, actual_ids, _ = _today_ffn(
+            L, res, blk, inj, return_routes=True
+        )
+        torch.accelerator.synchronize()
+        error = torch.ops._rocm_C.mono_k2_rdna2_error(ws).tolist()
+        assert error[0] == 0, f"{label}: sticky record {error[:3]}"
+    
+        # Native fused_topk and Mono may use different slot ordering; selected
+        # expert IDs must match exactly as sets for every row.
+        # Ctrl has eight 32-bit words, eight 64-bit timestamps and the
+        # wg_done[10][256] 64-bit debug array before topk_id. The standalone
+        # C++ topk helper is not registered as a production Torch operator.
+        topk_offset = 8 * 4 + 8 * 8 + 10 * 256 * 8
+        mono_ids = ws.narrow(0, topk_offset, M * TOPK * 4).view(torch.int32)
+        mono_ids = mono_ids.view(M, TOPK).sort(dim=-1).values
+        actual_ids = actual_ids.sort(dim=-1).values
+>       assert torch.equal(mono_ids, actual_ids), (
+            f"{label}: router expert IDs differ; "
+            f"Mono={mono_ids.tolist()} native={actual_ids.tolist()}"
+        )
+E       AssertionError: fresh eager seed+100000: router expert IDs differ; Mono=[[52, 106, 122, 225, 227, 333, 340, 348, 383, 440], [26, 129, 163, 256, 259, 402, 448, 473, 492, 500], [8, 97, 104, 168, 236, 270, 363, 370, 389, 437], [94, 101, 109, 238, 254, 269, 316, 385, 472, 489], [30, 35, 126, 171, 305, 322, 346, 374, 413, 431], [26, 171, 215, 258, 360, 365, 370, 403, 450, 476], [66, 67, 72, 93, 113, 149, 150, 316, 425, 460], [54, 87, 97, 108, 241, 261, 279, 470, 475, 502], [4, 19, 74, 77, 231, 355, 370, 395, 397, 456], [70, 82, 86, 106, 148, 262, 357, 386, 420, 445], [15, 17, 31, 54, 78, 175, 251, 326, 338, 378], [110, 226, 227, 272, 326, 366, 384, 414, 436, 483], [92, 137, 218, 226, 284, 334, 337, 383, 448, 453], [27, 80, 155, 187, 263, 304, 381, 410, 435, 436], [36, 97, 137, 232, 239, 240, 381, 448, 451, 458], [28, 93, 101, 127, 197, 316, 409, 462, 482, 510], [124, 159, 176, 196, 209, 221, 222, 236, 255, 332], [38, 123, 131, 182, 255, 258, 270, 281, 357, 424], [7, 32, 95, 125, 182, 191, 209, 295, 303, 360], [53, 71, 93, 134, 142, 199, 260, 287, 303, 344], [4, 159, 187, 288, 298, 404, 426, 429, 434, 496], [53, 147, 160, 237, 242, 324, 353, 362, 432, 474], [95, 161, 180, 201, 263, 267, 306, 322, 344, 416], [46, 73, 83, 107, 123, 125, 298, 314, 327, 348]] native=[[52, 106, 122, 225, 227, 333, 340, 348, 383, 440], [26, 129, 163, 256, 259, 402, 448, 473, 492, 500], [8, 97, 104, 168, 236, 270, 363, 370, 389, 437], [94, 101, 109, 238, 254, 269, 316, 385, 472, 489], [30, 35, 126, 171, 305, 322, 346, 374, 413, 431], [26, 171, 215, 258, 360, 365, 370, 403, 450, 476], [66, 67, 72, 93, 113, 149, 150, 316, 425, 460], [54, 87, 97, 108, 241, 261, 279, 470, 475, 502], [4, 19, 74, 77, 231, 355, 370, 395, 397, 456], [70, 82, 86, 106, 148, 262, 357, 386, 420, 445], [15, 17, 31, 54, 78, 175, 251, 326, 338, 378], [110, 226, 227, 272, 326, 366, 384, 414, 436, 483], [92, 137, 218, 226, 284, 334, 337, 383, 448, 453], [27, 80, 155, 187, 263, 304, 381, 410, 435, 436], [36, 97, 137, 232, 239, 240, 381, 448, 451, 458], [28, 93, 101, 127, 197, 316, 409, 462, 482, 510], [124, 159, 176, 196, 209, 221, 222, 236, 255, 332], [38, 123, 131, 182, 255, 258, 270, 281, 357, 424], [7, 32, 95, 125, 182, 191, 209, 295, 303, 360], [53, 71, 93, 134, 142, 199, 260, 287, 303, 344], [4, 159, 187, 288, 298, 404, 426, 429, 434, 496], [53, 147, 160, 237, 242, 324, 353, 362, 432, 474], [95, 161, 180, 201, 263, 267, 306, 322, 344, 416], [46, 73, 80, 83, 107, 125, 298, 314, 327, 348]]
+E       assert False
+E        +  where False = <built-in method equal of type object at 0x7fe11dd3ad80>(tensor([[ 52, 106, 122, 225, 227, 333, 340, 348, 383, 440],\n        [ 26, 129, 163, 256, 259, 402, 448, 473, 492, 500]...322, 344, 416],\n        [ 46,  73,  83, 107, 123, 125, 298, 314, 327, 348]], device='cuda:0',\n       dtype=torch.int32), tensor([[ 52, 106, 122, 225, 227, 333, 340, 348, 383, 440],\n        [ 26, 129, 163, 256, 259, 402, 448, 473, 492, 500]...322, 344, 416],\n        [ 46,  73,  80,  83, 107, 125, 298, 314, 327, 348]], device='cuda:0',\n       dtype=torch.int32))
+E        +    where <built-in method equal of type object at 0x7fe11dd3ad80> = torch.equal
+
+/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py:346: AssertionError
+=============================== warnings summary ===============================
+test_amd_mono_rdna2_kernels_v3.py: 14 warnings
+  /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py::test_quantized_target_router_half_boundary_matches_native[3-200000-100000]
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py::test_quantized_target_router_half_boundary_matches_native[7-100000-200000]
+FAILED ../home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py::test_quantized_target_router_half_boundary_matches_native[24-100000-200000]
+3 failed, 332 deselected, 14 warnings in 8.17s

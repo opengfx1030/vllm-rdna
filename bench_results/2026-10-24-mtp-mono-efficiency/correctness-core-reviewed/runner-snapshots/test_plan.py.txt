@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""CPU-only command rewrite tests; never execute Ninja, compiler, or linker."""
+
+import contextlib
+import importlib.util
+import io
+import json
+import shlex
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location(
+    "builder", HERE / "build_disposable_core.py"
+)
+builder = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(builder)
+
+
+class PlanTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="correctness plan ")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.build = self.root / "build with spaces"
+        self.source = self.build / "csrc/rocm/mono_k2_rdna2.hip"
+        self.source.parent.mkdir(parents=True)
+        self.source.write_bytes(b'#include "local.h"\n__device__ bool original;\n')
+        (self.source.parent / "local.h").write_text('#include "nested.h"\n')
+        (self.source.parent / "nested.h").write_text("// original header\n")
+        (self.build / "build.ninja").write_text("# fixture only\n")
+        self.obj = self.build / builder.OBJECT_REL
+        self.obj.parent.mkdir(parents=True)
+        self.obj.write_bytes(b"baseline object")
+        self.other = []
+        for index in range(51):
+            path = self.build / f"other {index}.o"
+            path.write_bytes(f"object{index}".encode())
+            self.other.append(path)
+        self.candidate = self.root / "validated candidate.hip"
+        self.candidate.write_bytes(b'#include "local.h"\n// exact candidate\r\n')
+        # A decoy proves the candidate's directory is NOT used for quoted headers.
+        (self.root / "local.h").write_text("// forbidden decoy\n")
+        self.compile = shlex.join(
+            [
+                "hipcc",
+                "-O2",
+                "-DNDEBUG",
+                "-c",
+                str(self.source),
+                "-o",
+                str(self.obj),
+                "-MF",
+                str(self.obj) + ".d",
+                "-MT",
+                str(self.obj),
+            ]
+        )
+        self.link = (
+            ": && "
+            + shlex.join(
+                [
+                    "clang++",
+                    "-shared",
+                    str(self.obj),
+                    *map(str, self.other),
+                    "-o",
+                    str(self.build / builder.LINK_TARGET),
+                    "-Xlinker",
+                    "--dependency-file=old.link.d",
+                ]
+            )
+            + " && :"
+        )
+
+    def args(self, suffix="plan"):
+        return [
+            "--build-dir",
+            str(self.build),
+            "--scratch-dir",
+            str(self.root / suffix),
+            "--candidate-hip",
+            str(self.candidate),
+            "--expected-candidate-hip-sha256",
+            builder.sha256(self.candidate),
+            "--expected-original-hip-sha256",
+            builder.sha256(self.source),
+        ]
+
+    def plan(self, args):
+        def commands(ninja, build, target):
+            return (
+                [self.compile]
+                if target == str(builder.OBJECT_REL)
+                else [self.compile, self.link]
+            )
+
+        with (
+            patch.object(builder, "ninja_commands", side_effect=commands),
+            patch.object(
+                builder.subprocess,
+                "run",
+                side_effect=AssertionError("no process allowed"),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            return builder.main(args)
+
+    def test_exact_source_and_51_objects(self):
+        before = {p: builder.sha256(p) for p in [self.source, self.obj, *self.other]}
+        self.assertEqual(self.plan(self.args()), 0)
+        scratch = self.root / "plan"
+        self.assertEqual(
+            (scratch / "mono_k2_rdna2.candidate.hip").read_bytes(),
+            self.candidate.read_bytes(),
+        )
+        data = json.loads((scratch / "build_manifest.json").read_text())
+        self.assertEqual(data["status"], "plan-only")
+        self.assertEqual(data["other_link_object_count"], 51)
+        self.assertTrue(data["input_pins_unchanged"])
+        self.assertEqual(data["optimization_flags"], ["-O2"])
+        self.assertEqual(set(data["visibility"].values()), {""})
+        self.assertIn("GPU_DEVICE_ORDINAL", data["visibility"])
+        self.assertEqual(
+            {x["path"] for x in data["quoted_headers"]},
+            {str(self.source.parent / "local.h"), str(self.source.parent / "nested.h")},
+        )
+        argv = data["commands"]["compile_rewritten"]
+        self.assertIn("-O2", argv)
+        self.assertIn(str(self.source.parent), argv)
+        self.assertNotIn(str(self.obj), argv)
+        self.assertEqual(before, {p: builder.sha256(p) for p in before})
+        self.assertFalse((scratch / builder.LINK_TARGET).exists())
+
+    def test_hash_mismatch_before_ninja_or_staging(self):
+        for flag in [
+            "--expected-candidate-hip-sha256",
+            "--expected-original-hip-sha256",
+        ]:
+            args = self.args(flag[2:])
+            args[args.index(flag) + 1] = "0" * 64
+            with (
+                patch.object(
+                    builder,
+                    "ninja_commands",
+                    side_effect=AssertionError("must reject before ninja"),
+                ),
+                self.assertRaisesRegex(ValueError, "SHA256 mismatch"),
+            ):
+                builder.main(args)
+            self.assertFalse((self.root / flag[2:]).exists())
+
+    def test_reject_non_o2(self):
+        self.compile = self.compile.replace("-O2", "-O3")
+        with self.assertRaisesRegex(ValueError, "production -O2"):
+            self.plan(self.args())
+
+    def test_missing_link_input_rejected(self):
+        self.other[-1].unlink()
+        with self.assertRaisesRegex(ValueError, "link input missing"):
+            self.plan(self.args())
+
+    def test_changed_link_count_rejected(self):
+        with self.assertRaisesRegex(ValueError, "link input count mismatch"):
+            self.plan(self.args() + ["--expected-other-link-object-count", "50"])
+
+    def test_no_shell_wrappers_and_duplicate_source(self):
+        with self.assertRaisesRegex(ValueError, "shell syntax"):
+            builder.parse_ninja_command("hipcc x && touch forbidden", self.build)
+        argv = ["hipcc", str(self.source), str(self.source), "-o", str(self.obj)]
+        with self.assertRaisesRegex(ValueError, "exactly once"):
+            builder.rewrite_compile(
+                argv,
+                self.build,
+                self.source,
+                self.root / "x.hip",
+                self.obj,
+                self.root / "x.o",
+                self.source.parent,
+            )
+
+    def test_changed_pin_rejected(self):
+        pins = [{"path": str(self.obj), "sha256": builder.sha256(self.obj)}]
+        self.obj.write_bytes(b"mutated")
+        with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
+            builder.check_pins(pins)
+
+    def test_execute_children_have_all_gpus_hidden(self):
+        # Mock child invocation: --execute is NOT invoked, no process is created.
+        with (
+            patch.object(builder.subprocess, "run") as run,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            builder.run_command(
+                ["compiler"], self.build, {"HIP_VISIBLE_DEVICES": "6"}, execute=True
+            )
+        env = run.call_args.kwargs["env"]
+        for key in [
+            "HIP_VISIBLE_DEVICES",
+            "ROCR_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+            "GPU_DEVICE_ORDINAL",
+        ]:
+            self.assertEqual(env[key], "")
+
+
+if __name__ == "__main__":
+    unittest.main()

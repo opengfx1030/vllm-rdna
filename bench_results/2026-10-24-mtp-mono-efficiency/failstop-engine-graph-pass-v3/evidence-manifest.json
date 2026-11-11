@@ -1,0 +1,70 @@
+{
+  "bundle": "failstop-engine-graph-pass-v3",
+  "files": [
+    {
+      "path": "ARM-PASS.txt",
+      "size_bytes": 208,
+      "sha256": "098aa1862fc45afd5f48a6b63f2dc757f0224165108e5c33f631f4da7b881c38"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 1745,
+      "sha256": "1888c8713749fdab603bba7e67ebe2a1c98d6994ad5b17bb5cf814a0b041ddfe"
+    },
+    {
+      "path": "boot-id.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "boot-id.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "path": "config-summary.txt",
+      "size_bytes": 434,
+      "sha256": "0d93b78da6232352d41e7fa301440768059ad78f0c4c214e73f1bbd98b154dd9"
+    },
+    {
+      "path": "kernel-journal-audit-summary.json",
+      "size_bytes": 600,
+      "sha256": "917643c253b548a5d426f09741b0f5cdcd3a121d9a3a07534c7a7f42f08d19ff"
+    },
+    {
+      "path": "models.json",
+      "size_bytes": 582,
+      "sha256": "f35a4dc997e11c46650930a5b6d2b170300758043f87e389b56d50121f19f002"
+    },
+    {
+      "path": "qualification-events.txt",
+      "size_bytes": 1876,
+      "sha256": "046df2fc6464842978a009680082ad32bda0a0916bd3e64f928fede5d968c700"
+    },
+    {
+      "path": "rank1-qualification.json",
+      "size_bytes": 566,
+      "sha256": "c24e769ea91ae5c8ddfb4760d2d7a0a5a5ca300476f410ec85ae0a30823d8174"
+    },
+    {
+      "path": "rank1-qualification.log",
+      "size_bytes": 566,
+      "sha256": "c24e769ea91ae5c8ddfb4760d2d7a0a5a5ca300476f410ec85ae0a30823d8174"
+    },
+    {
+      "path": "sha256.after",
+      "size_bytes": 4895,
+      "sha256": "ee32a7cf611b744db85dacca43e117112b6d1214fe5f669b6b2d7c5219479e85"
+    },
+    {
+      "path": "sha256.before",
+      "size_bytes": 4895,
+      "sha256": "ee32a7cf611b744db85dacca43e117112b6d1214fe5f669b6b2d7c5219479e85"
+    },
+    {
+      "path": "worker-provenance.json",
+      "size_bytes": 3797,
+      "sha256": "b0e03d493317e60057fcb7076159818bc244b440beb1d0002911ec6a0a2d09b4"
+    }
+  ]
+}

@@ -75,7 +75,7 @@ export PYTORCH_TUNABLEOP_ENABLED=0 PYTORCH_TUNABLEOP_TUNING=0 PYTORCH_TUNABLEOP_
 sdk=$runtime/.venv/lib/python3.12/site-packages/_rocm_sdk_core
 export PATH="$runtime/.venv/bin:/opt/rocm/core-10.0/bin:/opt/rocm/core-10.0/llvm/bin:$PATH"
 export LD_LIBRARY_PATH="$sdk/lib:$sdk/lib/host-math/lib:/opt/rocm/core-10.0/lib"
-source "$root/source/tools/rdna2/tunableop_env.sh"
+source "$root/source/tools/rdna2_028/tunableop_env.sh"
 configure_v620_tunableop "$runtime/.venv/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/librocblas.so.5" "$runtime/tunableop"
 command=("$runtime/.venv/bin/python" -m vllm.entrypoints.openai.api_server
  --model ${V620_MODEL:?set V620_MODEL} --served-model-name active qwen3.8-flash-next

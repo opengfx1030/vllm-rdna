@@ -1,0 +1,19 @@
+{
+  "baseline": {
+    "snapshot": "dense-mtp-failstop-engine-cleanup-proposal-v1/core.py.original",
+    "sha256": "9d1269b1e589325a45f715f43b5d731592681136bd247125e1e61005f749e2ac"
+  },
+  "candidate": {
+    "snapshot": "dense-mtp-failstop-engine-cleanup-proposal-v1/core.py.candidate",
+    "sha256": "d68e8983fa59059cdfa34be018aba291b7ffb0970cb4390fb3e6742b1e08228e"
+  },
+  "patch": {
+    "snapshot": "dense-mtp-failstop-engine-cleanup-proposal-v1/rocm-fatal-sigterm-cleanup.patch",
+    "sha256": "ffadcf57708a6d47cbeb61a2749d1a4609428145feddbcb0bfaa4efb8fea4d76"
+  },
+  "test": {
+    "snapshot": "dense-mtp-failstop-engine-cleanup-proposal-v1/check_cpu.py",
+    "sha256": "251b9d756cebeb33dc8020d0a16281956c5a3d0488ac978c4a944fe1cd833559"
+  },
+  "baseline_git_sha": "9d1269b1e589325a45f715f43b5d731592681136bd247125e1e61005f749e2ac"
+}

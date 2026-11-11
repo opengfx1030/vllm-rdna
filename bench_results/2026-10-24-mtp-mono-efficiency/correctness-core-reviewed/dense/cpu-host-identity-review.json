@@ -1,0 +1,171 @@
+{
+  "scope": "Read-only CPU inspection of recovered artifacts; no GPU identity/performance qualification",
+  "binary_sha256": "837e6ab2ff6c43831bfcaa39e807d8a7916a542039c32d503ee680d9d3bca601",
+  "build_source_sha256": "28356022f2ca23c667c70fc0712cef300fcdfa16b0dc1c8a23626b2cc413efa8",
+  "build_binding_sha256": "e3c943636b36f1e113edb6c5611cc147da1791c2f5f439a2f144eb1c66ddae43",
+  "build_exit_zero": true,
+  "installed_source_binary_and_boot_before_after_unchanged": true,
+  "all_Mono_host_names_and_relocations_unique_v2": true,
+  "original_AR_helper_absent": true,
+  "unique_AR_stub_relocation": true,
+  "unique_template_host_stubs": [
+    "_ZN30mono_ffn_dense_native_round_v230__device_stub__mono_ffn_kernelILi12ELi8EEEvNS_6ParamsE",
+    "_ZN30mono_ffn_dense_native_round_v230__device_stub__mono_ffn_kernelILi24ELi8EEEvNS_6ParamsE",
+    "_ZN30mono_ffn_dense_native_round_v230__device_stub__mono_ffn_kernelILi4ELi8EEEvNS_6ParamsE",
+    "_ZN30mono_ffn_dense_native_round_v230__device_stub__mono_ffn_kernelILi8ELi8EEEvNS_6ParamsE"
+  ],
+  "host_binding": "Kernel handles/stubs remain WEAK DEFAULT; v2 namespace/API/helper names avoid original core collisions. Actual unique-name GPU trace still required.",
+  "all_5_kernels_Wave32": true,
+  "all_FFN_private_bytes_zero": true,
+  "all_FFN_VGPR_spills_zero": true,
+  "comparisons": [
+    {
+      "M_bucket": 4,
+      "candidate": {
+        "group_segment_fixed_size": 25280,
+        "name": "_ZN30mono_ffn_dense_native_round_v215mono_ffn_kernelILi4ELi8EEEvNS_6ParamsE",
+        "private_segment_fixed_size": 0,
+        "sgpr_count": 107,
+        "sgpr_spill_count": 21,
+        "vgpr_count": 111,
+        "vgpr_spill_count": 0,
+        "wavefront_size": 32
+      },
+      "O3_inline_control": {
+        "group_segment_fixed_size": 25280,
+        "name": "_ZN8mono_ffn15mono_ffn_kernelILi4ELi8EEEvNS_6ParamsE",
+        "private_segment_fixed_size": 0,
+        "sgpr_count": 107,
+        "sgpr_spill_count": 20,
+        "vgpr_count": 109,
+        "vgpr_spill_count": 0,
+        "wavefront_size": 32
+      },
+      "candidate_host_estimate": {
+        "rounded_vgpr": 112,
+        "by_waves": 2,
+        "by_LDS": 2,
+        "WG_per_CU": 2
+      },
+      "control_host_estimate": {
+        "rounded_vgpr": 112,
+        "by_waves": 2,
+        "by_LDS": 2,
+        "WG_per_CU": 2
+      }
+    },
+    {
+      "M_bucket": 8,
+      "candidate": {
+        "group_segment_fixed_size": 25280,
+        "name": "_ZN30mono_ffn_dense_native_round_v215mono_ffn_kernelILi8ELi8EEEvNS_6ParamsE",
+        "private_segment_fixed_size": 0,
+        "sgpr_count": 107,
+        "sgpr_spill_count": 22,
+        "vgpr_count": 111,
+        "vgpr_spill_count": 0,
+        "wavefront_size": 32
+      },
+      "O3_inline_control": {
+        "group_segment_fixed_size": 25280,
+        "name": "_ZN8mono_ffn15mono_ffn_kernelILi8ELi8EEEvNS_6ParamsE",
+        "private_segment_fixed_size": 0,
+        "sgpr_count": 107,
+        "sgpr_spill_count": 22,
+        "vgpr_count": 109,
+        "vgpr_spill_count": 0,
+        "wavefront_size": 32
+      },
+      "candidate_host_estimate": {
+        "rounded_vgpr": 112,
+        "by_waves": 2,
+        "by_LDS": 2,
+        "WG_per_CU": 2
+      },
+      "control_host_estimate": {
+        "rounded_vgpr": 112,
+        "by_waves": 2,
+        "by_LDS": 2,
+        "WG_per_CU": 2
+      }
+    },
+    {
+      "M_bucket": 12,
+      "candidate": {
+        "group_segment_fixed_size": 25280,
+        "name": "_ZN30mono_ffn_dense_native_round_v215mono_ffn_kernelILi12ELi8EEEvNS_6ParamsE",
+        "private_segment_fixed_size": 0,
+        "sgpr_count": 107,
+        "sgpr_spill_count": 22,
+        "vgpr_count": 111,
+        "vgpr_spill_count": 0,
+        "wavefront_size": 32
+      },
+      "O3_inline_control": {
+        "group_segment_fixed_size": 25280,
+        "name": "_ZN8mono_ffn15mono_ffn_kernelILi12ELi8EEEvNS_6ParamsE",
+        "private_segment_fixed_size": 0,
+        "sgpr_count": 107,
+        "sgpr_spill_count": 22,
+        "vgpr_count": 109,
+        "vgpr_spill_count": 0,
+        "wavefront_size": 32
+      },
+      "candidate_host_estimate": {
+        "rounded_vgpr": 112,
+        "by_waves": 2,
+        "by_LDS": 2,
+        "WG_per_CU": 2
+      },
+      "control_host_estimate": {
+        "rounded_vgpr": 112,
+        "by_waves": 2,
+        "by_LDS": 2,
+        "WG_per_CU": 2
+      }
+    },
+    {
+      "M_bucket": 24,
+      "candidate": {
+        "group_segment_fixed_size": 25280,
+        "name": "_ZN30mono_ffn_dense_native_round_v215mono_ffn_kernelILi24ELi8EEEvNS_6ParamsE",
+        "private_segment_fixed_size": 0,
+        "sgpr_count": 107,
+        "sgpr_spill_count": 22,
+        "vgpr_count": 111,
+        "vgpr_spill_count": 0,
+        "wavefront_size": 32
+      },
+      "O3_inline_control": {
+        "group_segment_fixed_size": 25280,
+        "name": "_ZN8mono_ffn15mono_ffn_kernelILi24ELi8EEEvNS_6ParamsE",
+        "private_segment_fixed_size": 0,
+        "sgpr_count": 107,
+        "sgpr_spill_count": 22,
+        "vgpr_count": 109,
+        "vgpr_spill_count": 0,
+        "wavefront_size": 32
+      },
+      "candidate_host_estimate": {
+        "rounded_vgpr": 112,
+        "by_waves": 2,
+        "by_LDS": 2,
+        "WG_per_CU": 2
+      },
+      "control_host_estimate": {
+        "rounded_vgpr": 112,
+        "by_waves": 2,
+        "by_LDS": 2,
+        "WG_per_CU": 2
+      }
+    }
+  ],
+  "resource_conclusion": "VGPR111 vs109 at all4 buckets; both round112. LDS25280 and SGPR107 unchanged, giving same host-estimated2WG/CU. SGPRspill21 vs20 atM4,22 unchanged elsewhere. No private-memory/VGPR-spill or estimated residency cliff; actual residency/cost still needs measurements.",
+  "artifact_sha256": {
+    "large-m-mono-dense-native-round-v2/remote-build/host-symbols.txt": "111a41c1aac784ffe017b36005be5ae5ee4bc886fee3ab8f07796adc4b7f69d6",
+    "large-m-mono-dense-native-round-v2/remote-build/host-relocations.txt": "73257e0252b7ff4df025d5d6d634ba0e705185eaf86a6922a1bc57bb1e82888d",
+    "large-m-mono-dense-native-round-v2/remote-build/resources.json": "8d2f1e9ec3664f7c6cbd62ec798bb3c9d34ced84eb169e8e919338f8f0048a03",
+    "large-m-mono-dense-native-round-v2/remote-build/build-manifest.json": "fccf054047571515bd66664e7a40257641a6192f5f78690e4b398ec2e1b1cb34",
+    "large-m-mono-run/remote-evidence/resources-inline-ordinary.json": "277c6dd32a626a5ecb88bd33f8d6fbe73f5f66f80d9859794300533df994cbf9"
+  }
+}

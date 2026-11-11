@@ -1,0 +1,1273 @@
+{
+  "format": "review-evidence-export-v1",
+  "source_root": "/Users/kletorch/Projects/infrastructure/gfx1030_optimized/vllm-rdna-mtp-mono/bench_results/2026-10-24-mtp-mono-efficiency/core-inline-serving-ab",
+  "strict_gates": [
+    "validate_abba_provenance.py: all four arms, shared boot, per-arm binary/source hashes, TP-rank/GPU mapping, cross-arm non-core manifest equality",
+    "analyze_serving_ab.py: all 16 timed cells, detailed/log metric agreement, request-error checks, fixed-prompt parity comparisons",
+    "export preflight: all arm markers, qualification files, benchmark inputs, and zero serving/dmesg fault markers"
+  ],
+  "raw_input_hash_scope": "all regular files below source_root, including full raw logs and detailed JSON; excludes cache directories and binary build artifacts",
+  "raw_input_hashes": [
+    {
+      "path": "README.md",
+      "sha256": "d5762abacde82805f1c69555a4964539695f72f05e1cf9a5037be0b1e2e2b25a",
+      "bytes": "3468"
+    },
+    {
+      "path": "RESULTS.md",
+      "sha256": "40bcc59c57edd3cc8d50b278b4bc68bd4ea770215584486c7735399ec64b95f7",
+      "bytes": "7124"
+    },
+    {
+      "path": "analyze_serving_ab.py",
+      "sha256": "f532c50aa84baac59a295ba6f76191c322fb2c6a22548271b2df3dd9fe60e4e7",
+      "bytes": "18563"
+    },
+    {
+      "path": "check_candidate_source.py",
+      "sha256": "e4ffdf44d0f7ca60c748f5db8ec89e5fc963640398110872c1e6fde0521efd64",
+      "bytes": "1279"
+    },
+    {
+      "path": "check_candidate_tree.py",
+      "sha256": "b0d451b7d36f927f441cfcdb7fe8e7662e5b53bfee1b086993648ab20ebd5579",
+      "bytes": "1682"
+    },
+    {
+      "path": "check_reserved_gpu.py",
+      "sha256": "f1609d73b3403983238b22c209571755e1b2b682c5d1d2dfeb2511c03be66042",
+      "bytes": "1339"
+    },
+    {
+      "path": "control-first-arm-metrics.json",
+      "sha256": "bfda53450db45a728c6db0186ae28b61f8bdfef8a92ae077451885f64b6e6eb5",
+      "bytes": "7930"
+    },
+    {
+      "path": "export_review_evidence.py",
+      "sha256": "33eade7fd7ad940db211ff9ee8ac8c8556b157148fc8d604969aa4a5db2a434e",
+      "bytes": "16714"
+    },
+    {
+      "path": "first-pair-provisional-metrics.json",
+      "sha256": "655279c30181ca336f1c10f2f69c092dba67f61d1b359135ac03b9ed07d2e148",
+      "bytes": "15787"
+    },
+    {
+      "path": "intended-evidence-files.txt",
+      "sha256": "f3c351371ec546a2eb861b65f073e14411f8bb3850dd7e2940be8b342c6677b7",
+      "bytes": "4966"
+    },
+    {
+      "path": "prior-threshold-scope.md",
+      "sha256": "0bbd2e1890117097dedddd23677b007077860a29d4e21c9da5cc63145bf8a4ce",
+      "bytes": "3218"
+    },
+    {
+      "path": "remote-evidence/01-control/ARM-PASS.txt",
+      "sha256": "07c32b9155e8f2fc0430cbe38d043bb5250e7f136317f0bd65c4eb96b944c08b",
+      "bytes": "199"
+    },
+    {
+      "path": "remote-evidence/01-control/arm-provenance.txt",
+      "sha256": "8baf73b5d5b1589ee7a9c572b5cc9e1814d71b49b9d1b135248d686036c1e86d",
+      "bytes": "436"
+    },
+    {
+      "path": "remote-evidence/01-control/bench-1024x512-c1.json",
+      "sha256": "8b75856408320aff2d8cad91f8213b97bf6fba2667c8e4caf8c47f294100aaaf",
+      "bytes": "67258"
+    },
+    {
+      "path": "remote-evidence/01-control/bench-1024x512-c1.log",
+      "sha256": "f09eebb29e13e42cf6f0f7f2f56c1c08dd0d2ddd436d5801637efdc9549767e6",
+      "bytes": "6593"
+    },
+    {
+      "path": "remote-evidence/01-control/bench-1024x512-c8.json",
+      "sha256": "4392de5be89c620fc7560ecc977b50756154d432e13dd970a5d0df2468ba0e4c",
+      "bytes": "246710"
+    },
+    {
+      "path": "remote-evidence/01-control/bench-1024x512-c8.log",
+      "sha256": "35f528f8fca50a4796b3c0e57e1db20c77e20f47fa02aeb7f33be853661e40b7",
+      "bytes": "7954"
+    },
+    {
+      "path": "remote-evidence/01-control/bench-16384x1024-c1.json",
+      "sha256": "9767e60653e47bf66a8992d4704818c80edc8c8e7b04fb2164447287cc9fbcaf",
+      "bytes": "99708"
+    },
+    {
+      "path": "remote-evidence/01-control/bench-16384x1024-c1.log",
+      "sha256": "6d9f20b5a7d5baa98bb8e37b40447e6170b07605465fef62688e3af18373b8fe",
+      "bytes": "6601"
+    },
+    {
+      "path": "remote-evidence/01-control/bench-16384x1024-c8.json",
+      "sha256": "092e93a73339299e3c52d7676f6935cd1ca9cfb26fa434b92692e511e0d8aedc",
+      "bytes": "416998"
+    },
+    {
+      "path": "remote-evidence/01-control/bench-16384x1024-c8.log",
+      "sha256": "976026408668aa5615b28541ae695f7ccf351e05aff16babf40f1e4f1e0ac1e6",
+      "bytes": "8024"
+    },
+    {
+      "path": "remote-evidence/01-control/boot-id.after",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37"
+    },
+    {
+      "path": "remote-evidence/01-control/boot-id.before",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37"
+    },
+    {
+      "path": "remote-evidence/01-control/concurrency.json",
+      "sha256": "489dafab15965b1d8276928e2f97b1ee290186de85c732e856499211f6ad4290",
+      "bytes": "1073156"
+    },
+    {
+      "path": "remote-evidence/01-control/concurrency.txt",
+      "sha256": "f07eb30fd48a1dc03ee13330dbf2a071ac6f1085e9acaf5d1367b7d466c9ae99",
+      "bytes": "3761"
+    },
+    {
+      "path": "remote-evidence/01-control/config.env",
+      "sha256": "1cbddbf2f234190f8f3b713a54180f88d5a9db6e1644c78a8b94a728ff701160",
+      "bytes": "1251"
+    },
+    {
+      "path": "remote-evidence/01-control/driver.log",
+      "sha256": "f82f1afbd93ce8ceab069f23b7146413f05957f9e5a98c15358f48f3fb68e0c7",
+      "bytes": "6854"
+    },
+    {
+      "path": "remote-evidence/01-control/load_hook.txt",
+      "sha256": "65ebb1ab0cb8f6a1cec1ddfcb1f3c163952319f14a0aaae0feaf067bc9ff0ac7",
+      "bytes": "3228"
+    },
+    {
+      "path": "remote-evidence/01-control/models.json",
+      "sha256": "b5ceecef8733a17fa73db6c244a94999031ced3f74e2d4b8ff600dc98f36f11a",
+      "bytes": "582"
+    },
+    {
+      "path": "remote-evidence/01-control/parity.json",
+      "sha256": "221d4f33d891a00c603098aa8ff31b92e6d62fa8ba3c6f338ad7adaa19e07af1",
+      "bytes": "185902"
+    },
+    {
+      "path": "remote-evidence/01-control/ppl.txt",
+      "sha256": "9927442a38fdf4c8ef1e84cc6c5c8431e931410292b9d39d2942cb071abd967c",
+      "bytes": "1180"
+    },
+    {
+      "path": "remote-evidence/01-control/prefix.txt",
+      "sha256": "2acb2ce7cd2bda93c538d2aa52e9228a55fa120b73304e2d8993b967a0cea565",
+      "bytes": "331"
+    },
+    {
+      "path": "remote-evidence/01-control/probe-after.txt",
+      "sha256": "6c2e57862cf093f1f46b44f28a1de238d2af285f43855cc907fde7b423e34cbe",
+      "bytes": "664"
+    },
+    {
+      "path": "remote-evidence/01-control/probe.txt",
+      "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600",
+      "bytes": "670"
+    },
+    {
+      "path": "remote-evidence/01-control/reset-prefix-bench-1024x512-c1.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/01-control/reset-prefix-bench-1024x512-c8.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/01-control/reset-prefix-bench-16384x1024-c1.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/01-control/reset-prefix-bench-16384x1024-c8.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/01-control/serve.log",
+      "sha256": "fea957a1b6b458e0b303c989d80bc3c3a45937901e8e5559cf161118c7638bf7",
+      "bytes": "238495"
+    },
+    {
+      "path": "remote-evidence/01-control/serve.pid",
+      "sha256": "28c8a9689558dac24798933ce7421518a5ef2394353060be72cac63dac9ad3b8",
+      "bytes": "7"
+    },
+    {
+      "path": "remote-evidence/01-control/sha256.after",
+      "sha256": "1186144fa587427d3b76c86d5733e33bacc2f3ac4be98c71c2392e048c6ec0eb",
+      "bytes": "2025"
+    },
+    {
+      "path": "remote-evidence/01-control/sha256.before",
+      "sha256": "1186144fa587427d3b76c86d5733e33bacc2f3ac4be98c71c2392e048c6ec0eb",
+      "bytes": "2025"
+    },
+    {
+      "path": "remote-evidence/01-control/summary.txt",
+      "sha256": "d1eb4c2d213f0093a0ee8c31fd5a7da3f6df1cb00407db8e2ec153208d499f41",
+      "bytes": "7172"
+    },
+    {
+      "path": "remote-evidence/01-control/warmup.txt",
+      "sha256": "152c256fa0b787c30acf396bc21808d5e49f70b7cddf36f79b89573ce8d3f4af",
+      "bytes": "536"
+    },
+    {
+      "path": "remote-evidence/01-control/worker-provenance.json",
+      "sha256": "297c7086a1aeb9fcca6443032c94207250e857b04e6ab7c4594248cee0758cc1",
+      "bytes": "3417"
+    },
+    {
+      "path": "remote-evidence/01-control/worker-provenance.log",
+      "sha256": "297c7086a1aeb9fcca6443032c94207250e857b04e6ab7c4594248cee0758cc1",
+      "bytes": "3417"
+    },
+    {
+      "path": "remote-evidence/02-candidate/ARM-PASS.txt",
+      "sha256": "4f30eeeb42f7a2f5695560fc7715cc8013a39aa1f401e1e40dac573f423590d4",
+      "bytes": "201"
+    },
+    {
+      "path": "remote-evidence/02-candidate/arm-provenance.txt",
+      "sha256": "e0c0c7796f1623dd6d91f0e61d7a6dcfaa0ff6ccf0890b4e9e99f6c388702df5",
+      "bytes": "476"
+    },
+    {
+      "path": "remote-evidence/02-candidate/bench-1024x512-c1.json",
+      "sha256": "25daa2658452687f480a65314cce144a04e851e446388dcb731f53a54762d2d0",
+      "bytes": "56773"
+    },
+    {
+      "path": "remote-evidence/02-candidate/bench-1024x512-c1.log",
+      "sha256": "d3463ce6a7e045e86efab280eaf2642198711ecb79a6a3e4e0d42fa76a4209af",
+      "bytes": "6595"
+    },
+    {
+      "path": "remote-evidence/02-candidate/bench-1024x512-c8.json",
+      "sha256": "1551de2cff3d92e0e42f92ed5c26799fee6e734ff16eb811a7b7d8299d0e573a",
+      "bytes": "250690"
+    },
+    {
+      "path": "remote-evidence/02-candidate/bench-1024x512-c8.log",
+      "sha256": "6755cc73a845a30041faa15c17293b8a4046689349b067dd900a3e8feb5805b9",
+      "bytes": "7956"
+    },
+    {
+      "path": "remote-evidence/02-candidate/bench-16384x1024-c1.json",
+      "sha256": "1764f84d3bdcf961064a85dae1b852ecdb1419b07e0a103e9cd953d4836377f8",
+      "bytes": "113997"
+    },
+    {
+      "path": "remote-evidence/02-candidate/bench-16384x1024-c1.log",
+      "sha256": "cccdb88e0dc6bb86859c9d934d98eff9628456990ff8fc6a09ac74c8bc586410",
+      "bytes": "6603"
+    },
+    {
+      "path": "remote-evidence/02-candidate/bench-16384x1024-c8.json",
+      "sha256": "fe47d38bac53d8d50b5662455e26e937883e20cfe1b560ae8829009e94530e9b",
+      "bytes": "419030"
+    },
+    {
+      "path": "remote-evidence/02-candidate/bench-16384x1024-c8.log",
+      "sha256": "b60fb2ae31540c969d907f231ba98e51f489cfd1231916e82514fa1bb59a50df",
+      "bytes": "7968"
+    },
+    {
+      "path": "remote-evidence/02-candidate/boot-id.after",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37"
+    },
+    {
+      "path": "remote-evidence/02-candidate/boot-id.before",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37"
+    },
+    {
+      "path": "remote-evidence/02-candidate/concurrency.json",
+      "sha256": "4535cd59570a4860d50e4b037dcf1bc635013970ad2bb9aaafabc1721fb97e24",
+      "bytes": "1073522"
+    },
+    {
+      "path": "remote-evidence/02-candidate/concurrency.txt",
+      "sha256": "69e45818dbae28c0f4bf7e14c9810b5282f4c48c2e6883580d3faee83d1936a4",
+      "bytes": "3874"
+    },
+    {
+      "path": "remote-evidence/02-candidate/config.env",
+      "sha256": "1132499c914c065bb1b4d36fabb1815a447c9b636330d70e11e35d8a8003b4a1",
+      "bytes": "1333"
+    },
+    {
+      "path": "remote-evidence/02-candidate/driver.log",
+      "sha256": "c4f0d7ce89f3158098f4c064401cad8935a9c0c30111624f92fa0e8793f349be",
+      "bytes": "6980"
+    },
+    {
+      "path": "remote-evidence/02-candidate/load_hook.txt",
+      "sha256": "82bb8f0567b5d7fbbe6009dafb098157ad89bf7d5dbf443c71dcde29493ada57",
+      "bytes": "3230"
+    },
+    {
+      "path": "remote-evidence/02-candidate/models.json",
+      "sha256": "80f22b76a60d4d44423335d3105ca089b13da1f6fd623748e35878e45d76aa05",
+      "bytes": "582"
+    },
+    {
+      "path": "remote-evidence/02-candidate/parity.json",
+      "sha256": "2ebf52133ea07e20c84720cd92c7b5327cb55a73d255df1ac7c6c4c79b1cb53c",
+      "bytes": "200253"
+    },
+    {
+      "path": "remote-evidence/02-candidate/ppl.txt",
+      "sha256": "c4c1eeb9fa7e3da6cc053c88711a6ef0697d26ad166089cc2af8af91945a4ccc",
+      "bytes": "1221"
+    },
+    {
+      "path": "remote-evidence/02-candidate/prefix.txt",
+      "sha256": "b06aa81a863499894c9ca6bbd387f5c558b6263c3a9bf0cfcbd7157895a3b370",
+      "bytes": "331"
+    },
+    {
+      "path": "remote-evidence/02-candidate/probe-after.txt",
+      "sha256": "6c2e57862cf093f1f46b44f28a1de238d2af285f43855cc907fde7b423e34cbe",
+      "bytes": "664"
+    },
+    {
+      "path": "remote-evidence/02-candidate/probe.txt",
+      "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600",
+      "bytes": "670"
+    },
+    {
+      "path": "remote-evidence/02-candidate/reset-prefix-bench-1024x512-c1.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/02-candidate/reset-prefix-bench-1024x512-c8.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/02-candidate/reset-prefix-bench-16384x1024-c1.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/02-candidate/reset-prefix-bench-16384x1024-c8.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/02-candidate/serve.log",
+      "sha256": "3e911b71c09cb0dac5f4b63077578a2df2e60014bfb0f6a77ce1847d513cdef7",
+      "bytes": "238520"
+    },
+    {
+      "path": "remote-evidence/02-candidate/serve.pid",
+      "sha256": "a4423b8199ecc4bb79e13e2e754f162994e55d7a4d279e7f85604c8294af44dd",
+      "bytes": "7"
+    },
+    {
+      "path": "remote-evidence/02-candidate/sha256.after",
+      "sha256": "88e92e960d33439311fe2408d61fbaadad0212a487a551bfe24a4130900b08fe",
+      "bytes": "2443"
+    },
+    {
+      "path": "remote-evidence/02-candidate/sha256.before",
+      "sha256": "88e92e960d33439311fe2408d61fbaadad0212a487a551bfe24a4130900b08fe",
+      "bytes": "2443"
+    },
+    {
+      "path": "remote-evidence/02-candidate/summary.txt",
+      "sha256": "b7d16804223af65dc20e2284f637db45d3e1ee4e62cf0104a55a117a2fae21f2",
+      "bytes": "7256"
+    },
+    {
+      "path": "remote-evidence/02-candidate/warmup.txt",
+      "sha256": "b4d0b05e4c17bfb75c09c0384fede10b429f98497ab9a36e6c5a85655b574d48",
+      "bytes": "536"
+    },
+    {
+      "path": "remote-evidence/02-candidate/worker-provenance.json",
+      "sha256": "c0d9e0461b2a678f7425a92ec4fb2ec2aa4acc4642c60de6c55a5ab28fbdb1a5",
+      "bytes": "3721"
+    },
+    {
+      "path": "remote-evidence/02-candidate/worker-provenance.log",
+      "sha256": "c0d9e0461b2a678f7425a92ec4fb2ec2aa4acc4642c60de6c55a5ab28fbdb1a5",
+      "bytes": "3721"
+    },
+    {
+      "path": "remote-evidence/03-candidate/ARM-PASS.txt",
+      "sha256": "4f30eeeb42f7a2f5695560fc7715cc8013a39aa1f401e1e40dac573f423590d4",
+      "bytes": "201"
+    },
+    {
+      "path": "remote-evidence/03-candidate/arm-provenance.txt",
+      "sha256": "e0c0c7796f1623dd6d91f0e61d7a6dcfaa0ff6ccf0890b4e9e99f6c388702df5",
+      "bytes": "476"
+    },
+    {
+      "path": "remote-evidence/03-candidate/bench-1024x512-c1.json",
+      "sha256": "9bba623012e9146f58b29caf89b5e3a123861342657b1484f437ea10b2c75da7",
+      "bytes": "65893"
+    },
+    {
+      "path": "remote-evidence/03-candidate/bench-1024x512-c1.log",
+      "sha256": "b44b8b6a4b0f141d156d2d55f7c5076610ef0de6ebd8d208fc6fdea35b29c4d8",
+      "bytes": "6595"
+    },
+    {
+      "path": "remote-evidence/03-candidate/bench-1024x512-c8.json",
+      "sha256": "631a2bb432f0b4132a2b9dc921fc38348ea6beb6f2c2819307a9664576240ccc",
+      "bytes": "254981"
+    },
+    {
+      "path": "remote-evidence/03-candidate/bench-1024x512-c8.log",
+      "sha256": "9ba02e12b1fe4c4fdbfa749215c625845313a1059ba77e5c959688162bb247ed",
+      "bytes": "7960"
+    },
+    {
+      "path": "remote-evidence/03-candidate/bench-16384x1024-c1.json",
+      "sha256": "004ca05c1a26b770dcb15d1090d81b3675d3bd58030efd8e631b9de0becfcd95",
+      "bytes": "110618"
+    },
+    {
+      "path": "remote-evidence/03-candidate/bench-16384x1024-c1.log",
+      "sha256": "4eee460097b18239a8a5c677e31463ea13b2f08396457a036fcdac0f0066cd30",
+      "bytes": "6603"
+    },
+    {
+      "path": "remote-evidence/03-candidate/bench-16384x1024-c8.json",
+      "sha256": "baaf986a298ea2e47161ed4bfc83901049ffeb0c64dffde9c94ea278e8d00a73",
+      "bytes": "450020"
+    },
+    {
+      "path": "remote-evidence/03-candidate/bench-16384x1024-c8.log",
+      "sha256": "35eca160ef801a83e599bd048a8fae2242db19ca8f76bf95f67dc3ffe08878e5",
+      "bytes": "7962"
+    },
+    {
+      "path": "remote-evidence/03-candidate/boot-id.after",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37"
+    },
+    {
+      "path": "remote-evidence/03-candidate/boot-id.before",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37"
+    },
+    {
+      "path": "remote-evidence/03-candidate/concurrency.json",
+      "sha256": "75296d6fd25c3e316cd6456333cb41a5650b0d315cd9446de87f1dc3209718e9",
+      "bytes": "1074045"
+    },
+    {
+      "path": "remote-evidence/03-candidate/concurrency.txt",
+      "sha256": "d6ad9487f4f2ea9301a204772bd88f698075bb08966c6d8c4bd68ef22df802e1",
+      "bytes": "3339"
+    },
+    {
+      "path": "remote-evidence/03-candidate/config.env",
+      "sha256": "0901193eae414228f6217dbbe3ffc1dacf20313f868f7c9893d9dd08e549b84e",
+      "bytes": "1333"
+    },
+    {
+      "path": "remote-evidence/03-candidate/driver.log",
+      "sha256": "c20fc4cba005994bb5f5673f052f9ee50c1ab50dc18eb9dbe66cb7f6e8d264d8",
+      "bytes": "6974"
+    },
+    {
+      "path": "remote-evidence/03-candidate/load_hook.txt",
+      "sha256": "977823b02a27f2c5e0b4f6002b141400662faf87c4d2af14f8f991196da3fee3",
+      "bytes": "3231"
+    },
+    {
+      "path": "remote-evidence/03-candidate/models.json",
+      "sha256": "aa11211f0c67d6ac9d14dc4e40e6cba1996bb6f4e1f52c933fab948b4523e5b6",
+      "bytes": "582"
+    },
+    {
+      "path": "remote-evidence/03-candidate/parity.json",
+      "sha256": "5d7d28c4442bcec210b561d33b753543062b7100b47d1149068e13d9b4d827eb",
+      "bytes": "199935"
+    },
+    {
+      "path": "remote-evidence/03-candidate/ppl.txt",
+      "sha256": "52de1cf81cfa67a1bb7131ae6fcccf097d8dd0a24348047d8ec0ba7e837d4918",
+      "bytes": "1212"
+    },
+    {
+      "path": "remote-evidence/03-candidate/prefix.txt",
+      "sha256": "48c9660d98fddf0d88e84c16d564bc1125aa9cdd2a7cc0e724c0b3825ff2819b",
+      "bytes": "337"
+    },
+    {
+      "path": "remote-evidence/03-candidate/probe-after.txt",
+      "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600",
+      "bytes": "670"
+    },
+    {
+      "path": "remote-evidence/03-candidate/probe.txt",
+      "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600",
+      "bytes": "670"
+    },
+    {
+      "path": "remote-evidence/03-candidate/reset-prefix-bench-1024x512-c1.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/03-candidate/reset-prefix-bench-1024x512-c8.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/03-candidate/reset-prefix-bench-16384x1024-c1.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/03-candidate/reset-prefix-bench-16384x1024-c8.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/03-candidate/serve.log",
+      "sha256": "cf9706b5d362ea4277136a26f68f1f45d4647fa8ef7245d2a714551976278d83",
+      "bytes": "235532"
+    },
+    {
+      "path": "remote-evidence/03-candidate/serve.pid",
+      "sha256": "22677766c69c69f28707f937997e60d29f6ee93964f5d657e8ee823bc7515fe1",
+      "bytes": "7"
+    },
+    {
+      "path": "remote-evidence/03-candidate/sha256.after",
+      "sha256": "88e92e960d33439311fe2408d61fbaadad0212a487a551bfe24a4130900b08fe",
+      "bytes": "2443"
+    },
+    {
+      "path": "remote-evidence/03-candidate/sha256.before",
+      "sha256": "88e92e960d33439311fe2408d61fbaadad0212a487a551bfe24a4130900b08fe",
+      "bytes": "2443"
+    },
+    {
+      "path": "remote-evidence/03-candidate/summary.txt",
+      "sha256": "9101fc76ff126c893abd956bae9012e9b66d04472f3c9176ebed1ba4b9ed4b3c",
+      "bytes": "7250"
+    },
+    {
+      "path": "remote-evidence/03-candidate/warmup.txt",
+      "sha256": "eff0820b045df67bba946fa0d82fed2d36475ebe61060f31c8adff46f70edb2b",
+      "bytes": "536"
+    },
+    {
+      "path": "remote-evidence/03-candidate/worker-provenance.json",
+      "sha256": "7abcd2c6f0afaa541410b002f2eecea379980aa00591dd774aca9140216db998",
+      "bytes": "3721"
+    },
+    {
+      "path": "remote-evidence/03-candidate/worker-provenance.log",
+      "sha256": "7abcd2c6f0afaa541410b002f2eecea379980aa00591dd774aca9140216db998",
+      "bytes": "3721"
+    },
+    {
+      "path": "remote-evidence/04-control/ARM-PASS.txt",
+      "sha256": "07c32b9155e8f2fc0430cbe38d043bb5250e7f136317f0bd65c4eb96b944c08b",
+      "bytes": "199"
+    },
+    {
+      "path": "remote-evidence/04-control/arm-provenance.txt",
+      "sha256": "8baf73b5d5b1589ee7a9c572b5cc9e1814d71b49b9d1b135248d686036c1e86d",
+      "bytes": "436"
+    },
+    {
+      "path": "remote-evidence/04-control/bench-1024x512-c1.json",
+      "sha256": "19b227683a3955c4831365641eff091ddf846a0e1c9c51bdb5b417ae1f5cfd7b",
+      "bytes": "59869"
+    },
+    {
+      "path": "remote-evidence/04-control/bench-1024x512-c1.log",
+      "sha256": "7f7ba3dae41620db4bae092698843cb268551f1915e640c6babf1e6d96803ccc",
+      "bytes": "6593"
+    },
+    {
+      "path": "remote-evidence/04-control/bench-1024x512-c8.json",
+      "sha256": "8c6ac835cef271a1bff4c87b202caa4049c482e06db5bab67715c7312f76e783",
+      "bytes": "254952"
+    },
+    {
+      "path": "remote-evidence/04-control/bench-1024x512-c8.log",
+      "sha256": "a0f942ab84bd0f4defb0c7b2ccca70ff6e9098dd731e7e151a1d57a86e682f27",
+      "bytes": "7963"
+    },
+    {
+      "path": "remote-evidence/04-control/bench-16384x1024-c1.json",
+      "sha256": "03142960373aedf99834a005faf47186adcf8ff56579c81dee9234ec2ba0edb3",
+      "bytes": "105084"
+    },
+    {
+      "path": "remote-evidence/04-control/bench-16384x1024-c1.log",
+      "sha256": "3d0d3577464252449fe826761ed39dafac60fda2d95a4db8470597d317ad919a",
+      "bytes": "6601"
+    },
+    {
+      "path": "remote-evidence/04-control/bench-16384x1024-c8.json",
+      "sha256": "e17960c813b902d1fceb38304e06305aefa29e9576ccefa13e3136e4bca22a24",
+      "bytes": "426670"
+    },
+    {
+      "path": "remote-evidence/04-control/bench-16384x1024-c8.log",
+      "sha256": "1860d1d47f1381d2e6df55c600d2aacd45d315b9aee27ba4b86fea584d274901",
+      "bytes": "8024"
+    },
+    {
+      "path": "remote-evidence/04-control/boot-id.after",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37"
+    },
+    {
+      "path": "remote-evidence/04-control/boot-id.before",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37"
+    },
+    {
+      "path": "remote-evidence/04-control/concurrency.json",
+      "sha256": "ce3f77c85ef27846839bd1c5d497df00e6f4cdf350bd96599c771c703facd358",
+      "bytes": "1073753"
+    },
+    {
+      "path": "remote-evidence/04-control/concurrency.txt",
+      "sha256": "78b7827acd08dd0db609d4b4f6e2a31d7f88440aff31f64b72e133e03f139993",
+      "bytes": "3727"
+    },
+    {
+      "path": "remote-evidence/04-control/config.env",
+      "sha256": "520b1607a9900be0ad893bcf13a8ace6cd54e42bd507c23b70f196f09afa3601",
+      "bytes": "1251"
+    },
+    {
+      "path": "remote-evidence/04-control/driver.log",
+      "sha256": "e0ee74017b563e4f7a950acfb0b332196376b674f7c4cd0fe7987b4b1e8eb3fc",
+      "bytes": "6802"
+    },
+    {
+      "path": "remote-evidence/04-control/load_hook.txt",
+      "sha256": "f5d9bec4514104d65028e7610310dce9f9be43658f939fa8c33ad9d448333ccc",
+      "bytes": "3228"
+    },
+    {
+      "path": "remote-evidence/04-control/models.json",
+      "sha256": "894f86b0070ac40baf1082cd0223dc6bbb9d7a2063e9abff63e3c57bd5bf166a",
+      "bytes": "582"
+    },
+    {
+      "path": "remote-evidence/04-control/parity.json",
+      "sha256": "f3e2246a02e06e02a5f399f5b584a84e1f32dd95b9b96dec2cfbf68d961ca84b",
+      "bytes": "166753"
+    },
+    {
+      "path": "remote-evidence/04-control/ppl.txt",
+      "sha256": "34c0046d5515aeedcdce96b795fbb757d9ff2bb75b932051508710e062b18a88",
+      "bytes": "1211"
+    },
+    {
+      "path": "remote-evidence/04-control/prefix.txt",
+      "sha256": "b4295c8d7f7a918b61fe12c9345b3f4ead4720111e75fe15ecc9325bd1984008",
+      "bytes": "331"
+    },
+    {
+      "path": "remote-evidence/04-control/probe-after.txt",
+      "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600",
+      "bytes": "670"
+    },
+    {
+      "path": "remote-evidence/04-control/probe.txt",
+      "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600",
+      "bytes": "670"
+    },
+    {
+      "path": "remote-evidence/04-control/reset-prefix-bench-1024x512-c1.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/04-control/reset-prefix-bench-1024x512-c8.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/04-control/reset-prefix-bench-16384x1024-c1.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/04-control/reset-prefix-bench-16384x1024-c8.json",
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97",
+      "bytes": "16"
+    },
+    {
+      "path": "remote-evidence/04-control/serve.log",
+      "sha256": "ca27c8ee1f528cf9c754e2e582199ce4ad6f898756ee2e942439ea5027dd8ced",
+      "bytes": "239687"
+    },
+    {
+      "path": "remote-evidence/04-control/serve.pid",
+      "sha256": "83af24a06b42d1e15d51bee22b3b693dd487d132b59fab568e45a2e376624ecf",
+      "bytes": "7"
+    },
+    {
+      "path": "remote-evidence/04-control/sha256.after",
+      "sha256": "1186144fa587427d3b76c86d5733e33bacc2f3ac4be98c71c2392e048c6ec0eb",
+      "bytes": "2025"
+    },
+    {
+      "path": "remote-evidence/04-control/sha256.before",
+      "sha256": "1186144fa587427d3b76c86d5733e33bacc2f3ac4be98c71c2392e048c6ec0eb",
+      "bytes": "2025"
+    },
+    {
+      "path": "remote-evidence/04-control/summary.txt",
+      "sha256": "9ac33ef5daa068c1de554feaa852f15885e8f5598b81742d4dc945100703ba85",
+      "bytes": "7120"
+    },
+    {
+      "path": "remote-evidence/04-control/warmup.txt",
+      "sha256": "13638af7b94b6f521762e722116a3cc015c6f7fe7cebdd0462e6d912b545b1e0",
+      "bytes": "536"
+    },
+    {
+      "path": "remote-evidence/04-control/worker-provenance.json",
+      "sha256": "3614c617f9004d6651a7a81076f69e6e32443bd8fc422e113d5c814af3d81531",
+      "bytes": "3417"
+    },
+    {
+      "path": "remote-evidence/04-control/worker-provenance.log",
+      "sha256": "3614c617f9004d6651a7a81076f69e6e32443bd8fc422e113d5c814af3d81531",
+      "bytes": "3417"
+    },
+    {
+      "path": "remote-evidence/ANALYSIS.txt",
+      "sha256": "2eccffa93411bcab7df3dd770eaeb6bc0b681c18358150506e4bc228be8cf34c",
+      "bytes": "672"
+    },
+    {
+      "path": "remote-evidence/arm-gates.csv",
+      "sha256": "8ecae7beb88162e212a366e4395ff8eb94306058c19e91a46329711762d4c5e7",
+      "bytes": "128"
+    },
+    {
+      "path": "remote-evidence/cross-arm-logprob-parity.txt",
+      "sha256": "d4a9bdf5b643dca0f43ddd4f0c464cf31c1b18d1a44ca01f2687efde984eaebc",
+      "bytes": "4700"
+    },
+    {
+      "path": "remote-evidence/per-cell-analysis.csv",
+      "sha256": "cdd71d13c03413226248fe9fed594e5b58301a17ac5e247cfead25082bf4efcd",
+      "bytes": "9505"
+    },
+    {
+      "path": "remote-evidence/per-request-analysis.csv",
+      "sha256": "64a0db38ce41de3ac71c45a0e6af72786307de88b0e8dc88d158740fabbb8374",
+      "bytes": "91725"
+    },
+    {
+      "path": "remote-evidence/response-text-comparisons.csv",
+      "sha256": "785d1b85cb87d38f14f812cb18b26ee0bd4501beaa3c863ee3e62d558639cf68",
+      "bytes": "60522"
+    },
+    {
+      "path": "remote-evidence/whole-run-analysis.csv",
+      "sha256": "46ace04458a8b12d51ba76eba6d6a5f06e5b9766d9646688e75341b846c0b844",
+      "bytes": "631"
+    },
+    {
+      "path": "resume_validation_sequence_v2.sh",
+      "sha256": "a7c0d578a3609e77d7f1785bccc249b5eaf1d6fcc52c3e55e19ddccece8d1929",
+      "bytes": "3188"
+    },
+    {
+      "path": "run_one_arm.sh",
+      "sha256": "a4ee8da1b41bffc86056324b59f135b0140b330b1d2d9b4899447f8c1823461d",
+      "bytes": "8242"
+    },
+    {
+      "path": "run_validation_sequence.sh",
+      "sha256": "2e66d7a7269c154b8272406a51c255f8b8c242bbc6b1aaf74dbf4788e365cb9a",
+      "bytes": "3508"
+    },
+    {
+      "path": "serve_validate_mono_ab_gate.sh",
+      "sha256": "687e84b383fbed6c542a04d194152b55c7584154358e827efea87c254c4db8e9",
+      "bytes": "13684"
+    },
+    {
+      "path": "snapshot_workers.py",
+      "sha256": "3ad1690f8e5915979214ee9535b8b461c3b4aa8902234b9e38a7ff9cb8afcf5d",
+      "bytes": "2483"
+    },
+    {
+      "path": "validate_abba_provenance.py",
+      "sha256": "ec2c690cc49c6a4dc73be9fdb60849605bb3384391100db1b65b56144253e5bc",
+      "bytes": "9429"
+    }
+  ],
+  "tool_sources": [
+    {
+      "path": "/Users/kletorch/Projects/infrastructure/gfx1030_optimized/vllm-rdna-mtp-mono/bench_results/2026-10-24-mtp-mono-efficiency/core-inline-serving-ab/export_review_evidence.py",
+      "sha256": "33eade7fd7ad940db211ff9ee8ac8c8556b157148fc8d604969aa4a5db2a434e"
+    },
+    {
+      "path": "/Users/kletorch/Projects/infrastructure/gfx1030_optimized/vllm-rdna-mtp-mono/bench_results/2026-10-24-mtp-mono-efficiency/core-inline-serving-ab/validate_abba_provenance.py",
+      "sha256": "ec2c690cc49c6a4dc73be9fdb60849605bb3384391100db1b65b56144253e5bc"
+    },
+    {
+      "path": "/Users/kletorch/Projects/infrastructure/gfx1030_optimized/vllm-rdna-mtp-mono/bench_results/2026-10-24-mtp-mono-efficiency/core-inline-serving-ab/analyze_serving_ab.py",
+      "sha256": "f532c50aa84baac59a295ba6f76191c322fb2c6a22548271b2df3dd9fe60e4e7"
+    },
+    {
+      "path": "/Users/kletorch/Projects/infrastructure/gfx1030_optimized/vllm-rdna-mtp-mono/tools/rdna/mono/logprob_parity.py",
+      "sha256": "17faeb0b547caf5007ac5174f0926a25a7caa6ed4cb50b95f0548aba7a0de087"
+    }
+  ],
+  "output_hashes_and_transforms": [
+    {
+      "path": "01-control/ARM-PASS.txt",
+      "sha256": "07c32b9155e8f2fc0430cbe38d043bb5250e7f136317f0bd65c4eb96b944c08b",
+      "bytes": "199",
+      "source": "remote-evidence/01-control/ARM-PASS.txt",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "01-control/arm-provenance.txt",
+      "sha256": "8baf73b5d5b1589ee7a9c572b5cc9e1814d71b49b9d1b135248d686036c1e86d",
+      "bytes": "436",
+      "source": "remote-evidence/01-control/arm-provenance.txt",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "01-control/worker-provenance.json",
+      "sha256": "297c7086a1aeb9fcca6443032c94207250e857b04e6ab7c4594248cee0758cc1",
+      "bytes": "3417",
+      "source": "remote-evidence/01-control/worker-provenance.json",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "01-control/config.env",
+      "sha256": "1cbddbf2f234190f8f3b713a54180f88d5a9db6e1644c78a8b94a728ff701160",
+      "bytes": "1251",
+      "source": "remote-evidence/01-control/config.env",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "01-control/sha256.before",
+      "sha256": "1186144fa587427d3b76c86d5733e33bacc2f3ac4be98c71c2392e048c6ec0eb",
+      "bytes": "2025",
+      "source": "remote-evidence/01-control/sha256.before",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "01-control/sha256.after",
+      "sha256": "1186144fa587427d3b76c86d5733e33bacc2f3ac4be98c71c2392e048c6ec0eb",
+      "bytes": "2025",
+      "source": "remote-evidence/01-control/sha256.after",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "01-control/boot-id.before",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37",
+      "source": "remote-evidence/01-control/boot-id.before",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "01-control/boot-id.after",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37",
+      "source": "remote-evidence/01-control/boot-id.after",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "01-control/qualification-summary.txt",
+      "sha256": "f196e89e1b40d7b976996e5817afdf85389d856e0f6ba8a540e54fc3232a14ac",
+      "bytes": "3646",
+      "source": "remote-evidence/01-control/summary.txt, remote-evidence/01-control/probe.txt, remote-evidence/01-control/ppl.txt, remote-evidence/01-control/prefix.txt, remote-evidence/01-control/concurrency.txt, remote-evidence/01-control/load_hook.txt, remote-evidence/01-control/probe-after.txt",
+      "transform": "line filter: remove prompt/reply/generated text; retain PASS, metrics, route, and fault-marker lines"
+    },
+    {
+      "path": "01-control/benchmark-metrics/bench-1024x512-c1.metrics.txt",
+      "sha256": "04a04e8584d0c5bc7bd5fc4491f9c111c51f462c4ba993ed448e6319abc8174b",
+      "bytes": "1739",
+      "source": "remote-evidence/01-control/bench-1024x512-c1.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "01-control/benchmark-metrics/bench-1024x512-c8.metrics.txt",
+      "sha256": "ff175f2d006ecde3707035250a7b3498596b03db6e8deb8d2cdf0d6a47bdf53d",
+      "bytes": "1739",
+      "source": "remote-evidence/01-control/bench-1024x512-c8.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "01-control/benchmark-metrics/bench-16384x1024-c1.metrics.txt",
+      "sha256": "e95f4d1aeed68908f887bd8b7d0d3f7db5121bcb9a0d2491008d7940688d34c5",
+      "bytes": "1739",
+      "source": "remote-evidence/01-control/bench-16384x1024-c1.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "01-control/benchmark-metrics/bench-16384x1024-c8.metrics.txt",
+      "sha256": "e22f5dc743f66f67f82cbb3266542000b523c9807f509db9ec6afd488c289c99",
+      "bytes": "1739",
+      "source": "remote-evidence/01-control/bench-16384x1024-c8.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "02-candidate/ARM-PASS.txt",
+      "sha256": "4f30eeeb42f7a2f5695560fc7715cc8013a39aa1f401e1e40dac573f423590d4",
+      "bytes": "201",
+      "source": "remote-evidence/02-candidate/ARM-PASS.txt",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "02-candidate/arm-provenance.txt",
+      "sha256": "e0c0c7796f1623dd6d91f0e61d7a6dcfaa0ff6ccf0890b4e9e99f6c388702df5",
+      "bytes": "476",
+      "source": "remote-evidence/02-candidate/arm-provenance.txt",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "02-candidate/worker-provenance.json",
+      "sha256": "c0d9e0461b2a678f7425a92ec4fb2ec2aa4acc4642c60de6c55a5ab28fbdb1a5",
+      "bytes": "3721",
+      "source": "remote-evidence/02-candidate/worker-provenance.json",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "02-candidate/config.env",
+      "sha256": "1132499c914c065bb1b4d36fabb1815a447c9b636330d70e11e35d8a8003b4a1",
+      "bytes": "1333",
+      "source": "remote-evidence/02-candidate/config.env",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "02-candidate/sha256.before",
+      "sha256": "88e92e960d33439311fe2408d61fbaadad0212a487a551bfe24a4130900b08fe",
+      "bytes": "2443",
+      "source": "remote-evidence/02-candidate/sha256.before",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "02-candidate/sha256.after",
+      "sha256": "88e92e960d33439311fe2408d61fbaadad0212a487a551bfe24a4130900b08fe",
+      "bytes": "2443",
+      "source": "remote-evidence/02-candidate/sha256.after",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "02-candidate/boot-id.before",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37",
+      "source": "remote-evidence/02-candidate/boot-id.before",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "02-candidate/boot-id.after",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37",
+      "source": "remote-evidence/02-candidate/boot-id.after",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "02-candidate/qualification-summary.txt",
+      "sha256": "4d67155f908925bd2ebdac86a8bf8069fdd288964e32afff864213e9ae709ad1",
+      "bytes": "3113",
+      "source": "remote-evidence/02-candidate/summary.txt, remote-evidence/02-candidate/probe.txt, remote-evidence/02-candidate/ppl.txt, remote-evidence/02-candidate/prefix.txt, remote-evidence/02-candidate/concurrency.txt, remote-evidence/02-candidate/load_hook.txt, remote-evidence/02-candidate/probe-after.txt",
+      "transform": "line filter: remove prompt/reply/generated text; retain PASS, metrics, route, and fault-marker lines"
+    },
+    {
+      "path": "02-candidate/benchmark-metrics/bench-1024x512-c1.metrics.txt",
+      "sha256": "01a293b87056307cb0d04a78462dd8a87e2188d4f7644f1223f32758d18e5d99",
+      "bytes": "1739",
+      "source": "remote-evidence/02-candidate/bench-1024x512-c1.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "02-candidate/benchmark-metrics/bench-1024x512-c8.metrics.txt",
+      "sha256": "471d2bff36c95228315ff776d50a0b6fbb163cc983eef2311fa481be1baadab0",
+      "bytes": "1739",
+      "source": "remote-evidence/02-candidate/bench-1024x512-c8.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "02-candidate/benchmark-metrics/bench-16384x1024-c1.metrics.txt",
+      "sha256": "22496d500a0af02f378d555797adca3d475ed58dcc33d1f6b3805cf4c44e382a",
+      "bytes": "1739",
+      "source": "remote-evidence/02-candidate/bench-16384x1024-c1.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "02-candidate/benchmark-metrics/bench-16384x1024-c8.metrics.txt",
+      "sha256": "1fc3bb46abbce8ef5e72cbb38a383c324a8bba6356b133a8513d933a5693d748",
+      "bytes": "1739",
+      "source": "remote-evidence/02-candidate/bench-16384x1024-c8.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "03-candidate/ARM-PASS.txt",
+      "sha256": "4f30eeeb42f7a2f5695560fc7715cc8013a39aa1f401e1e40dac573f423590d4",
+      "bytes": "201",
+      "source": "remote-evidence/03-candidate/ARM-PASS.txt",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "03-candidate/arm-provenance.txt",
+      "sha256": "e0c0c7796f1623dd6d91f0e61d7a6dcfaa0ff6ccf0890b4e9e99f6c388702df5",
+      "bytes": "476",
+      "source": "remote-evidence/03-candidate/arm-provenance.txt",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "03-candidate/worker-provenance.json",
+      "sha256": "7abcd2c6f0afaa541410b002f2eecea379980aa00591dd774aca9140216db998",
+      "bytes": "3721",
+      "source": "remote-evidence/03-candidate/worker-provenance.json",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "03-candidate/config.env",
+      "sha256": "0901193eae414228f6217dbbe3ffc1dacf20313f868f7c9893d9dd08e549b84e",
+      "bytes": "1333",
+      "source": "remote-evidence/03-candidate/config.env",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "03-candidate/sha256.before",
+      "sha256": "88e92e960d33439311fe2408d61fbaadad0212a487a551bfe24a4130900b08fe",
+      "bytes": "2443",
+      "source": "remote-evidence/03-candidate/sha256.before",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "03-candidate/sha256.after",
+      "sha256": "88e92e960d33439311fe2408d61fbaadad0212a487a551bfe24a4130900b08fe",
+      "bytes": "2443",
+      "source": "remote-evidence/03-candidate/sha256.after",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "03-candidate/boot-id.before",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37",
+      "source": "remote-evidence/03-candidate/boot-id.before",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "03-candidate/boot-id.after",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37",
+      "source": "remote-evidence/03-candidate/boot-id.after",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "03-candidate/qualification-summary.txt",
+      "sha256": "e9f72b242c1cc60a8933cd2a26db7e67c073764c318b49a827e0d134d86102aa",
+      "bytes": "3113",
+      "source": "remote-evidence/03-candidate/summary.txt, remote-evidence/03-candidate/probe.txt, remote-evidence/03-candidate/ppl.txt, remote-evidence/03-candidate/prefix.txt, remote-evidence/03-candidate/concurrency.txt, remote-evidence/03-candidate/load_hook.txt, remote-evidence/03-candidate/probe-after.txt",
+      "transform": "line filter: remove prompt/reply/generated text; retain PASS, metrics, route, and fault-marker lines"
+    },
+    {
+      "path": "03-candidate/benchmark-metrics/bench-1024x512-c1.metrics.txt",
+      "sha256": "984bbe377f33a91fad9fe347697e20cc23554372e484f3800bd925f6d9e0a3e8",
+      "bytes": "1739",
+      "source": "remote-evidence/03-candidate/bench-1024x512-c1.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "03-candidate/benchmark-metrics/bench-1024x512-c8.metrics.txt",
+      "sha256": "73739d9be6bc8bafd9fa268ce7ddd51c615bfee6233ecb05dbf631922a6617f7",
+      "bytes": "1739",
+      "source": "remote-evidence/03-candidate/bench-1024x512-c8.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "03-candidate/benchmark-metrics/bench-16384x1024-c1.metrics.txt",
+      "sha256": "f59a59cdc2f66860bc1ffe98689ff7272efc217e49eef1499786d96a5c6f3aa8",
+      "bytes": "1739",
+      "source": "remote-evidence/03-candidate/bench-16384x1024-c1.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "03-candidate/benchmark-metrics/bench-16384x1024-c8.metrics.txt",
+      "sha256": "79de7e3666961d699cc1b03c9ed40a815215e38f65339d9ce6c219c7f6d96f83",
+      "bytes": "1739",
+      "source": "remote-evidence/03-candidate/bench-16384x1024-c8.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "04-control/ARM-PASS.txt",
+      "sha256": "07c32b9155e8f2fc0430cbe38d043bb5250e7f136317f0bd65c4eb96b944c08b",
+      "bytes": "199",
+      "source": "remote-evidence/04-control/ARM-PASS.txt",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "04-control/arm-provenance.txt",
+      "sha256": "8baf73b5d5b1589ee7a9c572b5cc9e1814d71b49b9d1b135248d686036c1e86d",
+      "bytes": "436",
+      "source": "remote-evidence/04-control/arm-provenance.txt",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "04-control/worker-provenance.json",
+      "sha256": "3614c617f9004d6651a7a81076f69e6e32443bd8fc422e113d5c814af3d81531",
+      "bytes": "3417",
+      "source": "remote-evidence/04-control/worker-provenance.json",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "04-control/config.env",
+      "sha256": "520b1607a9900be0ad893bcf13a8ace6cd54e42bd507c23b70f196f09afa3601",
+      "bytes": "1251",
+      "source": "remote-evidence/04-control/config.env",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "04-control/sha256.before",
+      "sha256": "1186144fa587427d3b76c86d5733e33bacc2f3ac4be98c71c2392e048c6ec0eb",
+      "bytes": "2025",
+      "source": "remote-evidence/04-control/sha256.before",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "04-control/sha256.after",
+      "sha256": "1186144fa587427d3b76c86d5733e33bacc2f3ac4be98c71c2392e048c6ec0eb",
+      "bytes": "2025",
+      "source": "remote-evidence/04-control/sha256.after",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "04-control/boot-id.before",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37",
+      "source": "remote-evidence/04-control/boot-id.before",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "04-control/boot-id.after",
+      "sha256": "6c93b71920e58f353b689558422e4824aa82fa744f47730fab924829df94ac48",
+      "bytes": "37",
+      "source": "remote-evidence/04-control/boot-id.after",
+      "transform": "byte-for-byte copy"
+    },
+    {
+      "path": "04-control/qualification-summary.txt",
+      "sha256": "5dec3a7963be926148fc52c8e90c233e616525ac594444897a44adbb4de5e3c5",
+      "bytes": "3646",
+      "source": "remote-evidence/04-control/summary.txt, remote-evidence/04-control/probe.txt, remote-evidence/04-control/ppl.txt, remote-evidence/04-control/prefix.txt, remote-evidence/04-control/concurrency.txt, remote-evidence/04-control/load_hook.txt, remote-evidence/04-control/probe-after.txt",
+      "transform": "line filter: remove prompt/reply/generated text; retain PASS, metrics, route, and fault-marker lines"
+    },
+    {
+      "path": "04-control/benchmark-metrics/bench-1024x512-c1.metrics.txt",
+      "sha256": "d6a7dbe8a8542781c30fe96b3d6c54a1bc0723b6ca196399c04442cd20aad6c2",
+      "bytes": "1739",
+      "source": "remote-evidence/04-control/bench-1024x512-c1.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "04-control/benchmark-metrics/bench-1024x512-c8.metrics.txt",
+      "sha256": "461efbfa2905af014e1eee5ff4a5d0f517ba6661ef5adb08b4ec41adcf454c4e",
+      "bytes": "1739",
+      "source": "remote-evidence/04-control/bench-1024x512-c8.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "04-control/benchmark-metrics/bench-16384x1024-c1.metrics.txt",
+      "sha256": "c5510d77f5e1c3b079edb44c72c051588611d815ce79fe3c17d30a4fa5f6960a",
+      "bytes": "1739",
+      "source": "remote-evidence/04-control/bench-16384x1024-c1.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "04-control/benchmark-metrics/bench-16384x1024-c8.metrics.txt",
+      "sha256": "e3f0a12de1dba8a57986a9e33577892e6ff812e825f82d32262f6605a1bfd1a6",
+      "bytes": "1739",
+      "source": "remote-evidence/04-control/bench-16384x1024-c8.log",
+      "transform": "retain only the Serving Benchmark Result metrics block(s)"
+    },
+    {
+      "path": "per-request-analysis.csv",
+      "sha256": "64a0db38ce41de3ac71c45a0e6af72786307de88b0e8dc88d158740fabbb8374",
+      "bytes": "91725",
+      "source": "temporary analyzer output derived from raw timed cells and parity probes",
+      "transform": "copied analyzer result; raw payload omitted"
+    },
+    {
+      "path": "per-cell-analysis.csv",
+      "sha256": "cdd71d13c03413226248fe9fed594e5b58301a17ac5e247cfead25082bf4efcd",
+      "bytes": "9505",
+      "source": "temporary analyzer output derived from raw timed cells and parity probes",
+      "transform": "copied analyzer result; raw payload omitted"
+    },
+    {
+      "path": "whole-run-analysis.csv",
+      "sha256": "46ace04458a8b12d51ba76eba6d6a5f06e5b9766d9646688e75341b846c0b844",
+      "bytes": "631",
+      "source": "temporary analyzer output derived from raw timed cells and parity probes",
+      "transform": "copied analyzer result; raw payload omitted"
+    },
+    {
+      "path": "response-text-comparisons.csv",
+      "sha256": "785d1b85cb87d38f14f812cb18b26ee0bd4501beaa3c863ee3e62d558639cf68",
+      "bytes": "60522",
+      "source": "temporary analyzer output derived from raw timed cells and parity probes",
+      "transform": "copied analyzer result; raw payload omitted"
+    },
+    {
+      "path": "arm-gates.csv",
+      "sha256": "8ecae7beb88162e212a366e4395ff8eb94306058c19e91a46329711762d4c5e7",
+      "bytes": "128",
+      "source": "temporary analyzer output derived from raw timed cells and parity probes",
+      "transform": "copied analyzer result; raw payload omitted"
+    },
+    {
+      "path": "cross-arm-logprob-parity.txt",
+      "sha256": "d4a9bdf5b643dca0f43ddd4f0c464cf31c1b18d1a44ca01f2687efde984eaebc",
+      "bytes": "4700",
+      "source": "temporary analyzer output derived from raw timed cells and parity probes",
+      "transform": "copied analyzer result; raw payload omitted"
+    },
+    {
+      "path": "ANALYSIS.txt",
+      "sha256": "2eccffa93411bcab7df3dd770eaeb6bc0b681c18358150506e4bc228be8cf34c",
+      "bytes": "672",
+      "source": "temporary analyzer output derived from raw timed cells and parity probes",
+      "transform": "copied analyzer result; raw payload omitted"
+    }
+  ],
+  "export_manifest_self_hash": "omitted because including its own digest would be self-referential",
+  "excluded_from_output": [
+    "raw timed benchmark JSON (contains generated_texts)",
+    "parity.json (contains generated strings and token logprobs)",
+    "full serve.log and driver.log",
+    "generated response payloads",
+    "binaries, compiler outputs, and caches"
+  ]
+}

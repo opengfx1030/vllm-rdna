@@ -1,0 +1,511 @@
+{
+  "native_arm_files": [
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "ARM-PASS.txt",
+      "size_bytes": 347,
+      "sha256": "b38a1c2bd878ce8aefb992667ade7d78f8854ccfe43b25d9bd96f991794e8ebc"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "arm-provenance.txt",
+      "size_bytes": 687,
+      "sha256": "0fc531f00baa9d9f344531e87ca84a5846a8a7180088f1d1df90babfff77e826"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "bench-1024x512-c1.json",
+      "size_bytes": 61978,
+      "sha256": "5f3468ea3593d5873d064ab0e34aefa6395ce4bba0d87979eecc3c5ccbe4feb3"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "bench-1024x512-c1.log",
+      "size_bytes": 6602,
+      "sha256": "4f9c6ed57245815d0a22ec26e7b7ca4dce4455a5e333435fff1a0f5e0a279382"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "bench-1024x512-c8.json",
+      "size_bytes": 234367,
+      "sha256": "b47e992c2dea1b862f8289b5993b6fe315e6aa00f0c1bdd5756fc93ff1af2661"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "bench-1024x512-c8.log",
+      "size_bytes": 7967,
+      "sha256": "f51de5a5acacaa24de294da66b2246cbe1dbda13a578482c7ec6c61a66781495"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "bench-16384x1024-c1.json",
+      "size_bytes": 111424,
+      "sha256": "7018d98168be656325c43e33bdad986c0d9e37708a23e099643fa44008c3d53d"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "bench-16384x1024-c1.log",
+      "size_bytes": 6610,
+      "sha256": "5a732e9effcb66c1455eea34f3d01304857b0cbeb572e424e75c1261396bfd63"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "bench-16384x1024-c8.json",
+      "size_bytes": 445494,
+      "sha256": "2ee3ca1a0358238cd7d13c30055ab98031386e02515199a9e79ded05d9f0ebee"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "bench-16384x1024-c8.log",
+      "size_bytes": 7871,
+      "sha256": "4b98d877dc301a1d8a0bd478b4b7c888f2201c5e646a0caf2896b96773c69afb"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "boot-id.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "boot-id.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "concurrency.json",
+      "size_bytes": 1074416,
+      "sha256": "a3d311197c66b61f49c4d6251d37c737e4e93cbd10bd80ec3cf39b6137d1d15b"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "concurrency.txt",
+      "size_bytes": 3742,
+      "sha256": "d5b470942dcb5c759cb4af77658004617a6bb5e1474364428284d1e7e7e30736"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "config.env",
+      "size_bytes": 1375,
+      "sha256": "b6222ec7a8d6893a4402ae81903f14214958c660440114c20543df83c45cd321"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "driver.log",
+      "size_bytes": 7548,
+      "sha256": "3a2cb093936d8db97a876786358b94bfc30465c6a92374f213256ec571207693"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "kernel.after.json",
+      "size_bytes": 8153346,
+      "sha256": "a2ab3ddfb617fae25eb1c02136e7cdb03506b885c3a1c0e1be89b5a2ae675e67"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "kernel.before.json",
+      "size_bytes": 7971998,
+      "sha256": "d6b7da1eec2cb2965c8d0262bc7b6f604720077823f3efdda47df04332082d14"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "load_hook.txt",
+      "size_bytes": 110,
+      "sha256": "0481b78148e5fa3d9884220f29f1a05c6e697652864f58b531319b2f90f59642"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "models.json",
+      "size_bytes": 582,
+      "sha256": "e2d010298e7fa861145bf0467877a2a9994fb45ac731f40bdb44cba0776bb3d7"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "parity.json",
+      "size_bytes": 186247,
+      "sha256": "759c731aab8ba4a9dec5334d068fe615c14db05f7d73386a5bc38326c588ca4b"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "ppl.txt",
+      "size_bytes": 1137,
+      "sha256": "91acb0fc5b5c64148130572d7281f9a8307357ce465d65014cbd5e33a6b92406"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "prefix.txt",
+      "size_bytes": 331,
+      "sha256": "065717c51aa9e0891e9c9e2c387b9224b1e2c9d59a8f7cd821d1bd6178a88d54"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "probe-after.txt",
+      "size_bytes": 670,
+      "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "probe.txt",
+      "size_bytes": 665,
+      "sha256": "297dd2f52f1555d1c27115b65fbedf7971999313533bb42f75c08508258b71be"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "reset-prefix-bench-1024x512-c1.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "reset-prefix-bench-1024x512-c8.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "reset-prefix-bench-16384x1024-c1.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "reset-prefix-bench-16384x1024-c8.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "serve.log",
+      "size_bytes": 145745,
+      "sha256": "116b48bb2826978a11472325d194bf614deadb41b7d26940355daba6cc129639"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "serve.pid",
+      "size_bytes": 6,
+      "sha256": "526dab4489fb2e0234159acb9f2b429cab12499e9e173dd50e4a7d98be663d42"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "sha256.after",
+      "size_bytes": 6334,
+      "sha256": "3e43ffb880c268f8a8b6a5c6db721e03f1969470013fb677870e2f41808fe645"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "sha256.before",
+      "size_bytes": 6334,
+      "sha256": "3e43ffb880c268f8a8b6a5c6db721e03f1969470013fb677870e2f41808fe645"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "summary.txt",
+      "size_bytes": 7543,
+      "sha256": "64e5b0d5e3081f9f25cc692551818cb443e20daa71a2d81bdef3b9cbe046798c"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "warmup.txt",
+      "size_bytes": 536,
+      "sha256": "8edff6b1e99a79f0f126d2ad2f778cde4b07002e4abc7f54c319bbadefcb7b22"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "worker-provenance.json",
+      "size_bytes": 3813,
+      "sha256": "1a8c576849dd667a203c93b6529ea8a99bba507425d30c5426b4b66c1e78731f"
+    },
+    {
+      "arm_dir": "dense-mtp-native-no-mono-v3-results",
+      "path": "worker-provenance.log",
+      "size_bytes": 3813,
+      "sha256": "1a8c576849dd667a203c93b6529ea8a99bba507425d30c5426b4b66c1e78731f"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "ARM-PASS.txt",
+      "size_bytes": 338,
+      "sha256": "0f09056e5984620a44e48749341c85128ffa9f1ba148c4cde5e204ec35983b91"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "api-environment-audit.json",
+      "size_bytes": 517,
+      "sha256": "0410a1309c9d6a9b754e87aa42b209a9240a5ed9bad5b032148597d55af53796"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "arm-provenance.txt",
+      "size_bytes": 660,
+      "sha256": "717d2076c5035f5de5764ed7931f760d80d05710d6c04fde8f8f79bbca421d47"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "bench-1024x512-c1.json",
+      "size_bytes": 58089,
+      "sha256": "65179215242975315b982ce16e2a125ae080d9e952132a074f3ac60123b9cf1b"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "bench-1024x512-c1.log",
+      "size_bytes": 6603,
+      "sha256": "3ee3dcf422075cbc712a43c72f95d42670730ff0b5af8b46748d8ddea5a9b4ac"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "bench-1024x512-c8.json",
+      "size_bytes": 241229,
+      "sha256": "679cde696a14a86873e814f7e97c2759b615512813c98685f508f7f3fd1bfd9b"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "bench-1024x512-c8.log",
+      "size_bytes": 7735,
+      "sha256": "7ee009c37aab18c9cd74e18e6234ed9096078ef0075be3e440e22dfd1c2f6fdb"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "bench-16384x1024-c1.json",
+      "size_bytes": 109632,
+      "sha256": "106dec21afb7efd1dce5add6527e36edb3445a9763a535edf0bd9056ae80fdbd"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "bench-16384x1024-c1.log",
+      "size_bytes": 6611,
+      "sha256": "c1872a9ba38efed5c8f0eb06393b95227cbbbb76cef06fdc22e998153b3438d1"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "bench-16384x1024-c8.json",
+      "size_bytes": 432820,
+      "sha256": "b8a6378fe6cb87c15e4545f08e1b4c98d0f19e55c1afce9d4a69e2ecef0a1bf0"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "bench-16384x1024-c8.log",
+      "size_bytes": 8034,
+      "sha256": "c15b553a44ed6b394a8fb1ec810a91c6209e33a80a1bc41ad82a759020e574cc"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "boot-id.after",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "boot-id.before",
+      "size_bytes": 37,
+      "sha256": "77f2f900cf8c0ed196c8134ddceff0710995a5b7d8eef55a6fe4eeecdbdf6c6a"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "concurrency.json",
+      "size_bytes": 1073586,
+      "sha256": "936452bbc3eab1d2b0385180d29f96bc6378b0a0249b6ea9e34ca1e1e6ba8b3f"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "concurrency.txt",
+      "size_bytes": 3897,
+      "sha256": "413d2247455b506e792f10e85d6e1acfb9bcdf5f0fe320896712fd16d94e30cf"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "config.env",
+      "size_bytes": 1412,
+      "sha256": "06efc3a22446638df474aff3eb81d3e07077987084ab3fbfcd327ff058e316f7"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "driver.log",
+      "size_bytes": 7410,
+      "sha256": "7c7e0cb608c49c925d445d93aef08d7ca51ff302872490787327718e3fba4746"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "kernel.after.json",
+      "size_bytes": 7888847,
+      "sha256": "532d302844b1ea3d6d823a380881ffb13f554c4405c22fff68cd4ecf74f8e71a"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "kernel.before.json",
+      "size_bytes": 7693212,
+      "sha256": "e6dc1ac9a988a2c60ce9db8b4ccc00f3a4db85961c87eb219131af39747989d0"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "load_hook.txt",
+      "size_bytes": 3239,
+      "sha256": "1b5f68ddbca372f0c95425d2227b274437aaba0142cac6a8f7024e1a41a88349"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "models.json",
+      "size_bytes": 582,
+      "sha256": "394e7e2526c1cb66078540943290dc3f0e501c02688059d17cdba50a11b57e27"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "parity.json",
+      "size_bytes": 186345,
+      "sha256": "930b14a95600c52b76b661812822d1378221a4b444afca5ec220906d623899ea"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "ppl.txt",
+      "size_bytes": 1116,
+      "sha256": "7b031208fd9fdf35e520ceb42024ca3c503f7d5c96423ac1787afaad2e4b485b"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "prefix.txt",
+      "size_bytes": 331,
+      "sha256": "404f3da21fe9b728ca3a9258327defb3f7e2913c233aded4384132169d243eb9"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "probe-after.txt",
+      "size_bytes": 654,
+      "sha256": "b158287167b3bdd91fac84148ecfb90fe4bc8ea2220460e71d03e599aff2e416"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "probe.txt",
+      "size_bytes": 668,
+      "sha256": "64f87651092e0add47261f74d6b6b8ea0bb945b674211505d433d90da64d6a20"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "reset-prefix-bench-1024x512-c1.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "reset-prefix-bench-1024x512-c8.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "reset-prefix-bench-16384x1024-c1.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "reset-prefix-bench-16384x1024-c8.json",
+      "size_bytes": 16,
+      "sha256": "c955e57777ec0d73639dca6748560d00aa5eb8e12f13ebb2ed9656add3908f97"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "serve.log",
+      "size_bytes": 285021,
+      "sha256": "bcc5d0a227a3a9f5a93e7b80a497c44a2fcc53d886d69381595642063336ab31"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "serve.pid",
+      "size_bytes": 6,
+      "sha256": "44ae1cd789bfcd471783c528e5a191371a02e6eb1c4d228ceb559646a24459ec"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "sha256.after",
+      "size_bytes": 5778,
+      "sha256": "87171c451d52c70c9ae64abc26f5c257ef1a61580bc0f30da79022fe91584350"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "sha256.before",
+      "size_bytes": 5778,
+      "sha256": "87171c451d52c70c9ae64abc26f5c257ef1a61580bc0f30da79022fe91584350"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "summary.txt",
+      "size_bytes": 7426,
+      "sha256": "e396d92592ea825c8a5c29163679088225c0c09aca54490545e251665ab1d105"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "warmup.txt",
+      "size_bytes": 536,
+      "sha256": "cbaf4f2728ac7051aacf42586d19c98e9bcc0cd8251ee3a0782e93df53d96f54"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "worker-environment-audit.json",
+      "size_bytes": 1526,
+      "sha256": "fd7c624b77b346ef47e1d31e61b17cb5b244e15d2cc1b75d2222c129e0a36642"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "worker-provenance.json",
+      "size_bytes": 3813,
+      "sha256": "10f38cde0787029e7c16151f2bc916f0059db86c91c056673705da436109e17f"
+    },
+    {
+      "arm_dir": "dense-mtp-failstop-healthy-v3-results",
+      "path": "worker-provenance.log",
+      "size_bytes": 3813,
+      "sha256": "10f38cde0787029e7c16151f2bc916f0059db86c91c056673705da436109e17f"
+    }
+  ],
+  "native_safe_evidence_copied": [
+    "ARM-PASS.txt",
+    "arm-provenance.txt",
+    "boot-id.before",
+    "boot-id.after",
+    "sha256.before",
+    "sha256.after",
+    "worker-provenance.json",
+    "config.env",
+    "models.json"
+  ],
+  "mono_curated_manifest_sha256": "b80a4b012c2080d60b16cff7e71bd84a89eac416372cf49dc8a0f9780d173c5d",
+  "analyzer_sha256": "9676b6a460b958f71dc90e60810aa834f0ed74b0e2df711af6195ca09bd43bee",
+  "metric_extractor_sha256": "62f766cf1007aef0e4c6f45d1fbc7a56819949c0cb45a85c241c4d59951436cb",
+  "curator_sha256": "d44c5455070bd2e588b820ff479eefbb81ab5f0baa9f33726c97c3a07cc8605b",
+  "excluded": [
+    "raw response-bearing benchmark JSON/text/log bodies",
+    "raw kernel journals",
+    "binary artifacts",
+    "cache subtrees"
+  ],
+  "reproducibility_tools": {
+    "analyze_native_vs_mono_v4.py.txt": {
+      "sha256": "9676b6a460b958f71dc90e60810aa834f0ed74b0e2df711af6195ca09bd43bee",
+      "snapshot": "analyze_native_vs_mono_v4.py.txt",
+      "source_path": "bench_results/2026-10-24-mtp-mono-efficiency/native-vs-mono-control-v3/analyze_native_vs_mono_v4.py"
+    },
+    "curate_pair_v4.py.txt": {
+      "sha256": "d44c5455070bd2e588b820ff479eefbb81ab5f0baa9f33726c97c3a07cc8605b",
+      "snapshot": "curate_pair_v4.py.txt",
+      "source_path": "bench_results/2026-10-24-mtp-mono-efficiency/native-vs-mono-control-v3/curate_pair_v4.py"
+    },
+    "test_analyze_native_vs_mono_v4.py.txt": {
+      "sha256": "3dfd313c3d7a98b8c6aa138b6175d99ea5ed9e703bb0afacd7fa18143c2ea94d",
+      "snapshot": "test_analyze_native_vs_mono_v4.py.txt",
+      "source_path": "bench_results/2026-10-24-mtp-mono-efficiency/native-vs-mono-control-v3/test_analyze_native_vs_mono_v4.py"
+    },
+    "test_curate_pair_v3.py.txt": {
+      "sha256": "bb23438bccd1f32e57e279a1ddff77c73e3774b6aa3c306bfbec90241ccf0c19",
+      "snapshot": "test_curate_pair_v3.py.txt",
+      "source_path": "bench_results/2026-10-24-mtp-mono-efficiency/native-vs-mono-control-v3/test_curate_pair_v3.py"
+    },
+    "analyze_pair_v1.py.txt": {
+      "sha256": "62f766cf1007aef0e4c6f45d1fbc7a56819949c0cb45a85c241c4d59951436cb",
+      "snapshot": "analyze_pair_v1.py.txt",
+      "source_path": "bench_results/2026-10-24-mtp-mono-efficiency/correctness-core-serving-ab/tools/analyze_pair_v1.py"
+    }
+  },
+  "source_equality_receipt_sha256": "7a9c74336ae5e4f113a2f0513824b437909846e10ab57e8cede95818b4d048a1",
+  "native_privileged_journal_summary_sha256": "dc3492e17733e6c34eae0f8213bbda8b1c7bd8e17eb872faf82d009c1c4b2be8",
+  "native_privileged_checker_sha256": "d2272c6289f9791472045f2d0091eed1ef2df4a6db9fb35ee476db031ea19bd0"
+}

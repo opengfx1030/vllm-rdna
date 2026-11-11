@@ -779,10 +779,9 @@ def test_mul1_real_tiles_match_upstream_dp4a():
 
     from safetensors import safe_open
 
-    root = os.environ.get(
-        "EXL3_MUL1_MODEL",
-        "/home/chenco_adm/models/Qwen3.8-27B-exl3-3.00bpw",
-    )
+    root = os.environ.get("EXL3_MUL1_MODEL")
+    if not root:
+        pytest.skip("EXL3_MUL1_MODEL is not set")
     index = os.path.join(root, "model.safetensors.index.json")
     if not os.path.isfile(index):
         pytest.skip(f"real mul1 checkpoint not at {root}")

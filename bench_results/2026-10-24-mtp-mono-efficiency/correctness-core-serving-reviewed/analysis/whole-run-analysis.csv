@@ -1,0 +1,3 @@
+arm,variant,timed_cells,sum_cell_durations_s,sum_input_tokens,sum_output_tokens,whole_run_input_tokps_true,whole_run_output_tokps_true,mean_cell_prefill_tokps_wave_proxy_NOT_TRUE_THROUGHPUT
+01-old,old25f3,4,624.7925271859999,696320,61440,1114.4819595332747,98.33664348823012,2205.2442791365856
+02-new,new3f688,4,623.254941535,696320,61440,1117.2314146199144,98.57924246646303,2196.212786613311

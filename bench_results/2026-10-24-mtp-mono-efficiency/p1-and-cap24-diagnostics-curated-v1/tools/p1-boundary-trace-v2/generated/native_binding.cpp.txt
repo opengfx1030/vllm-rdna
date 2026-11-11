@@ -1,0 +1,3 @@
+#include <torch/extension.h>
+void hc_combine_norm_rdna2_p1trace(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, torch::Tensor);
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("hc_combine_norm_rdna2_p1trace", &hc_combine_norm_rdna2_p1trace); }

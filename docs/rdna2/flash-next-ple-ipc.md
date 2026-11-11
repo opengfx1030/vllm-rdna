@@ -21,13 +21,11 @@ worker's cross-process handshake failed.
 
 ## Root cause
 
-`tools/rdna/serve_gfx1030_full.sh` exports
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. With expandable segments the
-CUDA caching allocator carves large allocations straight from VMM
-(`cuMemCreate`/`cuMemMap`). VMM-backed memory **cannot be exported through CUDA
-IPC** on ROCm, so the receiving process's `hipIpcOpenMemHandle` fails with
-`hipErrorInvalidValue` — for *every* PLE tensor, starting with the 10 MB
-`[2048, 2560]` fp16 `gpu_output_buffer`.
+With `expandable_segments:True` the CUDA caching allocator carves large
+allocations straight from VMM (`cuMemCreate`/`cuMemMap`). VMM-backed memory
+**cannot be exported through CUDA IPC** on ROCm, so the receiving process's
+`hipIpcOpenMemHandle` fails with `hipErrorInvalidValue` — for *every* PLE
+tensor, starting with the 10 MB `[2048, 2560]` fp16 `gpu_output_buffer`.
 
 Minimal repro (two spawned processes, one tensor):
 
@@ -41,19 +39,16 @@ share fine without expandable segments.
 
 ## Fix
 
-**Turn expandable segments off for any run that uses PLE offload.**
+`tools/rdna/serve_rdna.sh` owns the allocator flag. `ALLOC_CONF=auto`
+(set in `tools/rdna/recipes/full.env`; pass it on a sidecar launch) exports
+`expandable_segments:False` when `VLLM_PLE_CPU_OFFLOAD=1`, and
+`expandable_segments:True` otherwise. `serve_gfx1030_full.sh` is
+`RECIPE=full`. Do not force `expandable_segments:True` on a sidecar run.
 
 ```bash
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False \
-VLLM_PLE_CPU_OFFLOAD=1 \
-VLLM_PLE_QUANT_DIR=<sidecar>/ples_int4 \
-  ... --enable-expert-parallel
+bash tools/rdna/serve_rdna.sh RECIPE=flashnext PLE=int4-disk \
+  PLE_QUANT_DIR=<ples_int4> ALLOC_CONF=auto
 ```
-
-Note `serve_gfx1030_full.sh` uses
-`PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"`,
-so exporting an *empty* value re-selects the default: pass
-`expandable_segments:False` explicitly.
 
 Expandable segments are otherwise preferred here (they fix a cudagraph hole at
 1k/1k c=8 — see the serve script), so this is a PLE-only override until the

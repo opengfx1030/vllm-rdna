@@ -1,0 +1,12 @@
+arm=new3f688
+label=target-MonoKernel-native-MTP2-cap8
+mtp_drafter=0
+target_monokernel=1
+k2_max_rows=8
+serve_tree=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2
+old_tree=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree
+new_tree=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2
+expected_core_sha256=3f688006eec38adef6cf4d4546735f66b8892d8066387336a88ba6fe7b668bac
+expected_mono_cu_sha256=bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf
+gpus=6,7,8,9
+boot_id=1e8b5da1-759f-4dbb-ae87-e58c2faaff48

@@ -1,16 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# The imports below follow the module-level skip on purpose.
-# ruff: noqa: E402
-import pytest
-
-pytest.skip(
-    "The fork's PLE CPU sidecar is not wired on the v0.31 port; Flash-Next "
-    "uses upstream EngramConfig.cpu_offload (docs/rdna2/v0.31.0-port-notes.md).",
-    allow_module_level=True,
-)
-
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -317,7 +307,9 @@ def test_ple_offload_accepts_supported_configurations(
     )
     worker.model_config = SimpleNamespace(architecture=architecture)
     worker.vllm_config = SimpleNamespace(weight_transfer_config=None)
-    monkeypatch.setattr(gpu_worker_module.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        gpu_worker_module.current_platform, "is_cuda_alike", lambda: True
+    )
 
     if unsupported_setting is None:
         worker._validate_ple_offload_config()

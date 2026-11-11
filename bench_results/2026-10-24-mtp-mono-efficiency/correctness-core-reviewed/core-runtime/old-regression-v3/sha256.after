@@ -1,0 +1,3 @@
+2e37d05cab3b47b8535ca7e274b71212b1f94a690bb23644071c4bcd0c55d9a8  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-candidate-v1/test_amd_mono_rdna2_kernels_v3.py
+25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so
+aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/csrc/rocm/mono_k2_rdna2.cu

@@ -1,0 +1,26 @@
+"""CPU replay using exact archived analyzer/helper text and numeric subset."""
+import importlib.machinery
+import importlib.util
+import json
+import sys
+sys.dont_write_bytecode = True
+from pathlib import Path
+
+HERE=Path(__file__).resolve().parent
+
+
+def load(name,path):
+    loader=importlib.machinery.SourceFileLoader(name,str(path))
+    spec=importlib.util.spec_from_loader(name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module)
+    return module
+
+
+analyzer=load('curated_p1_analyzer',HERE/'tools/p1-boundary-trace-analysis-v3/analyze.py.txt')
+helper=load('curated_p1_helper',HERE/'tools/native-m128-repeat-v1/analyze_p1.py.txt')
+args=[json.loads((HERE/path).read_text()) for path in ('p1/v2/result.json','p1/native-repeat-result.json','p1/snapshot-row104-stream0-subset.json')]
+actual=analyzer.analyze(*args,helper)
+expected=json.loads((HERE/'p1/analysis-v3-result.json').read_text())
+expected.pop('sources')
+assert actual==expected,'curated numeric inputs do not reproduce exact analyzer-v3 result'
+print('PASS: exact analyzer-v3 result reproduced from response-free numeric subset')

@@ -29,6 +29,9 @@ if not on_gfx10x():
 from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (  # noqa: E402
     fused_recurrent_gated_delta_rule_packed_decode,
 )
+from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+    fused_sigmoid_gating_delta_rule_update,
+)
 
 device = "cuda"
 
@@ -150,3 +153,371 @@ def test_gdn_decode_rdna2_invalid_state_idx_zeroes_output():
     out_hip, state_hip = _run_hip(mixed_qkv, a, b, A_log, dt_bias, state0, idx, scale)
     assert out_hip.abs().max().item() == 0.0
     torch.testing.assert_close(state_hip, state0)
+
+
+# =============================================================================
+# GDN speculative-decoding verify (torch.ops._rocm_C.gdn_spec_verify_rdna2).
+#
+# The MTP spec-verify step of fused_sigmoid_gating_delta_rule_update_kernel:
+# varlen + continuous batching + spec decoding + in-place final state. The HIP
+# kernel walks every token of a sequence in registers and stores the state to
+# slot t of the request's index row.
+#
+# Tolerance: the fp32 state agrees to <= 1 ulp (the two kernels reduce the
+# 128-wide K axis in different orders -- Triton uses sizePerThread=[1,4] with a
+# DPP and shared-memory tree, the HIP kernel 8 lanes x 16 elements with a
+# shuffle butterfly). Every other op matches bit-for-bit: exp/log go through
+# the same llvm.exp2.f32 / llvm.log.f32 lowering, rsqrt is __frsqrt_rn
+# (llvm.amdgcn.rsq.f32) and the divisions are IEEE. The fp16 output is
+# bit-identical except ~1 element in 2000, by 1 fp16 ulp.
+# =============================================================================
+
+SPEC_H, SPEC_HV = 4, 12  # TP4: 16/4 key heads, 48/4 value heads
+
+
+def _make_spec(
+    n_req,
+    lens,
+    accepted,
+    blocks=None,
+    seed=0,
+    a_dtype=torch.float32,
+    d_dtype=torch.float32,
+    state_dtype=torch.float32,
+    a_3d=False,
+):
+    g = torch.Generator(device=device).manual_seed(seed)
+    T = sum(lens)
+    q = torch.randn(1, T, SPEC_H, K, device=device, dtype=torch.float16, generator=g)
+    k = torch.randn(1, T, SPEC_H, K, device=device, dtype=torch.float16, generator=g)
+    v = torch.randn(1, T, SPEC_HV, V, device=device, dtype=torch.float16, generator=g)
+    # The layer hands the wrapper flattened [T, HV] rows (a_spec = a[:n]
+    # .index_select(0, spec_token_indx)); 3-D [1, T, HV] is also accepted.
+    gate_shape = (1, T, SPEC_HV) if a_3d else (T, SPEC_HV)
+    a = torch.randn(*gate_shape, device=device, dtype=torch.float16, generator=g)
+    b = torch.randn(*gate_shape, device=device, dtype=torch.float16, generator=g)
+    A_log = torch.randn(SPEC_HV, device=device, dtype=torch.float32, generator=g).to(
+        a_dtype
+    )
+    dt_bias = torch.randn(SPEC_HV, device=device, dtype=torch.float32, generator=g).to(
+        d_dtype
+    )
+    blocks = blocks or (1 + n_req * 3)
+    state = torch.randn(
+        blocks, SPEC_HV, V, K, device=device, dtype=state_dtype, generator=g
+    )
+    cu = torch.zeros(n_req + 1, device=device, dtype=torch.int32)
+    cu[1:] = torch.tensor(lens, device=device, dtype=torch.int32)
+    cu = cu.cumsum(0).to(torch.int32)
+    # [n_req, 1 + num_spec]: the model passes the whole row for the state and
+    # column 0 for the indices, so both stride patterns are covered.
+    idx = (
+        torch.arange(n_req * 3, device=device, dtype=torch.int32).reshape(n_req, 3) + 1
+    )
+    acc = (
+        None
+        if accepted is None
+        else torch.tensor(accepted, device=device, dtype=torch.int32)
+    )
+    return q, k, v, a, b, A_log, dt_bias, state, cu, idx, acc
+
+
+def _run_spec(parts, monkeypatch, hip, scale):
+    q, k, v, a, b, A_log, dt_bias, state, cu, idx, acc = parts
+    monkeypatch.setenv("VLLM_GDN_DECODE_RDNA2", "1" if hip else "0")
+    s = state.clone()
+    out, _ = fused_sigmoid_gating_delta_rule_update(
+        A_log=A_log,
+        a=a,
+        b=b,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        initial_state=s,
+        inplace_final_state=True,
+        cu_seqlens=cu,
+        ssm_state_indices=idx,
+        num_accepted_tokens=acc,
+        use_qk_l2norm_in_kernel=True,
+        scale=scale,
+    )
+    return out, s
+
+
+def _assert_spec_parity(parts, monkeypatch, state_atol=1e-5):
+    scale = K**-0.5
+    out_hip, state_hip = _run_spec(parts, monkeypatch, True, scale)
+    out_tri, state_tri = _run_spec(parts, monkeypatch, False, scale)
+    torch.accelerator.synchronize()
+
+    used = parts[9].reshape(-1).unique().long()
+    err_out = (out_hip.float() - out_tri.float()).abs()
+    err_state = (state_hip[used].float() - state_tri[used].float()).abs()
+    # <= 1 fp16 ulp on a handful of elements, bit-identical on the rest
+    # (1 fp16 ulp is 6.1e-5 at |x| = 0.125 and 3.1e-5 at |x| = 0.03).
+    assert err_out.max().item() <= 1.25e-4, f"out err {err_out.max().item()}"
+    assert (err_out > 0).sum().item() < 0.005 * err_out.numel()
+    # state: 1 ulp of the reduction order, absolutely bounded (an fp16 state
+    # quantises ~1e-3, an fp32 state ~5e-7).
+    assert err_state.max().item() <= state_atol, f"state err {err_state.max().item()}"
+    torch.testing.assert_close(
+        state_hip[used], state_tri[used], atol=state_atol, rtol=1e-6
+    )
+    # the untouched slots must stay untouched
+    keep = torch.ones(state_hip.size(0), dtype=torch.bool, device=device)
+    keep[used] = False
+    assert torch.equal(state_hip[keep], state_tri[keep])
+
+
+@pytest.mark.parametrize("n_req,accepted", [(1, [3]), (2, [3, 3]), (8, [3] * 8)])
+def test_gdn_spec_verify_rdna2_parity(n_req, accepted, monkeypatch):
+    parts = _make_spec(n_req, [3] * n_req, accepted)
+    _assert_spec_parity(parts, monkeypatch)
+
+
+@pytest.mark.parametrize("accepted", [[1] * 8, [2] * 8, [1, 2, 3, 1, 2, 3, 1, 2]])
+def test_gdn_spec_verify_rdna2_partial_acceptance(accepted, monkeypatch):
+    """num_accepted_tokens - 1 selects the state slot to start from, so a wrong
+    offset silently reads the wrong history."""
+    _assert_spec_parity(_make_spec(8, [3] * 8, accepted), monkeypatch)
+
+
+@pytest.mark.parametrize("lens", [[3, 1, 2, 3], [1] * 4])
+def test_gdn_spec_verify_rdna2_ragged(lens, monkeypatch):
+    accepted = [min(ln, 3) for ln in lens]
+    _assert_spec_parity(_make_spec(len(lens), lens, accepted), monkeypatch)
+
+
+def test_gdn_spec_verify_rdna2_non_spec_varlen(monkeypatch):
+    """IS_VARLEN with no num_accepted_tokens: one token per request, offset 0."""
+    _assert_spec_parity(_make_spec(8, [1] * 8, None), monkeypatch)
+
+
+def test_gdn_spec_verify_rdna2_fp16_gates_and_fp16_state(monkeypatch):
+    """dt_bias is cast to the model dtype on load while A_log stays fp32, and
+    the mamba state can be fp16."""
+    _assert_spec_parity(
+        _make_spec(4, [3] * 4, [3] * 4, a_dtype=torch.float16, d_dtype=torch.float16),
+        monkeypatch,
+    )
+    _assert_spec_parity(
+        _make_spec(4, [3] * 4, [3] * 4, state_dtype=torch.float16),
+        monkeypatch,
+        state_atol=2e-3,
+    )
+
+
+def test_gdn_spec_verify_rdna2_gate_layout_matches_call_site(monkeypatch):
+    """Regression: the layer passes a/b as flattened [T, HV] rows -- see
+    qwen_gdn_linear_attn.py ``a_spec = a.index_select(0, spec_token_indx)``
+    on a 2-D ``a``. The op used to require 3-D [B, T, HV] and rejected the real
+    engine call during warmup."""
+    parts = _make_spec(8, [3] * 8, [3] * 8)
+    assert parts[3].shape == (24, SPEC_HV) and parts[3].dim() == 2
+    assert parts[4].shape == (24, SPEC_HV) and parts[4].dim() == 2
+    _assert_spec_parity(parts, monkeypatch)
+
+
+def test_gdn_spec_verify_rdna2_3d_gates(monkeypatch):
+    """The 3-D [1, T, HV] spelling of the same token layout stays supported."""
+    parts = _make_spec(4, [3] * 4, [3] * 4, a_3d=True)
+    assert parts[3].dim() == 3
+    _assert_spec_parity(parts, monkeypatch)
+
+
+def test_gdn_spec_verify_rdna2_invalid_slot_zeroes_output(monkeypatch):
+    """state_idx <= 0 (NULL_BLOCK_ID) must not touch the state and must zero the
+    output instead of leaving the caller's buffer undefined."""
+    parts = list(_make_spec(2, [3, 3], [3, 3]))
+    idx = parts[9].clone()
+    idx[0, 2] = 0  # NULL_BLOCK_ID on the slot the initial-state load reads
+    parts[9] = idx
+    monkeypatch.setenv("VLLM_GDN_DECODE_RDNA2", "1")
+    out, state = _run_spec(tuple(parts), monkeypatch, True, K**-0.5)
+    torch.accelerator.synchronize()
+    assert out[0, :3].abs().max().item() == 0.0
+    assert torch.equal(state[idx[0, 0]], parts[7][idx[0, 0]])
+    # request 1 is a normal sequence and must be unaffected
+    assert out[0, 3:6].abs().max().item() > 0.0
+
+
+class _NoLaunchSpec:
+    def __getitem__(self, _key):
+        raise AssertionError("Triton kernel launched on the RDNA2 path")
+
+
+def test_gdn_spec_verify_rdna2_does_not_launch_triton(monkeypatch):
+    import vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating as fsg
+
+    monkeypatch.setattr(
+        fsg, "fused_sigmoid_gating_delta_rule_update_kernel", _NoLaunchSpec()
+    )
+    parts = _make_spec(8, [3] * 8, [3] * 8)
+    out, state = _run_spec(parts, monkeypatch, True, K**-0.5)  # env var set to "1"
+    monkeypatch.setenv("VLLM_GDN_DECODE_RDNA2", "1")
+    torch.accelerator.synchronize()
+    assert torch.isfinite(out).all()
+    assert torch.isfinite(state).all()
+
+
+def _packed_views(parts):
+    """q/k/v/a/b rebuilt as views into the packed buffers the layer holds: the
+    conv output rows (token stride wider than q + k + v, as in mixed_qkvz,
+    with junk in the z tail) and the ba projection. Same values as ``parts``."""
+    q, k, v, a, b = parts[:5]
+    T = q.shape[1]
+    hq, hv = SPEC_H * K, SPEC_HV * V
+    g = torch.Generator(device=device).manual_seed(7)
+    mixed = torch.randn(
+        T, 2 * hq + 2 * hv, device=device, dtype=torch.float16, generator=g
+    )
+    mixed[:, :hq] = q[0].reshape(T, hq)
+    mixed[:, hq : 2 * hq] = k[0].reshape(T, hq)
+    mixed[:, 2 * hq : 2 * hq + hv] = v[0].reshape(T, hv)
+    qs, ks, vs = torch.split(mixed[:, : 2 * hq + hv], [hq, hq, hv], dim=-1)
+    ba = torch.randn(T, 2 * SPEC_HV, device=device, dtype=torch.float16, generator=g)
+    ba[:, :SPEC_HV] = b
+    ba[:, SPEC_HV:] = a
+    bv, av = ba.split(SPEC_HV, dim=-1)
+    return (qs.view(1, T, -1, K), ks.view(1, T, -1, K), vs.view(1, T, -1, V), av, bv)
+
+
+@pytest.mark.parametrize("hip", [True, False])
+def test_gdn_spec_verify_strided_views_and_direct_out(hip, monkeypatch):
+    """The layer hands the verify step views into the conv output and the ba
+    projection (token stride != packed) plus an ``out=`` slice of its
+    core_attn_out. Both must match the contiguous call bit-for-bit, and rows
+    past the last sequence must stay untouched (the buffer is zero-initialised
+    by the caller). On the HIP path Triton must not launch."""
+    import vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating as fsg
+
+    if hip:
+        monkeypatch.setattr(
+            fsg, "fused_sigmoid_gating_delta_rule_update_kernel", _NoLaunchSpec()
+        )
+    monkeypatch.setenv("VLLM_GDN_DECODE_RDNA2", "1" if hip else "0")
+    parts = _make_spec(8, [3] * 8, [3] * 8)
+    q, k, v, a, b, A_log, dt_bias, state, cu, idx, acc = parts
+    qv, kv, vv, av, bv = _packed_views(parts)
+    assert not qv.is_contiguous() and not vv.is_contiguous()
+    assert av.stride(0) == 2 * SPEC_HV and bv.stride(0) == 2 * SPEC_HV
+    T = q.shape[1]
+
+    def run(q_, k_, v_, a_, b_, out=None):
+        s = state.clone()
+        o, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a_,
+            b=b_,
+            dt_bias=dt_bias,
+            q=q_,
+            k=k_,
+            v=v_,
+            initial_state=s,
+            inplace_final_state=True,
+            cu_seqlens=cu,
+            ssm_state_indices=idx,
+            num_accepted_tokens=acc,
+            use_qk_l2norm_in_kernel=True,
+            scale=K**-0.5,
+            out=out,
+        )
+        return o.reshape(T, SPEC_HV, V), s
+
+    ref_o, ref_s = run(q, k, v, a, b)
+    strided_o, strided_s = run(qv, kv, vv, av, bv)
+    buf = torch.zeros(T + 5, SPEC_HV, V, device=device, dtype=torch.float16)
+    _, direct_s = run(qv, kv, vv, av, bv, out=buf[:T].unsqueeze(0))
+    torch.accelerator.synchronize()
+    assert torch.equal(strided_o, ref_o) and torch.equal(strided_s, ref_s)
+    assert torch.equal(buf[:T], ref_o) and torch.equal(direct_s, ref_s)
+    assert torch.count_nonzero(buf[T:]) == 0
+
+
+def test_gdn_spec_verify_rejects_non_dense_heads(monkeypatch):
+    """A view whose heads are not dense (a head-strided slice) must fall back to
+    Triton rather than hand the HIP kernel a wrong stride."""
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("HIP verify kernel launched on head-strided q")
+
+    monkeypatch.setattr(torch.ops._rocm_C, "gdn_spec_verify_rdna2", refuse)
+    parts = _make_spec(2, [3, 3], [3, 3])
+    q, k, v, a, b, A_log, dt_bias, state, cu, idx, acc = parts
+    T = q.shape[1]
+    wide = torch.zeros(1, T, SPEC_H, 2 * K, device=device, dtype=torch.float16)
+    wide[..., :K] = q
+    q_ds = wide[..., :K]  # heads strided by 2K, last dim dense
+    assert not q_ds.is_contiguous() and q_ds.stride(-2) != K
+
+    def run(q_, env):
+        monkeypatch.setenv("VLLM_GDN_DECODE_RDNA2", env)
+        out, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
+            q=q_,
+            k=k,
+            v=v,
+            initial_state=state.clone(),
+            inplace_final_state=True,
+            cu_seqlens=cu,
+            ssm_state_indices=idx,
+            num_accepted_tokens=acc,
+            use_qk_l2norm_in_kernel=True,
+            scale=K**-0.5,
+        )
+        return out
+
+    out = run(q_ds, "1")  # guard declines -> Triton
+    ref = run(q, "0")  # Triton on the contiguous q
+    torch.accelerator.synchronize()
+    assert torch.equal(out, ref)
+
+
+def test_gdn_spec_verify_rdna2_model_shaped_arguments(monkeypatch):
+    """Mirror exactly what GatedDeltaNet.forward passes on the MTP-2 spec-verify
+    step (index_select slices for a/b, a sliced spec_query_start_loc, the 2-D
+    state-index tensor and a sliced num_accepted_tokens) with the Triton kernel
+    poisoned: the HIP op must be the one that runs."""
+    import vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating as fsg
+
+    monkeypatch.setattr(
+        fsg, "fused_sigmoid_gating_delta_rule_update_kernel", _NoLaunchSpec()
+    )
+    monkeypatch.setenv("VLLM_GDN_DECODE_RDNA2", "1")
+
+    n_req = 8
+    parts = _make_spec(n_req, [3] * n_req, [3] * n_req)
+    q, k, v, a, b, A_log, dt_bias, state, cu, idx, acc = parts
+    # a/b are index_select'ed out of a wider token buffer by the layer
+    tok_sel = torch.arange(n_req * 3, device=device, dtype=torch.int64)
+    a_sel = a.reshape(-1, SPEC_HV).index_select(0, tok_sel)
+    b_sel = b.reshape(-1, SPEC_HV).index_select(0, tok_sel)
+    assert a_sel.is_contiguous() and b_sel.is_contiguous()
+    # spec_query_start_loc is a slice of a larger per-step buffer
+    qsl_buf = torch.zeros(n_req + 3, device=device, dtype=torch.int32)
+    qsl_buf[: n_req + 1] = cu
+    cu_slice = qsl_buf[: n_req + 1]
+    acc_slice = acc.clone()
+    out, st = fused_sigmoid_gating_delta_rule_update(
+        A_log=A_log,
+        a=a_sel,
+        b=b_sel,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        initial_state=state,
+        inplace_final_state=True,
+        cu_seqlens=cu_slice,
+        ssm_state_indices=idx,
+        num_accepted_tokens=acc_slice,
+        use_qk_l2norm_in_kernel=True,
+    )
+    torch.accelerator.synchronize()
+    assert torch.isfinite(out).all()
+    written = idx.reshape(-1).unique().long()
+    assert torch.isfinite(state[written]).all()

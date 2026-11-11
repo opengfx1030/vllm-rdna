@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""Export a small, reviewable copy after the strict four-arm ABBA gates pass.
+
+The source run archive is read-only. Raw detailed JSON, parity payloads, full
+server logs, generated text, binaries, and caches are never copied to the
+review output. The analyzer runs on a temporary private copy because it reads
+generated response strings to compute hash-only comparison CSVs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ARMS = ("01-control", "02-candidate", "03-candidate", "04-control")
+CELLS = ((1024, 512, 1), (1024, 512, 8), (16384, 1024, 1), (16384, 1024, 8))
+PROVENANCE_ALLOWLIST = (
+    "ARM-PASS.txt",
+    "arm-provenance.txt",
+    "worker-provenance.json",
+    "config.env",
+    "sha256.before",
+    "sha256.after",
+    "boot-id.before",
+    "boot-id.after",
+)
+ANALYSIS_ALLOWLIST = (
+    "per-request-analysis.csv",
+    "per-cell-analysis.csv",
+    "whole-run-analysis.csv",
+    "response-text-comparisons.csv",
+    "arm-gates.csv",
+    "cross-arm-logprob-parity.txt",
+    "ANALYSIS.txt",
+)
+RAW_EXCLUDE_PARTS = {"__pycache__", ".git", "build", ".cache", ".triton"}
+RAW_EXCLUDE_SUFFIXES = {".pyc", ".so", ".o", ".a", ".hsaco", ".co"}
+GENERATED_TEXT = re.compile(
+    r"(?:prompt\s*=|reply\s*=|cold\s*text\s*:|warm\s*text\s*:|"
+    r"generated_texts?|\bok\s+['\"])",
+    re.IGNORECASE,
+)
+KEEP_QUALIFICATION = re.compile(
+    r"\b(?:PASS|FAIL|RESULT|fault|faults|TTFT|speedup|PPL|NLL|"
+    r"tok/s|throughput|acceptance|accepted|drafts?|Position|ITL|TPOT|"
+    r"prefill|decode|concurrency|READY|ROUTE|GDN|MTP|marker|"
+    r"Model loading|GPU KV cache|Maximum concurrency|dmesg|timeout)\b",
+    re.IGNORECASE,
+)
+BENCH_START = "============ Serving Benchmark Result ============"
+BENCH_END = "=================================================="
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def safe_qualification_text(text: str) -> str:
+    kept = []
+    for line in text.splitlines():
+        if GENERATED_TEXT.search(line):
+            continue
+        if KEEP_QUALIFICATION.search(line):
+            kept.append(line.rstrip())
+    return "\n".join(kept).rstrip() + "\n"
+
+
+def extract_metric_blocks(text: str) -> str:
+    lines = text.splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if BENCH_START in line:
+            if current:
+                blocks.append(current)
+            current = [line]
+            continue
+        if current is None:
+            continue
+        current.append(line)
+        if BENCH_END in line:
+            blocks.append(current)
+            current = None
+    if current:
+        blocks.append(current)
+    if not blocks:
+        raise ValueError("benchmark log has no complete Serving Benchmark Result block")
+    return "\n\n".join("\n".join(block) for block in blocks) + "\n"
+
+
+def raw_input_manifest(source_root: Path) -> list[dict[str, str]]:
+    evidence_root = source_root / "remote-evidence"
+    if not evidence_root.is_dir():
+        raise FileNotFoundError(f"missing raw evidence directory: {evidence_root}")
+    records = []
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(source_root)
+        if any(part in RAW_EXCLUDE_PARTS for part in rel.parts):
+            continue
+        if path.suffix.lower() in RAW_EXCLUDE_SUFFIXES:
+            continue
+        records.append(
+            {
+                "path": rel.as_posix(),
+                "sha256": sha256(path),
+                "bytes": str(path.stat().st_size),
+            }
+        )
+    if not records:
+        raise ValueError("no raw inputs found to hash")
+    return records
+
+
+def check_complete_inputs(source_root: Path) -> None:
+    evidence = source_root / "remote-evidence"
+    for arm in ARMS:
+        arm_dir = evidence / arm
+        if not (arm_dir / "ARM-PASS.txt").is_file():
+            raise FileNotFoundError(
+                f"incomplete input set; missing {arm_dir / 'ARM-PASS.txt'}"
+            )
+        required = list(PROVENANCE_ALLOWLIST) + [
+            "summary.txt",
+            "probe.txt",
+            "ppl.txt",
+            "prefix.txt",
+            "concurrency.txt",
+            "load_hook.txt",
+            "probe-after.txt",
+        ]
+        missing = [name for name in required if not (arm_dir / name).is_file()]
+        if missing:
+            raise FileNotFoundError(
+                f"{arm}: missing raw gate/provenance files: {missing}"
+            )
+        for input_len, output_len, concurrency in CELLS:
+            stem = f"bench-{input_len}x{output_len}-c{concurrency}"
+            for suffix in (".json", ".log"):
+                path = arm_dir / f"{stem}{suffix}"
+                if not path.is_file():
+                    raise FileNotFoundError(f"{arm}: missing timed-cell input {path}")
+        for name in ("serve.log", "driver.log"):
+            path = arm_dir / name
+            if path.is_file():
+                text = path.read_text(errors="replace")
+                if re.search(
+                    r"(?:fault markers in serve\.log:\s*[1-9]|"
+                    r"new amdgpu dmesg faults:\s*[1-9])",
+                    text,
+                    re.I,
+                ):
+                    raise ValueError(f"{arm}: fault marker detected in {name}")
+        summary = (arm_dir / "summary.txt").read_text(errors="replace")
+        if not re.search(r"fault markers in serve\.log:\s*0", summary, re.I):
+            raise ValueError(
+                f"{arm}: summary does not prove zero serving fault markers"
+            )
+        if not re.search(r"new amdgpu dmesg faults:\s*0", summary, re.I):
+            raise ValueError(f"{arm}: summary does not prove zero new dmesg faults")
+        required_markers = (
+            r"\bPROBE PASS\b",
+            r"\bPPL PROBE PASS\b",
+            r"\bPREFIX PASS\b",
+            r"\bCONCURRENCY PASS\b",
+            r"LOAD HOOK rc=0 PASS",
+            r"PROBE-AFTER-LOAD PASS",
+        )
+        for marker in required_markers:
+            if not re.search(marker, summary, re.I):
+                raise ValueError(f"{arm}: qualification summary missing {marker!r}")
+
+
+def run_strict_gates(source_root: Path) -> None:
+    validate = HERE / "validate_abba_provenance.py"
+    analyzer = HERE / "analyze_serving_ab.py"
+    subprocess.run(
+        [
+            sys.executable,
+            str(validate),
+            "--evidence",
+            str(source_root / "remote-evidence"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    with tempfile.TemporaryDirectory(prefix="inline-abba-review-") as tmp:
+        temp_root = Path(tmp)
+        for arm in ARMS:
+            src = source_root / "remote-evidence" / arm
+            dst = temp_root / arm
+            dst.mkdir()
+            for name in ("ARM-PASS.txt", "summary.txt", "parity.json"):
+                shutil.copyfile(src / name, dst / name)
+            for input_len, output_len, concurrency in CELLS:
+                stem = f"bench-{input_len}x{output_len}-c{concurrency}"
+                for suffix in (".json", ".log"):
+                    shutil.copyfile(src / f"{stem}{suffix}", dst / f"{stem}{suffix}")
+        subprocess.run(
+            [sys.executable, str(analyzer), "--root", str(temp_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        missing = [
+            name for name in ANALYSIS_ALLOWLIST if not (temp_root / name).is_file()
+        ]
+        if missing:
+            raise RuntimeError(f"analyzer omitted expected derived files: {missing}")
+        # A nonzero parity status makes the analyzer fail; validate output files
+        # remain hash/match diagnostics and contain no generated payload column.
+        text = (temp_root / "response-text-comparisons.csv").read_text()
+        if "text_a_sha256" not in text or "generated_text" in text:
+            raise RuntimeError(
+                "response comparison output is not the expected hash-only form"
+            )
+
+
+def export(source_root: Path, output: Path) -> None:
+    source_root = source_root.resolve()
+    output = output.resolve()
+    if not source_root.is_dir():
+        raise FileNotFoundError(f"source root does not exist: {source_root}")
+    if output.exists():
+        raise FileExistsError(f"refusing to overwrite output directory: {output}")
+    if output == source_root or source_root in output.parents:
+        raise ValueError("output must be outside the source run archive")
+
+    check_complete_inputs(source_root)
+    run_strict_gates(source_root)
+    raw_manifest = raw_input_manifest(source_root)
+    output.mkdir(parents=True)
+    output_manifest: list[dict[str, str]] = []
+
+    def record_output(path: Path, source_description: str, transform: str) -> None:
+        output_manifest.append(
+            {
+                "path": path.relative_to(output).as_posix(),
+                "sha256": sha256(path),
+                "bytes": str(path.stat().st_size),
+                "source": source_description,
+                "transform": transform,
+            }
+        )
+
+    for arm in ARMS:
+        src = source_root / "remote-evidence" / arm
+        arm_out = output / arm
+        arm_out.mkdir()
+        for name in PROVENANCE_ALLOWLIST:
+            shutil.copyfile(src / name, arm_out / name)
+            record_output(
+                arm_out / name, f"remote-evidence/{arm}/{name}", "byte-for-byte copy"
+            )
+
+        gate_sources = (
+            "summary.txt",
+            "probe.txt",
+            "ppl.txt",
+            "prefix.txt",
+            "concurrency.txt",
+            "load_hook.txt",
+            "probe-after.txt",
+        )
+        qualification: list[str] = [
+            f"Arm {arm} qualification evidence (generated text removed)."
+        ]
+        for name in gate_sources:
+            filtered = safe_qualification_text((src / name).read_text(errors="replace"))
+            if filtered.strip():
+                qualification.extend((f"\n[{name}]", filtered.rstrip()))
+        qpath = arm_out / "qualification-summary.txt"
+        qpath.write_text("\n".join(qualification) + "\n")
+        record_output(
+            qpath,
+            ", ".join(f"remote-evidence/{arm}/{name}" for name in gate_sources),
+            "line filter: remove prompt/reply/generated text; retain PASS, metrics, "
+            "route, and fault-marker lines",
+        )
+
+        metric_dir = arm_out / "benchmark-metrics"
+        metric_dir.mkdir()
+        for input_len, output_len, concurrency in CELLS:
+            stem = f"bench-{input_len}x{output_len}-c{concurrency}"
+            src_log = src / f"{stem}.log"
+            metric_path = metric_dir / f"{stem}.metrics.txt"
+            metric_path.write_text(
+                extract_metric_blocks(src_log.read_text(errors="replace"))
+            )
+            record_output(
+                metric_path,
+                f"remote-evidence/{arm}/{stem}.log",
+                "retain only the Serving Benchmark Result metrics block(s)",
+            )
+
+    # Feed the detailed JSON and parity payload only to the already-gated
+    # analyzer in a temporary directory; neither payload is copied to output.
+    with tempfile.TemporaryDirectory(prefix="inline-abba-export-") as tmp:
+        temp_root = Path(tmp)
+        for arm in ARMS:
+            src = source_root / "remote-evidence" / arm
+            dst = temp_root / arm
+            dst.mkdir()
+            shutil.copyfile(src / "ARM-PASS.txt", dst / "ARM-PASS.txt")
+            shutil.copyfile(src / "summary.txt", dst / "summary.txt")
+            shutil.copyfile(src / "parity.json", dst / "parity.json")
+            for input_len, output_len, concurrency in CELLS:
+                stem = f"bench-{input_len}x{output_len}-c{concurrency}"
+                for suffix in (".json", ".log"):
+                    shutil.copyfile(src / f"{stem}{suffix}", dst / f"{stem}{suffix}")
+        subprocess.run(
+            [
+                sys.executable,
+                str(HERE / "analyze_serving_ab.py"),
+                "--root",
+                str(temp_root),
+            ],
+            check=True,
+        )
+        for name in ANALYSIS_ALLOWLIST:
+            target = output / name
+            shutil.copyfile(temp_root / name, target)
+            record_output(
+                target,
+                "temporary analyzer output derived from raw timed cells and "
+                "parity probes",
+                "copied analyzer result; raw payload omitted",
+            )
+
+    repo_root = HERE.parents[2]
+    tool_paths = (
+        HERE / "export_review_evidence.py",
+        HERE / "validate_abba_provenance.py",
+        HERE / "analyze_serving_ab.py",
+        repo_root / "tools/rdna/mono/logprob_parity.py",
+    )
+    missing_tools = [str(path) for path in tool_paths if not path.is_file()]
+    if missing_tools:
+        raise FileNotFoundError(f"missing exporter/gate tool sources: {missing_tools}")
+
+    record = {
+        "format": "review-evidence-export-v1",
+        "source_root": str(source_root),
+        "strict_gates": [
+            "validate_abba_provenance.py: all four arms, shared boot, per-arm "
+            "binary/source hashes, TP-rank/GPU mapping, cross-arm non-core "
+            "manifest equality",
+            "analyze_serving_ab.py: all 16 timed cells, detailed/log metric "
+            "agreement, request-error checks, fixed-prompt parity comparisons",
+            "export preflight: all arm markers, qualification files, benchmark "
+            "inputs, and zero serving/dmesg fault markers",
+        ],
+        "raw_input_hash_scope": (
+            "all regular files below source_root, including full raw logs and "
+            "detailed JSON; excludes cache directories and binary build artifacts"
+        ),
+        "raw_input_hashes": raw_manifest,
+        "tool_sources": [
+            {"path": str(path), "sha256": sha256(path)} for path in tool_paths
+        ],
+        "output_hashes_and_transforms": output_manifest,
+        "export_manifest_self_hash": (
+            "omitted because including its own digest would be self-referential"
+        ),
+        "excluded_from_output": [
+            "raw timed benchmark JSON (contains generated_texts)",
+            "parity.json (contains generated strings and token logprobs)",
+            "full serve.log and driver.log",
+            "generated response payloads",
+            "binaries, compiler outputs, and caches",
+        ],
+    }
+    (output / "export-manifest.json").write_text(json.dumps(record, indent=2) + "\n")
+
+
+def self_test() -> None:
+    sample = (
+        "[00:00] PROBE PASS\n"
+        "reply='private generated text'\n"
+        "[00:01] PPL 4.20 PASS\n"
+        "[00:02] PREFIX PASS\n"
+        "    cold text: 'private text'\n"
+        "[00:03] fault markers in serve.log: 0\n"
+    )
+    filtered = safe_qualification_text(sample)
+    assert "PROBE PASS" in filtered and "PPL 4.20 PASS" in filtered
+    assert "fault markers in serve.log: 0" in filtered
+    assert "private" not in filtered
+    block = (
+        "noise prompt='private'\n"
+        + BENCH_START
+        + "\nSuccessful requests: 8\n"
+        + BENCH_END
+        + "\n"
+    )
+    metrics = extract_metric_blocks(block)
+    assert "Successful requests: 8" in metrics and "private" not in metrics
+    assert sha256(Path(__file__))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-root", type=Path, default=HERE)
+    parser.add_argument(
+        "--output", type=Path, help="new output directory; existing paths are refused"
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run synthetic redaction/extraction checks only",
+    )
+    args = parser.parse_args()
+    try:
+        if args.self_test:
+            self_test()
+            print("self-test PASS (synthetic inputs only)")
+            return 0
+        if args.output is None:
+            parser.error("--output is required unless --self-test is used")
+        export(args.source_root, args.output)
+        print(f"export PASS: {args.output.resolve()}")
+        return 0
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"export FAIL: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

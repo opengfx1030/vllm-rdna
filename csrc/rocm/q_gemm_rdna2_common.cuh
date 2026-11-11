@@ -130,16 +130,41 @@ __forceinline__ __device__ void refresh_group(
   }
 }
 
+// Shared guarded Q32 reduction for dense and routed expert split-K outputs.
+// The bound must account for every partial that can reach an output cell.
+__forceinline__ __device__ void fixed_accum_row(const float (&vals)[4],
+                                                long long* out,
+                                                long long* row_status,
+                                                float fixed_limit) {
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    if (!isfinite(vals[j]) || fabsf(vals[j]) >= fixed_limit) {
+      atomicOr(reinterpret_cast<unsigned long long*>(row_status), 1ull);
+      continue;
+    }
+    const long long fixed = __float2ll_rn(vals[j] * 4294967296.f);
+    atomicAdd(reinterpret_cast<unsigned long long*>(out + j),
+              static_cast<unsigned long long>(fixed));
+  }
+}
+
 // Epilogue: write M_TILE rows of 4 consecutive N-columns via packed f16 CAS.
 // Output tensor c must be zero-initialized.
 template <int M_TILE>
 __forceinline__ __device__ void epilogue(const float block_c[M_TILE][4],
                                          int m_tile, int size_m, int size_n,
-                                         int n, half* c) {
+                                         int n, half* c,
+                                         long long* fixed = nullptr) {
 #pragma unroll
   for (int m = 0; m < M_TILE; ++m) {
     const int m_row = m_tile + m;
     if (m_row >= size_m) continue;
+    if (fixed) {
+      long long* row = fixed + (int64_t)m_row * (size_n + 1);
+      fixed_accum_row(block_c[m], row + n, row + size_n,
+                      1073741824.f / (float)gridDim.z);
+      continue;
+    }
     half* c_row = c + m_row * size_n + n;
     half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
                                __float2half_rn(block_c[m][1]));

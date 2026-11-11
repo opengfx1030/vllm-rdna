@@ -1,0 +1,29 @@
+"""Check recorded visible GPU ordinals against the KFD GPU IDs, CPU only."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+TOPOLOGY_GPU_IDS = [8425, 5082, 11353, 47517, 45975, 33237, 56424, 18860, 17318, 29156]
+
+
+def check() -> None:
+    summary = json.loads((ROOT / "collective/summary.json").read_text())
+    assert len(summary["ranks"]) == 4
+    for rank, record in enumerate(summary["ranks"]):
+        metadata = record["metadata"]
+        ordinal = metadata["physical_device_id"]
+        kfd_gpu_id = metadata["expected_kfd_gpu_id"]
+        assert metadata["rank"] == rank
+        assert ordinal == rank + 6
+        assert metadata["kfd_topology_gpu_ids"] == TOPOLOGY_GPU_IDS
+        assert TOPOLOGY_GPU_IDS[ordinal] == kfd_gpu_id
+        queue_ids = metadata["kfd_queue_gpu_ids"]
+        assert queue_ids and set(queue_ids) == {kfd_gpu_id}
+    print("PASS: physical ordinals 6–9 map to the recorded HIP 6–9 KFD IDs")
+
+
+if __name__ == "__main__":
+    check()

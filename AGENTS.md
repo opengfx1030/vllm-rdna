@@ -3,6 +3,28 @@
 > These instructions apply to **all** AI-assisted contributions to `vllm-project/vllm`.
 > Breaching these guidelines can result in automatic banning.
 
+## 0. RDNA fork (read first)
+
+This repository is the **opengfx1030** fork of vLLM for AMD **RDNA2 (gfx1030)**
+and related RDNA GPUs. The default branch is `rdna_extras`. Sections 1-2 below
+are upstream's rules and still apply here.
+
+- Read the community wiki <https://blivioniag.github.io/gfx1030-wiki/>; prefer a
+  **host venv** over Hub Docker images for current kernels.
+- Serve through the in-tree launcher, never a hand-written `vllm serve` argv:
+
+```bash
+MODEL=/path/to/checkpoint VENV=/path/to/venv \
+  bash tools/rdna/serve_rdna.sh RECIPE=<name>
+```
+
+`PRINT=1` dry-runs it. Recipes live in `tools/rdna/recipes/*.env` (`flashnext*`,
+`27b-awq`, `27b-exl3`, `dsv4-flash`, `full`); override with a trailing
+`KEY=value`, add flags with `EXTRA_ARGS='...'`. PLE table: `PLE=bf16` (default,
+~95 GB host RAM) or `PLE=int4[-disk]` with `PLE_QUANT_DIR=/path/to/ples_int4`.
+
+**Fork rules:** see [`docs/rdna/agent-rules.md`](docs/rdna/agent-rules.md).
+
 ## 1. Contribution Policy (Mandatory)
 
 ### Duplicate-work checks
@@ -13,6 +35,14 @@ Before proposing a PR, run these checks:
 gh issue view <issue_number> --repo vllm-project/vllm --comments
 gh pr list --repo vllm-project/vllm --state open --search "<issue_number> in:body"
 gh pr list --repo vllm-project/vllm --state open --search "<short area keywords>"
+```
+
+For work on this fork, also check its own issues and PRs (including `[backlog]`
+drafts):
+
+```bash
+gh pr list --repo opengfx1030/vllm-rdna --state open --search "<short area keywords>"
+gh issue list --repo opengfx1030/vllm-rdna --state open --search "<short area keywords>"
 ```
 
 - If an open PR already addresses the same fix, do not open another.
@@ -31,6 +61,10 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
     - Test commands run and results.
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
+- User-visible changes (features, CLI args, config fields, env vars, models,
+  hardware, defaults, deprecations) must update the rendered docs in the same PR;
+  follow [Documenting User-Visible Changes](docs/contributing/README.md#documenting-user-visible-changes).
+- Before opening a PR (drafts included) or requesting re-review, run the [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill and address its findings.
 
 ### Fail-closed behavior
 
@@ -64,6 +98,11 @@ pre-commit install
 VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
 ```
 
+On this fork the precompiled artifacts do not help: they are CUDA builds. For
+RDNA, build the ROCm extensions from source in a venv that has a ROCm PyTorch
+(`VLLM_TARGET_DEVICE=rocm`, `PYTORCH_ROCM_ARCH=gfx1030`); the wiki has the full
+recipe.
+
 For C/C++ or CUDA changes, follow the
 [incremental compilation workflow](docs/contributing/incremental_build.md) to
 configure and perform incremental builds.
@@ -84,7 +123,9 @@ When adding tests:
 
 - **Design before you write.** Answer four questions first: what is the module
   for, what is its I/O contract, what failure am I guarding against, and what is
-  the cheapest level that catches it (unit over integration over e2e)?
+  the cheapest level that actually reproduces it? Fixes to user-visible
+  behavior need a test through a real entry point (`LLM`, OpenAI server); see
+  [`tests/AGENTS.md`](tests/AGENTS.md).
 - **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
   helpers; add a new file only when no nearby suite fits.
 - **Test behavior with intent.** Assert observable outcomes through public APIs;
@@ -113,9 +154,6 @@ pre-commit run --all-files
 
 # Run a specific hook:
 pre-commit run ruff-check --all-files
-
-# Run mypy as it is in CI:
-pre-commit run mypy-3.12 --all-files --hook-stage manual
 ```
 
 The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
@@ -158,3 +196,5 @@ vulnerability process.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
+- **Rust frontend (`rust/`)**: [`rust/AGENTS.md`](rust/AGENTS.md)
+  — Crate ownership, design principles, Python parity, and testing conventions.

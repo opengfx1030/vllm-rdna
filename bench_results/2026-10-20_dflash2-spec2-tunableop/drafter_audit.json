@@ -1,0 +1,81 @@
+{
+  "status": "complete_same_boot_native_mtp2_vs_tuned_dflash2_spec2",
+  "csv": "/private/tmp/dflash2-2026-10-20-evidence/drafter_control.csv",
+  "boot_id": "d100f920-0655-4319-bddd-a430b7d2d282",
+  "api_args_match_except_port_and_drafter": true,
+  "conditions": {
+    "target_snapshot": "0939125b929543a783ce700c90e36dd1a575c00c",
+    "GPUs": "HIP 6,7,8,9 Radeon PRO V620 TP4/EP4",
+    "profile": "committed new1860 on both arms; original FP16 target rows unchanged",
+    "speculative_tokens": 2,
+    "bench_temperature": 0,
+    "bench_seed": 12345,
+    "benchmark_ignore_eos": true,
+    "normal_eos_probe_ignore_eos": false
+  },
+  "metric_definitions": {
+    "prefill_tok_s_per_request": "mean input tokens / mean TTFT seconds",
+    "prefill_tok_s_wave_proxy": "min(concurrency,completed) * mean input tokens / p99 TTFT seconds; not true prefill throughput in multi-wave cells",
+    "decode_tok_s_per_request": "1000 / mean TPOT ms",
+    "output_tok_s_aggregate": "total output tokens / full benchmark duration",
+    "draft_verifications_per_s_full_run": "spec_decode_num_drafts / full benchmark duration; overall speculative iteration rate including external draft work, target verification, prefill and queueing; does not isolate a target kernel",
+    "change_percent_vs_native_mtp2": "100 * (DFlash2/native MTP2 - 1); negative latency change is improvement"
+  },
+  "gates": {
+    "native_mtp2": {
+      "probe_pass": true,
+      "ppl_probe_pass": true,
+      "ppl_value": 4.79,
+      "prefix_pass": true,
+      "concurrency_pass": true,
+      "concurrency_failing": 0,
+      "near_ties": 16,
+      "soft": 1,
+      "solo_noise": 0,
+      "identical_within_arm": 31,
+      "checks": 48,
+      "prefix_reset_pass_count": 4,
+      "probe_after_load_pass": true,
+      "serve_log_fault_markers": 0,
+      "new_amdgpu_dmesg_faults": 0,
+      "serve_log_present": true,
+      "worker_env_present": true,
+      "within_arm_stopping": {
+        "stopping_differences": 3,
+        "same_prefix_premature_stops": 0
+      }
+    },
+    "dflash2_spec2": {
+      "probe_pass": true,
+      "ppl_probe_pass": true,
+      "ppl_value": 4.87,
+      "prefix_pass": true,
+      "concurrency_pass": true,
+      "concurrency_failing": 0,
+      "near_ties": 17,
+      "soft": 1,
+      "solo_noise": 0,
+      "identical_within_arm": 30,
+      "checks": 48,
+      "prefix_reset_pass_count": 4,
+      "probe_after_load_pass": true,
+      "serve_log_fault_markers": 0,
+      "new_amdgpu_dmesg_faults": 0,
+      "serve_log_present": true,
+      "worker_env_present": true,
+      "within_arm_stopping": {
+        "stopping_differences": 3,
+        "same_prefix_premature_stops": 0
+      }
+    }
+  },
+  "normal_eos_cross_arm": {
+    "total": 48,
+    "exact_tokens": 19,
+    "stopping_differences": 4,
+    "same_prefix_premature_stops": 0,
+    "first_divergence_margin_at_most_0_2": 24,
+    "first_divergence_margin_gt_1_or_not_top5": 0
+  },
+  "benchmark_client_flag_caveat": "Native used --save-detailed for per-request retention; completed DFlash2 cells did not. Server configuration matches except drafter method and port."
+}

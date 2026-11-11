@@ -141,10 +141,18 @@ def make_shadow(layer: torch.nn.Module) -> None:
     n, k = w.shape
     if k % 16 != 0 or n < int(os.getenv("VLLM_RDNA_DENSE_INT8_MIN_ROWS", "64")):
         return
-    amax = w.abs().amax(dim=1).float().clamp_min(1e-8)
-    scale = amax / 127.0
-    q = torch.round(w.float() / scale[:, None]).clamp_(-127, 127).to(torch.int8)
-    layer.weight_i8 = q.contiguous()
+    # Row chunks with the same per-element math: the whole-matrix fp16/fp32
+    # temporaries peaked at ~6 GiB for a vocab-sized weight (2.4 GiB for one
+    # fp32 copy), more than a full TP1 x PP3 stage has left.
+    scale = torch.empty(n, dtype=torch.float32, device=w.device)
+    q = torch.empty((n, k), dtype=torch.int8, device=w.device)
+    rows = max(1, (64 << 20) // (k * 4))
+    for i in range(0, n, rows):
+        wi = w[i : i + rows]
+        si = wi.abs().amax(dim=1).float().clamp_min(1e-8) / 127.0
+        scale[i : i + rows] = si
+        q[i : i + rows] = torch.round(wi.float() / si[:, None]).clamp_(-127, 127)
+    layer.weight_i8 = q
     layer.weight_i8_scale = scale.to(torch.float16).contiguous()
     if only_mode():
         # Release the fp16 copy: keep the Parameter object (loader attrs, registration)

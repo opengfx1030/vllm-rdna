@@ -20,9 +20,6 @@ def moe_align_block_size(
     ignore_invalid_experts: bool = False,
     *,
     return_scatter_idx: Literal[False] = False,
-    sorted_ids: torch.Tensor | None = None,
-    expert_ids: torch.Tensor | None = None,
-    num_tokens_post_pad: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 
@@ -36,9 +33,6 @@ def moe_align_block_size(
     ignore_invalid_experts: bool = False,
     *,
     return_scatter_idx: Literal[True],
-    sorted_ids: torch.Tensor | None = None,
-    expert_ids: torch.Tensor | None = None,
-    num_tokens_post_pad: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 
@@ -52,9 +46,6 @@ def moe_align_block_size(
     ignore_invalid_experts: bool = False,
     *,
     return_scatter_idx: bool,
-    sorted_ids: torch.Tensor | None = None,
-    expert_ids: torch.Tensor | None = None,
-    num_tokens_post_pad: torch.Tensor | None = None,
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -69,9 +60,6 @@ def moe_align_block_size(
     pad_sorted_ids: bool = False,
     ignore_invalid_experts: bool = False,
     return_scatter_idx: bool = False,
-    sorted_ids: torch.Tensor | None = None,
-    expert_ids: torch.Tensor | None = None,
-    num_tokens_post_pad: torch.Tensor | None = None,
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -104,11 +92,6 @@ def moe_align_block_size(
             -1 in expert_ids.
         return_scatter_idx: Whether to additionally return a masked identity
             mapping for the original routed rows.
-        sorted_ids: Optional preallocated output for sorted_token_ids
-            (allocated here when None).
-        expert_ids: Optional preallocated output for expert_ids.
-        num_tokens_post_pad: Optional preallocated output for
-            num_tokens_post_padded.
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according
@@ -158,19 +141,14 @@ def moe_align_block_size(
         max_num_tokens_padded = min(
             topk_ids.numel() * block_size, max_num_tokens_padded
         )
-    if sorted_ids is None:
-        sorted_ids = torch.empty(
-            (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
-        )
-    if expert_ids is None:
-        max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-        expert_ids = torch.empty(
-            (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
-        )
-    if num_tokens_post_pad is None:
-        num_tokens_post_pad = torch.empty(
-            (1,), dtype=torch.int32, device=topk_ids.device
-        )
+    sorted_ids = torch.empty(
+        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+    )
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    expert_ids = torch.empty(
+        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
+    )
+    num_tokens_post_pad = torch.empty((1,), dtype=torch.int32, device=topk_ids.device)
 
     ops.moe_align_block_size(
         topk_ids,

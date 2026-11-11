@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Resume only unstarted remaining arms after the recorded cleanup-lock race.
+# Each child acquires the same GPU lock and checks physical-mask owners.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+RUN="$BASE/serve-inline-ab"
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+CONTROL=/home/chenco_adm/vllm-rdna-mtp-mono
+CANDIDATE="$BASE/core-inline-serve-tree"
+OLD=6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3
+NEW=25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f
+CU=aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf
+[[ $(hostname) == par1-cs25 ]]
+exec 8>"$BASE/serving-sequence.lock"
+flock -n 8
+[[ ! -e $RUN/sequence-resume-v2.log ]] || { echo 'refusing sequence restart'; exit 2; }
+mkdir -p "$RUN"
+exec > >(tee "$RUN/sequence-resume-v2.log") 2>&1
+BOOT=$(cat /proc/sys/kernel/random/boot_id)
+echo "SEQUENCE START $(date -Is) boot=$BOOT"
+for completed in 01-control 02-candidate; do
+    [[ -s $RUN/$completed/ARM-PASS.txt ]]
+    [[ $(cat "$RUN/$completed/boot-id.after") == "$BOOT" ]]
+done
+[[ ! -e $RUN/03-candidate && ! -e $RUN/04-control ]]
+echo "RECOVERED 01-control and 02-candidate; original sequence.log retains cleanup-lock refusal"
+for spec in '03-candidate:candidate:18873' '04-control:control:18874'; do
+    IFS=: read -r tag arm port <<< "$spec"
+    [[ $(cat /proc/sys/kernel/random/boot_id) == "$BOOT" ]]
+    if [[ $arm == candidate ]]; then tree=$CANDIDATE; sha=$NEW; else tree=$CONTROL; sha=$OLD; fi
+    out="$RUN/$tag"
+    # A tee/cleanup descendant may retain the preceding arm's lock briefly.
+    # Wait for release before invoking the child; its own lock remains decisive.
+    flock -w 90 /tmp/codex-mtp-mono-hip6-9.lock -c true
+    "$VENV/bin/python" -S "$HERE/check_reserved_gpu.py"
+    # Read-only worker provenance snapshot after readiness, before timed cells.
+    (
+        for attempt in $(seq 1 180); do
+            if [[ -f $out/summary.txt ]] && grep -Fq 'READY in ' "$out/summary.txt"; then
+                "$VENV/bin/python" -S "$HERE/snapshot_workers.py" \
+                    --serve-log "$out/serve.log" --expected-tree "$tree" \
+                    --expected-core-sha "$sha" --output "$out/worker-provenance.json" \
+                    > "$out/worker-provenance.log" 2>&1
+                exit $?
+            fi
+            sleep 10
+        done
+        exit 1
+    ) &
+    watcher=$!
+    echo "ARM BEGIN $tag $(date -Is)"
+    set +e
+    env ARM="$arm" RUNS_ROOT="$out" PORT="$port" \
+        EXPECTED_CANDIDATE_SO="$NEW" EXPECTED_CANDIDATE_CU="$CU" \
+        GATE_SCRIPT="$HERE/serve_validate_mono_ab_gate.sh" \
+        timeout 2400 bash "$HERE/run_one_arm.sh"
+    status=$?
+    set -e
+    if [[ $status != 0 ]]; then
+        kill "$watcher" 2>/dev/null || true
+        wait "$watcher" 2>/dev/null || true
+        echo "ARM FAILED $tag status=$status"; exit "$status"
+    fi
+    wait "$watcher"
+    [[ -s $out/ARM-PASS.txt && -s $out/worker-provenance.json ]]
+    [[ $(cat "$out/boot-id.after") == "$BOOT" ]]
+    echo "ARM VERIFIED $tag $(date -Is)"
+done
+echo "SEQUENCE COMPLETE $(date -Is) boot=$BOOT" | tee "$RUN/SEQUENCE-RESUME-V2-COMPLETE.txt"

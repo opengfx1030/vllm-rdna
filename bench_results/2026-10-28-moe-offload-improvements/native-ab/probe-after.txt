@@ -1,0 +1,4 @@
+FAIL  'The capital of France is': request error <urlopen error [Errno 111] Connection refused>
+FAIL  '1+1=': request error <urlopen error [Errno 111] Connection refused>
+FAIL  'The capital of Germany is': request error <urlopen error [Errno 111] Connection refused>
+RESULT FAIL (0/3)

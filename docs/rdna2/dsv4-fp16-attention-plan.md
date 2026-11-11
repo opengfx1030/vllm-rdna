@@ -1,9 +1,10 @@
 # DeepSeek-V4-Flash: fp16 attention on RDNA (plan)
 
-Status: assessment, 2026-10-08. DeepSeek-V4-Flash (K128, MXFP4 experts) does not boot on
-gfx1030 on either v0.31 or 0.28. The checkpoint loads after the fused-expert loader fix,
-and fp16 mHC works. The attention path is the next and largest blocker, because upstream's
-AMD DeepSeek-V4 attention assumes bf16 end to end (it was built for MI300).
+Status: `DeepseekV4RDNAAttention` is selected on RDNA when both sparse-MLA
+HIP ops are present (`vllm/models/deepseek_v4/amd/model.py`), and prefill
+calls `sparse_mla_prefill_rdna2`. Full serve confirmation is still
+outstanding. Upstream's AMD DeepSeek-V4 attention assumes bf16 end to end
+(it was built for MI300).
 
 Why fp16 and not bf16:
 - gfx1030 has no bf16 math.
@@ -20,7 +21,7 @@ Why fp16 and not bf16:
 | 4b | Indexer fp8 paged MQA logits | AITER (CDNA) / Triton / torch | fp8 in, fp32 out | `indexer_paged_mqa_rdna2.cu` exists | wire up + test |
 | 4c | Indexer top-k | AITER top-k (CDNA) → fallback | none | fallback | verify fallback; HIP later |
 | 5 | Sparse MLA **decode** | Triton ragged/partial kernels (bf16) | bf16 in the kernels | `sparse_mla_decode_rdna2` already selected (`_rdna2_mla_available`), fp16 + bf16 q | ✓ (check the fp16 output path) |
-| 6 | Sparse MLA **prefill** | `dequantize_and_gather_k_cache` → bf16 workspace → Triton ragged prefill | workspace hard-coded bf16 (`rocm.py` x2); Triton kernel bf16 | `sparse_mla_prefill_rdna2` exists in `_rocm_C`, **not wired** | wire up the HIP prefill; workspace dtype = `q.dtype` |
+| 6 | Sparse MLA **prefill** | `dequantize_and_gather_k_cache` → bf16 workspace → Triton ragged prefill | workspace hard-coded bf16 (`rocm.py` x2); Triton kernel bf16 | `DeepseekV4RDNAAttention._forward_prefill` calls `sparse_mla_prefill_rdna2` on an fp16 gather workspace | full serve confirmation still outstanding |
 | 7 | Inverse RoPE + `wo_a` bmm + `wo_b` | Triton `_inverse_rope_gptj` + einsum with cached **bf16** `wo_a` | assert + bf16 weight cache + bf16 casts | blocked | dtype-parametrize (cache `wo_a` in the activation dtype), or an fp8 `wo_a` bmm with fp16 output |
 | 8 | mHC pre/post | torch fallback | fixed (`mhc/torch.py` accepts fp16) | works | – |
 | – | Attention-output and workspace buffers | `torch.empty(..., bfloat16)` in a few places | dtype hard-coding | blocked | use the activation dtype |
@@ -35,7 +36,7 @@ convert to fp32, so fp16 compute does not need a new cache layout. Only the writ
 | Item | Size | Notes |
 |---|---|---|
 | Stage 2 RDNA HIP KV insert | M (port ~400 lines) | Byte-identical cache rows vs the CUDA kernel's output for bf16-rounded inputs (test) |
-| Stage 6 wire `sparse_mla_prefill_rdna2` | S–M | Kernel exists; needs contract check vs upstream's ragged prefill (indices, sink, SWA combine) |
+| Stage 6 `sparse_mla_prefill_rdna2` | done in tree | Called from `DeepseekV4RDNAAttention`; full serve confirmation still outstanding |
 | Stage 4a / 7 dtype parametrization | S | Triton; RDNA-gated where behaviour changes |
 | Stage 4b/4c wiring | S | Kernel exists for 4b |
 | Workspace/output dtype plumbing | S | |
@@ -92,6 +93,7 @@ vllm/models/deepseek_v4/amd/rdna/
 1. Layout skeleton plus moving the two existing DSV4 kernels (no behaviour change; tests pass).
 2. Stage 2 KV-insert HIP kernel + test.
 3. Output projection (stage 7) and indexer q-quant (4a) dtype work; workspace dtypes.
-4. Wire `sparse_mla_prefill_rdna2` (6) and the MQA logits kernel (4b).
-5. `DeepseekV4RDNAAttention` + boot TP=4 (fp16), probes, then FULL_AND_PIECEWISE
-   cudagraphs (required), then TP=8.
+4. Prefill HIP (`sparse_mla_prefill_rdna2`) is wired. Full serve confirmation
+   is still outstanding, including the MQA logits kernel (4b).
+5. `DeepseekV4RDNAAttention` is in tree. Outstanding: boot TP=4 (fp16), probes,
+   then FULL_AND_PIECEWISE cudagraphs, then TP=8.

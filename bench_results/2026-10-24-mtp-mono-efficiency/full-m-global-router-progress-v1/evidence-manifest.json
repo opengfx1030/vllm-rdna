@@ -1,0 +1,35 @@
+{
+  "bundle": "full-m-global-router-progress-v1",
+  "files": [
+    {
+      "path": "README.md",
+      "size_bytes": 2100,
+      "sha256": "15496552ee08ee7071be9a67fa2aafbb735d51685bc08164fe1b55dede6f4417"
+    },
+    {
+      "path": "cooperative-capability-summary.json",
+      "size_bytes": 1538,
+      "sha256": "0fee63e7bc855963e74b27fb03ef1be36c21ff4ce2f1f69f08d4e65610c7be5d"
+    },
+    {
+      "path": "immutable-params-build-summary.json",
+      "size_bytes": 1782,
+      "sha256": "2b74152b22c04f8ddcdb2e5171fe52a881379bd6be8f8d181feec45a0b9928fe"
+    },
+    {
+      "path": "provenance.json",
+      "size_bytes": 2479,
+      "sha256": "00938d462f62c99f55f125259ed0bae820a2ea60d3a4c4425525b911bc9d6b61"
+    },
+    {
+      "path": "strict-full-m-v2-runtime.log",
+      "size_bytes": 917,
+      "sha256": "a5ca84a9d6772ea94ab42306d312b9611fdd3424c02db4d633b80cf05ba0ef82"
+    },
+    {
+      "path": "strict-full-m-v2-summary.json",
+      "size_bytes": 7080,
+      "sha256": "7c084320d80da8427f9262839721556ebf922ad979091352d4776e8aa6ce7866"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "diagnostic_only": true,
+  "default_timing_false_gpu_extras": 0,
+  "core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+  "frozen_v1_generator_sha256": "a5f46f7b53f69ae0828c3c540ada4af324caf05e255883405970d6fdf639f81c",
+  "changes": {
+    "vllm/models/qwen4_exp/amd/mono/rdna2/debug.py": {
+      "original": "9694c95a7e7f75f9ad3cb2388b73105f0503413909dc381d24c3ebb93cf30f95",
+      "candidate": "8b07985f3418685f4081b236c3f17f883d63b5a43c8ff066b3987bb3830d4a27"
+    },
+    "vllm/models/qwen4_exp/amd/mono/rdna2/layout.py": {
+      "original": "00e730f8d40b5ec9966ff096040e872be2547068e60e4af87d93b8bb17a575c1",
+      "candidate": "fe43c61de797553e51532732418e7eaf85f87b75b3a99bd6865d932aff8af566"
+    },
+    "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py": {
+      "original": "64cc1b2a22737b59f2e6113ceeaa551509a63e4a307abe44c286849a426788dc",
+      "candidate": "6ed4e3adbe4baaa301869c93fa47c2f8924bc4bf15c44fd8531cce82164a5410"
+    },
+    "vllm/v1/worker/gpu/phase_timer.py": {
+      "original": "15c23af808931d8f2eedb130a476b8f6530f4aa301b3c72ee98e0e29050b78d7",
+      "candidate": "032d7fc37bd20d1dbb78f2086c7bb5c8b05e061c9fb49a439f3d99f1412f446a"
+    }
+  }
+}

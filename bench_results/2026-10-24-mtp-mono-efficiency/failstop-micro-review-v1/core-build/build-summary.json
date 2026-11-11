@@ -1,0 +1,26 @@
+{
+  "schema": "mtp-failstop-core-build-review-v1",
+  "result": "PASS",
+  "scope": "disposable O2 core build and object resource extraction; no installation or inference serving",
+  "host": "par1-cs25",
+  "boot_id_before_after": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "target": "gfx1030",
+  "source_base_mono_cu_sha256": "bc8e35dd429fab98b55dbef2a87113794f1558f474bf1914fc98645262453dcf",
+  "candidate_mono_cu_sha256": "c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434",
+  "generated_hip_sha256": "79b7101bbe2f66cd8cf5bd89ce91e7836c48e45ce5e806494679577152f5703c",
+  "extension_sha256_not_included": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+  "mono_object_sha256_not_included": "8e7835f356ff5212be7d6eaf8ac271e00997eb52de3ad7dacc6d17bd6c97185a",
+  "torch_bindings_object_sha256_not_included": "523515e1f24c2b93a52421c415e13961d1e937bedb6a3e8bf4243c42f6c542ad",
+  "build_flags": ["-O2", "-g", "-DNDEBUG", "--offload-arch=gfx1030", "-fno-gpu-rdc"],
+  "unchanged_object_archive_proof": true,
+  "kernel_resources": {
+    "ffn_kernel_variants": ["mono_ffn_kernel<4,8>", "mono_ffn_kernel<8,8>", "mono_ffn_kernel<12,8>", "mono_ffn_kernel<24,8>"],
+    "vgpr_count": 109,
+    "private_segment_bytes": 0,
+    "wavefront_size": 32,
+    "group_segment_bytes": 25280,
+    "sgpr_count": 107,
+    "sgpr_spills": "21 for M4; 22 for M8/M12/M24"
+  },
+  "omitted_artifacts": ["extension binary", "object files", "GPU code image", "full compiler and disassembly dumps"]
+}

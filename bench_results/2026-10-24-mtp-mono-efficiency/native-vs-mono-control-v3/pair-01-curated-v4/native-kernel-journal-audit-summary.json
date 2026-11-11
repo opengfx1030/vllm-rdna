@@ -1,0 +1,15 @@
+{
+  "status": "PASS",
+  "source": "offline rerun of pinned privileged checker against recovered snapshots",
+  "boot_before": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "boot_after": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "raw_records_before": 9236,
+  "raw_records_after": 9470,
+  "appended_record_count": 234,
+  "append_only_prefix_match": true,
+  "gpu_pcie_faults": 0,
+  "checker_source_sha256": "d2272c6289f9791472045f2d0091eed1ef2df4a6db9fb35ee476db031ea19bd0",
+  "kernel_before_sha256": "d6b7da1eec2cb2965c8d0262bc7b6f604720077823f3efdda47df04332082d14",
+  "kernel_after_sha256": "a2ab3ddfb617fae25eb1c02136e7cdb03506b885c3a1c0e1be89b5a2ae675e67",
+  "raw_journal_snapshots_retained": false
+}

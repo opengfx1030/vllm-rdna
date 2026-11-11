@@ -1,0 +1,23 @@
+{
+  "status": "PASS",
+  "boot_id": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "worker_pids_exited": [
+    76268,
+    76269,
+    76270,
+    76271
+  ],
+  "rank1_marker": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-engine-graph-v3/rank1.marker.injected",
+  "injected_reply": "HTTP Error 500: Internal Server Error",
+  "later_replies": [
+    {
+      "ok": false,
+      "reply": "HTTP Error 500: Internal Server Error"
+    },
+    {
+      "ok": false,
+      "reply": "HTTP Error 500: Internal Server Error"
+    }
+  ],
+  "new_kernel_records": 0
+}

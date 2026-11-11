@@ -1,0 +1,283 @@
+{
+  "status": "FAIL",
+  "complete": false,
+  "scope": "synthetic rank-local actual-native correctness and safety; no timing or serving claim",
+  "gpu": 6,
+  "boot": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "rows": [
+    25,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    1045
+  ],
+  "seed": 50124,
+  "failed_stage": "M128",
+  "error": "AssertionError('strict gate failed: candidate_changed200000_native')",
+  "records": [
+    {
+      "M": 25,
+      "complete": true,
+      "check_count": 21,
+      "passed_check_count": 21,
+      "failed_checks": [],
+      "changed_inputs": [
+        {
+          "seed": 150149,
+          "all_three_changed": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "seed": 250149,
+          "all_three_changed": [
+            true,
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "M": 32,
+      "complete": true,
+      "check_count": 21,
+      "passed_check_count": 21,
+      "failed_checks": [],
+      "changed_inputs": [
+        {
+          "seed": 150156,
+          "all_three_changed": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "seed": 250156,
+          "all_three_changed": [
+            true,
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "M": 64,
+      "complete": true,
+      "check_count": 21,
+      "passed_check_count": 21,
+      "failed_checks": [],
+      "changed_inputs": [
+        {
+          "seed": 150188,
+          "all_three_changed": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "seed": 250188,
+          "all_three_changed": [
+            true,
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "M": 128,
+      "complete": false,
+      "check_count": 15,
+      "passed_check_count": 14,
+      "failed_checks": [
+        {
+          "label": "candidate_changed200000_native",
+          "tensors": [
+            {
+              "tensor": 1,
+              "max_abs": 0.121002197265625,
+              "failed_indices_first32": [
+                [
+                  104,
+                  1
+                ],
+                [
+                  104,
+                  2
+                ],
+                [
+                  104,
+                  3
+                ],
+                [
+                  104,
+                  4
+                ],
+                [
+                  104,
+                  5
+                ],
+                [
+                  104,
+                  6
+                ],
+                [
+                  104,
+                  7
+                ],
+                [
+                  104,
+                  8
+                ],
+                [
+                  104,
+                  9
+                ],
+                [
+                  104,
+                  10
+                ],
+                [
+                  104,
+                  12
+                ],
+                [
+                  104,
+                  13
+                ],
+                [
+                  104,
+                  14
+                ],
+                [
+                  104,
+                  15
+                ],
+                [
+                  104,
+                  16
+                ],
+                [
+                  104,
+                  17
+                ],
+                [
+                  104,
+                  18
+                ],
+                [
+                  104,
+                  19
+                ],
+                [
+                  104,
+                  20
+                ],
+                [
+                  104,
+                  21
+                ],
+                [
+                  104,
+                  22
+                ],
+                [
+                  104,
+                  23
+                ],
+                [
+                  104,
+                  24
+                ],
+                [
+                  104,
+                  25
+                ],
+                [
+                  104,
+                  26
+                ],
+                [
+                  104,
+                  27
+                ],
+                [
+                  104,
+                  28
+                ],
+                [
+                  104,
+                  29
+                ],
+                [
+                  104,
+                  30
+                ],
+                [
+                  104,
+                  31
+                ],
+                [
+                  104,
+                  32
+                ],
+                [
+                  104,
+                  33
+                ]
+              ]
+            }
+          ]
+        }
+      ],
+      "changed_inputs": [
+        {
+          "seed": 150252,
+          "all_three_changed": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "seed": 250252,
+          "all_three_changed": [
+            true,
+            true,
+            true
+          ]
+        }
+      ]
+    }
+  ],
+  "candidate_provenance": {
+    "binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/full-m-router-half-pair-v1-build/torch-extensions/mono_k2_global_quant_router_half_v1_20261024/mono_k2_global_quant_router_half_v1_20261024.so",
+    "binary_sha256": "01b3710e9933feb63e86e25035e15b6726993c1f5171116440b8e45962b2dc54",
+    "manifest": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-router-half-v1/source_manifest.json",
+    "manifest_sha256": "820b0b4d16643a40e6584f1d80ed9e96a8afde9664b71c9c9e5e7a03f9af3479",
+    "source_sha256": "46ea5a8ccebdac7834dc84ed68863d9291008bc89d9b2d6b5ac15e13e3ff7ce8"
+  },
+  "trace_provenance": {
+    "binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/full-m-router-half-pair-v2-continue/torch-extensions/mono_k2_global_quant_router_half_trace_v1_20261024/mono_k2_global_quant_router_half_trace_v1_20261024.so",
+    "binary_sha256": "1e9b62e763980d545e6bccb44d18c947ac00cbb2a04bb3cdfc664486aba57c4f",
+    "manifest": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-router-half-trace-v1/source_manifest.json",
+    "manifest_sha256": "6f11b4c0888a9ccc213bf49e0b63f7446efbc6b16b9be635d58eb4c50c01eb88",
+    "source_sha256": "a03041f587a4837d28d56c25062c85635ecf422cf455020bf2307a8d10c5df1e"
+  },
+  "native_core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+  "torch": "2.12.0+rocm7.14.0",
+  "hip": "7.14.60850",
+  "overlay_before": "PASS: healthy overlay, 11 source replacements and pinned core",
+  "overlay_after": "PASS: healthy overlay, 11 source replacements and pinned core",
+  "exit_status": "1",
+  "scope_note": "M25, M32, and M64 checks passed. At M128, changed seed 250252 failed strict candidate-versus-native FFN output at row 104 (maximum absolute error 0.121002197265625); residual remained exact. This is a correctness failure, not a performance result. Full-M implementation is not qualified."
+}

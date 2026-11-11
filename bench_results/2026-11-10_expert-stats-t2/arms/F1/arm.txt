@@ -1,0 +1,6 @@
+arm=F1 try=1 desc=stats ON (pairs, fused Triton kernels)
+sha=46868fb5f7e41ff3136dd33d4acbe59db212e66d tree=/home/chenco_adm/vllm-expstats-46868fb5f7
+stats_env=VLLM_EXPERT_STATS_DIR=/home/chenco_adm/w4a8_runs/expert-stats-t10b/arms/F1/stats VLLM_EXPERT_STATS_INTERVAL_S=30 VLLM_EXPERT_STATS_PAIRS=1 VLLM_EXPERT_STATS_KERNEL=fused cells=1024:512:1 1024:512:6 1024:512:8 16384:1024:1 16384:1024:8 hook_s=300
+load=2.60 7.40 8.63 aer=19 date=2026-11-10T10:05:52+01:00
+memlock=unlimited
+rc=0 aer_end=19 end=2026-11-10T10:33:32+01:00

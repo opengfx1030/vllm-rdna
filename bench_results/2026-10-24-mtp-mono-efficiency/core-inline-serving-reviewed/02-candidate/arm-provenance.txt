@@ -1,0 +1,9 @@
+arm=candidate
+base_tree=/home/chenco_adm/vllm-rdna-mtp-mono
+candidate_tree=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree
+serving_tree=/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree
+expected_so_sha256=25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f
+expected_cu_sha256=aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf
+mtp_drafter=0
+gpus=6,7,8,9
+boot_id=7a8851c9-87c4-4dc0-8f5b-3e172aa84773

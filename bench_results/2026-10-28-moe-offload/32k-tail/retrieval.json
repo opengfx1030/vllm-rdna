@@ -1,0 +1,35 @@
+{
+  "id": "cmpl-bffd75b2d0c5ec1b",
+  "object": "text_completion",
+  "created": 1793181416,
+  "model": "flash-next",
+  "choices": [
+    {
+      "index": 0,
+      "text": "\n\n<think>\nThe user is asking me to return the deployment marker that was given at the start of the message. Let me find it.\n\nThe deployment marker stated at the beginning is: ORBITAL_FENCE_4729\n\nThey want only that exact marker, without explanation.\n</think>\n\nORBITAL_FENCE_4729",
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": 248044,
+      "token_ids": null,
+      "prompt_logprobs": null,
+      "prompt_token_ids": null,
+      "routed_experts": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": "vllm-0.1.dev22653+gafc3735bf.d20261028-tp2-ep-6a8c61ff",
+  "usage": {
+    "prompt_tokens": 32256,
+    "total_tokens": 32329,
+    "completion_tokens": 73,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "created_cache_tokens": null,
+      "multimodal_tokens": null
+    },
+    "completion_tokens_details": null
+  },
+  "kv_transfer_params": null,
+  "ec_transfer_params": null,
+  "metrics": null
+}

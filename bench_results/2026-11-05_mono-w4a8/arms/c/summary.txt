@@ -1,0 +1,73 @@
+[10:12:35] boot TREE=/home/chenco_adm/w4a8_runs/mono-w4a8/trees/tree-5b8d1e5570 RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=2,3,4,5 PORT=18470 overrides= bench_extra=
+[10:12:35] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock
+[10:17:25] READY in 290s served=flash-next
+[10:17:32] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. Paris is a city of great historical and cultural significance, known for its iconic landmarks such as the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral. It is also a major center for fashion, gastronomy,'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=" Berlin, which is also the country's largest city and one of its 16 federal states. With a population of approximately 3.5 million, Berlin is the second most populous city in the European Union. It serves as the headquarters"
+RESULT PASS (3/3)
+[10:17:39] PPL PROBE PASS
+    PPL 4.84 (mean NLL 1.578 over 261 tokens) PASS
+    ok      'The history of the printing press begins' -> ' with the invention of movable type in China during the Song Dynasty (960-1279 AD). Bi Sheng, a Chinese artisan, is credited with creating the first movable type printing system around 1040 AD. This innovation allowed for the mass production of texts, significantly impacting the spread of'
+    ok      'Here is a short recipe for vegetable soup:' -> '\n\n1. Heat 2 tablespoons of olive oil in a large pot over medium heat.\n2. Add 1 chopped onion and 3 minced garlic cloves, and sauté until softened.\n3. Add 2 chopped carrots, 2 chopped celery stalks, and 1 chopped bell pepper, and cook'
+    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'
+    RESULT PASS
+[10:17:49] PREFIX PASS
+    cold TTFT 4.42 s, warm TTFT 0.28 s, speedup 15.8x -> PASS
+    cold text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "bar'
+    warm text: '\n\n<think>\nThe user has provided a very long text that appears to be a sequence of GPU/computing-related terms (like "bar'
+[10:18:02] warmup rc=0 in 13s (sizes default); slowest:
+    decode batch 2:   1.70 s
+    decode batch 8:   0.87 s
+    decode batch 7:   0.81 s
+[10:18:35] CONCURRENCY PASS
+    WARN together 2        prompt 2: soft token 43/64: margin 0.234, continuation mean lp -0.04 vs solo -0.04
+    WARN together 6        prompt 6: near-tie token 15/64: margin 0.062, continuation mean lp -0.18 vs solo -0.18
+    WARN together 7        prompt 7: near-tie token 3/64: margin 0.000, continuation mean lp -0.26 vs solo -0.50
+    WARN churn    (0, 0)   prompt 0: near-tie token 2/16: margin 0.172, continuation mean lp -0.76 vs solo -0.25
+    WARN churn    (6, 2)   prompt 2: soft token 43/48: margin 0.234, continuation mean lp -0.17 vs solo -0.15
+    WARN churn    (11, 1)  prompt 1: soft token 19/64: margin 0.266, continuation mean lp -0.27 vs solo -0.21
+    WARN churn    (14, 2)  prompt 2: soft token 43/48: margin 0.234, continuation mean lp -0.18 vs solo -0.15
+    RESULT PASS: 0 failing, 6 near-tie, 4 soft, 0 solo-noise, 38 identical of 48 checks (27.8s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[10:18:35] load hook: /home/chenco_adm/w4a8_runs/mono-w4a8/trees/tree-5b8d1e5570/tools/rdna/mono/w4a8/hook.sh
+[10:30:12] LOAD HOOK rc=0 PASS
+    [10:19:47] warm-up warm-c8: rc=0 in 20 s
+    [10:20:20] cell ttft4k try 1 seed 4101: valid | EVICT OK (4 workers, 33 s) | TTFT 1.42 s prefill 2892/2877 tok/s ITL 24.2 ms decode 89.1 tok/s/req accept 2.169491525423729
+    [10:21:28] cell ttft16k try 1 seed 4102: valid | EVICT OK (4 workers, 68 s) | TTFT 5.60 s prefill 2925/2902 tok/s ITL 24.1 ms decode 85.4 tok/s/req accept 2.0239043824701195
+    [10:22:04] cell c1 try 1 seed 4201: valid | EVICT OK (4 workers, 36 s) | TTFT 0.39 s prefill 2652/2608 tok/s ITL 23.7 ms decode 112.4 tok/s/req accept 2.6640625
+    [10:23:20] cell c6 try 1 seed 4206: valid | EVICT OK (4 workers, 76 s) | TTFT 0.80 s prefill 1279/2742 tok/s ITL 42.1 ms decode 40.9 tok/s/req accept 1.8995977722772277
+    [10:24:39] cell c8 try 1 seed 4208: valid | EVICT OK (4 workers, 80 s) | TTFT 0.89 s prefill 1151/2721 tok/s ITL 45.5 ms decode 36.9 tok/s/req accept 1.9533412887828163
+    [10:27:29] cell agg16k try 1 seed 4301: valid | EVICT OK (4 workers, 170 s) | TTFT 17.54 s prefill 934/2661 tok/s ITL 47.7 ms decode 20.2 tok/s/req accept 2.1597679936725545
+    [10:27:41] parity dump rc=0
+    [10:29:19] topk (limit 32/domain) rc=0 in 99 s
+    [10:30:11] topk_rep (limit 16/domain) rc=0 in 52 s
+    [10:30:11] whole-hook EVICT OK (4 workers, 692 s)
+    [10:30:11] PASS
+[10:30:18] PROBE-AFTER-LOAD PASS
+[10:30:19] evicted_ms since READY: Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+[10:30:19] markers:
+          4 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_config=CompressedTensorsConfig, quantizat
+          1 WNA16 MoE backend.
+          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 
+          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x
+          1 qwen_gdn_full_forward (opaque to inductor; projecti
+          1 Model loading took 20.56 GiB memory and 91.774968 seconds
+          1 Model loading took 20.56 GiB memory and 91.164030 seconds
+          1 Model loading took 20.56 GiB memory and 90.755149 seconds
+          1 Model loading took 20.56 GiB memory and 90.656339 seconds
+          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo
+[10:30:19] fault markers in serve.log: 0
+[10:30:19] new amdgpu dmesg faults: 0
+n/a
+[10:30:19] done

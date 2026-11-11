@@ -12,7 +12,7 @@ decision in a custom op makes it a runtime choice on the real batch size.
   rdna_hc_mix       hyper-connection mix: 2 fused kernels for decode; prefill
                      runs fused HIP kernels (VLLM_RDNA_HC_PREFILL_FUSED=0: torch)
   rdna_shared_expert shared expert (gate_up+silu*mul, down*sigmoid(gate)):
-                     2 kernels / torch
+                     2 kernels for M <= 32 (int8 shadows: M <= 8) / torch
 """
 
 import os
@@ -26,6 +26,16 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 _DECODE_MAX = 8
+# Shared-expert fused kernels cover MTP verify batches (fp16 weights). 8 keeps
+# the torch path above the exact-MT range; 0 turns the fused kernels off.
+_SE_DECODE_MAX = int(os.environ.get("VLLM_RDNA_SE_DECODE_MAX", "32") or 0)
+# From this many tokens up (fp16 weights) the gate_up half runs as one split-K
+# GEMM with a silu*mul epilogue instead of a wave per output pair; 0 keeps the
+# wave-per-pair kernel for every M.
+_SE_TILE_MIN = int(os.environ.get("VLLM_RDNA_SE_TILE_MIN", "9") or 0)
+# The down half of the tile path: one split-K GEMM with the expert-gate multiply
+# as its epilogue instead of a wave per output row. 0 keeps the wave kernel.
+_SE_DOWN_TILE = os.environ.get("VLLM_RDNA_SE_DOWN_TILE", "1") != "0"
 
 
 def _ntok(x: torch.Tensor) -> int:
@@ -59,6 +69,11 @@ def _rdna_dense_gemm_fake(x, weight, weight_i8, scale, bias):
 
 
 # ---------------------------------------------------------------- hyper-connection mix
+def _hc_inj_cols(w_down: torch.Tensor, lora_rank: int, hc_count: int) -> int:
+    """Width of the injection logits in the down projection (0 without them)."""
+    return max(0, min(hc_count, w_down.shape[0] - lora_rank))
+
+
 def _rdna_hc_mix(
     xn: torch.Tensor,
     w_down: torch.Tensor,
@@ -70,17 +85,24 @@ def _rdna_hc_mix(
     lora_rank: int,
     hc_count: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Returns (block_input [M, H], down_and_injection [M, N_down])."""
+    """Returns (block_input [M, H], injection [M, n_inj]).
+
+    ``injection`` holds the raw HC injection logits, columns
+    ``lora_rank:lora_rank + n_inj`` of the down projection (n_inj is 0 for a
+    down weight without injection rows). It is a separate contiguous tensor:
+    the caller needs no strided slice, which a compiled piecewise graph would
+    have to copy (and which it specializes on the trace-time stride of).
+    """
     n = _ntok(xn)
     if 0 < n <= _DECODE_MAX and xn.dtype == torch.float16 and xn.is_contiguous():
         from vllm import _custom_ops as ops
 
         wd, sd = (w_down_i8, s_down) if w_down_i8 is not None else (w_down, None)
         wu, su = (w_up_i8, s_up) if w_up_i8 is not None else (w_up, None)
-        dai = ops.rdna_gemv_act(xn, wd, sd, lora_rank, 1.0 / hc_count)
-        lora = dai[:, :lora_rank].contiguous()
+        n_inj = _hc_inj_cols(wd, lora_rank, hc_count)
+        lora, inj = ops.rdna_gemv_act(xn, wd, sd, lora_rank, 1.0 / hc_count, n_inj)
         block_input = ops.rdna_hc_up_gate_mix(lora, wu, su, xn, hc_count)
-        return block_input, dai
+        return block_input, inj
     # prefill / fallback: the original op sequence
     from vllm.model_executor.layers.rdna_dense_int8 import weight_for_gemm
     from vllm.models.qwen4_exp.amd.ops.hc import hc_gate_mix, hc_silu
@@ -98,12 +120,13 @@ def _rdna_hc_mix(
         block_input = ops.rdna_hc_up_gate_mix_prefill(
             dai, w_up, xn, lora_rank, hc_count
         )
-        return block_input, dai
-    dai = _linear_padded_m(xn, w_down)
-    lora = hc_silu(dai[:, :lora_rank].contiguous(), hc_count)
-    gate = _linear_padded_m(lora, w_up)
-    block_input = hc_gate_mix(xn, gate, hc_count)
-    return block_input, dai
+    else:
+        dai = _linear_padded_m(xn, w_down)
+        lora = hc_silu(dai[:, :lora_rank].contiguous(), hc_count)
+        gate = _linear_padded_m(lora, w_up)
+        block_input = hc_gate_mix(xn, gate, hc_count)
+    inj = dai[:, lora_rank : lora_rank + _hc_inj_cols(w_down, lora_rank, hc_count)]
+    return block_input, inj.contiguous()
 
 
 # Pad the GEMM row count (tokens) of the prefill HC GEMMs to a multiple of
@@ -188,7 +211,7 @@ def _rdna_hc_mix_fake(
     n_down = w_down_i8.shape[0] if w_down_i8 is not None else w_down.shape[0]
     return (
         xn.new_empty((m, xn.shape[1] // hc_count)),
-        xn.new_empty((m, n_down)),
+        xn.new_empty((m, max(0, min(hc_count, n_down - lora_rank)))),
     )
 
 
@@ -206,7 +229,7 @@ def _rdna_shared_expert(
     """Per-rank partial of sigmoid(w_gate.x) * down(silu(gate)*up); caller reduces."""
     n = _ntok(x)
     if (
-        0 < n <= _DECODE_MAX
+        0 < n <= (_DECODE_MAX if w1_i8 is not None else _SE_DECODE_MAX)
         and x.dtype == torch.float16
         and x.dim() == 2
         and x.is_contiguous()
@@ -215,8 +238,24 @@ def _rdna_shared_expert(
 
         a, sa = (w1_i8, s1) if w1_i8 is not None else (w1, None)
         b, sb = (w2_i8, s2) if w2_i8 is not None else (w2, None)
-        act = ops.rdna_se_gate_up_silu(x, a, sa)
-        return ops.rdna_se_down_gated(act, b, sb, x, w_gate)
+        if (
+            w1_i8 is None
+            and 0 < _SE_TILE_MIN <= n
+            and w1.shape[0] % 32 == 0
+            and w1.shape[0] <= 4064  # one arrival ticket per 16-row tile
+            and w1.shape[1] % 32 == 0
+        ):
+            act, gate = ops.rdna_se_gate_up_tile(x, w1, w_gate)
+            if (
+                _SE_DOWN_TILE
+                and w2_i8 is None
+                and w2.shape[1] % 32 == 0
+                and w2.shape[0] % 4 == 0
+            ):
+                return ops.rdna_se_down_tile(act, w2, gate)
+        else:
+            act, gate = ops.rdna_se_gate_up_silu(x, a, sa, w_gate)
+        return ops.rdna_se_down_gated(act, b, sb, gate)
     from vllm.model_executor.layers.rdna_dense_int8 import weight_for_gemm
 
     w1 = weight_for_gemm(w1, w1_i8, s1)

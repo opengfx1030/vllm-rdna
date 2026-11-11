@@ -1,0 +1,29 @@
+{
+  "status": "PASS",
+  "scope": "CPU only; no SSH/GPU/build/production edits",
+  "artifact_count": 93,
+  "exact_analyzer_v3_replayed": true,
+  "source_execution_pin_mismatches": 0,
+  "all_files_UTF8_text": true,
+  "no_binaries_rawserve_or_generation_payloads": true,
+  "profile_JSON_payloads_preserved": true,
+  "archived_journal_CPU_rechecks": {
+    "p1_v1": {
+      "new_records": 13,
+      "new_faults": 0
+    },
+    "p1_v2": {
+      "new_records": 0,
+      "new_faults": 0
+    },
+    "cap8": {
+      "new_records": 104,
+      "new_faults": 0
+    },
+    "cap24": {
+      "new_records": 104,
+      "new_faults": 0
+    }
+  },
+  "curated_markdown_table_separator_MD060_only": true
+}

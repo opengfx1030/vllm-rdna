@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "caches": 48,
+      "debug_timing": false,
+      "post_step_checks": "collective",
+      "copy_modes": [
+        "tensor"
+      ],
+      "expert_demands": 891706,
+      "expert_misses": 237643,
+      "committed_passes": 46674,
+      "copied_bytes": 606845164800,
+      "native_copy_calls": 39166,
+      "batch_copy_calls": 39166,
+      "map_uploads": 46485,
+      "device_bytes": 11767037952,
+      "host_bytes": 31378685952
+    },
+    {
+      "caches": 48,
+      "debug_timing": false,
+      "post_step_checks": "collective",
+      "copy_modes": [
+        "tensor"
+      ],
+      "expert_demands": 906503,
+      "expert_misses": 247876,
+      "committed_passes": 46531,
+      "copied_bytes": 632976153600,
+      "native_copy_calls": 39544,
+      "batch_copy_calls": 39544,
+      "map_uploads": 46496,
+      "device_bytes": 11767037952,
+      "host_bytes": 31378685952
+    }
+  ]
+}

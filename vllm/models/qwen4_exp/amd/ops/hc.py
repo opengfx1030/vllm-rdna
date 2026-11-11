@@ -8,7 +8,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-# Opt-in HIP port of the same kernels (gfx1030). When
+# HIP port of the same kernels (gfx1030). When
 # ``VLLM_RDNA_HC_PREFILL_HIP=1`` AND ``on_gfx10x()`` is true, the helpers
 # below route through the HIP bindings; otherwise they fall through to
 # the Triton kernels below unchanged.

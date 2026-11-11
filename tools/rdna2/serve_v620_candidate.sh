@@ -94,8 +94,8 @@ export PATH="$venv/bin:/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH"
 export LD_LIBRARY_PATH="$runtime_sdk/lib:$runtime_sdk/lib/host-math/lib:/opt/rocm/core-10.0/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 if [[ ${V620_TUNABLEOP:-0} == 1 ]]; then
     # V620_ROCBLAS_LIBRARY must identify the library loaded by this wheel SDK.
-    # shellcheck source=tools/rdna2/tunableop_env.sh
-    source "$source_dir/tools/rdna2/tunableop_env.sh"
+    # shellcheck source=tools/rdna2_028/tunableop_env.sh
+    source "$source_dir/tools/rdna2_028/tunableop_env.sh"
     rows_root=${V620_TUNABLEOP_ROOT:-$test_root/tunableop}
     if [[ ! -d $rows_root && -z ${V620_TUNABLEOP_ROOT:-} ]]; then
         rows_root=$source_dir/tunableop
