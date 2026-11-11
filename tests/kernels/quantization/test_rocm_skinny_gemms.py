@@ -81,9 +81,12 @@ NKM_FACTORS_LLMM1 = [
     # Edge cases with specific K sizes
     (1, 6144, 1024),
     (1, 8192, 2048),
-    # 17 waves on wave32: smallest K that reaches the second-stage
-    # partials 16..31 of the LLMM1 reduction
+    # 17 waves on wave32. K=4104 is the smallest K that reaches the second-stage
+    # partials 16..31 of the LLMM1 reduction, but partial 16 then holds only 8
+    # of the 4104 products (0.2%, below this test's rtol). K=4352 fills the whole
+    # 17th wave (5.9% of the sum), so it fails without the fix.
     (1, 4104, 1024),
+    (1, 4352, 1024),
     # Very large case
     (1, 4096, 8192),
 ]
