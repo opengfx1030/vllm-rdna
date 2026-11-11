@@ -1,0 +1,48 @@
+## offload A/B (2026-11-02 23:53:12)
+- T0: ec7ce7df7599c36d82fbee5076ea4ec0  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py 70dfe18aa3717dd5d41c43a0edf97540  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py 5a1fa44aa939f199a018aa77206052f4  vllm/model_executor/layers/fused_moe/rdna_expert_cache_po
+- T0r: ec7ce7df7599c36d82fbee5076ea4ec0  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py 70dfe18aa3717dd5d41c43a0edf97540  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py 5a1fa44aa939f199a018aa77206052f4  vllm/model_executor/layers/fused_moe/rdna_expert_cache_po
+- T1: 72ef538fe9ac52d92733823ce5aec69a  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py 251b883386dda4414acd91224f5f2327  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py 7b83c9a3e3b267aef821b5389cd70d54  vllm/model_executor/layers/fused_moe/rdna_expert_cache_po
+- T1r: d0aa7c7ec56f2ae0c458557475de33de  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py 251b883386dda4414acd91224f5f2327  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py 9014c90fa0865f8e848927c7da1be7a9  vllm/model_executor/layers/fused_moe/rdna_expert_cache_po
+- T2: 0ca7a06c6845b1c1bf0273ea29470762  vllm/models/qwen4_exp/amd/mono/rdna2/k2.py acf819ade145b0c58851574450899fb7  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py 9014c90fa0865f8e848927c7da1be7a9  vllm/model_executor/layers/fused_moe/rdna_expert_cache_po
+
+| label | cell | ok | prefill tok/s req (agg) | decode tok/s req | agg out tok/s | TTFT mean/p50/p99 s | ITL p50/p99 ms (mean) | acc len |
+|---|---|---|---|---|---|---|---|---|
+| T0-c1 | 1024/512 c1 | 10/10 | 745 (648) | 27.98 | 26.1 | 1.37/1.38/1.58 | 64.0/103 (77.0) | 2.16 |
+| T0-c4 | 1024/512 c4 | 12/12 | 406 (848) | 11.03 | 41.2 | 2.52/1.86/4.83 | 159.1/1251 (206.1) | 2.28 |
+| T0r-c1 | 1024/512 c1 | 10/10 | 737 (637) | 33.01 | 30.3 | 1.39/1.42/1.61 | 62.4/100 (65.3) | 2.16 |
+| T0r-c4 | 1024/512 c4 | 12/12 | 408 (838) | 13.49 | 49.6 | 2.51/1.86/4.89 | 155.0/270 (168.6) | 2.28 |
+| T1-c1 | 1024/512 c1 | 10/10 | 754 (677) | 37.58 | 34.2 | 1.36/1.37/1.51 | 51.8/82 (53.3) | 2.00 |
+| T1-c4 | 1024/512 c4 | 12/12 | 426 (857) | 13.74 | 49.5 | 2.40/1.65/4.78 | 141.9/214 (151.8) | 2.09 |
+| T1r-c1 | 1024/512 c1 | 10/10 | 731 (604) | 40.49 | 36.5 | 1.40/1.38/1.70 | 54.1/95 (57.1) | 2.32 |
+| T1r-c4 | 1024/512 c4 | 12/12 | 398 (850) | 13.59 | 50.4 | 2.57/1.82/4.82 | 149.3/279 (163.0) | 2.22 |
+| T2-c1 | 1024/512 c1 | 10/10 | 747 (661) | 34.07 | 31.3 | 1.37/1.42/1.55 | 60.1/107 (63.3) | 2.16 |
+| T2-c4 | 1024/512 c4 | 12/12 | 420 (859) | 13.60 | 50.1 | 2.44/1.75/4.77 | 151.6/291 (167.2) | 2.28 |
+
+step period (derived) = acceptance length / decode tok/s per request:
+  T0-c1: mean TPOT 35.74 ms, acc len 2.158, step period ~ 77.1 ms; ITL p50 64.0 ms
+  T0-c4: mean TPOT 90.65 ms, acc len 2.277, step period ~ 206.4 ms; ITL p50 159.1 ms
+  T0r-c1: mean TPOT 30.30 ms, acc len 2.158, step period ~ 65.4 ms; ITL p50 62.4 ms
+  T0r-c4: mean TPOT 74.15 ms, acc len 2.277, step period ~ 168.8 ms; ITL p50 155.0 ms
+  T1-c1: mean TPOT 26.61 ms, acc len 2.004, step period ~ 53.3 ms; ITL p50 51.8 ms
+  T1-c4: mean TPOT 72.81 ms, acc len 2.087, step period ~ 151.9 ms; ITL p50 141.9 ms
+  T1r-c1: mean TPOT 24.70 ms, acc len 2.319, step period ~ 57.3 ms; ITL p50 54.1 ms
+  T1r-c4: mean TPOT 73.57 ms, acc len 2.218, step period ~ 163.2 ms; ITL p50 149.3 ms
+  T2-c1: mean TPOT 29.35 ms, acc len 2.158, step period ~ 63.3 ms; ITL p50 60.1 ms
+  T2-c4: mean TPOT 73.54 ms, acc len 2.277, step period ~ 167.4 ms; ITL p50 151.6 ms
+
+greedy equality vs T0:
+compare serve-T0/greedy.json vs serve-T0r/greedy.json: sequential identical=True concurrent identical=False
+compare serve-T0/greedy.json vs serve-T1/greedy.json: sequential identical=False concurrent identical=False
+  prompt 0: first difference at char 321: 'These statements are not independent; th' vs '**Question:** Which of the following sta'
+  prompt 2: first difference at char 302: '' vs '\n\nQuestion: What is the difference betwe'
+  prompt 4: first difference at char 338: '20} \\approx 10.95$. Therefore, we only n' vs '00} = 10$ and $\\sqrt{121} = 11$. Therefo'
+  prompt 5: first difference at char 225: '(10) with the same timestamp (1). Accord' vs '**10** with timestamp **1**. \n**What val'
+compare serve-T0/greedy.json vs serve-T1r/greedy.json: sequential identical=False concurrent identical=False
+  prompt 4: first difference at char 338: '20} \\approx 10.95$. Therefore, we only n' vs '00} = 10$ and $\\sqrt{121} = 11$. Therefo'
+  prompt 5: first difference at char 225: '(10) with the same timestamp (1). Accord' vs '**10** with timestamp **1**. \n**What val'
+compare serve-T0/greedy.json vs serve-T2/greedy.json: sequential identical=True concurrent identical=True
+  T0 sha256 5527d8b3bd52d7d5 seq==conc False
+  T0r sha256 69eec27b821aed9e seq==conc False
+  T1 sha256 0a7c62086fa3dba4 seq==conc False
+  T1r sha256 9ae9528ff489e2f0 seq==conc False
+  T2 sha256 5527d8b3bd52d7d5 seq==conc False

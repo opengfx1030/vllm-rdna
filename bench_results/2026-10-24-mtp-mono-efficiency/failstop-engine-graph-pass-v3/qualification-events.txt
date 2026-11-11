@@ -1,0 +1,13 @@
+(Worker_TP0_EP0 pid=76268) ERROR 10-24 10:03:46 [multiproc_executor.py:1007]     raise RuntimeError("Mono MTP drafter K2 fault on a TP rank; restart the engine")
+(Worker_TP0_EP0 pid=76268) ERROR 10-24 10:03:46 [multiproc_executor.py:1007] RuntimeError: Mono MTP drafter K2 fault on a TP rank; restart the engine
+(EngineCore pid=76179) ERROR 10-24 10:03:46 [core.py:1482] RuntimeError: Worker failed with error 'Mono MTP drafter K2 fault on a TP rank; restart the engine', please check the stack trace above for the root cause
+(EngineCore pid=76179) INFO 10-24 10:03:46 [multiproc_executor.py:482] [shutdown] Executor: waiting for worker exit count=4
+(APIServer pid=75576) ERROR 10-24 10:03:46 [async_llm.py:871] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+INFO:     127.0.0.1:50476 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:50478 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:50494 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error
+(Worker_TP0_EP0 pid=76268) ERROR 10-24 10:03:46 [multiproc_executor.py:1007]     raise RuntimeError("Mono MTP drafter K2 fault on a TP rank; restart the engine")
+(Worker_TP0_EP0 pid=76268) ERROR 10-24 10:03:46 [multiproc_executor.py:1007] RuntimeError: Mono MTP drafter K2 fault on a TP rank; restart the engine
+(APIServer pid=75576) INFO 10-24 10:03:46 [utils.py:286] [shutdown] EngineCore process manager: using 15.0s ROCm cleanup grace after immediate request abort
+(EngineCore pid=76179) WARNING 10-24 10:03:51 [multiproc_executor.py:494] [shutdown] Executor: workers still running after grace period; sending SIGTERM count=4
+(EngineCore pid=76179) WARNING 10-24 10:03:55 [multiproc_executor.py:504] [shutdown] Executor: workers still running after SIGTERM; sending SIGKILL count=4

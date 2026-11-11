@@ -1,0 +1,9 @@
+.................                                                        [100%]
+17 passed in 1.54s
+RDNA_GDN_DIAG scratch=0x7f9a8f846600 kind=1 seq=0 head=0 tile=0 thread=0 nacc=0 cslot=1 slot=1 tok=0 value=0
+RDNA_GDN_DIAG scratch=0x7f9a8f846600 kind=1 seq=0 head=0 tile=3 thread=64 nacc=4 cslot=1 slot=1 tok=0 value=4
+RDNA_GDN_DIAG scratch=0x7f9a8f846600 kind=1 seq=0 head=0 tile=3 thread=0 nacc=-1 cslot=1 slot=1 tok=0 value=-1
+RDNA_GDN_DIAG scratch=0x7f9a8f846600 kind=4 seq=0 head=0 tile=3 thread=96 nacc=1 cslot=1 slot=1 tok=0 value=nan
+RDNA_GDN_DIAG scratch=0x7f9a8f846600 kind=3 seq=0 head=0 tile=0 thread=0 nacc=1 cslot=1 slot=-1 tok=0 value=nan
+RDNA_GDN_DIAG scratch=0x7f9a8f846600 kind=8 seq=0 head=0 tile=1 thread=32 nacc=1 cslot=1 slot=1 tok=0 value=2.5e+07
+RDNA_GDN_DIAG scratch=0x7f9a8f846600 kind=1 seq=0 head=0 tile=0 thread=0 nacc=0 cslot=1 slot=1 tok=0 value=0

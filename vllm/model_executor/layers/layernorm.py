@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom normalization layers."""
 
+import functools
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +15,7 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms.rdna import on_rdna_family
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -65,6 +69,9 @@ class RMSNorm(CustomOp):
         self.weight = torch.ones(hidden_size, dtype=weight_dtype)
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
+            # Dummy weights keep norms neutral: random ones would shrink every
+            # activation and skew data-dependent kernels (e.g. sparse top-k).
+            set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
 
         # When has_weight=False, pass weight=None so implementations that
         # support a weightless path can skip the per-channel multiply.
@@ -169,6 +176,7 @@ class GemmaRMSNorm(CustomOp):
     ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
+        set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
         self.variance_epsilon = eps
         self._opaque_rdna = on_rdna_family()
 
@@ -182,9 +190,7 @@ class GemmaRMSNorm(CustomOp):
             weight = self.weight.float() + 1.0
             if residual is None:
                 return ir.ops.rms_norm(x, weight, self.variance_epsilon)
-            return ir.ops.fused_add_rms_norm(
-                x, residual, weight, self.variance_epsilon
-            )
+            return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
         # RDNA: opaque custom ops so inductor cannot lower Gemma's (1+w) RMS
         # (that lowering produces garbage greedy decode on Qwen3.5 hybrid).
         if residual is None:
@@ -239,6 +245,81 @@ class GemmaRMSNorm(CustomOp):
         return out
 
 
+@CustomOp.register("layer_norm")
+class LayerNorm(CustomOp):
+    """Standard (mean-centered) LayerNorm.
+
+    Drop-in for a bare `nn.LayerNorm` that dispatches to a fused XPU kernel
+    when one is available, and to the native implementation otherwise.
+
+    Normalization runs in the wider of the input and parameter dtypes and the
+    result is cast back to the input dtype, so `dtype=torch.float32` gives an
+    fp32 reduction for a lower-precision input.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
+        bias: bool = True,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        self.normalized_shape = (hidden_size,)
+        self.eps = eps
+        weight_dtype = dtype or torch.get_default_dtype()
+        self.weight: nn.Parameter | None = None
+        self.bias: nn.Parameter | None = None
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(hidden_size, dtype=weight_dtype))
+            set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
+            if bias:
+                self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=weight_dtype))
+                set_weight_attrs(self.bias, {"dummy_weight_value": 0.0})
+
+    def _compute_dtype(self, x: torch.Tensor) -> torch.dtype:
+        if self.weight is None:
+            return x.dtype
+        return torch.promote_types(x.dtype, self.weight.dtype)
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        compute_dtype = self._compute_dtype(x)
+        if compute_dtype != x.dtype:
+            return F.layer_norm(
+                x.to(compute_dtype),
+                self.normalized_shape,
+                self.weight,
+                self.bias,
+                self.eps,
+            ).type_as(x)
+        return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_layer_norm
+
+        if (
+            self.weight is None
+            or self.bias is None
+            or not hasattr(torch.ops._C, "layer_norm")
+            # The kernel reduces in the input dtype, so a widened reduction
+            # takes the native path.
+            or self._compute_dtype(x) != x.dtype
+        ):
+            return self.forward_native(x)
+        # empty_like preserves x's strides, but the kernel requires a
+        # contiguous out (unlike x, which it can handle non-contiguous).
+        out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+        torch.ops.vllm.xpu_layer_norm(out, x, self.weight, self.bias, self.eps)
+        return out
+
+    def extra_repr(self) -> str:
+        return f"hidden_size={self.normalized_shape[0]}, eps={self.eps}"
+
+
 # --8<-- [start:rms_norm_gated]
 @CustomOp.register("rms_norm_gated")
 class RMSNormGated(CustomOp):
@@ -283,6 +364,7 @@ class RMSNormGated(CustomOp):
         self.eps = eps
         self.activation = activation
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
         self.register_parameter("bias", None)
         self.group_size = group_size
         self.norm_before_gate = norm_before_gate
@@ -359,19 +441,14 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
-        from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
-            rmsnorm_fn,
-        )
-
-        return rmsnorm_fn(
+        return torch.ops.vllm.fla_rms_norm_gated(
             x,
+            z,
             self.weight,
-            self.bias,
-            z=z,
-            eps=self.eps,
-            group_size=self.group_size,
-            norm_before_gate=self.norm_before_gate,
-            activation=self.activation,
+            self.eps,
+            self.group_size,
+            self.norm_before_gate,
+            self.activation,
         )
 
     @classmethod
@@ -402,14 +479,19 @@ class RMSNormGated(CustomOp):
             and z.shape == x.shape
         ):
             # The kernel takes 2D rows; GDN passes [tokens, heads, head_dim]
-            # and normalizes per head, i.e. over the last dim.
+            # and normalizes per head, i.e. over the last dim. Released builds
+            # of _rocm_C.gated_rms_norm still declare 2D inputs, so a 3D z is
+            # always flattened: passing a heads-contiguous 3D z in place
+            # raised "input and z must be 2D [M, N]" at the first TP2 profile
+            # run (model_runner.profile_run -> _output_projection -> forward_hip).
             act = 1 if self.activation == "sigmoid" else 0
             x2 = x.reshape(-1, x.shape[-1]).contiguous()
             out = torch.empty_like(x2)
+            z_arg = z.reshape(-1, z.shape[-1]).contiguous()
             torch.ops._rocm_C.gated_rms_norm(
                 out,
                 x2,
-                z.reshape(-1, z.shape[-1]).contiguous(),
+                z_arg,
                 self.weight.data,
                 self.eps,
                 act,
@@ -423,20 +505,33 @@ class RMSNormGated(CustomOp):
         return self.forward_cuda(x, z)
 
 
-class LayerNorm(nn.Module):
-    """Layer Normalization."""
+@functools.cache
+def _gemma_norm_hip() -> bool:
+    """One-kernel RDNA Gemma norm available (VLLM_RDNA_GEMMA_NORM_HIP=0 off)."""
+    if os.environ.get("VLLM_RDNA_GEMMA_NORM_HIP", "1") == "0":
+        return False
+    return (
+        torch.version.hip is not None
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "gemma_rms_norm")
+    )
 
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
 
-    def forward(self, x: torch.Tensor):
-        return F.layer_norm(
-            x.float(), (self.dim,), self.weight, self.bias, self.eps
-        ).type_as(x)
+def _norm_rows(x: torch.Tensor) -> torch.Tensor | None:
+    """Return x as a [rows, N] view with unit column stride and any row stride.
+
+    None when the leading dims do not merge into one row stride (a [T, heads, D]
+    slice of a wider tensor); the caller then keeps the eager path, since the
+    fused kernel would need a copy.
+    """
+    n = x.shape[-1]
+    if x.stride(-1) != 1:
+        return None
+    try:
+        rows = x.view(-1, n)
+    except RuntimeError:
+        return None
+    return rows if rows.shape[0] < 2 or rows.stride(0) >= n else None
 
 
 def gemma_rms_norm(
@@ -445,6 +540,22 @@ def gemma_rms_norm(
     epsilon: float,
 ) -> torch.Tensor:
     """Gemma RMSNorm: x * (1+w) / rms. Opaque to inductor."""
+    if (
+        x.dtype == torch.float16
+        and weight.dtype == torch.float16
+        and x.is_cuda
+        and weight.is_contiguous()
+        and _gemma_norm_hip()
+        and (rows := _norm_rows(x)) is not None
+    ):
+        # One kernel instead of the cast, add, cast and norm launches below
+        # (28 calls per Flash-Next decode step), reading row-strided views
+        # (pooled keys cut out of a wider buffer) in place.
+        from vllm import _custom_ops as ops
+
+        out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+        ops.gemma_rms_norm(out.view(rows.shape), rows, weight, epsilon)
+        return out
     # Fold in x.dtype: an fp32 scale fails the vllm_c dtype-match guard and
     # silently falls back to the decomposed native path (~5 kernels/call).
     scale = (weight.float() + 1.0).to(x.dtype)
@@ -491,13 +602,58 @@ def gemma_fused_add_rms_norm_fake(
     # See gemma_rms_norm_fake: the real op preserves the (contiguous at
     # runtime) input stride; empty_like on a transposed traced fake makes
     # inductor assert the wrong stride under piecewise compile.
-    return (torch.empty(x.size(), dtype=x.dtype, device=x.device),
-            torch.empty(residual.size(), dtype=residual.dtype,
-                        device=residual.device))
+    return (
+        torch.empty(x.size(), dtype=x.dtype, device=x.device),
+        torch.empty(residual.size(), dtype=residual.dtype, device=residual.device),
+    )
 
 
 direct_register_custom_op(
     op_name="gemma_fused_add_rms_norm",
     op_func=gemma_fused_add_rms_norm,
     fake_impl=gemma_fused_add_rms_norm_fake,
+)
+
+
+def _fla_rms_norm_gated(
+    x: torch.Tensor,
+    z: torch.Tensor | None,
+    weight: torch.Tensor,
+    eps: float,
+    group_size: int | None,
+    norm_before_gate: bool,
+    activation: str,
+) -> torch.Tensor:
+    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+        rmsnorm_fn,
+    )
+
+    return rmsnorm_fn(
+        x,
+        weight,
+        None,
+        z=z,
+        eps=eps,
+        group_size=group_size,
+        norm_before_gate=norm_before_gate,
+        activation=activation,
+    )
+
+
+def _fla_rms_norm_gated_fake(
+    x: torch.Tensor,
+    z: torch.Tensor | None,
+    weight: torch.Tensor,
+    eps: float,
+    group_size: int | None,
+    norm_before_gate: bool,
+    activation: str,
+) -> torch.Tensor:
+    return x.new_empty(x.shape)
+
+
+direct_register_custom_op(
+    op_name="fla_rms_norm_gated",
+    op_func=_fla_rms_norm_gated,
+    fake_impl=_fla_rms_norm_gated_fake,
 )

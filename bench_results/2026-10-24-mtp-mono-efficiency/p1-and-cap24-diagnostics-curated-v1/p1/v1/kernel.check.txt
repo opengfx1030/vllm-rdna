@@ -1,0 +1,1 @@
+PASS privileged kernel journal: 13 new records, no GPU fault

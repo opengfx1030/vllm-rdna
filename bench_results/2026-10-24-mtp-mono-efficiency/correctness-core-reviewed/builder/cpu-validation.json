@@ -1,0 +1,14 @@
+{
+  "scope": "CPU-only mocked plan tests; no Ninja/compiler/linker/GPU/SSH executed",
+  "tests_passed": 8,
+  "ruff_check": "PASS",
+  "syntax": "PASS",
+  "original_inline_helper_unchanged": true,
+  "original_inline_helper_sha256": "ec81d8e673e8554c4ac1fb55a5a351e58911af09bc46842d4c7c3c73dad2c30c",
+  "files": {
+    "test_plan.py": "27c8c7725c920019e0462ffb4d4a18337128cf48e54772206bff0d41550be13e",
+    "upstream-helper.json": "9422b636d120e02774e5ce035d6795937a06863d3df735267e2605c84f5ee574",
+    "build_disposable_core.py": "768844ca17fc917746051d113b62ca1b60e0de55b2e1ce0da17a55af35b72ded",
+    "README.md": "81881f41f39d6f80a8b3ccca0a5890e3a716d2459a57388218535033bcc42fd1"
+  }
+}

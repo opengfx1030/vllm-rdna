@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.phase_timer import phase_timer
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 
@@ -59,7 +59,7 @@ def _selector_walk_kernel(
             scores,
             candidates,
             mask & valid,
-            seed,
+            spec_step_seed(seed, step),
             sample_pos,
             temperature if SAMPLE_PROBABILISTIC else 0.0,
             IS_DRAFTING=True,

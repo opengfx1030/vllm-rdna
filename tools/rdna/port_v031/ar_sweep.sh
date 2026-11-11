@@ -19,7 +19,7 @@ WORLD=$(awk -F, '{print NF}' <<< "$GPUS")
 case ",$GPUS," in *,0,* | *,1,*) echo "refusing HIP 0/1"; exit 2 ;; esac
 mkdir -p "$OUT"
 SITE=$VENV/lib/python3.12/site-packages
-export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib/core/lib:$SITE/torch/lib
+export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib:$SITE/torch/lib
 export HIP_VISIBLE_DEVICES=$GPUS VLLM_RDNA_AR=${VLLM_RDNA_AR:-1}
 export HSA_FORCE_FINE_GRAIN_PCIE=1 HSA_ENABLE_SDMA=0 GPU_MAX_HW_QUEUES=2
 cd "$OUT"

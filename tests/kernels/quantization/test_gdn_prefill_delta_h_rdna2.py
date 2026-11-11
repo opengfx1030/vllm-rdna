@@ -77,20 +77,14 @@ def _make_inputs(seq_lens, H, Hg, seed, with_initial_state):
     # comparison meaningless. Normalised k/w keep the recurrence bounded and
     # match the magnitudes the production kernel actually processes (cf. the
     # _l2norm helper in test_gdn_prefill_o_rdna2.py).
-    k = (
-        F.normalize(
-            torch.randn(1, T_total, Hg, K, device=device, generator=gen).float(),
-            dim=-1,
-        )
-        .to(torch.float16)
-    )
-    w = (
-        F.normalize(
-            torch.randn(1, T_total, H, K, device=device, generator=gen).float(),
-            dim=-1,
-        )
-        .to(torch.float16)
-    )
+    k = F.normalize(
+        torch.randn(1, T_total, Hg, K, device=device, generator=gen).float(),
+        dim=-1,
+    ).to(torch.float16)
+    w = F.normalize(
+        torch.randn(1, T_total, H, K, device=device, generator=gen).float(),
+        dim=-1,
+    ).to(torch.float16)
     u = torch.randn(1, T_total, H, V, device=device, dtype=torch.float16, generator=gen)
     # Chunk-local cumulative log-gate: monotonically decreasing within each
     # chunk, restarting at 0 for every chunk (chunk_local_cumsum's contract).
@@ -116,7 +110,8 @@ def _make_inputs(seq_lens, H, Hg, seed, with_initial_state):
 
 
 def _run_ref(k, w, u, g, cu_seqlens, initial_state, output_final_state):
-    h_ref, v_new_ref, final_ref = chunk_gated_delta_rule_fwd_h(
+    # The reference is annotated as returning two tensors but returns three.
+    h_ref, v_new_ref, final_ref = chunk_gated_delta_rule_fwd_h(  # type: ignore[misc]
         k=k,
         w=w,
         u=u,
@@ -145,8 +140,18 @@ def _run_hip(k, w, u, g, cu_seqlens, initial_state, output_final_state):
 
     h = torch.empty(B, NT_total, H, V, K, device=device, dtype=torch.float16)
     v_new = torch.empty_like(u)
+    # The state slot follows the cache dtype: fp32 by default, fp16 for an
+    # --mamba-ssm-cache-dtype float16 cache. The kernel is templated on it and
+    # requires the initial and final slots to agree.
     final_state = (
-        torch.empty(N, H, V, K, device=device, dtype=torch.float32)
+        torch.empty(
+            N,
+            H,
+            V,
+            K,
+            device=device,
+            dtype=initial_state.dtype if initial_state is not None else torch.float32,
+        )
         if output_final_state
         else None
     )
@@ -207,6 +212,43 @@ def test_gdn_prefill_delta_h_rdna2_parity(
         torch.testing.assert_close(final_hip, final_ref, rtol=1e-3, atol=1e-3)
 
 
+@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4)])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [64],  # exactly 1 chunk
+        [192],  # 3 chunks (NT=3 serial loop)
+        [100],  # chunk-boundary tail (64 + 36, not 16-aligned)
+        [137],  # tail not multiple-of-16 nor of BT
+        [63],  # tail where T_seq < BT (NT=1, t_len=63)
+    ],
+)
+def test_gdn_prefill_delta_h_rdna2_fp16_state_parity(seq_lens, H, Hg):
+    """An fp16 SSM state must behave like the fp32 path fed the same values.
+
+    The recurrence runs in fp32 registers either way; the fp16 instantiation
+    only rounds the h0 load and the final-state store. So the per-chunk h and
+    the v_new must equal the fp32 run bit for bit, and the final state must
+    match it to within the fp16 rounding of the value it stores.
+    """
+    torch.manual_seed(0)
+    k, w, u, g, cu_seqlens, initial_state = _make_inputs(
+        seq_lens, H, Hg, seed=42, with_initial_state=True
+    )
+    state16 = initial_state.to(torch.float16)
+
+    # The fp32 instantiation fed the widened fp16 state: same recurrence.
+    h32, v_new32, final32 = _run_hip(k, w, u, g, cu_seqlens, state16.float(), True)
+    # The fp16 instantiation: same recurrence, fp16 state slot.
+    h16, v_new16, final16 = _run_hip(k, w, u, g, cu_seqlens, state16, True)
+
+    assert final16.dtype == torch.float16
+    torch.testing.assert_close(h16.float(), h32.float(), rtol=0, atol=0)
+    torch.testing.assert_close(v_new16.float(), v_new32.float(), rtol=0, atol=0)
+    # The final state is the fp32 value rounded to fp16 (0.5 ulp of fp16).
+    torch.testing.assert_close(final16.float(), final32.float(), rtol=1e-3, atol=1e-3)
+
+
 @pytest.mark.parametrize("H,Hg", [(12, 4)])
 @pytest.mark.parametrize(
     "seq_lens",
@@ -238,9 +280,7 @@ def test_gdn_prefill_delta_h_rdna2_varlen_multi_seq(seq_lens, H, Hg):
     # fp16 ulp IS 1.56e-2, and this varlen case measures exactly that. Bound the
     # comparison by the fp16 ulp of the largest |h| (2 ulps), same as final_state.
     _ulp = 2.0 ** (math.floor(math.log2(max(h_ref.abs().max().item(), 1.0))) - 10)
-    torch.testing.assert_close(
-        h_hip.float(), h_ref.float(), rtol=1e-3, atol=2.0 * _ulp
-    )
+    torch.testing.assert_close(h_hip.float(), h_ref.float(), rtol=1e-3, atol=2.0 * _ulp)
     # See the fp16-ulp note above: the fp32 slot's value still carries fp16
     # quantization from the reference's gated b_v.
     # fs is fp32, but its VALUE passed through the reference's fp16-quantised
@@ -299,3 +339,83 @@ def test_gdn_prefill_delta_h_rdna2_no_g_equal_no_g():
     # holding a value the reference quantised to fp16.
     _ulp = 2.0 ** (math.floor(math.log2(max(fs_ref.abs().max().item(), 1.0))) - 10)
     torch.testing.assert_close(fs_hip, fs_ref, rtol=1e-3, atol=2.0 * _ulp)
+
+
+def _bits(x):
+    return x.view(torch.int16 if x.dtype == torch.float16 else torch.int32)
+
+
+def _scaled(k, w):
+    # Scale k and w down so the long recurrences stay finite (the stock
+    # synthetic inputs overflow after ~12 chunks, and NaN payloads are not
+    # comparable bit for bit).
+    return (k.float() * 0.05).half(), (w.float() * 0.05).half()
+
+
+@pytest.mark.parametrize("variant", ["1", "2", "3", "4"])
+@pytest.mark.parametrize("H,Hg", [(12, 4), (4, 4)])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [2048],  # 32 chunks, the production single-sequence step
+        [64],
+        [63],
+        [100],
+        [137],
+        [640],
+        [1],  # one valid row in a 64-row chunk
+        [300, 1000, 748],  # varlen, no sequence starts on a chunk boundary
+        [64] * 8,
+        [5, 7, 2036],
+        [65, 129, 193],
+    ],
+)
+@pytest.mark.parametrize("with_initial_state", [False, True])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.float16])
+def test_gdn_prefill_delta_h_rdna2_pipe_bitwise(
+    monkeypatch, variant, H, Hg, seq_lens, with_initial_state, state_dtype
+):
+    """VLLM_RDNA_GDN_DH_PIPE=1..4 (16-byte staging, prefetch, DPP reduction,
+    LDS-staged v_new, optional pair-interleaved k) must reproduce the default
+    kernel bit for bit."""
+    if not with_initial_state and state_dtype == torch.float16:
+        pytest.skip("the state dtype only matters with an initial state")
+    torch.manual_seed(0)
+    k, w, u, g, cu_seqlens, initial_state = _make_inputs(
+        seq_lens, H, Hg, seed=sum(seq_lens) + H, with_initial_state=with_initial_state
+    )
+    k, w = _scaled(k, w)
+    if initial_state is not None:
+        initial_state = initial_state.to(state_dtype)
+
+    monkeypatch.setenv("VLLM_RDNA_GDN_DH_PIPE", "0")
+    ref = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
+    monkeypatch.setenv("VLLM_RDNA_GDN_DH_PIPE", variant)
+    out = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
+
+    for name, r, o in zip(("h", "v_new", "final_state"), ref, out):
+        assert torch.isfinite(r.float()).all(), name
+        assert torch.equal(_bits(r), _bits(o)), name
+
+
+def test_gdn_prefill_delta_h_rdna2_pipe_unaligned_inputs_fall_back(monkeypatch):
+    """The pipelined kernels need 16-byte aligned k/u/w/v_new; anything else
+    must silently run the default kernel and still give the same result."""
+    torch.manual_seed(0)
+    H, Hg = 12, 4
+    k, w, u, g, cu_seqlens, initial_state = _make_inputs(
+        [200], H, Hg, seed=3, with_initial_state=True
+    )
+    k, w = _scaled(k, w)
+    flat = torch.empty(k.numel() + 1, device=device, dtype=torch.float16)
+    flat[1:].copy_(k.flatten())
+    k_off = flat[1:].view_as(k)
+    assert k_off.data_ptr() % 16 != 0
+
+    monkeypatch.setenv("VLLM_RDNA_GDN_DH_PIPE", "0")
+    ref = _run_hip(k, w, u, g, cu_seqlens, initial_state, True)
+    for variant in ("1", "2", "3", "4"):
+        monkeypatch.setenv("VLLM_RDNA_GDN_DH_PIPE", variant)
+        out = _run_hip(k_off, w, u, g, cu_seqlens, initial_state, True)
+        for r, o in zip(ref, out):
+            assert torch.equal(_bits(r), _bits(o))

@@ -1,0 +1,177 @@
+{
+ "arm": "/tmp/t10/B1",
+ "files": [
+  {
+   "file": "expert_stats-dp0-pid712855.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 154,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    8889547
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    9137477
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 4998.605,
+   "final_time": 1794063121.912057,
+   "prev_elapsed_s": 4968.252,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid712856.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 154,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    8889547
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    9137477
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 4998.349,
+   "final_time": 1794063121.9120433,
+   "prev_elapsed_s": 4967.996,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid712857.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 154,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    8889547
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    9137477
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 4998.451,
+   "final_time": 1794063121.9120755,
+   "prev_elapsed_s": 4968.099,
+   "final_newer_than_last_periodic": true
+  },
+  {
+   "file": "expert_stats-dp0-pid712858.jsonl",
+   "tp_rank": 0,
+   "layers": 49,
+   "targets": 48,
+   "snapshots": 154,
+   "top_k": 10,
+   "problems": [],
+   "sum_counts_vs_tokens_top_k_bad_layers": 0,
+   "decode_counts_vs_rows_hist_bad_layers": 0,
+   "decode_counts_vs_rows_hist_examples": [],
+   "target_tokens_final_minus_seq1": [
+    8889547
+   ],
+   "mtp_tokens_final_minus_seq1": [
+    9137477
+   ],
+   "first_snapshot_target_tokens": [
+    2048
+   ],
+   "final_elapsed_s": 4998.175,
+   "final_time": 1794063121.911999,
+   "prev_elapsed_s": 4967.823,
+   "final_newer_than_last_periodic": true
+  }
+ ],
+ "target_rows_vs_server_final": {
+  "collector_final_minus_seq1": 8889547,
+  "server_last_poll": 8933107.0,
+  "diff": -43560.0,
+  "rel": -0.004876242946603013,
+  "seconds_final_snapshot_before_last_poll": 37.0879430770874
+ },
+ "target_rows_vs_server_aligned": {
+  "snapshots_compared": 153,
+  "median_rel": 0.0016400939149469054,
+  "max_abs_rel": 0.7748927506248884,
+  "last_rel": 0.003070450105813975
+ },
+ "rank_agreement": {
+  "expert_stats-dp0-pid712856.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    34856,
+    34856
+   ],
+   "final_elapsed_s": [
+    4998.349,
+    4998.605
+   ],
+   "layers_differing": 0,
+   "max_abs_count_diff": 0,
+   "max_rel_to_layer_decode_total": 0.0,
+   "snapshots": [
+    154,
+    154
+   ]
+  },
+  "expert_stats-dp0-pid712857.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    34856,
+    34856
+   ],
+   "final_elapsed_s": [
+    4998.451,
+    4998.605
+   ],
+   "layers_differing": 0,
+   "max_abs_count_diff": 0,
+   "max_rel_to_layer_decode_total": 0.0,
+   "snapshots": [
+    154,
+    154
+   ]
+  },
+  "expert_stats-dp0-pid712858.jsonl": {
+   "tp_rank": 0,
+   "ref_tp_rank": 0,
+   "layer0_steps_last_snapshot": [
+    34856,
+    34856
+   ],
+   "final_elapsed_s": [
+    4998.175,
+    4998.605
+   ],
+   "layers_differing": 31,
+   "max_abs_count_diff": 2,
+   "max_rel_to_layer_decode_total": 3.5215793579104356e-07,
+   "snapshots": [
+    154,
+    154
+   ]
+  }
+ }
+}

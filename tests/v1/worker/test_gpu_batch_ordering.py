@@ -154,11 +154,12 @@ def test_one_new_prompt_token_over_context_runs_as_decode():
     }
 
 
-def test_one_token_prompt_tail_with_prior_context_is_uniform_decode():
+def test_one_token_prompt_tail_with_prior_context_is_not_full_graph_eligible():
     # Replaying the last prompt token over existing context (full prefix-cache
-    # hit or P/D KV import) computes exactly like a decode.
+    # hit or P/D KV import) computes exactly like a decode, but the batch still
+    # has a prefill row: it must not dispatch to a FULL graph.
     batch = {"d0": (16, 16), "d1": (16, 16), "p0": (128, 129)}
-    assert _uniform_token_count(batch, 1) == 1
+    assert _uniform_token_count(batch, 1) is None
 
     # A fresh 1-token prompt alongside it has no prior state.
     batch["p1"] = (0, 1)
@@ -168,9 +169,11 @@ def test_one_token_prompt_tail_with_prior_context_is_uniform_decode():
     assert _uniform_token_count({"d0": (16, 16), "p0": (120, 129)}, 8) is None
 
 
-def test_padded_prompt_tail_with_prior_context_is_uniform_decode():
+def test_padded_prompt_tail_with_prior_context_is_not_full_graph_eligible():
     # The scheduler pads a one-token prompt tail with K placeholder drafts to
-    # keep the K+1 spec-decode shape; it verifies like any other decode.
+    # keep the K+1 spec-decode shape; the row runs the decode kernels, but the
+    # batch still has a prefill row and takes PIECEWISE, never a FULL graph
+    # captured from pure-decode dummies.
     batch = {"d0": (16, 16), "d1": (16, 16), "p0": (128, 129)}
     runner = _make_runner(batch, decode_query_len=4)
     scheduler_output = SimpleNamespace(
@@ -179,8 +182,11 @@ def test_padded_prompt_tail_with_prior_context_is_uniform_decode():
         scheduled_spec_decode_tokens={req_id: [-1] * 3 for req_id in batch},
     )
     state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
-    assert state.has_prefill and state.decode_graph_eligible
-    assert uniform_tok_count == 4
+    assert state.has_prefill and not state.decode_graph_eligible
+    assert uniform_tok_count is None
+    # The prompt tail still runs as a decode inside the (PIECEWISE) routine.
+    runs_as_decode = dict(zip(state.req_ids, state.prefill_runs_as_decode_np))
+    assert runs_as_decode["p0"]
 
     # Without the placeholder drafts, it is a real 4-token prompt chunk.
     del scheduler_output.scheduled_spec_decode_tokens["p0"]

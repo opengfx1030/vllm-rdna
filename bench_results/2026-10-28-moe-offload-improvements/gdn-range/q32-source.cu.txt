@@ -1,0 +1,545 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
+// MonoKernel GDN (gfx1030, mono_gdn_rdna2; was E1'): the GDN (gated delta
+// net) decode core of one Qwen4Exp
+// linear-attention layer between in_proj and out_proj in ONE launch,
+// replacing today's causal_conv1d_update + gdn_decode_rdna2 (non-spec) or
+// causal_conv1d_update + fused_sigmoid_gating_delta_rule_update (MTP verify)
+// + gated RMSNorm and the zeros / chunk / contiguous / copy glue around them.
+//
+// One WG per (sequence, value head, 32-row V tile), 256 threads:
+//   1. causal conv1d update of the channels the tile needs, into LDS: the
+//      256 q|k channels of its key head (thread = channel) and its 32 v
+//      channels; non-spec (one token, state len 3) or spec verify (varlen
+//      tokens, sliding state from num_accepted - 1), the same state rolling
+//      as _causal_conv1d_update_kernel. The q|k channels are shared by the
+//      HV/H * 4 tiles of a key head: every tile computes them, the last tile
+//      to arrive (a per (sequence, key head) counter) writes their state, so
+//      no tile reads a state another already rolled. Each tile owns the state
+//      of its 32 v channels.
+//   2. gated delta rule per token, the fp32 state tile in registers: non-spec
+//      is the gdn_decode_rdna2 math (fp16-rounded beta), spec the
+//      fused_sigmoid_gating_delta_rule_update math (per-token state slots,
+//      initial state from num_accepted - 1).
+//   3. gated RMSNorm (norm before gate) over the head: the tiles publish
+//      their fp16 outputs and int64 fixed-point sums of squares; the last
+//      tile of a (sequence, head) normalizes and clears the counters.
+//
+// Output y [M, HV * V] fp16 is today's out_proj input. Null / padded slots
+// (index <= 0) write y = 0 and leave both states untouched.
+
+#include <torch/all.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <cstdio>
+#include <cstdlib>
+
+namespace gdn_fused {
+
+constexpr int kK = 128, kV = 128, kBV = 32, kThreads = 256, kConvW = 4;
+constexpr int kMaxT = 8;  // tokens per sequence (MTP verify)
+constexpr int kMaxSL = kConvW - 1 + kMaxT - 1;  // conv state window
+constexpr int kCapRows = 64;                    // rows (tokens) per call
+
+__device__ __forceinline__ float rh(float v) {
+  return __half2float(__float2half(v));
+}
+__device__ __forceinline__ float silu_f(float v) {
+  return v / (1.f + __expf(-v));
+}
+
+struct Args {
+  const half* qkvz;  // [M, ldq]: q (H*K) | k (H*K) | v (HV*V) | z (HV*V)
+  long ldq;
+  const half* ba;  // [M, ldba]: b (HV) | a (HV)
+  long ldba;
+  const half* cw;  // conv weight [CD, 4]
+  const half* cb;  // conv bias [CD] or null
+  half* cs;        // conv state (slot, channel, tok) via strides
+  long cs_slot, cs_dim, cs_tok;
+  const float* alog;  // [HV]
+  const float* dtb;   // [HV]
+  float* ssm;         // [slots, HV, V, K] fp32
+  long ss_slot;
+  const int* sidx;  // non-spec [N]; spec [N, T]
+  long sidx_seq;
+  const int* nacc;    // spec or null
+  const int* qsl;     // spec or null
+  const half* normw;  // [V]
+  float scale, eps;
+  int sig, H, HV, CD, slots, tmax;
+  unsigned long long*
+      ssq;          // [kCapRows, HV] fixed-point sums (zero between calls)
+  int* cnt;         // [kCapRows, HV] norm arrivals (zero between calls)
+  int* cntqk;       // [kCapRows, H] q|k state arrivals (zero between calls)
+  half* obuf;       // [M, HV, V] fp16
+  half* y;          // [M, HV * V]
+  int* diagnostic;  // one first-error flag after the output scratch
+};
+
+// Bit tests remain effective when HIP is built with finite/fast-math flags.
+__device__ __forceinline__ bool finite32(float value) {
+  return (__float_as_uint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+// Diagnostic specialization only: report the first detected error per launch.
+// Codes are stable so the tiny scratch flag can also be checked by GPU tests.
+__device__ __forceinline__ void diagnose(const Args& a, int kind, float value,
+                                         long tok, long slot) {
+  if (atomicCAS(a.diagnostic, 0, kind) != 0) return;
+  const int seq = blockIdx.x / a.HV;
+  const int hv = blockIdx.x % a.HV;
+  printf(
+      "RDNA_GDN_DIAG scratch=%p kind=%d seq=%d head=%d tile=%d thread=%d "
+      "nacc=%d cslot=%d slot=%ld tok=%ld value=%g\n",
+      (void*)a.ssq, kind, seq, hv, (int)blockIdx.y, (int)threadIdx.x,
+      a.nacc ? a.nacc[seq] : 1, a.sidx[(long)seq * a.sidx_seq], slot, tok,
+      (double)value);
+}
+
+// conv1d update of one channel: T outputs (fp16-rounded, like today's conv
+// output tensor) to out[t * ostride], the rolled state window to nst
+template <bool DIAG>
+__device__ __forceinline__ void conv_channel(const Args& a, int ch,
+                                             const half* base, long off,
+                                             int state_len, int T, long bos,
+                                             bool spec, float* out, int ostride,
+                                             half* nst) {
+  float c0 = __half2float(base[off * a.cs_tok]);
+  float c1 = __half2float(base[(off + 1) * a.cs_tok]);
+  float c2 = __half2float(base[(off + 2) * a.cs_tok]);
+  if constexpr (DIAG) {
+    if (!finite32(c0) || !finite32(c1) || !finite32(c2))
+      diagnose(a, 2, !finite32(c0) ? c0 : (!finite32(c1) ? c1 : c2), bos, -1);
+  }
+  const long shift = spec ? 1 : T;
+#pragma unroll
+  for (int t = 0; t < kMaxSL; t++) {
+    if (t < state_len)
+      nst[t] = (t + T < state_len)
+                   ? base[(off + t + shift) * a.cs_tok]
+                   : a.qkvz[(bos + t - (state_len - T)) * a.ldq + ch];
+  }
+  const half* w = a.cw + (long)ch * kConvW;
+  const float w0 = __half2float(w[0]), w1 = __half2float(w[1]);
+  const float w2 = __half2float(w[2]), w3 = __half2float(w[3]);
+  const float b = a.cb ? __half2float(a.cb[ch]) : 0.f;
+#pragma unroll
+  for (int t = 0; t < kMaxT; t++) {
+    if (t < T) {
+      const float x = __half2float(a.qkvz[(bos + t) * a.ldq + ch]);
+      if constexpr (DIAG) {
+        if (!finite32(x)) diagnose(a, 3, x, bos + t, -1);
+      }
+      // spec: the Triton update (fp16 products into fp32); non-spec: the HIP
+      // causal_conv1d_update_rdna2 (fp32 multiply-adds)
+      const float acc =
+          spec ? b + rh(w0 * c0) + rh(w1 * c1) + rh(w2 * c2) + rh(w3 * x)
+               : fmaf(w3, x, fmaf(w2, c2, fmaf(w1, c1, fmaf(w0, c0, b))));
+      out[t * ostride] = rh(silu_f(acc));
+      if constexpr (DIAG) {
+        if (!finite32(out[t * ostride])) diagnose(a, 6, acc, bos + t, -1);
+      }
+      c0 = c1;
+      c1 = c2;
+      c2 = x;
+    }
+  }
+}
+
+__device__ __forceinline__ void store_window(const Args& a, half* base,
+                                             int state_len, const half* nst) {
+#pragma unroll
+  for (int t = 0; t < kMaxSL; t++)
+    if (t < state_len) base[t * a.cs_tok] = nst[t];
+}
+
+// lane ks owns k = 32*jj + 4*ks + e (KMAP 1: 8 lanes cover 128 B of a row per
+// load, best up to ~16 rows) or k = 16*ks + j (KMAP 0: 64 B per lane, best for
+// wide non-spec batches, measured cold over 64 layers)
+#define KIDX(j) \
+  (KMAP ? ((((j) >> 2) << 5) + (ks << 2) + ((j) & 3)) : ((ks << 4) + (j)))
+#ifndef GDN_FUSED_NT
+  #define GDN_FUSED_NT 1
+#endif
+__device__ __forceinline__ float ld_state(const float* p) {
+#if GDN_FUSED_NT
+  return __builtin_nontemporal_load(p);
+#else
+  return *p;
+#endif
+}
+__device__ __forceinline__ void st_state(float* p, float v) {
+#if GDN_FUSED_NT
+  __builtin_nontemporal_store(v, p);
+#else
+  *p = v;
+#endif
+}
+
+__device__ __forceinline__ float ksum8(float x) {
+  x += __shfl_xor(x, 1);
+  x += __shfl_xor(x, 2);
+  x += __shfl_xor(x, 4);
+  return x;
+}
+
+template <int KMAP, bool DIAG>
+__global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
+  const int seq = blockIdx.x / a.HV, hv = blockIdx.x % a.HV;
+  const int tile = blockIdx.y, h = hv / (a.HV / a.H);
+  const int tid = threadIdx.x, v_local = tid >> 3, ks = tid & 7;
+  const int o_v = tile * kBV + v_local;
+  const bool spec = a.nacc != nullptr;
+  const long bos = spec ? a.qsl[seq] : seq;
+  // a verify row never exceeds the state-index width (LDS is sized by it)
+  const int T = spec ? min(a.qsl[seq + 1] - (int)bos, a.tmax) : 1;
+  if (T <= 0) return;
+  const int* srow = a.sidx + (long)seq * a.sidx_seq;
+  const long cslot = srow[0];
+  const int VD = a.HV * kV;
+  // Padded sequences may carry nacc=0. Never read their accepted-state index.
+  if (cslot <= 0 || cslot >= a.slots) {
+    if (tile == 0)
+      for (int t = 0; t < T; t++)
+        for (int i = tid; i < kV; i += kThreads)
+          a.y[(bos + t) * VD + hv * kV + i] = __float2half(0.f);
+    return;
+  }
+  const int accepted = spec ? a.nacc[seq] : 1;
+  if (accepted < 1 || accepted > a.tmax) {
+    if constexpr (DIAG) diagnose(a, 1, (float)accepted, bos, cslot);
+    // Real invalid metadata must poison the output rather than read outside
+    // srow. The ordinary nonfinite-logit fail-stop will reject the request.
+    if (tile == 0)
+      for (int t = 0; t < T; t++)
+        for (int i = tid; i < kV; i += kThreads)
+          a.y[(bos + t) * VD + hv * kV + i] = __float2half(nanf(""));
+    return;
+  }
+  const int acc_i = accepted - 1;
+  const long slot0 = srow[acc_i];
+  if (slot0 <= 0 || slot0 >= a.slots) {
+    if (tile == 0)  // null / padded: y = 0
+      for (int t = 0; t < T; t++)
+        for (int i = tid; i < kV; i += kThreads)
+          a.y[(bos + t) * VD + hv * kV + i] = __float2half(0.f);
+    return;
+  }
+  // conv outputs: [tmax][2K] q|k then [tmax][BV] v (dynamic: 1.2 KB non-spec)
+  extern __shared__ float s_dyn[];
+  float* s_qk = s_dyn;
+  float* s_v = s_dyn + a.tmax * 2 * kK;
+  __shared__ float s_red[kThreads / 32];
+  __shared__ int s_own;
+
+  // ---- 1. conv1d update into LDS
+  const long off = spec ? acc_i : 0;
+  const int state_len = spec ? (kConvW - 1) + (T - 1) : kConvW - 1;
+  half* cbase = a.cs + cslot * a.cs_slot;
+  const int ch = tid < kK ? h * kK + tid : a.H * kK + h * kK + (tid - kK);
+  half nst[kMaxSL];
+  conv_channel<DIAG>(a, ch, cbase + (long)ch * a.cs_dim, off, state_len, T, bos,
+                     spec, s_qk + tid, 2 * kK, nst);
+  if (tid < kBV) {
+    const int chv = 2 * a.H * kK + hv * kV + tile * kBV + tid;
+    half nv[kMaxSL];
+    conv_channel<DIAG>(a, chv, cbase + (long)chv * a.cs_dim, off, state_len, T,
+                       bos, spec, s_v + tid, kBV, nv);
+    store_window(a, cbase + (long)chv * a.cs_dim, state_len,
+                 nv);  // own channel
+  }
+  __syncthreads();
+  if (tid == 0) {
+    __threadfence();
+    s_own =
+        atomicAdd(&a.cntqk[seq * a.H + h], 1) == (a.HV / a.H) * (kV / kBV) - 1;
+  }
+  __syncthreads();
+  if (s_own) {  // every tile of this key head has read the q|k window
+    store_window(a, cbase + (long)ch * a.cs_dim, state_len, nst);
+    if (tid == 0) a.cntqk[seq * a.H + h] = 0;
+  }
+
+  // ---- 2. gated delta rule
+  float hs[16];
+  {
+    const float* p = a.ssm + slot0 * a.ss_slot + ((long)hv * kV + o_v) * kK;
+#pragma unroll
+    for (int j = 0; j < 16; j++) {
+      hs[j] = ld_state(p + KIDX(j));
+      if constexpr (DIAG) {
+        if (!finite32(hs[j])) diagnose(a, 4, hs[j], bos, slot0);
+      }
+    }
+  }
+  const float A = expf(a.alog[hv]);
+  for (int t = 0; t < T; t++) {
+    const long tok = bos + t;
+    float q[16], kk[16];
+#pragma unroll
+    for (int j = 0; j < 16; j++) {
+      q[j] = s_qk[t * 2 * kK + KIDX(j)];
+      kk[j] = s_qk[t * 2 * kK + kK + KIDX(j)];
+    }
+    float nq = 0.f, nk = 0.f;
+#pragma unroll
+    for (int j = 0; j < 16; j++) {
+      nq += q[j] * q[j];
+      nk += kk[j] * kk[j];
+    }
+    nq = ksum8(nq);
+    nk = ksum8(nk);
+    const float qs =
+        spec ? rsqrtf(nq + 1e-6f) * a.scale : a.scale / sqrtf(nq + 1e-6f);
+    const float kss = spec ? rsqrtf(nk + 1e-6f) : 1.f / sqrtf(nk + 1e-6f);
+#pragma unroll
+    for (int j = 0; j < 16; j++) {
+      q[j] *= qs;
+      kk[j] *= kss;
+    }
+    const float av = __half2float(a.ba[tok * a.ldba + a.HV + hv]);
+    const float bv = __half2float(a.ba[tok * a.ldba + hv]);
+    if constexpr (DIAG) {
+      if (!finite32(av) || !finite32(bv))
+        diagnose(a, 5, !finite32(av) ? av : bv, tok, slot0);
+    }
+    const float xg = av + a.dtb[hv];
+    const float softplus = xg <= 20.f ? logf(1.f + expf(xg)) : xg;
+    const float decay = expf(-A * softplus);
+    const float sgb = 1.f / (1.f + expf(-bv));
+    const float beta = spec ? sgb : __half2float(__float2half(sgb));
+#pragma unroll
+    for (int j = 0; j < 16; j++) hs[j] *= decay;
+    float acc = 0.f;
+#pragma unroll
+    for (int j = 0; j < 16; j++) acc += hs[j] * kk[j];
+    acc = ksum8(acc);
+    const float v2 = (s_v[t * kBV + v_local] - acc) * beta;
+#pragma unroll
+    for (int j = 0; j < 16; j++) hs[j] += v2 * kk[j];
+    float oa = 0.f;
+#pragma unroll
+    for (int j = 0; j < 16; j++) oa += hs[j] * q[j];
+    oa = ksum8(oa);
+    const half o16 = __float2half(oa);
+    if constexpr (DIAG) {
+      if (!finite32(oa))
+        diagnose(a, 7, oa, tok, slot0);
+      else if (!finite32(__half2float(o16)))
+        diagnose(a, 8, oa, tok, slot0);
+    }
+    const long slot_t = spec ? srow[t] : slot0;
+    if (slot_t > 0 && slot_t < a.slots) {
+      float* p = a.ssm + slot_t * a.ss_slot + ((long)hv * kV + o_v) * kK;
+#pragma unroll
+      for (int j = 0; j < 16; j++) st_state(p + KIDX(j), hs[j]);
+    }
+    // this tile's 32 outputs + their sum of squares (one lane per v row)
+    float sq = 0.f;
+    if (ks == 0) {
+      a.obuf[(tok * a.HV + hv) * kV + o_v] = o16;
+      const float of = __half2float(o16);
+      sq = of * of;
+    }
+    for (int sh = 16; sh >= 1; sh >>= 1) sq += __shfl_xor(sq, sh);
+    if ((tid & 31) == 0) s_red[tid >> 5] = sq;
+    __syncthreads();
+    if (tid == 0) {
+      float tot = 0.f;
+#pragma unroll
+      for (int w8 = 0; w8 < kThreads / 32; w8++) tot += s_red[w8];
+      atomicAdd(&a.ssq[tok * a.HV + hv],
+                (unsigned long long)__float2ll_rn(tot * 4294967296.f));
+    }
+    __syncthreads();
+  }
+
+  // ---- 3. the last tile of this (sequence, head) normalizes the head
+  if (tid == 0) {
+    __threadfence();
+    s_own = atomicAdd(&a.cnt[seq * a.HV + hv], 1) == kV / kBV - 1;
+  }
+  __syncthreads();
+  if (!s_own) return;
+  __threadfence();
+  for (int t = 0; t < T; t++) {
+    const long tok = bos + t;
+    unsigned long long* ps = &a.ssq[tok * a.HV + hv];
+    const long long fx = (long long)__hip_atomic_load(ps, __ATOMIC_RELAXED,
+                                                      __HIP_MEMORY_SCOPE_AGENT);
+    const float tot = __ll2float_rn(fx) * (1.f / 4294967296.f);
+    const float rstd = rsqrtf(tot / kV + a.eps);
+    for (int i = tid; i < kV; i += kThreads) {
+      const unsigned short ob =
+          *reinterpret_cast<const volatile unsigned short*>(
+              &a.obuf[(tok * a.HV + hv) * kV + i]);
+      const float o = __half2float(__ushort_as_half(ob));
+      const float zv = __half2float(a.qkvz[tok * a.ldq + a.CD + hv * kV + i]);
+      const float sg = 1.f / (1.f + expf(-zv));
+      const float gate = a.sig ? sg : zv * sg;
+      a.y[tok * VD + hv * kV + i] =
+          __float2half(o * rstd * __half2float(a.normw[i]) * gate);
+      if constexpr (DIAG) {
+        if (!finite32(zv)) diagnose(a, 3, zv, tok, slot0);
+        if (!finite32(__half2float(a.y[tok * VD + hv * kV + i])))
+          diagnose(a, 9, rstd, tok, slot0);
+      }
+    }
+    __syncthreads();
+    if (tid == 0) *ps = 0ull;
+  }
+  if (tid == 0) a.cnt[seq * a.HV + hv] = 0;
+}
+
+}  // namespace gdn_fused
+
+// y = gated-RMSNorm(delta-rule(conv(qkvz))) for a decode / verify batch.
+// Non-spec: sidx [N] int32 (N == M), nacc / qsl empty. Spec: sidx [N, T]
+// int32, nacc [N], qsl [N + 1]. scratch: uint8 >= mono_gdn_rdna2_scratch_bytes,
+// zero-initialized once (the kernel leaves its counters zero).
+void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
+                    const torch::Tensor& conv_w, const torch::Tensor& conv_b,
+                    torch::Tensor& conv_state, torch::Tensor& ssm_state,
+                    const torch::Tensor& A_log, const torch::Tensor& dt_bias,
+                    const torch::Tensor& norm_w, const torch::Tensor& sidx,
+                    const torch::Tensor& nacc, const torch::Tensor& qsl,
+                    torch::Tensor& y, torch::Tensor& scratch,
+                    int64_t num_k_heads, double scale, double eps,
+                    int64_t gate_sigmoid) {
+  using namespace gdn_fused;
+  const int M = qkvz.size(0);
+  const int HV = ssm_state.size(1);
+  const int H = (int)num_k_heads;
+  const int CD = 2 * H * kK + HV * kV;
+  const bool spec = nacc.numel() > 0;
+  const int N = spec ? (int)nacc.size(0) : M;
+  TORCH_CHECK(qkvz.scalar_type() == at::kHalf && qkvz.stride(1) == 1 &&
+                  qkvz.size(1) >= CD + HV * kV,
+              "mono_gdn_rdna2: qkvz fp16 [M, >= CD + HV*V]");
+  TORCH_CHECK(ba.scalar_type() == at::kHalf && ba.stride(1) == 1 &&
+                  ba.size(1) >= 2 * HV && ba.size(0) >= M,
+              "mono_gdn_rdna2: ba fp16 [M, 2*HV]");
+  TORCH_CHECK(conv_w.numel() == (int64_t)CD * kConvW &&
+                  conv_w.is_contiguous() && conv_w.scalar_type() == at::kHalf,
+              "mono_gdn_rdna2: conv weight fp16 [CD, 4]");
+  TORCH_CHECK(conv_b.numel() == 0 ||
+                  (conv_b.numel() == CD && conv_b.scalar_type() == at::kHalf),
+              "mono_gdn_rdna2: conv bias fp16 [CD]");
+  TORCH_CHECK(conv_state.dim() == 3 && conv_state.size(1) == CD &&
+                  conv_state.scalar_type() == at::kHalf,
+              "mono_gdn_rdna2: conv state (slots, CD, len)");
+  TORCH_CHECK(ssm_state.dim() == 4 && ssm_state.size(2) == kV &&
+                  ssm_state.size(3) == kK &&
+                  ssm_state.scalar_type() == at::kFloat &&
+                  ssm_state.stride(3) == 1 && ssm_state.stride(2) == kK &&
+                  ssm_state.stride(1) == (int64_t)kV * kK,
+              "mono_gdn_rdna2: ssm state [slots, HV, 128, 128] fp32");
+  TORCH_CHECK(H > 0 && HV % H == 0 && A_log.numel() == HV &&
+                  dt_bias.numel() == HV && A_log.scalar_type() == at::kFloat &&
+                  dt_bias.scalar_type() == at::kFloat,
+              "mono_gdn_rdna2: A_log / dt_bias fp32 [HV]");
+  TORCH_CHECK(norm_w.numel() == kV && norm_w.scalar_type() == at::kHalf,
+              "mono_gdn_rdna2: norm weight fp16 [V]");
+  TORCH_CHECK(sidx.scalar_type() == at::kInt && sidx.size(0) >= N &&
+                  (sidx.dim() == 1 || sidx.stride(1) == 1),
+              "mono_gdn_rdna2: sidx int32");
+  TORCH_CHECK(y.scalar_type() == at::kHalf && y.is_contiguous() &&
+                  y.numel() >= (int64_t)M * HV * kV,
+              "mono_gdn_rdna2: y fp16 [M, HV*V]");
+  const int tmax = spec ? (int)sidx.size(1) : 1;
+  TORCH_CHECK(tmax <= kMaxT, "mono_gdn_rdna2: at most 8 tokens per sequence");
+  TORCH_CHECK(conv_state.size(2) >= (kConvW - 1) + (tmax - 1),
+              "mono_gdn_rdna2: conv state length");
+  if (spec)
+    TORCH_CHECK(qsl.numel() >= N + 1 && qsl.scalar_type() == at::kInt &&
+                    nacc.scalar_type() == at::kInt,
+                "mono_gdn_rdna2: qsl [N+1], nacc [N] int32");
+  TORCH_CHECK(M <= kCapRows && N <= kCapRows,
+              "mono_gdn_rdna2: at most 64 rows");
+  // scratch: [ssq | cnt | cntqk] at fixed offsets (zero between calls) then
+  // obuf
+  const int64_t zb = (int64_t)kCapRows * (HV * 12 + H * 4);
+  // Env selection is process-static; no getenv or extra finite checks in the
+  // default device specialization. The flag follows this launch's output rows.
+  static const bool diagnostics = [] {
+    const char* value = std::getenv("VLLM_RDNA_GDN_DIAGNOSTICS");
+    return value && value[0] == '1' && value[1] == '\0';
+  }();
+  const int64_t need = zb + (int64_t)M * HV * kV * 2 + sizeof(int);
+  TORCH_CHECK(scratch.numel() * scratch.element_size() >= need,
+              "mono_gdn_rdna2: scratch too small");
+  if (M == 0 || N == 0) return;
+  const at::cuda::OptionalCUDAGuard guard(qkvz.device());
+  auto stream = at::cuda::getCurrentCUDAStream();
+  char* sp = reinterpret_cast<char*>(scratch.data_ptr());
+
+  Args a{};
+  a.qkvz = reinterpret_cast<const half*>(qkvz.data_ptr());
+  a.ldq = qkvz.stride(0);
+  a.ba = reinterpret_cast<const half*>(ba.data_ptr());
+  a.ldba = ba.stride(0);
+  a.cw = reinterpret_cast<const half*>(conv_w.data_ptr());
+  a.cb = conv_b.numel() > 0 ? reinterpret_cast<const half*>(conv_b.data_ptr())
+                            : nullptr;
+  a.cs = reinterpret_cast<half*>(conv_state.data_ptr());
+  a.cs_slot = conv_state.stride(0);
+  a.cs_dim = conv_state.stride(1);
+  a.cs_tok = conv_state.stride(2);
+  a.alog = A_log.data_ptr<float>();
+  a.dtb = dt_bias.data_ptr<float>();
+  a.ssm = ssm_state.data_ptr<float>();
+  a.ss_slot = ssm_state.stride(0);
+  a.sidx = sidx.data_ptr<int>();
+  a.sidx_seq = sidx.dim() > 1 ? sidx.stride(0) : 1;
+  a.nacc = spec ? nacc.data_ptr<int>() : nullptr;
+  a.qsl = spec ? qsl.data_ptr<int>() : nullptr;
+  a.normw = reinterpret_cast<const half*>(norm_w.data_ptr());
+  a.scale = (float)scale;
+  a.eps = (float)eps;
+  a.sig = (int)gate_sigmoid;
+  a.H = H;
+  a.HV = HV;
+  a.CD = CD;
+  a.slots = (int)std::min(conv_state.size(0), ssm_state.size(0));
+  a.tmax = tmax;
+  a.ssq = reinterpret_cast<unsigned long long*>(sp);
+  a.cnt = reinterpret_cast<int*>(sp + (int64_t)kCapRows * HV * 8);
+  a.cntqk = reinterpret_cast<int*>(sp + (int64_t)kCapRows * HV * 12);
+  a.obuf = reinterpret_cast<half*>(sp + zb);
+  a.y = reinterpret_cast<half*>(y.data_ptr());
+  a.diagnostic = reinterpret_cast<int*>(sp + need - sizeof(int));
+  if (diagnostics) {
+    const auto error = hipMemsetAsync(a.diagnostic, 0, sizeof(int), stream);
+    TORCH_CHECK(
+        error == hipSuccess,
+        "mono_gdn_rdna2: diagnostic reset failed: ", hipGetErrorString(error));
+  }
+  const size_t lds = (size_t)tmax * (2 * kK + kBV) * sizeof(float);
+  const dim3 grid(N * HV, kV / kBV);
+  if (diagnostics) {
+    if (!spec && M > 16)
+      hipLaunchKernelGGL((gdn_fused_k<0, true>), grid, dim3(kThreads), lds,
+                         stream, a);
+    else
+      hipLaunchKernelGGL((gdn_fused_k<1, true>), grid, dim3(kThreads), lds,
+                         stream, a);
+  } else {
+    if (!spec && M > 16)
+      hipLaunchKernelGGL((gdn_fused_k<0, false>), grid, dim3(kThreads), lds,
+                         stream, a);
+    else
+      hipLaunchKernelGGL((gdn_fused_k<1, false>), grid, dim3(kThreads), lds,
+                         stream, a);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+int64_t mono_gdn_rdna2_scratch_bytes(int64_t M, int64_t HV, int64_t H) {
+  return (int64_t)gdn_fused::kCapRows * (HV * 12 + H * 4) +
+         M * HV * gdn_fused::kV * 2 + sizeof(int);
+}

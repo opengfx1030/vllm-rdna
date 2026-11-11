@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import math
+import tempfile
+import unittest
+from pathlib import Path
+
+from analyze_native_vs_mono_v4 import (
+    EXPECTED_CONFIG,
+    EXPECTED_MODEL,
+    EXPECTED_PLE,
+    manifest_digest,
+    read_manifest,
+    relative_delta_pct,
+    stable_path,
+    validate_config_pair,
+)
+
+TREE = "/remote/healthy/dense-mtp-failstop-healthy-tree-v3"
+NATIVE_OUT = "/remote/runs/native"
+MONO_OUT = "/remote/runs/mono"
+
+
+def make_config(kind: str) -> dict[str, str]:
+    config = {
+        **EXPECTED_CONFIG,
+        "MODEL": f"/models/{EXPECTED_MODEL}",
+        "PLE_QUANT_DIR": f"/ple/{EXPECTED_PLE}/ples_int4",
+        "VENV": "/venv/frozen",
+        "PORT": "18917" if kind == "native" else "18916",
+        "TAG": (
+            "native-nomono-native_nomono_cleanup_v3"
+            if kind == "native"
+            else "dense-drafter-failstop_dense_mtp_cleanup_v3"
+        ),
+        "OUT": NATIVE_OUT if kind == "native" else MONO_OUT,
+        "CACHE": (NATIVE_OUT if kind == "native" else MONO_OUT) + "/cache",
+        "SERVE_TREE": TREE,
+        "SERVE_SCRIPT": f"{TREE}/tools/rdna/serve_rdna.sh",
+        "MTP_DRAFTER": "0" if kind == "native" else "1",
+        "EXTRA_ARGS": (
+            '--additional-config {"rocm_mono_decode":{"mtp_drafter":false}}'
+            if kind == "native"
+            else "--monokernel --additional-config "
+            '{"rocm_mono_decode":{"k2_max_rows":8,"mtp_drafter":true}}'
+        ),
+    }
+    return config
+
+
+def check_pair(native: dict[str, str], mono: dict[str, str]) -> None:
+    validate_config_pair(
+        native,
+        mono,
+        NATIVE_OUT,
+        MONO_OUT,
+        "[10:00:00] boot PORT=18917",
+        "[10:01:00] boot PORT=18916",
+    )
+
+
+class RelativeDeltaTests(unittest.TestCase):
+    def test_manifest_digest_finds_tests_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "sha256.before"
+            digest = "f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7"
+            manifest_path.write_text(
+                f"{digest}  /remote/tree/tests/models/qwen4_exp/"
+                "test_amd_mono_rdna2_kernels.py\n"
+            )
+            manifest = read_manifest(manifest_path)
+            self.assertEqual(
+                manifest_digest(
+                    manifest,
+                    "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py",
+                ),
+                digest,
+            )
+
+    def test_tests_subtree_is_preserved_for_source_gate(self):
+        raw = (
+            "/home/chenco_adm/vllm-rdna-mtp-mono/"
+            "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py"
+        )
+        self.assertEqual(
+            stable_path(raw),
+            "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py",
+        )
+
+    def test_candidate_ten_percent_faster_rate_is_positive(self):
+        self.assertAlmostEqual(relative_delta_pct(100.0, 110.0), 10.0)
+
+    def test_candidate_slower_rate_is_negative(self):
+        self.assertAlmostEqual(relative_delta_pct(100.0, 90.0), -10.0)
+
+    def test_zero_reference_is_undefined(self):
+        self.assertTrue(math.isnan(relative_delta_pct(0.0, 10.0)))
+
+
+class ConfigPairTests(unittest.TestCase):
+    def setUp(self):
+        self.native = make_config("native")
+        self.mono = make_config("mono")
+
+    def test_distinct_operational_paths_and_ports_are_valid(self):
+        check_pair(self.native, self.mono)
+
+    def test_inference_configuration_mismatch_is_rejected(self):
+        self.mono["GMEM"] = "0.91"
+        with self.assertRaisesRegex(ValueError, "configuration mismatch for GMEM"):
+            check_pair(self.native, self.mono)
+
+    def test_remote_output_directory_must_match_declared_arm(self):
+        self.mono["OUT"] = "/remote/runs/wrong"
+        with self.assertRaisesRegex(ValueError, "OUT does not match"):
+            check_pair(self.native, self.mono)
+
+
+if __name__ == "__main__":
+    unittest.main()

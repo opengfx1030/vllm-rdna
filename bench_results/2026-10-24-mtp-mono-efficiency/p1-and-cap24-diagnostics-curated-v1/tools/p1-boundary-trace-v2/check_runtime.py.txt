@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Strict native/global P1 trace output parity at M128, seed250252."""
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import math
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+BASE = HERE.parent
+HELPER = BASE / "large-m-mono-global-quant-strict-v2/validate_full_m.py"
+LAYOUT = BASE / "full-m-m128-route-diagnostic-v2/workspace_layout.py"
+CORE_SHA = "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed"
+TEST_SHA = "f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7"
+B0_MANIFEST_SHA = "820b0b4d16643a40e6584f1d80ed9e96a8afde9664b71c9c9e5e7a03f9af3479"
+B1_MANIFEST_SHA = "6f11b4c0888a9ccc213bf49e0b63f7446efbc6b16b9be635d58eb4c50c01eb88"
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def load_python(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--trace-build-manifest", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.output.exists():
+        raise FileExistsError(args.output)
+    root = args.repo_root.resolve(strict=True)
+    if sha(HELPER) != "b100bbd4374272b3a8b09c2b79055d9990cb74e6aecc92a8e7b399beed5196ea":
+        raise RuntimeError("strict helper drift")
+    if sha(LAYOUT) != "28d7721f906f58fcbaf060cdf5dfd31facd5df2d4f5dbec475bceaf5f16825c7":
+        raise RuntimeError("layout helper drift")
+    h = load_python(HELPER, "p1_strict_helper")
+    wl = load_python(LAYOUT, "p1_layout_helper")
+    h.selected_gpu()
+    sys.path.insert(0, str(root))
+    os.environ["VLLM_SOURCE_ROOT"] = str(root)
+    os.environ["VLLM_RDNA_HC_PREFILL_HIP"] = "1"
+    import torch
+    import vllm._rocm_C as core
+    from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_norm
+    from vllm.models.qwen4_exp.amd.ops.hc_rdna2 import hc_use_rdna2
+
+    if not hc_use_rdna2() or torch.cuda.device_count() != 1:
+        raise RuntimeError("native HC HIP path and one gfx10 GPU required")
+    h.pin(core.__file__, CORE_SHA)
+    tests = h.load(h.pin(root / "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py", TEST_SHA), "p1_m128_fixture")
+    build_path = args.trace_build_manifest.resolve(strict=True)
+    build = json.loads(build_path.read_text())
+    if (build.get("status") != "COMPILED_CPU_ONLY_UNQUALIFIED"
+            or build.get("source_manifest_sha256") != sha(HERE / "source_manifest.json")):
+        raise RuntimeError("wrong disposable trace build")
+    generated = json.loads((HERE / "source_manifest.json").read_text())
+    for name, expected in generated["generated_sha256"].items():
+        h.pin(HERE / "generated" / name, expected)
+    ext = {}
+    for kind in ("native", "global"):
+        item = build["builds"][kind]
+        expected_flag = "-O2" if kind == "native" else "-O3"
+        if (expected_flag not in item["ninja"]
+                or item["requested_cuda_cflags"] != [expected_flag]):
+            raise RuntimeError(f"{kind} build flags changed")
+        binary = h.pin(item["binary"], item["binary_sha256"])
+        ext[kind] = h.load(binary, item["module"])
+    b0 = json.loads((BASE / "full-m-router-half-pair-v1-build/0-build.json").read_text())
+    b1 = json.loads((BASE / "full-m-router-half-pair-v2-continue/1-build.json").read_text())
+    old, old_manifest, _ = h.prebuilt(
+        BASE / "large-m-mono-global-quant-router-half-v1",
+        Path(b0["binary"]), b0["binary_sha256"], B0_MANIFEST_SHA)
+    old_trace, old_trace_manifest, _ = h.prebuilt(
+        BASE / "large-m-mono-global-quant-router-half-trace-v1",
+        Path(b1["binary"]), b1["binary_sha256"], B1_MANIFEST_SHA)
+    if generated["source_pins"]["global_source"] != old_trace_manifest["source_sha256"]:
+        raise RuntimeError("P1 trace not based on proven route trace source")
+    weights, _ = tests._make_layer(torch.Generator(device="cuda").manual_seed(50124), keep_golden=False)
+    inputs = tests._inputs(128, 250252)
+    baseline = h.Runner(torch, old, old_manifest, weights, 32)
+    old_route = h.Runner(torch, old_trace, old_trace_manifest, weights, 32, True)
+    new_manifest = {"export_prefix": "mono_k2_rdna2_global_quant_router_half_p1trace"}
+    traced = h.Runner(torch, ext["global"], new_manifest, weights, 32, True)
+    for runner in (baseline, old_route, traced):
+        runner.prepare(inputs)
+    trace_p1 = torch.full((2,), math.nan, dtype=torch.float32, device="cuda")
+    native_out = (torch.empty_like(inputs[0]), torch.empty_like(inputs[0]))
+    native_diag = torch.full((2,), math.nan, dtype=torch.float32, device="cuda")
+    spans = wl.layout(BASE / "large-m-mono-global-quant-router-half-v1/mono_k2_global_quant_router_half.cu")
+
+    def run_new_global():
+        w = weights
+        ro, out, io = traced.outputs
+        traced.routes.fill_(-1)
+        trace_p1.fill_(math.nan)
+        ext["global"].mono_k2_rdna2_global_quant_router_half_p1trace_global_chunked(
+            *inputs, w["norm_w"], w["wd"], w["wu"], w["wr"],
+            w["se_w1"], w["se_w2"], w["se_wg"], w["w13"], w["s13"],
+            w["z13"], w["w2"], w["s2"], w["z2"], ro, io, out, traced.ws,
+            0, 1, 32, 1e-6, 2000.0, False, False, traced.routes, trace_p1)
+
+    def run_native_trace():
+        native_diag.fill_(math.nan)
+        ext["native"].hc_combine_norm_rdna2_p1trace(
+            *inputs, weights["norm_w"], *native_out, 4, 1e-6, native_diag)
+
+    output = {
+        "status": "RUNNING", "complete": False,
+        "scope": "untimed M128 seed250252 actual FP32 P1 trace; no serving claim",
+        "boot": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "trace_build_manifest": str(build_path),
+        "trace_build_manifest_sha256": sha(build_path),
+        "core_sha256": CORE_SHA,
+        "tests_sha256": TEST_SHA,
+        "records": [],
+    }
+
+    def save():
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(output, indent=2) + "\n")
+
+    save()
+
+    def record(label, native_reference):
+        torch.accelerator.synchronize()
+        errors = {name: runner.error() for name, runner in
+                  (("baseline", baseline), ("old_route", old_route), ("new_trace", traced))}
+        if any(code[0] != 0 for code in errors.values()):
+            raise RuntimeError(f"Mono sticky error: {errors}")
+        nres, nxn = native_reference
+        ntrace_res, ntrace_xn = native_out
+        baseline_xn = wl.snapshot(baseline, spans, torch)["xn"]
+        old_xn = wl.snapshot(old_route, spans, torch)["xn"]
+        new_xn = wl.snapshot(traced, spans, torch)["xn"]
+        checks = {
+            "native_res_bit_exact": bool(torch.equal(nres, ntrace_res)),
+            "native_xn_bit_exact": bool(torch.equal(nxn, ntrace_xn)),
+            "global_outputs_bit_exact": all(
+                torch.equal(a, b) and torch.equal(a, c)
+                for a, b, c in zip(baseline.outputs, old_route.outputs, traced.outputs)),
+            "global_xn_bit_exact": bool(torch.equal(baseline_xn, old_xn)
+                                         and torch.equal(baseline_xn, new_xn)),
+            "global_route_ids_bit_exact": bool(torch.equal(old_route.routes, traced.routes)),
+            "native_global_combined_res_bit_exact": bool(torch.equal(nres, traced.outputs[0])),
+            "trace_values_finite": bool(torch.isfinite(native_diag).all().item()
+                                         and torch.isfinite(trace_p1).all().item()),
+        }
+        entry = {
+            "label": label, "checks": checks, "errors": errors,
+            "native_sum_fp32": float(native_diag[0].item()),
+            "native_rrms_fp32": float(native_diag[1].item()),
+            "global_sum_fp32": float(trace_p1[0].item()),
+            "global_rrms_fp32": float(trace_p1[1].item()),
+            "native_xn_row104_index1690": float(nxn[104, 1690].item()),
+            "global_xn_row104_index1690": float(new_xn[104, 1690].item()),
+            "global_route_ids_row104": old_route.routes[104].cpu().tolist(),
+        }
+        output["records"].append(entry)
+        save()
+        if not all(checks.values()):
+            raise AssertionError(f"trace perturbed output or route at {label}: {checks}")
+
+    # Eager exact fixture.
+    native_reference = hc_combine_norm(*inputs, weights["norm_w"], 1e-6, 4)
+    run_native_trace()
+    baseline(inputs)
+    old_route(inputs)
+    run_new_global()
+    record("eager_seed250252", native_reference)
+
+    # Capture each actual path separately at stable input/output addresses.
+    graph_native = torch.cuda.CUDAGraph()
+    graph_native_trace = torch.cuda.CUDAGraph()
+    graph_baseline = torch.cuda.CUDAGraph()
+    graph_old_route = torch.cuda.CUDAGraph()
+    graph_new_trace = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph_native):
+        native_reference = hc_combine_norm(*inputs, weights["norm_w"], 1e-6, 4)
+    with torch.cuda.graph(graph_native_trace):
+        run_native_trace()
+    with torch.cuda.graph(graph_baseline):
+        baseline(inputs)
+    with torch.cuda.graph(graph_old_route):
+        old_route(inputs)
+    with torch.cuda.graph(graph_new_trace):
+        run_new_global()
+    for seed in (250252, 250253):
+        if seed != 250252:
+            changed = tests._inputs(128, seed)
+            if not all(not torch.equal(a, b) for a, b in zip(inputs, changed)):
+                raise AssertionError("inputs did not change")
+            for a, b in zip(inputs, changed):
+                a.copy_(b)
+        for graph in (graph_native, graph_native_trace, graph_baseline,
+                      graph_old_route, graph_new_trace):
+            graph.replay()
+        record(f"graph_seed{seed}", native_reference)
+    output["status"] = "PASS"
+    output["complete"] = True
+    save()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,22 @@
+{
+  "status": "pass",
+  "gpu_used": false,
+  "torch_imported": false,
+  "source": "vllm/v1/worker/gpu_model_runner.py",
+  "source_sha256": "f5a3f1a24b5e4e0dad1fba63062a0071fda358c4e039be5616419502b672f8a7",
+  "checks": [
+    "c1_late_verification_and_bonus",
+    "c8_variable_lengths_and_late_requests",
+    "non_spec_short",
+    "non_spec_empty",
+    "spec_clean",
+    "spec_missing_rows_fail_closed_0",
+    "spec_missing_rows_fail_closed_3",
+    "async_output_completes_when_raise_disabled",
+    "async_rejection_parse_branch_raise_False",
+    "async_owns_step_metadata_raise_False",
+    "async_late_row_raises",
+    "async_rejection_parse_branch_raise_True",
+    "async_owns_step_metadata_raise_True"
+  ]
+}

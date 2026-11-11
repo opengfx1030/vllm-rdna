@@ -1,0 +1,52 @@
+{
+  "scope": "whitelisted live worker environment, captured during healthy benchmark; no secrets collected",
+  "utc": "2026-10-24T08:12:53.438862+00:00",
+  "boot": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "worker_provenance_sha256": "10f38cde0787029e7c16151f2bc916f0059db86c91c056673705da436109e17f",
+  "workers": [
+    {
+      "pid": 82852,
+      "environment": {
+        "VLLM_ROCM_MONO_DECODE": null,
+        "VLLM_TEST_MTP_FAULT_MARKER": null,
+        "VLLM_RAISE_ON_LOGIT_NANS": null,
+        "VLLM_RDNA_PHASE_TIMING": null,
+        "VLLM_RDNA_OP_TIMING": "0",
+        "HIP_VISIBLE_DEVICES": null
+      }
+    },
+    {
+      "pid": 82853,
+      "environment": {
+        "VLLM_ROCM_MONO_DECODE": null,
+        "VLLM_TEST_MTP_FAULT_MARKER": null,
+        "VLLM_RAISE_ON_LOGIT_NANS": null,
+        "VLLM_RDNA_PHASE_TIMING": null,
+        "VLLM_RDNA_OP_TIMING": "0",
+        "HIP_VISIBLE_DEVICES": null
+      }
+    },
+    {
+      "pid": 82854,
+      "environment": {
+        "VLLM_ROCM_MONO_DECODE": null,
+        "VLLM_TEST_MTP_FAULT_MARKER": null,
+        "VLLM_RAISE_ON_LOGIT_NANS": null,
+        "VLLM_RDNA_PHASE_TIMING": null,
+        "VLLM_RDNA_OP_TIMING": "0",
+        "HIP_VISIBLE_DEVICES": null
+      }
+    },
+    {
+      "pid": 82855,
+      "environment": {
+        "VLLM_ROCM_MONO_DECODE": null,
+        "VLLM_TEST_MTP_FAULT_MARKER": null,
+        "VLLM_RAISE_ON_LOGIT_NANS": null,
+        "VLLM_RDNA_PHASE_TIMING": null,
+        "VLLM_RDNA_OP_TIMING": "0",
+        "HIP_VISIBLE_DEVICES": null
+      }
+    }
+  ]
+}

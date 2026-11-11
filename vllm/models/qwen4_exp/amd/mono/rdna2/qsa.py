@@ -55,9 +55,15 @@ def _log_once(what: str, rows: int, taken: bool) -> None:
 
 
 def _hip_ok(q, k_cache, v_cache, group_size) -> bool:
+    # The kernel reads K and V as FP16 words. A packed or quantized cache (the
+    # int4_fp16_block record layout, fp8, ...) has a different layout and would
+    # be read as garbage, so the gate requires the dtype it was written for
+    # rather than trusting the caller.
     return (
         MIN_ROWS <= q.shape[0] <= 64
         and q.dtype == torch.float16
+        and k_cache.dtype == torch.float16
+        and v_cache.dtype == torch.float16
         and q.shape[2] == 256
         and group_size <= 8
         and k_cache.stride(3) == 1

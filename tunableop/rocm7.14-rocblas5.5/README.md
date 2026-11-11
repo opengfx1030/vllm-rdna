@@ -6,6 +6,74 @@ captured 2026-09-29 by re-tuning the production Flash-Next shapes with the
 `lib_sha256` is the `librocblas.so.5` sha256 (see `provenance.json`), and
 `configure_tunableop` matches it against the loaded build.
 
+## TP8 and TP4 x PP2: rank files 4-7 and 592 new shapes (2026-11-06, validated by ABBA on both layouts)
+
+A worker opens `tunableop_results<device ordinal>.csv`. TP8 and the second stage of TP4 x PP2 use ordinals 4-7, which had no
+file, so those workers ran every GEMM on the rocBLAS default without a warning. Rank files 4-7 now exist (copies of 0-3 plus
+the harvest below). Census: TP8 Flash-Next MTP2 boot, probes and the four bench cells (`tp8-census`, 640 keys per ordinal; union
+with the boot-only census 697): 100 keys already had a row; the 593 missing tunable GEMMs (433 `TN` K=2560 at 141 token counts,
+K=768 and K=80 at 59 token counts each, 36 `NN` M=1 lengths, a few others) were tuned offline with
+`tools/rdna/prof/tune_missing_gemms.sh` (8 V620s, one shard each, 3.5 minutes) and 592 of them harvested into all eight rank
+files: **3330 rows/rank** (+592). Lookup-hit proof: ordinals 0-7, 692 of 693 census keys (the miss is the excluded row).
+
+Excluded: `GemmTunableOp_Half_TN,tn_2048_12_2560_ld_2560_2560_2048` (a 2048 x 2560 weight against 12 activation rows = 4
+requests x 3 MTP2 tokens). With all 593 rows the deterministic concurrency probe (`VLLM_RDNA2_MOE_DETERMINISTIC=1`, four
+requests together against solo) fails reproducibly on the flat all-reduce (7 of 10 runs on one tree, 5 of 10 on another: one token
+of one answer flips, margin 1.2 nats) and passes without this row (0 of 10 and 0 of 6 no-EOS runs, flat and hierarchical
+all-reduce). The row is not a numerical defect: its solution is as accurate as the rocBLAS default (error against an fp64
+reference equal to four digits) and rounds differently in 0.2 to 0.3 % of the outputs; the flip also needs other new rows (this
+row alone passes). All 557 new `TN` rows are as accurate as the default (`tools/rdna/tp8pp2/rowcheck.py`: a tuned process against
+a process with TunableOp off, fp64 reference: L2 error ratio 1.000, max-error ratio 0.99 to 1.01); 392 of them differ from the
+default in some output bits, which is why a tuned server is not bit-identical to a default one (see Caveats).
+
+Status: validated for serving. Recipe-native ABBA boots (shipped rows, 593 rows, 593 rows, shipped rows) of
+`flashnext-tp8-mtp2` and `flashnext-tp4pp2-mtp2` gave, with the new rows, an ITL p50 at c8 of -3.4 % (TP8) and -10 % (TP4 x PP2),
+2.5 to 9 % more output tokens/s, TTFT -2 to -4 %, and an unchanged single-stream step time; every difference quoted is larger
+than the spread inside both pairs. The 592-row set on the tree with the hierarchical all-reduce (TP8, boots in the order A A B
+B): ITL p50 at c8 -3.7 % and -4.1 % against the shipped rows (1k and 16k); TP4 x PP2 was not re-measured with 592 rows. The
+default-MoE concurrency probe flips a haiku prompt after its stop token with the shipped rows as well (see
+`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`).
+A census taken with `PYTORCH_TUNABLEOP_RECORD_UNTUNED=1` lists every GEMM and
+disables the lookup in torch 2.12: never measure with it.
+
+## Flash-Next prefill GEMM shapes no bench cell reaches (2026-11-03)
+
+Census from the solo-prefill rocprofv3 capture (TP4 Flash-Next MTP2, one 16k
+prompt at a time, four ranks): 31 half-precision GEMM keys that the four
+bench cells never issue — the 2048- and 1024-token prefill chunks of the dense
+projections at N 320/640/1152/2560/3584/4096/12800 with K 160/288/1152/1536/2560,
+including the padded 4092/4104 widths, the 8192-token chunk, and N=12800 at
+M 12/24/32. Tuned offline with `tools/rdna/prof/tune_missing_gemms.sh` (three
+V620s in parallel, ~1 min per shard, 25 ms/solver budget) and harvested into
+all four rank files by the same tool, additive: **2738 rows/rank** (+31).
+Lookup-hit proof: the post-harvest untuned record is empty, i.e. every census
+key now has a row. Details in `provenance.json` (`missing_gemms`).
+
+## rdna_hint_flex / dense OLMoE-1B-7B (2026-10-26)
+
+Census during the four bench cells (1k/512 and 2k/512 at c=1/c=8, max context
+4096) of OLMoE-1B-7B-0924 as rdna_hint_flex `olmoe-r4` and `olmoe-b3.0` and as
+dense fp16 on the RDNA2 HIP and Triton MoE backends, TP=1: 113 unique FP16
+keys (attention, router and lm_head; routed experts do not reach rocBLAS on
+any arm). Tuned with the M=1..8 extensions (145 shapes) on one V620 and curated
+at the usual 3 % margin: 113 rows adopted (median 1.57x over the heuristic,
+best 3.55x), 32 left on the heuristic, appended to each rank file:
+**2738 rows/rank** (2707 at the OLMoE capture + 31 prefill shapes on
+2026-11-03). Lookup-hit proof 2613/2613 FP16 keys. Details in
+`provenance.json` (`olmoe_hi2`).
+
+## rdna_hint_flex / dense Qwen3.5-4B and Qwen2.5-0.5B (2026-10-25)
+
+Census during the four bench cells of `tools/rdna/rdna_hint_flex/bench_serve.sh`
+(Qwen3.5-4B rdna_hint_flex 3.0 bpw and its dense fp16 export at TP=1/2/4;
+Qwen2.5-0.5B-Instruct rdna_hint_flex, dense export and AWQ at TP=1): 798 + 182
+unique FP16 keys, tuned with the M=1..8 extensions (966 + 222 shapes) and
+curated at the usual 3 % margin by `tools/rdna/rdna_hint_flex/tunableop_campaign.sh`:
+605 + 136 rows adopted (median 1.60x / 1.26x over the heuristic, 1.21x for the
+M >= 512 prefill shapes of the 4B), 734 appended to each rank file (7 adopted keys
+already had a shipped row and keep it): **2594 rows/rank**. Lookup-hit proof
+2500/2500 FP16 keys. Details in `provenance.json` (`campaign`).
+
 ## DFlash2 BF16 draft (2026-10-20)
 
 The Flash-Next DFlash2 recipe keeps its draft in BF16 on gfx1030 because an
@@ -54,7 +122,7 @@ GEMMs are outside this tuning set. The recipe keeps its existing depth default.
 ## What changed vs the harvested 903-row set
 
 | | rows | file |
-|---|---|---|
+| --- | --- | --- |
 | harvested (2026-09-27) | 903 | `tunableop_results{0..3}.csv` |
 | curated (2026-09-29) | 719 | `tunableop_results{0..3}.csv` |
 | campaign-3 expansion (2026-09-30) | 760 | `tunableop_results{0..3}.csv` |
@@ -158,7 +226,7 @@ rank files). The launchers
 `tools/rdna/serve_gfx1030_flashnext.sh`, `tools/rdna/serve_gfx1030_full.sh`)
 already do this. A healthy start logs:
 
-```
+```text
 TunableOp profile rocm7.14-rocblas5.5 auto-selected for rocBLAS build f30bb442e9b5.
 TunableOp lookup enabled for profile rocm7.14-rocblas5.5 (rocBLAS f30bb442e9b5; rows: .../tunableop/rocm7.14-rocblas5.5); tuning off ...
 ```

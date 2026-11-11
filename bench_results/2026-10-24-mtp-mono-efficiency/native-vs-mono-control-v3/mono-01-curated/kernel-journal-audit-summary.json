@@ -1,0 +1,10 @@
+{
+  "status": "PASS",
+  "source": "saved privileged kernel snapshots, original driver check completed",
+  "new_kernel_records": 248,
+  "gpu_pcie_faults": 0,
+  "raw_sha256": {
+    "kernel.before.json": "e6dc1ac9a988a2c60ce9db8b4ccc00f3a4db85961c87eb219131af39747989d0",
+    "kernel.after.json": "532d302844b1ea3d6d823a380881ffb13f554c4405c22fff68cd4ecf74f8e71a"
+  }
+}

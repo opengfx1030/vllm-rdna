@@ -1,0 +1,35 @@
+import argparse, hashlib, importlib.util, json, statistics, sys, time
+from pathlib import Path
+import torch
+p=argparse.ArgumentParser();p.add_argument('--repo',type=Path,required=True);p.add_argument('--reference',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args()
+torch.set_num_threads(1)
+d=a.repo/'vllm/model_executor/layers/fused_moe'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+load('vllm.model_executor.layers.fused_moe.rdna_expert_cache_policy',d/'rdna_expert_cache_policy.py')
+modules={name:load('mapbench_'+name,path) for name,path in [('reference',a.reference),('optimized',d/'rdna_expert_cache.py')]}
+result={'scope':'Actual PackedExpertCache.ensure/release on CPU, resident hits with changing active maps; excludes GPU event and DMA time','samples':{}}
+for width in (1,10,32,64):
+ caches={}
+ for name,m in modules.items():
+  bank={n:torch.arange(256,dtype=torch.int32).reshape(256,1) for n in m.PAYLOAD_NAMES}
+  c=m.PackedExpertCache(bank,96,'cpu');c.release(c.ensure(range(96)));caches[name]=c
+ traces=[list(range(i%(97-width),i%(97-width)+width)) for i in range(64)]
+ values={name:[] for name in caches}
+ def sample(name):
+  c=caches[name];copied=c.copied_bytes;t=time.perf_counter_ns()
+  for ids in traces:c.release(c.ensure(ids))
+  us=(time.perf_counter_ns()-t)/1000/len(traces)
+  assert c.copied_bytes==copied
+  expected=torch.full((256,),-1,dtype=torch.int32)
+  for e in traces[-1]:expected[e]=c.policy.mapping[e]
+  assert torch.equal(c.slot_map,expected)
+  return us
+ for _ in range(3):
+  for name in ('reference','optimized','optimized','reference'):sample(name)
+ for _ in range(15):
+  for name in ('reference','optimized','optimized','reference'):values[name].append(sample(name))
+ result['samples'][width]={name:{'median_us':statistics.median(v),'samples_us':v} for name,v in values.items()}
+result['source_sha256']={name:hashlib.sha256(path.read_bytes()).hexdigest() for name,path in [('reference',a.reference),('optimized',d/'rdna_expert_cache.py')]}
+a.out.write_text(json.dumps(result,indent=2)+'\n')
+for width,rows in result['samples'].items():print(width,{k:round(v['median_us'],3) for k,v in rows.items()})

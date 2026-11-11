@@ -122,7 +122,29 @@ fi
 MODEL=${MODEL:-${MODEL_PATH:-}}
 SERVED_NAME=${SERVED_NAME:-}
 SEQS=${SEQS:-${MAX_NUM_SEQS:-8}}
-MAXBAT=${MAXBAT:-${MAX_BATCHED_TOKENS:-2048}}
+MAXBAT=${MAXBAT:-${MAX_BATCHED_TOKENS:-}}
+if [[ -z $MAXBAT ]]; then
+    # The hybrid mamba/attention page alignment raises the attention block
+    # size until the attention page covers the mamba state page: 1024 tokens
+    # for an FP16 KV cache, 2048 for a packed KV cache with an FP16 SSM
+    # state, 3072 for a packed KV cache with the model's own FP32 SSM state.
+    # A prefill chunk ends on a mamba state block boundary, so the per-step
+    # token budget must cover two blocks for two requests to be prefilled per
+    # step. At one block per step a long prompt at concurrency drains at half
+    # the rate (gfx1030, 27B AWQ, 16k x c=8: 42.2 -> 37.4 tok/s and 50.7 ->
+    # 103.3 s TTFT at block 2048, per-token prefill cost unchanged). Two
+    # blocks per step restores parity, so scale the budget with the block.
+    case ${EXTRA_ARGS:-} in
+        *int4_fp16_block*)
+            if [[ ${EXTRA_ARGS:-} == *"--mamba-ssm-cache-dtype float16"* ]]; then
+                MAXBAT=4096   # block 2048
+            else
+                MAXBAT=6144   # block 3072
+            fi
+            ;;
+        *) MAXBAT=2048 ;;  # block 1024
+    esac
+fi
 MAXLEN=${MAXLEN:-${MAX_MODEL_LEN:-}}
 MIN_MAXLEN=${MIN_MAXLEN:-}
 KV=${KV:-${KVCAP:-${KV_CACHE_MEMORY:-}}}
@@ -145,6 +167,13 @@ COMPILATION_CONFIG=${COMPILATION_CONFIG:-}
 EAGER=${EAGER:-0}
 ALLOC_CONF=${ALLOC_CONF:-}
 TUNED_CONFIG=${TUNED_CONFIG:-0}
+# PCI_BUSES="ce d3 d8 db 0a 0f 14 17": hex PCI bus numbers of the GPUs to serve on, in rank
+# order (TP rank 0 / pipeline stage 0 first), resolved to HIP_VISIBLE_DEVICES at launch by
+# torch's device properties. A HIP index is enumeration order and moves when cards, risers or
+# switches change; a bus does not, and a missing bus (or a count different from TP*PP)
+# refuses the launch instead of putting a TP group on the wrong cards. An explicit
+# HIP_VISIBLE_DEVICES / GPUIDS from the caller or the recipe wins.
+PCI_BUSES=${PCI_BUSES:-}
 # PLE n-gram table (Qwen4Exp / Flash-Next): bf16 = upstream pinned BF16 table
 # (~95 GB host RAM); int4 = INT4 table from PLE_QUANT_DIR in pinned RAM (~30 GB);
 # int4-disk = same INT4 table memory-mapped from disk, served by the CPU sidecar
@@ -181,10 +210,34 @@ if [[ -n $MIN_MAXLEN && -n $MAXLEN ]] && ((MAXLEN < MIN_MAXLEN)); then
     rdna_die "MAXLEN=$MAXLEN is below the $MIN_MAXLEN floor required by recipe '$rdse_recipe'."
 fi
 
+# An explicit device list (caller or recipe) wins over PCI_BUSES; rdna_init() would otherwise
+# fill in its 0,1,2,3 default, so look before it runs.
+rdse_hip_explicit=0
+if [[ -n ${HIP_VISIBLE_DEVICES:-} || -n ${GPUIDS:-} ]]; then
+    rdse_hip_explicit=1
+fi
 if ((rdse_print)); then
-    RDNA_DRY_RUN=1
+    # Read by rdna_init() in rdna_launcher_common.sh (RDNA_DRY_RUN).
+    export RDNA_DRY_RUN=1
 fi
 rdna_init
+
+rdse_gpu_line=""
+if [[ -n $PCI_BUSES && $rdse_hip_explicit == 0 ]]; then
+    read -r -a rdse_buses <<<"${PCI_BUSES//,/ }"
+    ((${#rdse_buses[@]} == TP * PP)) ||
+        rdna_die "PCI_BUSES lists ${#rdse_buses[@]} GPUs but TP*PP is $((TP * PP))."
+    if [[ -x $VENV/bin/python ]] && rdse_hip=$(rdna_resolve_pci_buses "${rdse_buses[@]}"); then
+        export HIP_VISIBLE_DEVICES=$rdse_hip
+        rdse_gpu_line="PCI_BUSES='${rdse_buses[*]}' -> HIP_VISIBLE_DEVICES=$rdse_hip"
+    elif ((rdse_print)); then
+        rdse_gpu_line="PCI_BUSES='${rdse_buses[*]}' (not resolvable on this host; resolved at launch)"
+    else
+        rdna_die "PCI_BUSES='${rdse_buses[*]}' did not resolve to GPUs (see above)."
+    fi
+elif [[ -n $PCI_BUSES ]]; then
+    rdse_gpu_line="HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$GPUIDS} (PCI_BUSES='$PCI_BUSES' ignored: an explicit device list wins)"
+fi
 
 case $PLE in
     bf16)
@@ -307,6 +360,8 @@ else
     comp_config="{"
     [[ -n $COMPILE_MODE ]] && comp_config+="\"mode\":$COMPILE_MODE,"
     comp_config+="\"cudagraph_mode\":\"$CG_MODE\""
+    # capture_sizes is set by rdna_mtp_args() in rdna_launcher_common.sh.
+    # shellcheck disable=SC2154
     [[ $CG_CAPTURE_SIZES == 1 ]] && comp_config+=",\"cudagraph_capture_sizes\":$capture_sizes"
     comp_config+="$CG_EXTRA}"
 fi
@@ -382,6 +437,7 @@ RDSE_ENV_KEYS=(
     PYTHONPATH HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
     HIP_VISIBLE_DEVICES VLLM_WORKER_MULTIPROC_METHOD GPU_MAX_HW_QUEUES ROCPROFILER_REGISTER_ENABLED
     VLLM_ROCM_USE_AITER VLLM_ROCM_USE_AITER_MOE VLLM_ROCM_MONO_DECODE
+    VLLM_RAISE_ON_LOGIT_NANS VLLM_SERVER_DEV_MODE
     TORCH_BLAS_PREFER_HIPBLASLT VLLM_BATCH_INVARIANT
     VLLM_CACHE_ROOT TRITON_CACHE_DIR TORCHINDUCTOR_CACHE_DIR TORCH_EXTENSIONS_DIR
     PYTORCH_TUNABLEOP_ENABLED PYTORCH_TUNABLEOP_TUNING
@@ -395,9 +451,15 @@ RDSE_ENV_KEYS=(
     VLLM_GDN_HIP_PREFILL VLLM_RDNA_FUSED_SE
     VLLM_RDNA_DENSE_INT8 VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_DENSE_GEMV
     VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA2_W4A8_DEBUG
+    VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA_W4A8_KBLOCK
     VLLM_FORCE_CUSTOM_ALL_REDUCE VLLM_RDNA_AR VLLM_RDNA_AR_MAX_KB
     VLLM_RDNA_AR_ONESHOT_KB VLLM_RDNA_AR_BLOCKS VLLM_RDNA_AR_PACE
     VLLM_CAUSAL_CONV1D_RDNA2_FWD VLLM_CAUSAL_CONV1D_RDNA2_UPDATE
+    VLLM_RDNA2_MOE_TILE8_MIN_TOKENS VLLM_RDNA_QSA_BLOCK_N VLLM_RDNA_QSA_SPLITS
+    VLLM_RDNA_HC_DOWN_TARGET VLLM_RDNA_HC_DOWN_SPLITS
+    VLLM_RDNA_MOE_HIST_DIR VLLM_RDNA_MOE_HIST_MIN_TOKENS
+    VLLM_EXPERT_STATS_DIR VLLM_EXPERT_STATS_INTERVAL_S VLLM_EXPERT_STATS_PAIRS
+    VLLM_EXPERT_STATS_PAIRS_EVERY VLLM_EXPERT_STATS_DECODE_MAX_TOKENS
     VLLM_ENABLE_STARTUP_PLAN VLLM_TUNED_CONFIG_FOLDER
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
     VLLM_PLE_CPU_OFFLOAD VLLM_PLE_OFFLOAD_READY_TIMEOUT VLLM_PLE_QUANT_DIR
@@ -415,6 +477,7 @@ rdse_print_plan() {
     printf '# entry:     %s\n' "$SERVE_ENTRY"
     printf '# ple:       %s%s\n' "$PLE" "${PLE_QUANT_DIR:+ ($PLE_QUANT_DIR)}"
     printf '# p2p:       %s\n' "$([[ $P2P == 0 ]] && echo 'off (no rdna_ar, RCCL over SHM)' || echo on)"
+    printf '# gpus:      %s\n' "${rdse_gpu_line:-HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-}}"
     printf '\n# --- environment ---\n'
     for _key in "${RDSE_ENV_KEYS[@]}"; do
         if [[ -v $_key ]]; then
@@ -436,4 +499,8 @@ fi
 
 rdna_kill_stale
 rdna_run_cwd
-exec "${cmd[@]}"
+# LAUNCH_WRAPPER prefixes only the server process (e.g. a rocprofv3 command
+# line ending in "--"); wrapping this script instead breaks rocprofv3, whose
+# tool cannot re-initialise across this exec.
+# shellcheck disable=SC2086 # deliberately word-split
+exec ${LAUNCH_WRAPPER:-} "${cmd[@]}"

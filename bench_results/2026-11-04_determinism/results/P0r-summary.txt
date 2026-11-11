@@ -1,0 +1,46 @@
+[14:09:30] boot TREE=/home/chenco_adm/vllm-w4a8q-4a3d RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=2,3,4,5 PORT=18470 overrides=EAGER=0 bench_extra=
+[14:09:30] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock
+[14:12:51] READY in 201s served=flash-next
+[14:12:57] PROBE PASS
+PASS  prompt='The capital of France is'
+      reply=' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=" Berlin, which is also the country's largest city, with a population of 3.5 million. It is the largest city proper by population in the European Union. Berlin is one of Germany's 16 federal states and is surrounded"
+RESULT PASS (3/3)
+[14:13:10] warmup rc=0 in 13s (sizes default); slowest:
+    decode batch 7:   0.85 s
+    decode batch 5:   0.75 s
+    decode batch 8:   0.74 s
+[14:13:10] load hook: /home/chenco_adm/w4a8_runs/determinism/det_hook.sh
+[14:15:40] LOAD HOOK rc=0 PASS det_hook P0r
+    [14:13:10] perf start
+    [14:14:11] perf-16384x256-c1 kfd: evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+    [14:15:39] perf-1024x512-c8 kfd: evicted_ms Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok
+    [14:15:40] perf done rc=0
+    PASS det_hook P0r
+[14:15:46] PROBE-AFTER-LOAD PASS
+[14:15:46] markers:
+          4 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_config=CompressedTensorsConfig, quantizat
+          1 WNA16 MoE backend.
+          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, 
+          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, 
+          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x
+          1 qwen_gdn_full_forward (opaque to inductor; projecti
+          1 Model loading took 20.56 GiB memory and 99.858348 seconds
+          1 Model loading took 20.56 GiB memory and 99.836781 seconds
+          1 Model loading took 20.56 GiB memory and 100.892341 seconds
+          1 Model loading took 20.56 GiB memory and 100.816638 seconds
+          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo
+[14:15:46] fault markers in serve.log: 0
+[14:15:46] new amdgpu dmesg faults: 0
+n/a
+[14:15:46] done

@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""Export ABBA pair deltas and within-arm repeat spread from per-cell metrics.
+
+Accepts analyze_serving_ab.py's per-cell-analysis.csv or the provisional
+first-pair JSON (whose `rows` field contains the same per-cell records).
+This is descriptive analysis only; it does not estimate statistical confidence.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import statistics
+import sys
+from pathlib import Path
+from typing import Any
+
+ARMS = ("01-control", "02-candidate", "03-candidate", "04-control")
+PAIRS = (
+    ("01-control", "02-candidate", "pair1_candidate_vs_control"),
+    ("04-control", "03-candidate", "pair2_candidate_vs_control"),
+)
+METRICS = (
+    # Keep arithmetic means of request-level rates separate from pooled rates.
+    ("whole_run_input_tokps_true", "whole-run input throughput", "rate_pct"),
+    ("whole_run_output_tokps_true", "whole-run output throughput", "rate_pct"),
+    (
+        "prefill_tokps_per_request_mean",
+        "mean per-request input tokens / TTFT",
+        "rate_pct",
+    ),
+    (
+        "prefill_tokps_wave_proxy_from_p99_ttft_NOT_TRUE_THROUGHPUT",
+        "TTFT-derived prefill wave proxy (not throughput)",
+        "rate_pct",
+    ),
+    (
+        "decode_tokps_per_request_mean",
+        "mean per-request output tokens / decode window",
+        "rate_pct",
+    ),
+    (
+        "decode_tokps_pooled_over_request_decode_windows",
+        "pooled output tokens / summed decode windows",
+        "rate_pct",
+    ),
+    ("mean_ttft_ms", "mean TTFT", "time_pct"),
+    ("median_ttft_ms", "median TTFT", "time_pct"),
+    ("p99_ttft_ms", "p99 TTFT", "time_pct"),
+    ("mean_itl_ms", "mean stream ITL", "time_pct"),
+    ("median_itl_ms", "median stream ITL", "time_pct"),
+    ("p99_itl_ms", "p99 stream ITL", "time_pct"),
+    ("pooled_stream_mean_itl_ms", "pooled stream mean ITL", "time_pct"),
+    ("pooled_stream_median_itl_ms", "pooled stream median ITL", "time_pct"),
+    ("acceptance_rate_pct_json", "acceptance rate", "pp"),
+    ("acceptance_length_json", "acceptance length", "absolute"),
+    ("position0_acceptance_pct_json", "draft position 0 acceptance", "pp"),
+    ("position1_acceptance_pct_json", "draft position 1 acceptance", "pp"),
+)
+CELL_KEYS = ("input_length_requested", "output_length_requested", "concurrency")
+
+
+def load_rows(path: Path) -> list[dict[str, Any]]:
+    if path.suffix.lower() == ".csv":
+        with path.open(newline="") as f:
+            rows = list(csv.DictReader(f))
+    else:
+        data = json.loads(path.read_text())
+        rows = data.get("rows") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("JSON input must contain a list field named 'rows'")
+    if not rows:
+        raise ValueError(f"no metric rows in {path}")
+    normalized = []
+    for row in rows:
+        item = dict(row)
+        for key in CELL_KEYS:
+            if key not in item:
+                raise ValueError(f"row lacks required cell key {key!r}")
+            item[key] = int(item[key])
+        if item.get("arm") not in ARMS:
+            raise ValueError(f"unexpected arm name: {item.get('arm')!r}")
+        normalized.append(item)
+    return normalized
+
+
+def num(row: dict[str, Any] | None, key: str) -> float | None:
+    if row is None or row.get(key) in (None, "", "nan", "NaN"):
+        return None
+    try:
+        x = float(row[key])
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def fmt_cell(cell: tuple[int, int, int]) -> str:
+    return f"{cell[0]}x{cell[1]}-c{cell[2]}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="per-cell-analysis.csv or provisional JSON with rows",
+    )
+    ap.add_argument(
+        "--out-dir",
+        type=Path,
+        required=True,
+        help="new/empty output directory; never overwrites existing outputs",
+    )
+    args = ap.parse_args()
+    try:
+        rows = load_rows(args.input)
+        by_arm_cell: dict[tuple[str, tuple[int, int, int]], dict[str, Any]] = {}
+        for row in rows:
+            cell = tuple(row[k] for k in CELL_KEYS)
+            key = (row["arm"], cell)
+            if key in by_arm_cell:
+                raise ValueError(f"duplicate per-cell row: {key}")
+            by_arm_cell[key] = row
+        cells = sorted({cell for _, cell in by_arm_cell})
+        if len(cells) != 4:
+            raise ValueError(
+                f"expected four workload cells, found {len(cells)}: {cells}"
+            )
+
+        records: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for cell in cells:
+            for metric, label, kind in METRICS:
+                values = {
+                    arm: num(by_arm_cell.get((arm, cell)), metric) for arm in ARMS
+                }
+                for control, candidate, pair_name in PAIRS:
+                    cv, nv = values[control], values[candidate]
+                    if cv is None or nv is None:
+                        missing.append(f"{fmt_cell(cell)} {metric} {pair_name}")
+                        continue
+                    delta = nv - cv
+                    pct = (delta / cv * 100) if cv != 0 else None
+                    records.append(
+                        {
+                            "record_type": "paired_delta",
+                            "cell": fmt_cell(cell),
+                            "metric": metric,
+                            "metric_label": label,
+                            "pair": pair_name,
+                            "control_value": cv,
+                            "candidate_value": nv,
+                            "candidate_minus_control": delta,
+                            "candidate_vs_control_pct": pct,
+                            "candidate_minus_control_pp": delta
+                            if kind == "pp"
+                            else None,
+                            "metric_units": "percentage_points"
+                            if kind == "pp"
+                            else (
+                                "ms"
+                                if kind == "time_pct"
+                                else (
+                                    "ratio_or_units"
+                                    if kind == "absolute"
+                                    else "tok_per_s"
+                                )
+                            ),
+                        }
+                    )
+                c1, c2 = values["01-control"], values["04-control"]
+                n1, n2 = values["02-candidate"], values["03-candidate"]
+                for variant, first, second in (
+                    ("control", c1, c2),
+                    ("candidate", n1, n2),
+                ):
+                    if first is not None and second is not None:
+                        mean = (first + second) / 2
+                        spread = second - first
+                        records.append(
+                            {
+                                "record_type": "within_arm_repeat_spread",
+                                "cell": fmt_cell(cell),
+                                "metric": metric,
+                                "metric_label": label,
+                                "pair": f"{variant}_repeat_01_vs_02",
+                                "control_value": first,
+                                "candidate_value": second,
+                                "candidate_minus_control": spread,
+                                "candidate_vs_control_pct": spread / mean * 100
+                                if mean
+                                else None,
+                                "candidate_minus_control_pp": spread
+                                if kind == "pp"
+                                else None,
+                                "metric_units": "percentage_points"
+                                if kind == "pp"
+                                else (
+                                    "ms"
+                                    if kind == "time_pct"
+                                    else (
+                                        "ratio_or_units"
+                                        if kind == "absolute"
+                                        else "tok_per_s"
+                                    )
+                                ),
+                            }
+                        )
+                # Across the two repeats per variant, also provide arithmetic means.
+                if all(v is not None for v in (c1, c2, n1, n2)):
+                    cmean, nmean = statistics.mean([c1, c2]), statistics.mean([n1, n2])
+                    records.append(
+                        {
+                            "record_type": "two_repeat_mean_comparison",
+                            "cell": fmt_cell(cell),
+                            "metric": metric,
+                            "metric_label": label,
+                            "pair": "candidate_mean_vs_control_mean_descriptive",
+                            "control_value": cmean,
+                            "candidate_value": nmean,
+                            "candidate_minus_control": nmean - cmean,
+                            "candidate_vs_control_pct": (nmean / cmean - 1) * 100
+                            if cmean
+                            else None,
+                            "candidate_minus_control_pp": nmean - cmean
+                            if kind == "pp"
+                            else None,
+                            "metric_units": "percentage_points"
+                            if kind == "pp"
+                            else (
+                                "ms"
+                                if kind == "time_pct"
+                                else (
+                                    "ratio_or_units"
+                                    if kind == "absolute"
+                                    else "tok_per_s"
+                                )
+                            ),
+                        }
+                    )
+            # For acceptance, retain a token-count-weighted two-run estimate
+            # alongside the arithmetic mean of the two run percentages.
+            count_pairs = {}
+            for variant, arm_pair in (
+                ("control", ("01-control", "04-control")),
+                ("candidate", ("02-candidate", "03-candidate")),
+            ):
+                counts = [
+                    (
+                        num(by_arm_cell.get((arm, cell)), "accepted_tokens_json"),
+                        num(by_arm_cell.get((arm, cell)), "draft_tokens_json"),
+                    )
+                    for arm in arm_pair
+                ]
+                if all(a is not None and d is not None for a, d in counts):
+                    accepted = sum(a for a, _ in counts if a is not None)
+                    drafted = sum(d for _, d in counts if d is not None)
+                    count_pairs[variant] = (
+                        100 * accepted / drafted if drafted else None,
+                        accepted,
+                        drafted,
+                    )
+            if set(count_pairs) == {"control", "candidate"} and all(
+                v[0] is not None for v in count_pairs.values()
+            ):
+                cval, caccepted, cdrafted = count_pairs["control"]
+                nval, naccepted, ndrafted = count_pairs["candidate"]
+                records.append(
+                    {
+                        "record_type": "two_repeat_count_weighted_acceptance",
+                        "cell": fmt_cell(cell),
+                        "metric": "accepted_tokens_json_over_draft_tokens_json_pct",
+                        "metric_label": (
+                            "two-repeat token-count-weighted acceptance rate"
+                        ),
+                        "pair": "candidate_ratio_of_sums_vs_control_ratio_of_sums",
+                        "control_value": cval,
+                        "candidate_value": nval,
+                        "candidate_minus_control": nval - cval,
+                        "candidate_vs_control_pct": None,
+                        "candidate_minus_control_pp": nval - cval,
+                        "metric_units": "percentage_points",
+                        "control_accepted_tokens_sum": caccepted,
+                        "control_draft_tokens_sum": cdrafted,
+                        "candidate_accepted_tokens_sum": naccepted,
+                        "candidate_draft_tokens_sum": ndrafted,
+                    }
+                )
+
+        if args.out_dir.exists() and any(args.out_dir.iterdir()):
+            raise ValueError(
+                f"refusing to overwrite nonempty output directory: {args.out_dir}"
+            )
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        out_csv = args.out_dir / "abba-repeat-comparison.csv"
+        fieldnames = list(dict.fromkeys(key for record in records for key in record))
+        with out_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(records)
+        definitions = {
+            "input": str(args.input),
+            "cells_found": [fmt_cell(c) for c in cells],
+            "arms_found": sorted({r["arm"] for r in rows}),
+            "records_written": len(records),
+            "missing_pair_metrics": missing,
+            "definitions": {
+                "paired_delta": (
+                    "Candidate minus control for pairs 02-01 and 03-04. Rate "
+                    "percentages use the matching control as denominator. Time "
+                    "deltas are also in ms; acceptance deltas are percentage points."
+                ),
+                "within_arm_repeat_spread": (
+                    "Second occurrence minus first: 04-01 for control and 03-02 "
+                    "for candidate. Relative spread divides by the arithmetic "
+                    "mean of those two runs."
+                ),
+                "two_repeat_mean_comparison": (
+                    "Descriptive arithmetic mean of two candidate runs versus "
+                    "two control runs; not a confidence interval or significance test."
+                ),
+                "prefill_rate": (
+                    "prefill_tokps_per_request_mean is the arithmetic mean of "
+                    "per-request input_tokens/TTFT. The TTFT-derived wave value "
+                    "is a proxy, not throughput."
+                ),
+                "aggregate_rates": (
+                    "whole_run_* rates are summed tokens divided by summed "
+                    "timed-cell duration. decode_tokps_pooled_* is total output "
+                    "tokens divided by summed request decode windows; these differ "
+                    "from arithmetic means of per-request rates."
+                ),
+                "acceptance": (
+                    "Per-run and per-position rates use percentage-point deltas. "
+                    "The two-repeat weighted row is 100*sum(accepted_tokens)/"
+                    "sum(draft_tokens); the mean-comparison row is the arithmetic "
+                    "mean of run percentages."
+                ),
+                "inference_limit": (
+                    "Serving runs are the experimental units. Two repeats per "
+                    "variant yield only two paired contrasts and descriptive "
+                    "repeat spread; no request-level bootstrap or statistical "
+                    "confidence is computed."
+                ),
+            },
+        }
+        (args.out_dir / "definitions.json").write_text(
+            json.dumps(definitions, indent=2) + "\n"
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "output_csv": str(out_csv),
+                    "cells_found": definitions["cells_found"],
+                    "arms_found": definitions["arms_found"],
+                    "records_written": definitions["records_written"],
+                    "missing_pair_metric_count": len(missing),
+                    "inference_limit": definitions["definitions"]["inference_limit"],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    except (OSError, ValueError, json.JSONDecodeError, csv.Error) as exc:
+        print(
+            json.dumps({"status": "FAIL", "error": str(exc)}, indent=2), file=sys.stderr
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Stage/verify an isolated four-file timing overlay of a verified healthy v3 tree."""
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+from generate import BASE, HERE, sha, transform
+
+STAGE = HERE.parent / "dense-mtp-failstop-serving-stage-v3"
+CORE = "vllm/_rocm_C.abi3.so"
+CORE_PY = "vllm/v1/engine/core.py"
+CORE_PY_SHA = "d68e8983fa59059cdfa34be018aba291b7ffb0970cb4390fb3e6742b1e08228e"
+
+
+def needed(changes):
+    return {parent for rel in changes for parent in Path(rel).parents}
+
+
+def share(source, target, ancestors, relative=Path(".")):
+    target.mkdir()
+    for entry in source.iterdir():
+        rel = relative / entry.name
+        dst = target / entry.name
+        if entry.is_dir() and rel in ancestors:
+            share(entry, dst, ancestors, rel)
+        else:
+            dst.symlink_to(entry.absolute(), target_is_directory=entry.is_dir())
+
+
+def check_links(source, target, ancestors, changes, relative=Path(".")):
+    expected_names = {p.name for p in source.iterdir()}
+    if relative == Path("."):
+        expected_names.add("timing_overlay_manifest.json")
+    if {p.name for p in target.iterdir()} != expected_names:
+        raise ValueError(f"overlay inventory differs: {relative}")
+    for entry in source.iterdir():
+        rel = relative / entry.name
+        dst = target / entry.name
+        if str(rel) in changes:
+            if dst.is_symlink() or sha(dst) != changes[str(rel)]["candidate"]:
+                raise ValueError(f"changed-file pin/origin differs: {rel}")
+        elif entry.is_dir() and rel in ancestors:
+            if dst.is_symlink():
+                raise ValueError("replacement ancestor must be real directory")
+            check_links(entry, dst, ancestors, changes, rel)
+        elif not dst.is_symlink() or dst.readlink() != entry.absolute():
+            raise ValueError(f"unchanged overlay entry differs: {rel}")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("action", choices=("stage", "verify"))
+    p.add_argument("--healthy-tree", type=Path, required=True)
+    p.add_argument("--frozen-source-tree", type=Path, required=True)
+    p.add_argument("--tree", type=Path, required=True)
+    a = p.parse_args()
+    source = a.healthy_tree.resolve(strict=True)
+    frozen = a.frozen_source_tree.resolve(strict=True)
+    target = a.tree.resolve()
+    if target == source or target.is_relative_to(source):
+        raise ValueError("use separate fresh overlay outside healthy source")
+    manifest = json.loads((HERE / "source-manifest.json").read_text())
+    changes = manifest["changes"]
+    if len(changes) != 4 or set(changes) != set(BASE):
+        raise ValueError("requires exactly the four timing-only files")
+    # Run the existing cleanup-v3 verifier against the unchanged healthy source.
+    subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(STAGE / "verify_overlay.py"),
+            "--tree",
+            str(source),
+            "--source-tree",
+            str(frozen),
+            "--candidate-core-sha256",
+            manifest["core_sha256"],
+            "--mode",
+            "healthy",
+        ],
+        check=True,
+    )
+    if (
+        sha(source / CORE) != manifest["core_sha256"]
+        or sha(source / CORE_PY) != CORE_PY_SHA
+    ):
+        raise ValueError("healthy core/cleanup mismatch")
+    for rel, pins in changes.items():
+        if sha(source / rel) != pins["original"]:
+            raise ValueError(f"healthy timing base differs: {rel}")
+        candidate = HERE / "candidate-overlay" / rel
+        if sha(candidate) != pins["candidate"] or candidate.read_text() != transform(
+            rel, (source / rel).read_text()
+        ):
+            raise ValueError(f"candidate transform/pin differs: {rel}")
+    ancestors = needed(changes)
+    metadata = {
+        "healthy_tree": str(source),
+        "frozen_source_tree": str(frozen),
+        "source_manifest_sha256": sha(HERE / "source-manifest.json"),
+        "healthy_overlay_manifest_sha256": sha(source / "overlay_manifest.json"),
+        "core_sha256": manifest["core_sha256"],
+        "changes": changes,
+        "diagnostic_only": True,
+        "timing_false_gpu_extras": 0,
+    }
+    if a.action == "stage":
+        if target.exists():
+            raise ValueError("refusing overlay overwrite")
+        share(source, target, ancestors)
+        for rel in changes:
+            dst = target / rel
+            if not dst.is_symlink():
+                raise ValueError("replacement must start as symlink")
+            dst.unlink()
+            dst.write_bytes((HERE / "candidate-overlay" / rel).read_bytes())
+        (target / "timing_overlay_manifest.json").write_text(
+            json.dumps(metadata, indent=2) + "\n"
+        )
+    if json.loads((target / "timing_overlay_manifest.json").read_text()) != metadata:
+        raise ValueError("timing overlay provenance mismatch")
+    check_links(source, target, ancestors, changes)
+    print(json.dumps({"status": "PASS", "tree": str(target), **metadata}, indent=2))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+ARM=${ARM:?select old or candidate}
+MODE=${MODE:-regression}
+case "$ARM" in
+    old) SRC="$BASE/core-inline-serve-tree"; CORE_SHA=25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f ;;
+    candidate) SRC="$BASE/correctness-core-v1-serve-tree"; CORE_SHA=3f688006eec38adef6cf4d4546735f66b8892d8066387336a88ba6fe7b668bac ;;
+    *) exit 2 ;;
+esac
+FILTER=test_quantized_target_router_half_boundary_matches_native
+if [[ $MODE == suite ]]; then
+    FILTER='test_quantized_target_router_half_boundary_matches_native or test_k2_matches_today or test_mtp_control_reset_is_captured_and_clears_sticky_error or test_k2_fail_stop_writes_nan or test_k1_matches_today or test_mtp_k1_runs_when_dense_k2_is_unsupported or test_gdn_fused_matches_today'
+else
+    [[ $MODE == regression ]]
+fi
+OUT="$BASE/correctness-core-v1-tests-$ARM-$MODE"
+[[ $(hostname) == par1-cs25 && ! -e $OUT ]]
+TEST="$HERE/test_amd_mono_rdna2_kernels.py"
+[[ $(sha256sum "$TEST" | cut -d' ' -f1) == a6d8e2cedd9259512c0931c0eb0abde0a278955b8780147d7ea667d0a928f962 ]]
+[[ $(sha256sum "$SRC/vllm/_rocm_C.abi3.so" | cut -d' ' -f1) == "$CORE_SHA" ]]
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -w 90 9
+mkdir "$OUT"
+"$VENV/bin/python" -S "$BASE/core-inline-serving-ab/check_reserved_gpu.py" > "$OUT/gpu-owners.txt" 2>&1
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES=6 VLLM_ROCM_USE_AITER=0 VLLM_RDNA2_MOE_FP32_ACCUM=0
+export VLLM_SOURCE_ROOT="$SRC" PYTHONPATH="$SRC"
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+export PYTORCH_TUNABLEOP_TUNING=0 TUNEOP_REQUIRE_HASH_ROWS=1
+source "$SRC/tools/rdna2_028/tunableop_env.sh"
+configure_tunableop "$SDK_LIB/librocblas.so.5" "$SRC/tunableop"
+hashes() {
+    sha256sum "$TEST" "$SRC/vllm/_rocm_C.abi3.so" "$SRC/csrc/rocm/mono_k2_rdna2.cu"
+}
+hashes > "$OUT/sha256.before"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.before"
+finish() {
+    rc=$?
+    set +e
+    hashes > "$OUT/sha256.after"
+    cat /proc/sys/kernel/random/boot_id > "$OUT/boot.after"
+    cmp "$OUT/sha256.before" "$OUT/sha256.after" || rc=1
+    cmp "$OUT/boot.before" "$OUT/boot.after" || rc=1
+    printf '%s\n' "$rc" > "$OUT/exit-status.txt"
+    exit "$rc"
+}
+trap finish EXIT
+cd /tmp
+timeout -k 10 300 "$VENV/bin/python" -c 'import hashlib,pathlib,sys; import vllm._rocm_C as core; import pytest; p=pathlib.Path(core.__file__).resolve(); sha=hashlib.sha256(p.read_bytes()).hexdigest(); print("LOADED",p,sha,flush=True); assert sha==sys.argv[1]; raise SystemExit(pytest.main([sys.argv[2],"-q","-p","no:cacheprovider","-k",sys.argv[3]]))' \
+    "$CORE_SHA" "$TEST" "$FILTER" > "$OUT/tests.log" 2>&1

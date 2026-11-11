@@ -188,19 +188,19 @@ __global__ void get_num_sampled_and_rejected_kernel(
 // sampled_tokens is int64 on the MTP spec path (rejection_sampler_utils.py
 // allocates it with dtype=torch.int64) and int32 on the plain sampler path.
 template <typename S>
-__global__ void post_update_kernel(const int32_t* __restrict__ idx_mapping,
-                                   int32_t* __restrict__ num_computed_tokens,
-                                   int64_t* __restrict__ last_sampled_tokens,
-                                   int32_t* __restrict__ output_bin_counts,
-                                   const int64_t output_bin_counts_stride,
-                                   const S* __restrict__ sampled_tokens,
-                                   const int64_t sampled_tokens_stride,
-                                   const int32_t* __restrict__ num_sampled,
-                                   const int32_t* __restrict__ num_rejected,
-                                   const int32_t* __restrict__ query_start_loc,
-                                   int32_t* __restrict__ all_token_ids,
-                                   const int64_t all_token_ids_stride,
-                                   int32_t* __restrict__ total_len) {
+__global__ void post_update_kernel(
+    const int32_t* __restrict__ idx_mapping,
+    int32_t* __restrict__ num_computed_tokens,
+    int64_t* __restrict__ last_sampled_tokens,
+    int32_t* __restrict__ output_bin_counts,
+    const int64_t output_bin_counts_stride,
+    const S* __restrict__ sampled_tokens, const int64_t sampled_tokens_stride,
+    const int32_t* __restrict__ num_sampled,
+    const int32_t* __restrict__ num_rejected,
+    const int32_t* __restrict__ query_start_loc,
+    int32_t* __restrict__ all_token_ids, const int64_t all_token_ids_stride,
+    int32_t* __restrict__ total_len, const int64_t* __restrict__ draft_tokens,
+    int64_t* __restrict__ draft_tokens_out, const int32_t num_draft_tokens) {
   const int req_id = blockIdx.x;
   const int req_state_idx = idx_mapping[req_id];
   if (req_state_idx < 0) {
@@ -209,6 +209,14 @@ __global__ void post_update_kernel(const int32_t* __restrict__ idx_mapping,
   }
   if (threadIdx.x != 0) {
     return;
+  }
+
+  if (draft_tokens != nullptr) {
+    // Batch row -> persistent request slot, num_draft_tokens wide on both.
+    for (int32_t i = 0; i < num_draft_tokens; i++) {
+      draft_tokens_out[(int64_t)req_state_idx * num_draft_tokens + i] =
+          draft_tokens[(int64_t)req_id * num_draft_tokens + i];
+    }
   }
 
   const int32_t total_len_v = total_len[req_state_idx];
@@ -414,7 +422,10 @@ void post_update_rdna2(torch::Tensor idx_mapping,
                        torch::Tensor num_rejected,
                        const std::optional<torch::Tensor>& query_start_loc,
                        torch::Tensor all_token_ids,
-                       int64_t all_token_ids_stride, torch::Tensor total_len) {
+                       int64_t all_token_ids_stride, torch::Tensor total_len,
+                       const std::optional<torch::Tensor>& draft_tokens,
+                       const std::optional<torch::Tensor>& draft_tokens_out,
+                       int64_t num_draft_tokens) {
   using namespace vllm::rdna2_input_batch;
   TORCH_CHECK(idx_mapping.scalar_type() == at::kInt &&
                   num_computed_tokens.scalar_type() == at::kInt &&
@@ -448,6 +459,26 @@ void post_update_rdna2(torch::Tensor idx_mapping,
     qsl = reinterpret_cast<const int32_t*>(query_start_loc->data_ptr());
   }
 
+  const int64_t* draft_ptr = nullptr;
+  int64_t* draft_out_ptr = nullptr;
+  if (draft_tokens.has_value() || draft_tokens_out.has_value()) {
+    TORCH_CHECK(draft_tokens.has_value() && draft_tokens_out.has_value(),
+                "post_update_rdna2: draft_tokens and draft_tokens_out come "
+                "together");
+    TORCH_CHECK(draft_tokens->scalar_type() == at::kLong &&
+                    draft_tokens_out->scalar_type() == at::kLong,
+                "post_update_rdna2: draft tensors must be int64");
+    TORCH_CHECK(
+        draft_tokens->is_contiguous() && draft_tokens_out->is_contiguous(),
+        "post_update_rdna2: draft tensors must be contiguous");
+    TORCH_CHECK(num_draft_tokens > 0 &&
+                    draft_tokens->size(1) == num_draft_tokens &&
+                    draft_tokens_out->size(1) == num_draft_tokens,
+                "post_update_rdna2: draft width must match num_draft_tokens");
+    draft_ptr = reinterpret_cast<const int64_t*>(draft_tokens->data_ptr());
+    draft_out_ptr = reinterpret_cast<int64_t*>(draft_tokens_out->data_ptr());
+  }
+
   auto launch = [&](auto sampled_tag) {
     using S = decltype(sampled_tag);
     post_update_kernel<S><<<num_reqs, kScalarThreads, 0, stream.stream()>>>(
@@ -460,8 +491,8 @@ void post_update_rdna2(torch::Tensor idx_mapping,
         reinterpret_cast<const int32_t*>(num_sampled.data_ptr()),
         reinterpret_cast<const int32_t*>(num_rejected.data_ptr()), qsl,
         reinterpret_cast<int32_t*>(all_token_ids.data_ptr()),
-        all_token_ids_stride,
-        reinterpret_cast<int32_t*>(total_len.data_ptr()));
+        all_token_ids_stride, reinterpret_cast<int32_t*>(total_len.data_ptr()),
+        draft_ptr, draft_out_ptr, (int32_t)num_draft_tokens);
   };
   if (sampled_tokens.scalar_type() == at::kLong) {
     launch(int64_t{});

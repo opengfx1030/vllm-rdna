@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "caches": 48,
+      "debug_timing": false,
+      "post_step_checks": "wait",
+      "copy_modes": [
+        "native"
+      ],
+      "expert_demands": 4274555,
+      "expert_misses": 540385,
+      "committed_passes": 200106,
+      "copied_bytes": 1379927136000,
+      "native_copy_calls": 48081,
+      "batch_copy_calls": 48081,
+      "map_uploads": 177311,
+      "device_bytes": 11767037952,
+      "host_bytes": 31378685952
+    },
+    {
+      "caches": 48,
+      "debug_timing": false,
+      "post_step_checks": "wait",
+      "copy_modes": [
+        "native"
+      ],
+      "expert_demands": 4186232,
+      "expert_misses": 564162,
+      "committed_passes": 200014,
+      "copied_bytes": 1440644083200,
+      "native_copy_calls": 48814,
+      "batch_copy_calls": 48814,
+      "map_uploads": 176243,
+      "device_bytes": 11767037952,
+      "host_bytes": 31378685952
+    }
+  ]
+}

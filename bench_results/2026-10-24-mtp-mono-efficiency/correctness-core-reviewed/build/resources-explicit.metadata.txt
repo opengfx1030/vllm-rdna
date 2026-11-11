@@ -1,0 +1,311 @@
+
+File: /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-build/compiled/mono_k2_rdna2.candidate.hip.o.0.hipv4-amdgcn-amd-amdhsa--gfx1030
+Format: elf64-amdgpu
+Arch: amdgcn
+AddressSize: 64bit
+LoadName: <Not found>
+NoteSections [
+  NoteSection {
+    Name: .note
+    Offset: 0x238
+    Size: 0x1560
+    Notes [
+      {
+        Owner: AMDGPU
+        Data size: 0x1549
+        Type: NT_AMDGPU_METADATA (AMDGPU Metadata)
+        AMDGPU Metadata: ---
+amdhsa.kernels:
+  - .args:
+      - .address_space:  global
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .offset:         8
+        .size:           4
+        .value_kind:     by_value
+      - .offset:         12
+        .size:           4
+        .value_kind:     by_value
+    .gfx1250_revision: B0
+    .group_segment_fixed_size: 0
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 16
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 1024
+    .name:           _ZN8mono_ffn16mono_mark_kernelEPyii
+    .private_segment_fixed_size: 0
+    .sgpr_count:     18
+    .sgpr_spill_count: 0
+    .symbol:         _ZN8mono_ffn16mono_mark_kernelEPyii.kd
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     12
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+  - .args:
+      - .offset:         0
+        .size:           664
+        .value_kind:     by_value
+      - .offset:         664
+        .size:           4
+        .value_kind:     hidden_block_count_x
+      - .offset:         668
+        .size:           4
+        .value_kind:     hidden_block_count_y
+      - .offset:         672
+        .size:           4
+        .value_kind:     hidden_block_count_z
+      - .offset:         676
+        .size:           2
+        .value_kind:     hidden_group_size_x
+      - .offset:         678
+        .size:           2
+        .value_kind:     hidden_group_size_y
+      - .offset:         680
+        .size:           2
+        .value_kind:     hidden_group_size_z
+      - .offset:         682
+        .size:           2
+        .value_kind:     hidden_remainder_x
+      - .offset:         684
+        .size:           2
+        .value_kind:     hidden_remainder_y
+      - .offset:         686
+        .size:           2
+        .value_kind:     hidden_remainder_z
+      - .offset:         704
+        .size:           8
+        .value_kind:     hidden_global_offset_x
+      - .offset:         712
+        .size:           8
+        .value_kind:     hidden_global_offset_y
+      - .offset:         720
+        .size:           8
+        .value_kind:     hidden_global_offset_z
+      - .offset:         728
+        .size:           2
+        .value_kind:     hidden_grid_dims
+    .gfx1250_revision: B0
+    .group_segment_fixed_size: 25280
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 920
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 256
+    .name:           _ZN8mono_ffn15mono_ffn_kernelILi4ELi8EEEvNS_6ParamsE
+    .private_segment_fixed_size: 0
+    .sgpr_count:     107
+    .sgpr_spill_count: 21
+    .symbol:         _ZN8mono_ffn15mono_ffn_kernelILi4ELi8EEEvNS_6ParamsE.kd
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     109
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+  - .args:
+      - .offset:         0
+        .size:           664
+        .value_kind:     by_value
+      - .offset:         664
+        .size:           4
+        .value_kind:     hidden_block_count_x
+      - .offset:         668
+        .size:           4
+        .value_kind:     hidden_block_count_y
+      - .offset:         672
+        .size:           4
+        .value_kind:     hidden_block_count_z
+      - .offset:         676
+        .size:           2
+        .value_kind:     hidden_group_size_x
+      - .offset:         678
+        .size:           2
+        .value_kind:     hidden_group_size_y
+      - .offset:         680
+        .size:           2
+        .value_kind:     hidden_group_size_z
+      - .offset:         682
+        .size:           2
+        .value_kind:     hidden_remainder_x
+      - .offset:         684
+        .size:           2
+        .value_kind:     hidden_remainder_y
+      - .offset:         686
+        .size:           2
+        .value_kind:     hidden_remainder_z
+      - .offset:         704
+        .size:           8
+        .value_kind:     hidden_global_offset_x
+      - .offset:         712
+        .size:           8
+        .value_kind:     hidden_global_offset_y
+      - .offset:         720
+        .size:           8
+        .value_kind:     hidden_global_offset_z
+      - .offset:         728
+        .size:           2
+        .value_kind:     hidden_grid_dims
+    .gfx1250_revision: B0
+    .group_segment_fixed_size: 25280
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 920
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 256
+    .name:           _ZN8mono_ffn15mono_ffn_kernelILi8ELi8EEEvNS_6ParamsE
+    .private_segment_fixed_size: 0
+    .sgpr_count:     107
+    .sgpr_spill_count: 22
+    .symbol:         _ZN8mono_ffn15mono_ffn_kernelILi8ELi8EEEvNS_6ParamsE.kd
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     109
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+  - .args:
+      - .offset:         0
+        .size:           664
+        .value_kind:     by_value
+      - .offset:         664
+        .size:           4
+        .value_kind:     hidden_block_count_x
+      - .offset:         668
+        .size:           4
+        .value_kind:     hidden_block_count_y
+      - .offset:         672
+        .size:           4
+        .value_kind:     hidden_block_count_z
+      - .offset:         676
+        .size:           2
+        .value_kind:     hidden_group_size_x
+      - .offset:         678
+        .size:           2
+        .value_kind:     hidden_group_size_y
+      - .offset:         680
+        .size:           2
+        .value_kind:     hidden_group_size_z
+      - .offset:         682
+        .size:           2
+        .value_kind:     hidden_remainder_x
+      - .offset:         684
+        .size:           2
+        .value_kind:     hidden_remainder_y
+      - .offset:         686
+        .size:           2
+        .value_kind:     hidden_remainder_z
+      - .offset:         704
+        .size:           8
+        .value_kind:     hidden_global_offset_x
+      - .offset:         712
+        .size:           8
+        .value_kind:     hidden_global_offset_y
+      - .offset:         720
+        .size:           8
+        .value_kind:     hidden_global_offset_z
+      - .offset:         728
+        .size:           2
+        .value_kind:     hidden_grid_dims
+    .gfx1250_revision: B0
+    .group_segment_fixed_size: 25280
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 920
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 256
+    .name:           _ZN8mono_ffn15mono_ffn_kernelILi12ELi8EEEvNS_6ParamsE
+    .private_segment_fixed_size: 0
+    .sgpr_count:     107
+    .sgpr_spill_count: 22
+    .symbol:         _ZN8mono_ffn15mono_ffn_kernelILi12ELi8EEEvNS_6ParamsE.kd
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     109
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+  - .args:
+      - .offset:         0
+        .size:           664
+        .value_kind:     by_value
+      - .offset:         664
+        .size:           4
+        .value_kind:     hidden_block_count_x
+      - .offset:         668
+        .size:           4
+        .value_kind:     hidden_block_count_y
+      - .offset:         672
+        .size:           4
+        .value_kind:     hidden_block_count_z
+      - .offset:         676
+        .size:           2
+        .value_kind:     hidden_group_size_x
+      - .offset:         678
+        .size:           2
+        .value_kind:     hidden_group_size_y
+      - .offset:         680
+        .size:           2
+        .value_kind:     hidden_group_size_z
+      - .offset:         682
+        .size:           2
+        .value_kind:     hidden_remainder_x
+      - .offset:         684
+        .size:           2
+        .value_kind:     hidden_remainder_y
+      - .offset:         686
+        .size:           2
+        .value_kind:     hidden_remainder_z
+      - .offset:         704
+        .size:           8
+        .value_kind:     hidden_global_offset_x
+      - .offset:         712
+        .size:           8
+        .value_kind:     hidden_global_offset_y
+      - .offset:         720
+        .size:           8
+        .value_kind:     hidden_global_offset_z
+      - .offset:         728
+        .size:           2
+        .value_kind:     hidden_grid_dims
+    .gfx1250_revision: B0
+    .group_segment_fixed_size: 25280
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 920
+    .language:       OpenCL C
+    .language_version:
+      - 2
+      - 0
+    .max_flat_workgroup_size: 256
+    .name:           _ZN8mono_ffn15mono_ffn_kernelILi24ELi8EEEvNS_6ParamsE
+    .private_segment_fixed_size: 0
+    .sgpr_count:     107
+    .sgpr_spill_count: 22
+    .symbol:         _ZN8mono_ffn15mono_ffn_kernelILi24ELi8EEEvNS_6ParamsE.kd
+    .uniform_work_group_size: 1
+    .uses_dynamic_stack: false
+    .vgpr_count:     109
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+amdhsa.target:   amdgcn-amd-amdhsa--gfx1030
+amdhsa.version:
+  - 1
+  - 2
+...
+
+      }
+    ]
+  }
+]

@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_expert_copy.py", line 157, in <module>
+    main()
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_expert_copy.py", line 108, in main
+    result = bench(args, CELLS[name], 12345)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_offload_long.py", line 265, in bench
+    **samples.summary(),
+      ^^^^^^^^^^^^^^^^^
+  File "/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading/tools/rdna/mono/qualify_offload_long.py", line 128, in summary
+    raise RuntimeError(f"required boundary counter unavailable: {key}")
+RuntimeError: required boundary counter unavailable: vllm:kv_offload_load_bytes

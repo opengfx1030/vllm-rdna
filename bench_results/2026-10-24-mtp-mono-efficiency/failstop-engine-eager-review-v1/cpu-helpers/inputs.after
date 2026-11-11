@@ -1,0 +1,2 @@
+6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/vllm/_rocm_C.abi3.so
+7af7fbb38ee7c6da7e38bc0d13192e15f3ee997cdeb65bca1a334d29152978fe  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-serving-stage-v1/test_mono_mtp_failstop.py

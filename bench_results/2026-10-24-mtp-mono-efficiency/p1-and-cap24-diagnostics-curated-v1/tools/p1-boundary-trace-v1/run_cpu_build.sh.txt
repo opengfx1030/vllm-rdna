@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Root-run only after existing CPU build completes. No GPUs, no install.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+BASE=$(dirname "$HERE")
+SRC=${SOURCE_ROOT:-$BASE/dense-mtp-failstop-healthy-tree-v1}
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+[[ $# == 1 ]] || { echo 'usage: run_cpu_build.sh FRESH_OUT_UNDER_EVIDENCE_BASE' >&2; exit 2; }
+OUT=$(realpath -m "$1")
+[[ $(hostname) == par1-cs25 && $OUT == "$BASE/"* && ! -e $OUT ]]
+[[ -x $VENV/bin/python && -f $SRC/csrc/rocm/hc_rdna2.cu && -f $HERE/source_manifest.json ]]
+unset GPU_DEVICE_ORDINAL
+export HIP_VISIBLE_DEVICES= ROCR_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES=
+export PYTORCH_ROCM_ARCH=gfx1030
+export ROCM_HOME=/opt/rocm/core-7.14 ROCM_PATH=/opt/rocm/core-7.14 HIP_PATH=/opt/rocm/core-7.14
+export PATH=/opt/rocm/core-7.14/bin:$VENV/bin:$PATH
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+"$VENV/bin/python" - <<'PY'
+import torch
+assert torch.version.hip and torch.cuda.device_count() == 0
+print('PASS CPU-only ROCm torch, zero visible GPUs')
+PY
+mkdir "$OUT"
+INPUTS=("$HERE/run_cpu_build.sh" "$HERE/compile_cpu_only.py" "$HERE/generate.py" "$HERE/test_cpu.py" "$HERE/source_manifest.json" "$HERE/generated/native_trace.cu" "$HERE/generated/native_binding.cpp" "$HERE/generated/global_trace.cu" "$HERE/generated/global_binding.cpp" "$SRC/csrc/rocm/hc_rdna2.cu" "$SRC/csrc/rocm/q_gemm_rdna2_common.cuh" "$SRC/csrc/rocm/qdq_4_rdna2.cuh" "$SRC/csrc/rocm/rdna_allreduce.cuh")
+sha256sum "${INPUTS[@]}" > "$OUT/inputs.before"
+cat /proc/sys/kernel/random/boot_id > "$OUT/boot.before"
+finish() {
+  rc=$?
+  set +e
+  sha256sum "${INPUTS[@]}" > "$OUT/inputs.after"
+  cat /proc/sys/kernel/random/boot_id > "$OUT/boot.after"
+  cmp "$OUT/inputs.before" "$OUT/inputs.after" || rc=1
+  cmp "$OUT/boot.before" "$OUT/boot.after" || rc=1
+  printf '%s\n' "$rc" > "$OUT/exit-status.txt"
+  exit "$rc"
+}
+trap finish EXIT
+cd /tmp
+timeout -k 10 900 "$VENV/bin/python" "$HERE/compile_cpu_only.py" \
+  --repo-root "$SRC" --output-dir "$OUT/compiled" > "$OUT/build.log" 2>&1

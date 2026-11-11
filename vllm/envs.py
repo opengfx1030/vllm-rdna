@@ -21,10 +21,12 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
+    VLLM_ROCM_MLOCK_PINNED_HOST: Literal["auto", "1", "0"] = "auto"
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
-    VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
+    VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
+    VLLM_CHAT_TEMPLATE_FUEL: int = 500000
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -60,11 +62,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
-    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
-    VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
-    VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XPU_PP_MICROBATCH: bool = True
-    VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
@@ -78,6 +76,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
     VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
+    VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
@@ -86,6 +85,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
+    VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES: int = 715_827_880
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
+    VLLM_HTTP_MAX_REQUEST_BODY_SIZE: int = 32 * 1024 * 1024  # bytes
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
@@ -137,23 +138,24 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
+    VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
+    VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
+    VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
-    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["asm", "segmented"] = "segmented"
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
-    VLLM_ROCM_USE_AITER_FP8BMM: bool = True
-    VLLM_ROCM_USE_AITER_FP4BMM: bool = True
+    VLLM_ROCM_USE_AITER_FP8BMM: bool = False
+    VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
-    VLLM_ROCM_MONO_DECODE: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -168,12 +170,25 @@ if TYPE_CHECKING:
     # MoE epilogue accumulation mode for the gfx1030 RDNA2 kernels. Default
     # (False): the legacy packed-fp16 CAS-64 atomic add (atomic_add_pk4_f16),
     # order-dependent at fp16 precision but faster (measured +2.5% at MTP=0,
-    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into a
-    # cached fp32 scratch plus a single fp32->fp16 cast — run-to-run
-    # deterministic in practice. Applies to moe_gptq_gemm_rdna2 (W4A16) and
-    # moe_w4a8_gemm_rdna2 (W4A8); per-call override via
-    # fp32_accum=True/False in _custom_ops.py.
+    # +12-13% at MTP=2 at c=1 vs fp32). Opt-in (=1): fp32 atomics into an
+    # fp32 scratch plus a single fp32->fp16 cast. Still order-dependent
+    # (fp32 adds in arrival order), only less often visible after the cast;
+    # VLLM_RDNA2_MOE_DETERMINISTIC is the exact mode. Applies to
+    # moe_gptq_gemm_rdna2 (W4A16) and moe_w4a8_gemm_rdna2 (W4A8); per-call
+    # override via fp32_accum=True/False in _custom_ops.py.
     VLLM_RDNA2_MOE_FP32_ACCUM: bool = False
+    # Deterministic mode for the gfx1030 RDNA2 path. Routed MoE
+    # (_rdna2_fused_moe): run-to-run bit-identical, with a fixed-order top-k
+    # sum for single-K-block W4A8 steps and Q32 fixed-point accumulation for
+    # every other step. Radix top-k (top_k_per_row_decode/_prefill in
+    # csrc/sampler.cu, which QSA uses above 2048 tokens of context): among
+    # exactly tied scores at the cut the lowest columns win, so the selected
+    # set no longer depends on atomic arrival order (the order of the returned
+    # indices still does). The top-k launcher reads the variable once, at its
+    # first launch, with the same truthiness as below, so set it in the server
+    # environment before the process starts. The gfx950 device-length-aware
+    # kernels are not covered.
+    VLLM_RDNA2_MOE_DETERMINISTIC: bool = False
     # Force gemv_f16_rdna2 for gfx1030 n<=5 instead of qualified wvSplitK.
     VLLM_RDNA_DENSE_GEMV: bool = False
     # hippihx V1 consume (github.com/BlivionIaG/hippihx). Off by default.
@@ -181,14 +196,12 @@ if TYPE_CHECKING:
     VLLM_HIPPIHX_LIB: str | None = None
     VLLM_HIPPIHX_CODE_OBJECT: str | None = None
     VLLM_RDNA_AR: str = "0"
+    VLLM_RDNA_AR_HIER: str = "auto"
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
-    Q_SCALE_CONSTANT: int = 200
-    K_SCALE_CONSTANT: int = 200
-    V_SCALE_CONSTANT: int = 100
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
@@ -236,6 +249,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -246,6 +260,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -255,6 +270,9 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
+    VLLM_P2P_MAX_PEERS: int = 128
+    VLLM_P2P_HANDSHAKE_TIMEOUT_S: int = 30
+    VLLM_P2P_IDLE_TIMEOUT_S: int = 300
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
@@ -266,6 +284,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
+    VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
@@ -325,6 +344,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_PLE_CPU_OFFLOAD: bool = False
@@ -340,6 +360,16 @@ if TYPE_CHECKING:
     # dilated short-conv (default off, not yet end-to-end measured).
     VLLM_RDNA_HC_PREFILL_HIP: bool = True
     VLLM_RDNA_QSA_HIP: bool = True
+    # Which fused HIP QSA decode the non-monokernel Qwen4Exp path may use.
+    #   "auto"  - pick the kernel that matches the cache layout: the fp16
+    #             fused decode for an fp16 cache, the packed-int4 fused decode
+    #             for an int4_fp16_block cache, Triton otherwise.
+    #   "int4"  - require the packed-int4 fused decode; refuse if it is not
+    #             available rather than falling back (the Triton kernels
+    #             cannot read the packed record layout, and reading it as
+    #             the wrong format is silent corruption rather than a crash).
+    #   "off"   - never use the fused HIP QSA decode.
+    VLLM_RDNA_QSA_DECODE_MODE: str = "auto"
     VLLM_RDNA_PLE_CONV_HIP: bool = False
     # Umbrella for the whole RDNA2 HIP kernel set (worker/sampler, top-k/top-p
     # masking, QSA metadata, MTP conv1d + GDN spec-verify, unquantized MoE,
@@ -370,6 +400,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_REQUEST_BODY_LOG_LEVEL: str = "DEBUG"
 
 
 def get_default_cache_root():
@@ -412,7 +443,7 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     default_value = (
         "1"
@@ -424,7 +455,7 @@ def use_aot_compile() -> bool:
 
 
 def use_mega_aot_artifact():
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     default_value = (
         "1" if is_torch_equal_or_newer("2.12.0.dev") and use_aot_compile() else "0"
@@ -794,6 +825,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE": lambda: int(
         os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")
     ),
+    # mlock() every pinned host mapping (hipHostMalloc, a KFD userptr buffer)
+    # of a ROCm worker once warm-up is done, and again every 2 s for the ones
+    # that appear later. Without it, page reclaim or compaction that moves one
+    # page of such a buffer makes KFD evict every GPU queue of the worker.
+    # "auto" (default): on for ROCm gfx10x only; "1": on for any ROCm GPU;
+    # "0": off. Needs RLIMIT_MEMLOCK above the pinned total (about 25 GiB per
+    # TP4 Flash-Next worker); an mlock() that fails only logs a warning. See
+    # docs/rdna/serving.md.
+    "VLLM_ROCM_MLOCK_PINNED_HOST": env_with_choices(
+        "VLLM_ROCM_MLOCK_PINNED_HOST", "auto", ["auto", "1", "0"]
+    ),
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.9 this is
     # enabled by default.
@@ -843,14 +885,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
     # used to control the visible devices in the distributed setting
     "CUDA_VISIBLE_DEVICES": lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
-    # timeout for each iteration in the engine
-    "VLLM_ENGINE_ITERATION_TIMEOUT_S": lambda: int(
-        os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")
-    ),
     # Timeout in seconds for waiting for engine cores to become ready
     # during startup. Default is 600 seconds (10 minutes).
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
+    ),
+    # Maximum wall-clock seconds allowed for a single chat template render.
+    # Set to 0 to disable the timeout.
+    "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
+        os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
+    ),
+    # Maximum template instructions (MiniJinja fuel) for rendering a
+    # request-supplied chat template (--trust-request-chat-template) in the
+    # Rust frontend; the server's own template has no limit. Set to 0 to
+    # disable the limit.
+    "VLLM_CHAT_TEMPLATE_FUEL": lambda: int(
+        os.environ.get("VLLM_CHAT_TEMPLATE_FUEL", "500000")
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
@@ -949,36 +999,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and
     # on Zen CPUs whether to serve int4 checkpoints as DA8W4 rather than W4A16.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
-    # If the env var is set, Ray Compiled Graph uses the specified
-    # channel type to communicate between workers belonging to
-    # different pipeline-parallel stages.
-    # Available options:
-    # - "auto": use the default channel type
-    # - "nccl": use NCCL for communication
-    # - "shm": use shared memory and gRPC for communication
-    "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE": env_with_choices(
-        "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto", ["auto", "nccl", "shm"]
-    ),
-    # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's Compiled Graph.
-    "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
-    ),
-    # If the env var is set, it uses a Ray Communicator wrapping
-    # vLLM's pipeline parallelism communicator to interact with Ray's
-    # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
-    "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
-    ),
     # Using a flag to control microbatch on XPU device, users on XPU device can
     # decide to disable it when they needed.
     "VLLM_XPU_PP_MICROBATCH": lambda: bool(
         int(os.getenv("VLLM_XPU_PP_MICROBATCH", "1"))
-    ),
-    # When True and distributed_executor_backend="ray", use RayExecutorV2
-    # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
-    "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
     # When True, GroupCoordinator constructs its CPU/device subgroups via
     # ``torch.distributed.split_group(backend=...)``
@@ -1100,6 +1124,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_IMAGE_PIXELS": lambda: int(
         os.getenv("VLLM_MAX_IMAGE_PIXELS", "178956970")
     ),
+    # Maximum aggregate decoded bytes across media in one request.
+    # The default allows one image at the per-image pixel limit at 4 bytes
+    # per pixel. Set to 0 to disable.
+    "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "715827880")
+    ),
+    "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", "256")
+    ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
@@ -1178,6 +1211,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
+    ),
+    # Maximum request body size in bytes accepted by the HTTP API server; 0
+    # removes the limit. Only enforced by the Rust frontend; the Python
+    # frontend has no limit.
+    "VLLM_HTTP_MAX_REQUEST_BODY_SIZE": lambda: int(
+        os.environ.get("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", str(32 * 1024 * 1024))
     ),
     # Maximum allowed value for the `n` sampling parameter (number of output
     # sequences per request). Limits resource consumption to prevent
@@ -1310,6 +1349,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
+    # Muse Spark on ROCm: dtype of the TP reduction before the post-expert norm.
+    "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
+        "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
+    ).lower(),
+    # Muse Spark on ROCm: online-quantize routed experts ("" or "mxfp4"; first
+    # and last layer stay BF16).
+    "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
+        "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
+    ).lower(),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -1333,6 +1381,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["auto", "a4w4", "a8w4", "a16w4", "0", "1"],
         case_sensitive=False,
     ),
+    # Opt-in switch for a4w4 (FP4 activation) MoE on DeepSeek V4.1, AITER
+    # MXFP4 backend. Default is a8w4 (FP8); set to "1" to enable a4w4
+    # ("true" is not accepted -- only "0"/"1"). Raises if set for other
+    # models.
+    "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4": lambda: maybe_convert_bool(
+        os.getenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4")
+    ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
     #       for large batches
@@ -1353,15 +1408,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
     ),
-    # Kernel for causal multi-token (spec-decode) verify steps under decode
-    # context parallelism on gfx950: "asm" uses AITER's round-robin ASM
-    # decode, "segmented" the Triton segmented MLA path.
-    "VLLM_ROCM_AITER_MLA_DCP_VERIFY": env_with_choices(
-        "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
-        "segmented",
-        ["asm", "segmented"],
-        case_sensitive=False,
-    ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through
     # the Gluon small-head kernel or through the padded persistent-scheduling
@@ -1381,25 +1427,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
     ),
-    # Whether to use aiter fp4 gemm asm.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
+    # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
+    # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the
+    # ROCM_AITER_MLA_SPARSE backend (DeepSeek V3.2, GLM-5.x) and DeepSeek
+    # V4 / V4.1. gfx950 only. By default is disabled.
+    "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
-    # Whether to use aiter triton fp8 bmm kernel
-    # By default is enabled.
+    # Whether to use aiter triton fp8 bmm kernel for MLA kv_b_proj.
+    # By default is disabled: it re-quantizes the projection weights online,
+    # regardless of the precision the checkpoint asked for.
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "False").lower() in ("true", "1")
     ),
-    # Whether to use aiter triton fp4 bmm kernel
-    # By default is enabled.
+    # Whether to use aiter triton fp4 bmm kernel for MLA kv_b_proj.
+    # By default is disabled, for the same reason as the fp8 variant above.
     "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "False").lower() in ("true", "1")
     ),
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
@@ -1412,9 +1462,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
-    # Alias of --monokernel (KernelConfig.monokernel), read in the API server
-    # by the ROCm platform and carried to the workers by the config.
-    # By default is disabled.
+    # Run the eligible layers of decode steps on the model's mono decode
+    # kernels: persistent launches a layer, the TP all-reduces in-kernel
+    # (DeepSeek-V4.1 on CDNA4). Also an alias of --monokernel
+    # (KernelConfig.monokernel), read in the API server by the ROCm platform
+    # and carried to the workers by the config. By default is disabled.
     "VLLM_ROCM_MONO_DECODE": lambda: (
         os.getenv("VLLM_ROCM_MONO_DECODE", "False").lower() in ("true", "1")
     ),
@@ -1464,6 +1516,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA2_MOE_FP32_ACCUM": lambda: (
         os.getenv("VLLM_RDNA2_MOE_FP32_ACCUM", "False").lower() in ("true", "1")
     ),
+    "VLLM_RDNA2_MOE_DETERMINISTIC": lambda: (
+        os.getenv("VLLM_RDNA2_MOE_DETERMINISTIC", "0").lower() in ("true", "1")
+    ),
     # Force donor gemv_f16_rdna2 on gfx1030 even for n<=5 (A/B vs wvSplitK).
     # From PR #5 / GeorgeMA-Strong Flash-Next candidate.
     "VLLM_RDNA_DENSE_GEMV": lambda: os.getenv("VLLM_RDNA_DENSE_GEMV", "0") == "1",
@@ -1480,9 +1535,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # larger messages use RCCL (two-shot was removed). fp16, bf16, and fp32.
     # Default off. "1" dispatches ahead of CUSTOM / RCCL. Not implied by
     # VLLM_FORCE_CUSTOM_ALL_REDUCE. Related: VLLM_RDNA_AR_BLOCKS,
-    # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_WAIT_MS. A wedge writes
+    # VLLM_RDNA_AR_PACE, VLLM_RDNA_AR_VEC, VLLM_RDNA_AR_WAIT_MS. A wedge writes
     # $VLLM_CACHE_ROOT/rdna_ar_wedged.
     "VLLM_RDNA_AR": lambda: os.getenv("VLLM_RDNA_AR", "0").strip().lower() or "0",
+    # Hierarchical rdna_ar for a group that spans two PCIe switch islands of
+    # equal size (TP8 on 2 x 4 V620). "auto" (default) turns it on for a group
+    # of 8 ranks that forms two equal islands and is silent elsewhere; "1" turns
+    # it on for any two equal islands of 2..4 and warns when the group is not
+    # two islands; "0" keeps the flat exchange. Messages below
+    # VLLM_RDNA_AR_HIER_MIN_KB keep the flat one-shot. Needs VLLM_RDNA_AR=1.
+    # Related: VLLM_RDNA_AR_HIER_ISLANDS, _ALGO, _MAX_KB, _X, _BLOCKS.
+    "VLLM_RDNA_AR_HIER": lambda: (
+        os.getenv("VLLM_RDNA_AR_HIER", "auto").strip().lower() or "auto"
+    ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce
@@ -1721,6 +1786,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
+    # instead of replicated weights and local-token computation.
+    "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(
+        int(os.getenv("VLLM_STEP5_SHARD_SP_SHARED_EXPERT", "0"))
+    ),
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to
     # serve its own token shard. Shard them across TP instead: the MLP then
@@ -1811,6 +1881,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_P2P_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")
     ),
+    # Maximum number of concurrent P2P peer sessions. Limits ZMQ socket
+    # consumption to prevent denial-of-service via unbounded peer
+    # creation from client-supplied kv_transfer_params. Default: 128.
+    "VLLM_P2P_MAX_PEERS": lambda: int(os.getenv("VLLM_P2P_MAX_PEERS", "128")),
+    # Seconds to wait for a P2P peer handshake to complete (connected
+    # but not yet ready). Sessions exceeding this deadline are reaped.
+    # Prevents never-responding peers from accumulating indefinitely.
+    "VLLM_P2P_HANDSHAKE_TIMEOUT_S": lambda: int(
+        os.getenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "30")
+    ),
+    # Seconds a P2P session may remain idle (no pending work, no
+    # messages) before it is eligible for eviction. Idle eviction runs
+    # only when remaining peer slots are within 8 of VLLM_P2P_MAX_PEERS.
+    # Default: 300. Set to 0 to disable.
+    "VLLM_P2P_IDLE_TIMEOUT_S": lambda: int(os.getenv("VLLM_P2P_IDLE_TIMEOUT_S", "300")),
     # IP address used for the EC connector's ZMQ side channel
     # (producer ROUTER bind, consumer DEALER dial).
     "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(
@@ -1878,6 +1963,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
     ),
+    # Transmit MoE all-to-all combine (expert-output) payloads in FP8 instead
+    # of BF16, halving NVLink traffic on the combine leg. Only takes effect
+    # when the installed FlashInfer MoeAlltoAll kernel supports it.
+    "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "0"))
+    ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
     # the blockscale tensor of activations NVFP4 Quantization.
@@ -1901,6 +1992,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enforce function parameter schemas in structural-tag based tool calling.
     "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
         os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
+    ),
+    # Constrain every `beam` output to its response template's format, also
+    # without tool or structured output constraints.
+    "VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT": lambda: (
+        os.getenv("VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT", "True").lower() in ("true", "1")
     ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
@@ -2097,9 +2193,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
     ),
-    # DeepEP v2: enable two-tier NVLink+RDMA hybrid mode
+    # DeepEP v2: use NVLink+RDMA hybrid communication across NVLink domains.
+    #   * hybrid mode = multi-node RDMA
+    #   * non hybrid mode = nvlink
+    # Set to 1 (the default) to allow DeepEP to autoselect hybrid vs non-hybrid.
+    # Set to 0 to disable hybrid mode.
     "VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE": lambda: bool(
-        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "0"))
+        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "1"))
     ),
     # DeepEP v2: use fewer SMs at slight throughput cost
     "VLLM_DEEPEP_V2_PREFER_OVERLAP": lambda: bool(
@@ -2175,6 +2275,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
+    # Cohere2 MoE runs the MLP/MoE of its parallel blocks on a side CUDA stream,
+    # overlapping it with attention, for batches of at most this many tokens.
+    # Larger batches and piecewise CUDA graphs (prefill / mixed batches) run
+    # the MLP inline. Set to 0 to disable the dual stream.
+    "VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD": lambda: int(
+        os.getenv("VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD", "256")
+    ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
     #     Safe for multiple vllm serve processes accessing the same torch compile cache.
@@ -2203,6 +2310,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_RDNA_HC_PREFILL_HIP", "1") == "1"
     ),
     "VLLM_RDNA_QSA_HIP": lambda: os.getenv("VLLM_RDNA_QSA_HIP", "1") == "1",
+    "VLLM_RDNA_QSA_DECODE_MODE": lambda: os.getenv("VLLM_RDNA_QSA_DECODE_MODE", "auto"),
     "VLLM_RDNA_PLE_CONV_HIP": lambda: os.getenv("VLLM_RDNA_PLE_CONV_HIP", "0") == "1",
     "VLLM_RDNA_ALL_HIP": lambda: os.getenv("VLLM_RDNA_ALL_HIP", "1") == "1",
     # Log model inspection after loading.
@@ -2336,6 +2444,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
         int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
     ),
+    # Logging level for request JSON body.
+    "VLLM_REQUEST_BODY_LOG_LEVEL": lambda: os.getenv(
+        "VLLM_REQUEST_BODY_LOG_LEVEL", "DEBUG"
+    ).upper(),
 }
 
 
@@ -2433,6 +2545,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_RAY_BUNDLE_INDICES",
+        "VLLM_CHAT_TEMPLATE_FUEL",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
@@ -2454,8 +2568,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
-        "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
@@ -2474,6 +2588,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_MAX_EMBED_DECODE_BYTES",
         "VLLM_MAX_IMAGE_PIXELS",
+        "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",
+        "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
@@ -2494,6 +2610,7 @@ def compile_factors() -> dict[str, object]:
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
+        "VLLM_REQUEST_BODY_LOG_LEVEL",
     }
 
     from vllm.config.utils import normalize_value

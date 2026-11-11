@@ -1,0 +1,28 @@
+# ROCm EngineCore fatal-shutdown race: isolated proposal
+
+The graph fault qualification reached `EngineCoreProc._send_engine_dead()` and
+then `MultiprocExecutor._ensure_worker_termination()`, which logged that it
+was waiting for four workers. The API manager sent SIGTERM in the same second.
+`run_engine_core()` currently restores SIGTERM to its default disposition
+before calling `engine_core.shutdown()`. This can terminate EngineCore before
+its executor reaches the bounded worker TERM/KILL escalation. The observed
+four surviving workers are consistent with that race; the logs do not prove
+which instruction received SIGTERM.
+
+`rocm-fatal-sigterm-cleanup.patch` is an unapplied proposal. On ROCm, it
+ignores SIGTERM before the fatal notification and throughout cleanup, then
+restores the default disposition in a `finally` block. SIGINT and non-ROCm
+behavior stay as before. The parent process still has its bounded SIGKILL
+escalation if EngineCore cannot finish cleanup.
+
+`core.py.candidate` is the full source with the patch for AST testing. Run
+`python3 check_cpu.py -v` from any directory. The test extracts only
+`run_engine_core`, needs no torch/GPU, and covers notification ordering,
+cleanup, exception restoration, non-ROCm behavior, and actual SIGTERM in
+short-lived subprocesses. The original source's ROCm child exits by SIGTERM;
+the proposed source completes fake cleanup. Result: **6 CPU tests pass**.
+
+This does not qualify the real four-worker graph fault. After review, the
+patch needs existing startup/shutdown tests and a fresh bounded rank-1 fault
+run on a separate server. Require all worker PIDs to exit without driver
+process-group SIGKILL, with privileged kernel logs and GPU ownership checked.

@@ -95,12 +95,36 @@ rdna_init() {
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$source_dir/cache/extensions}
 }
 
+# rdna_resolve_pci_buses BUS...  ->  comma-separated HIP indices, in the order given.
+# A HIP index is enumeration order and moves when cards, risers or switches change
+# (par1-cs25 re-enumerated on 2026-11-05); a PCI bus does not. BUS is the hex bus number
+# ("ce", "0a") or "domain:bus". Needs $VENV (torch) and the ROCm libraries from
+# rdna_init. Exits non-zero (message on stderr) when a bus has no GPU or is repeated.
+rdna_resolve_pci_buses() {
+    env -u HIP_VISIBLE_DEVICES -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
+        "$VENV/bin/python" -c '
+import sys
+import torch
+want = [a.lower().split(":")[-1] for a in sys.argv[1:]]
+have = {}
+for i in range(torch.cuda.device_count()):
+    have.setdefault("%02x" % torch.cuda.get_device_properties(i).pci_bus_id, i)
+missing = [b for b in want if b not in have]
+if missing:
+    sys.exit("no GPU on PCI bus %s (present: %s)" % (",".join(missing), " ".join(sorted(have))))
+if len(set(want)) != len(want):
+    sys.exit("a PCI bus is listed twice: %s" % " ".join(want))
+print(",".join(str(have[b]) for b in want))
+' "$@"
+}
+
 rdna_tunableop() {
     # shellcheck source=tools/rdna2_028/tunableop_env.sh
     source "$source_dir/tools/rdna2_028/tunableop_env.sh"
     if [[ ${TUNABLEOP:-1} == 1 ]]; then
-        configure_tunableop "$ROCM_SDK_LIB/librocblas.so.5" \
-            "${TUNABLEOP_ROOT:-$source_dir/tunableop}" || return 1
+        # One TunableOp rank file per worker device ordinal (TP * PP workers on this host).
+        TUNABLEOP_RANKS=$((${TP:-1} * ${PP:-1})) configure_tunableop \
+            "$ROCM_SDK_LIB/librocblas.so.5" "${TUNABLEOP_ROOT:-$source_dir/tunableop}" || return 1
     else
         export PYTORCH_TUNABLEOP_ENABLED=0 PYTORCH_TUNABLEOP_TUNING=0
         export PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=0

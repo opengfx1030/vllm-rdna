@@ -1,0 +1,50 @@
+{
+  "source_commit": "655cde1ce2",
+  "control_commit": "bab463679e",
+  "gpus": [
+    6,
+    7
+  ],
+  "tp": 2,
+  "mtp": 2,
+  "cpu_kv_gib": 16,
+  "forced_length_requests": 58,
+  "forced_output_tokens": 40960,
+  "reports": [
+    {
+      "group": "off-short",
+      "passed": true,
+      "arms": 8
+    },
+    {
+      "group": "off-long",
+      "passed": true,
+      "arms": 2
+    },
+    {
+      "group": "wait-long",
+      "passed": true,
+      "arms": 2
+    },
+    {
+      "group": "collective-long",
+      "passed": true,
+      "arms": 2
+    },
+    {
+      "group": "collective-long-c8",
+      "passed": true,
+      "arms": 2
+    }
+  ],
+  "diagnostic_marker_counts": {
+    "RDNA_GDN_DIAG scratch=": 0,
+    "Mono K2 fault": 0,
+    "NaNs detected in logits": 0,
+    "Memory Fault": 0,
+    "HSA_STATUS_ERROR": 0
+  },
+  "gdn_layer_mapping_lines": 72,
+  "original_serving_nan_cause_proven": false,
+  "performance_comparison_qualified": false
+}

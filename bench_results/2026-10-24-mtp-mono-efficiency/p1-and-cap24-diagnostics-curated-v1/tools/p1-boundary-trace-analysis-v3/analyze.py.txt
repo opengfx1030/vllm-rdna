@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Analyze qualified P1 device traces against exact row104 XN snapshots."""
+
+import argparse
+import ctypes
+import ctypes.util
+import hashlib
+import importlib.util
+import json
+import math
+import struct
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+P1_HELPER = BASE / "native-m128-repeat-v1/analyze_p1.py"
+LIBM_PATH = ctypes.util.find_library("m")
+if LIBM_PATH is None:
+    raise RuntimeError("system libm is required for fused multiply-add analysis")
+LIBM = ctypes.CDLL(LIBM_PATH)
+C_FMA = LIBM.fma
+C_FMA.argtypes = (ctypes.c_double, ctypes.c_double, ctypes.c_double)
+C_FMA.restype = ctypes.c_double
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load_helper():
+    spec = importlib.util.spec_from_file_location("p1_cpu_order_helper", P1_HELPER)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def f32_bits(value: float) -> int:
+    return struct.unpack("<I", struct.pack("<f", value))[0]
+
+
+def finite_f32(value: object) -> float:
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"nonfinite/non-numeric trace value: {value!r}")
+    result = float(value)
+    if struct.unpack("<f", struct.pack("<f", result))[0] != result:
+        raise ValueError(f"trace value is not exactly representable as FP32: {value!r}")
+    return result
+
+
+def predict_with_measured_rrms(helper, xs, ws, rrms: float, actual: list[int]):
+    if len(xs) != len(ws) or len(ws) != len(actual) or len(xs) != 2560:
+        raise ValueError("P1 arrays must each have 2560 values")
+    modes = {}
+    for mode in ("separate", "fma"):
+        predicted = []
+        for x, w in zip(xs, ws):
+            lo = helper.mul(x, rrms)
+            y = (helper.add(lo, helper.mul(lo, w)) if mode == "separate"
+                 else helper.f32(C_FMA(lo, w, lo)))
+            predicted.append(helper.half_bit(y))
+        wrong = [i for i, (got, expected) in enumerate(zip(predicted, actual))
+                 if got != (expected & 0xFFFF)]
+        modes[mode] = {
+            "exact": not wrong,
+            "mismatch_count": len(wrong),
+            "first_mismatch_indices": wrong[:16],
+            "index1690_predicted": helper.half(predicted[1690]),
+            "index1690_actual": helper.half(actual[1690]),
+        }
+    return modes
+
+
+def analyze(trace: dict, repeat: dict, snapshot: dict, helper) -> dict:
+    if trace.get("status") != "PASS" or trace.get("complete") is not True:
+        raise ValueError("trace did not complete all runtime gates")
+    if repeat.get("status") != "COMPLETE" or repeat.get("routes_stable") is not True:
+        raise ValueError("native repeat is incomplete or routes are unstable")
+    if snapshot.get("seed") != 250252 or snapshot.get("M") != 128:
+        raise ValueError("wrong M128 seed250252 snapshot")
+    records = trace.get("records")
+    labels = ("eager_seed250252", "graph_seed250252", "graph_seed250253")
+    if not isinstance(records, list) or [r.get("label") for r in records] != list(labels):
+        raise ValueError("expected eager, same-input graph, changed-input graph records")
+    for record in records:
+        checks = record.get("checks")
+        errors = record.get("errors")
+        if not isinstance(checks, dict) or not checks or not all(v is True for v in checks.values()):
+            raise ValueError(f"trace output parity failed at {record['label']}")
+        if not isinstance(errors, dict) or not errors or any(
+                not isinstance(code, list) or not code or code[0] != 0
+                for code in errors.values()):
+            raise ValueError(f"kernel sticky error at {record['label']}")
+
+    p1 = repeat["row104_stream0_p1"]
+    resbits = p1["res_out_fp16_bits_int16"]
+    wbits = p1["norm_weight_fp16_bits_int16"]
+    native_bits = p1["native_xn_fp16_bits_int16"]
+    native_snapshot_bits = snapshot["snapshots"]["native"]["xn"]["values"][104][:2560]
+    global_bits = snapshot["snapshots"]["candidate"]["xn"]["values"][104][:2560]
+    if any(len(row) != 2560 for row in
+           (resbits, wbits, native_bits, native_snapshot_bits, global_bits)):
+        raise ValueError("wrong P1 row width")
+    if [x & 0xFFFF for x in native_bits] != [x & 0xFFFF for x in native_snapshot_bits]:
+        raise ValueError("native XN changed across qualified runs")
+    xs = [helper.half(x) for x in resbits]
+    ws = [helper.half(w) for w in wbits]
+
+    rows = []
+    for record in records:
+        native_sum = finite_f32(record["native_sum_fp32"])
+        global_sum = finite_f32(record["global_sum_fp32"])
+        native_rrms = finite_f32(record["native_rrms_fp32"])
+        global_rrms = finite_f32(record["global_rrms_fp32"])
+        if record["label"].endswith("250252"):
+            if record["native_xn_row104_index1690"] != helper.half(native_bits[1690]):
+                raise ValueError("traced native XN does not match repeat/snapshot")
+            if record["global_xn_row104_index1690"] != helper.half(global_bits[1690]):
+                raise ValueError("traced global XN does not match snapshot")
+        row = {
+            "label": record["label"],
+            "native_sum_fp32": native_sum,
+            "global_sum_fp32": global_sum,
+            "sum_difference_global_minus_native": global_sum - native_sum,
+            "sum_ulp_distance": abs(f32_bits(global_sum) - f32_bits(native_sum)),
+            "native_rrms_fp32": native_rrms,
+            "global_rrms_fp32": global_rrms,
+            "rrms_difference_global_minus_native": global_rrms - native_rrms,
+            "rrms_ulp_distance": abs(f32_bits(global_rrms) - f32_bits(native_rrms)),
+            "index1690_native_xn": record["native_xn_row104_index1690"],
+            "index1690_global_xn": record["global_xn_row104_index1690"],
+            "global_route_ids_row104": record["global_route_ids_row104"],
+        }
+        if record["label"].endswith("250252"):
+            row["native_xn_prediction"] = predict_with_measured_rrms(
+                helper, xs, ws, native_rrms, native_bits)
+            row["global_xn_prediction"] = predict_with_measured_rrms(
+                helper, xs, ws, global_rrms, global_bits)
+            row["both_full_xn_reproduced"] = (
+                any(v["exact"] for v in row["native_xn_prediction"].values())
+                and any(v["exact"] for v in row["global_xn_prediction"].values()))
+        rows.append(row)
+    same_input_stable = all(
+        rows[0][key] == rows[1][key]
+        for key in ("native_sum_fp32", "global_sum_fp32",
+                    "native_rrms_fp32", "global_rrms_fp32",
+                    "index1690_native_xn", "index1690_global_xn",
+                    "global_route_ids_row104"))
+    measured_scale_sufficient = (
+        same_input_stable and rows[0]["both_full_xn_reproduced"]
+        and rows[1]["both_full_xn_reproduced"]
+        and rows[0]["rrms_ulp_distance"] > 0)
+    return {
+        "scope": "CPU analysis of qualified device FP32 P1 trace; no serving-speed claim",
+        "trace_boot": trace.get("boot"),
+        "native_repeat_boot": repeat.get("boot"),
+        "source_cross_run_native_xn_exact": True,
+        "same_input_eager_graph_fp32_and_route_stable": same_input_stable,
+        "measured_scale_sufficient_to_reproduce_full_xn": measured_scale_sufficient,
+        "caveat": "Measured rrms is sufficient only if full-XN prediction is bit exact; changed-input record has no archived full-XN reference. This does not prove a route repair or serving gain.",
+        "records": rows,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--trace-result", type=Path, required=True)
+    parser.add_argument("--repeat-result", type=Path, required=True)
+    parser.add_argument("--snapshot", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.output.exists():
+        raise FileExistsError(args.output)
+    source_paths = [args.trace_result, args.repeat_result, args.snapshot, P1_HELPER]
+    for path in source_paths:
+        path.resolve(strict=True)
+    helper = load_helper()
+    result = analyze(*(json.loads(path.read_text()) for path in source_paths[:3]), helper)
+    result["sources"] = {str(path): sha(path) for path in source_paths}
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# Diagnostic only: fresh server for one cap/concurrency pair; no throughput claim.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+STAGE="$HERE/../dense-mtp-failstop-serving-stage-v3"
+TIMING="$HERE/../mtp-body-timing-overlay-v2"
+HEALTHY_TREE=${HEALTHY_TREE:?set exact unchanged healthy cleanup-v3 source tree}
+PROFILE_CONC=${PROFILE_CONC:?set1or8}
+TARGET_CAP=${TARGET_CAP:?set8or24}
+case "$TARGET_CAP" in 8|24) ;; *) echo "target cap must be8 or24" >&2; exit 2;; esac
+case "$PROFILE_CONC" in
+  1) CELL="16384:1024:1:4"; EXPECTED_WIDTH=3; EXPECTED_MTP_WIDTH=1; KERNEL_MIN=1; KERNEL_MAX=2147483647;;
+  8) CELL="16384:1024:8:8"; EXPECTED_WIDTH=24; EXPECTED_MTP_WIDTH=8;
+     if [[ $TARGET_CAP == 8 ]]; then KERNEL_MIN=0; KERNEL_MAX=0; else KERNEL_MIN=1; KERNEL_MAX=2147483647; fi;;
+  *) echo "profile concurrency must be1 or8" >&2; exit 2;;
+esac
+ARM="mtp-body-phase-v1-cap${TARGET_CAP}-c${PROFILE_CONC}"
+RUNS_ROOT=${RUNS_ROOT:?set a new absolute RUNS_ROOT for this arm}
+PORT=${PORT:?set a unique unused PORT}
+BASE_TREE=${BASE_TREE:-/home/chenco_adm/vllm-rdna-mtp-mono}
+FROZEN_TREE=${FROZEN_TREE:-/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/correctness-core-v1-serve-tree-v2}
+CANDIDATE_TREE=${CANDIDATE_TREE:?set the fresh healthy fail-stop overlay tree}
+VENV=${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final}
+MODEL=${MODEL:-/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+PLE_DIR=${PLE_DIR:-/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
+GATE_SCRIPT=${GATE_SCRIPT:-$STAGE/serve_validate_mono_v3_gate.sh}
+EXPECTED_SO=6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed
+EXPECTED_CU=c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434
+EXPECTED_CORE_PY=d68e8983fa59059cdfa34be018aba291b7ffb0970cb4390fb3e6742b1e08228e
+
+MTP_DRAFTER=1
+LABEL=MonoKernel-dense-MTP-failstop
+[[ $RUNS_ROOT == /* && ! -e $RUNS_ROOT && ! -e ${RUNS_ROOT}.gpu-owners.txt ]] || {
+  echo "refusing reused/non-absolute output path: $RUNS_ROOT" >&2; exit 2;
+}
+[[ $PORT =~ ^[0-9]+$ ]] || { echo "PORT must be numeric" >&2; exit 2; }
+[[ $(hostname) == par1-cs25 ]] || { echo "refusing host $(hostname)" >&2; exit 2; }
+[[ -d $BASE_TREE && -d $FROZEN_TREE && -d $CANDIDATE_TREE && -x $VENV/bin/python ]] || { echo 'tree or frozen venv missing' >&2; exit 2; }
+[[ -f $MODEL/config.json && -f $PLE_DIR/META.json && -f $GATE_SCRIPT ]] || { echo 'model, PLE, or gate missing' >&2; exit 2; }
+[[ ! -e $RUNS_ROOT && ! -e $RUNS_ROOT/cache ]] || { echo 'refusing existing output/cache' >&2; exit 2; }
+if curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+  echo "refusing occupied port $PORT" >&2; exit 3
+fi
+
+mkdir -p "$(dirname "$RUNS_ROOT")"
+exec 9>/tmp/codex-mtp-mono-hip6-9.lock
+flock -n 9 || { echo 'HIP6-9 serving lock held' >&2; exit 3; }
+"$VENV/bin/python" -S "$HERE/../core-inline-serving-ab/check_reserved_gpu.py" >"${RUNS_ROOT}.gpu-owners.txt" 2>&1
+unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+unset VLLM_TEST_MTP_FAULT_MARKER
+export HIP_VISIBLE_DEVICES=6,7,8,9
+
+# Exact frozen diagnostic proposal; do not accept mutable timing substitutes.
+[[ $(sha256sum "$TIMING/source-manifest.json" | cut -d' ' -f1) == d8f69f012fdc8150a86ded3cdd8c3d366f95a1c466c10f1180ede6dc6a7ac410 ]]
+[[ $(sha256sum "$TIMING/stage_verify.py" | cut -d' ' -f1) == fd6335e8d0d2c4dfa9d7284783628e98f642c8d08276736238f244c29de27995 ]]
+[[ $(sha256sum "$TIMING/generate.py" | cut -d' ' -f1) == 677e35e43da8b8f27eaca1ef0ae510452b5330ec66b51809cae5dc02dba274e8 ]]
+# Diagnostic overlay retains native6fac and cleanup-v3 EngineCore.
+actual_so=$(sha256sum "$CANDIDATE_TREE/vllm/_rocm_C.abi3.so" | cut -d' ' -f1)
+actual_cu=$(sha256sum "$CANDIDATE_TREE/csrc/rocm/mono_k2_rdna2.cu" | cut -d' ' -f1)
+actual_core_py=$(sha256sum "$CANDIDATE_TREE/vllm/v1/engine/core.py" | cut -d' ' -f1)
+[[ $actual_so == "$EXPECTED_SO" ]] || { echo "candidate core SHA mismatch: $actual_so" >&2; exit 4; }
+[[ $actual_cu == "$EXPECTED_CU" ]] || { echo "candidate MonoKernel SHA mismatch: $actual_cu" >&2; exit 4; }
+[[ $actual_core_py == "$EXPECTED_CORE_PY" ]] || { echo "EngineCore cleanup SHA mismatch: $actual_core_py" >&2; exit 4; }
+"$VENV/bin/python" -S "$TIMING/stage_verify.py" verify \
+  --tree "$CANDIDATE_TREE" --healthy-tree "$HEALTHY_TREE" \
+  --frozen-source-tree "$FROZEN_TREE"
+
+BOOT=$(cat /proc/sys/kernel/random/boot_id)
+hashes() {
+  sha256sum \
+    "$CANDIDATE_TREE/vllm/_rocm_C.abi3.so" \
+    "$CANDIDATE_TREE/csrc/rocm/mono_k2_rdna2.cu" \
+    "$CANDIDATE_TREE/csrc/rocm/ops.h" \
+    "$CANDIDATE_TREE/csrc/rocm/torch_bindings.cpp" \
+    "$CANDIDATE_TREE/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py" \
+    "$CANDIDATE_TREE/vllm/models/qwen4_exp/amd/mono/rdna2/failstop.py" \
+    "$CANDIDATE_TREE/vllm/models/qwen4_exp/amd/mono/rdna2/k1.py" \
+    "$CANDIDATE_TREE/vllm/models/qwen4_exp/amd/mono_decode_rdna2.py" \
+    "$CANDIDATE_TREE/vllm/models/qwen4_exp/amd/mono/rdna2/k2.py" \
+    "$CANDIDATE_TREE/vllm/models/qwen4_exp/amd/mono/rdna2/layout.py" \
+    "$CANDIDATE_TREE/vllm/models/qwen4_exp/amd/mono/rdna2/debug.py" \
+    "$CANDIDATE_TREE/vllm/v1/worker/gpu/phase_timer.py" \
+    "$CANDIDATE_TREE/vllm/v1/worker/gpu_model_runner.py" \
+    "$CANDIDATE_TREE/vllm/v1/worker/gpu/model_runner.py" \
+    "$CANDIDATE_TREE/vllm/v1/worker/gpu/async_utils.py" \
+    "$CANDIDATE_TREE/vllm/v1/engine/core.py" \
+    "$CANDIDATE_TREE/vllm/models/qwen4_exp/amd/mono/rdna2/__init__.py" \
+    "$CANDIDATE_TREE/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_wna16_rdna2.py" \
+    "$CANDIDATE_TREE/tools/rdna/serve_rdna.sh" \
+    "$CANDIDATE_TREE/tools/rdna/recipes/flashnext-mtp2.env" \
+    "$MODEL/config.json" "$PLE_DIR/META.json" \
+    "$CANDIDATE_TREE/tunableop/rocm7.14-rocblas5.5/"tunableop_results{0,1,2,3}.csv \
+    "$CANDIDATE_TREE/overlay_manifest.json" "$CANDIDATE_TREE/timing_overlay_manifest.json" \
+    "$HEALTHY_TREE/overlay_manifest.json" "$TIMING/source-manifest.json" \
+    "$TIMING/generate.py" "$TIMING/stage_verify.py" \
+    "$HERE/../mtp-body-timing-overlay-v1/generate.py" "$HERE/profile_one_cell.sh" \
+    "$STAGE/stage_overlay.py" "$STAGE/verify_overlay.py" \
+    "$STAGE/kernel_journal_v2.py" "$GATE_SCRIPT" "$HERE/extract_profile.py" \
+    "$HERE/../core-inline-phase-profile-v3/extract_profile.py"
+}
+mkdir -p "$RUNS_ROOT"
+exec > >(tee -a "$RUNS_ROOT/driver.log") 2>&1
+echo "START $(date -Is) arm=$ARM label=$LABEL host=$(hostname) boot=$BOOT port=$PORT"
+hashes > "$RUNS_ROOT/sha256.before"
+printf '%s\n' "$BOOT" > "$RUNS_ROOT/boot-id.before"
+{
+  printf 'arm=%s\nlabel=%s\nmtp_drafter=%s\ntarget_monokernel=1\n' "$ARM" "$LABEL" "$MTP_DRAFTER"
+  printf 'candidate_tree=%s\nexpected_core_sha256=%s\nexpected_mono_cu_sha256=%s\nexpected_engine_core_py_sha256=%s\n' \
+    "$CANDIDATE_TREE" "$EXPECTED_SO" "$EXPECTED_CU" "$EXPECTED_CORE_PY"
+  printf 'profile_kind=diagnostic_only\ntarget_cap=%s\nprofile_concurrency=%s\nphase16_op0_timingtrue=1\nmtp_body_scope=separate_K2_plus_FFN_AR\nk1_attention_measured=0\nfrozen_source_tree=%s\nproposal_mode=healthy\n' "$TARGET_CAP" "$PROFILE_CONC" "$FROZEN_TREE"
+  printf 'gpus=6,7,8,9\nboot_id=%s\n' "$BOOT"
+} > "$RUNS_ROOT/arm-provenance.txt"
+
+export MTP_DRAFTER
+export READY_TIMEOUT=1800
+export RECIPE=flashnext-mtp2 MODEL GPUS=6,7,8,9 VENV
+export PORT TAG="dense-drafter-$ARM" OUT="$RUNS_ROOT" CACHE="$RUNS_ROOT/cache"
+export PLE=int4 PLE_QUANT_DIR="$PLE_DIR" KV=4026531840 GMEM=0.92
+export LPTH=1024 PREFILL_INTERVAL=2 SEQS=8
+export CELLS="$CELL"
+export BENCH_EXTRA='--temperature 0 --save-detailed'
+export RESET_PREFIX_CACHE=1 VLLM_SERVER_DEV_MODE=1
+export CONC_PROBE_ARGS='--no-ignore-eos --max-tokens 128'
+export PPL_PROBE=1 PREFIX_PROBE=1 CONC_PROBE=1 WARMUP=1
+export VLLM_RDNA_DYNAMIC_PREFILL=0 VLLM_RDNA_PHASE_TIMING=16 VLLM_RDNA_OP_TIMING=0
+export VLLM_GDN_PREFILL_TIMING=0 VLLM_RDNA_GDN_OPAQUE=1
+export VLLM_RAISE_ON_LOGIT_NANS=1
+export LOAD_HOOK="$CANDIDATE_TREE/tools/rdna/mono/parity_hook.sh"
+export SERVE_TREE="$CANDIDATE_TREE" SERVE_SCRIPT="$CANDIDATE_TREE/tools/rdna/serve_rdna.sh"
+if [[ $MTP_DRAFTER == 1 ]]; then mtp_json=true; else mtp_json=false; fi
+export EXTRA_ARGS="--monokernel --additional-config {\"rocm_mono_decode\":{\"k2_max_rows\":$TARGET_CAP,\"mtp_drafter\":$mtp_json,\"mtp_k2_max_rows\":24,\"timing\":true}}"
+env | sort | grep -E '^(RECIPE|MODEL|GPUS|VENV|PORT|TAG|OUT|CACHE|PLE|PLE_QUANT_DIR|KV|GMEM|LPTH|PREFILL_INTERVAL|SEQS|CELLS|BENCH_EXTRA|RESET_PREFIX_CACHE|VLLM_SERVER_DEV_MODE|CONC_PROBE_ARGS|VLLM_RDNA_DYNAMIC_PREFILL|VLLM_RDNA_PHASE_TIMING|VLLM_RDNA_OP_TIMING|VLLM_GDN_PREFILL_TIMING|VLLM_RDNA_GDN_OPAQUE|VLLM_RAISE_ON_LOGIT_NANS|MTP_DRAFTER|SERVE_TREE|SERVE_SCRIPT|EXTRA_ARGS)=' > "$RUNS_ROOT/config.env"
+"$VENV/bin/python" -S "$STAGE/kernel_journal_v2.py" snapshot \
+  --before "$RUNS_ROOT/kernel.before.json"
+
+# Snapshot all four loaded worker mappings and their physical KFD GPU owners
+# once the gate has launched the server. This is independent of HTTP metrics.
+worker_snapshot() {
+  for attempt in $(seq 1 360); do
+    [[ $(cat /proc/sys/kernel/random/boot_id) == "$BOOT" ]] || return 2
+    if [[ -f $RUNS_ROOT/summary.txt ]] && \
+       grep -Fq 'READY in ' "$RUNS_ROOT/summary.txt" && \
+       [[ -f $RUNS_ROOT/serve.log ]] && \
+       [[ $(grep -Ec 'Worker_TP[0-3]_EP[0-9]+ pid=' "$RUNS_ROOT/serve.log" || true) -ge 4 ]]; then
+      for snap_attempt in 1 2 3 4 5 6; do
+        if "$VENV/bin/python" -S "$HERE/../core-inline-serving-ab/snapshot_workers.py" \
+          --serve-log "$RUNS_ROOT/serve.log" --expected-tree "$CANDIDATE_TREE" \
+          --expected-core-sha "$EXPECTED_SO" --output "$RUNS_ROOT/worker-provenance.json" \
+          >> "$RUNS_ROOT/worker-provenance.log" 2>&1; then
+          return 0
+        fi
+        sleep 2
+      done
+    fi
+    sleep 10
+  done
+  echo 'worker provenance timeout waiting for four TP worker records' >&2
+  return 1
+}
+worker_snapshot &
+watcher=$!
+set +e
+bash "$GATE_SCRIPT" PLE=int4 PLE_QUANT_DIR="$PLE_DIR" KV=4026531840 \
+  GMEM=0.92 LPTH=1024 PREFILL_INTERVAL=2 SEQS=8 \
+  SERVE_TREE="$CANDIDATE_TREE" SERVE_SCRIPT="$CANDIDATE_TREE/tools/rdna/serve_rdna.sh"
+gate_status=$?
+set -e
+if (( gate_status != 0 )); then
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  exit "$gate_status"
+fi
+if ! wait "$watcher"; then
+  echo 'worker provenance did not verify all TP ranks on their expected physical HIP6-9 devices' >&2
+  exit 5
+fi
+[[ -s $RUNS_ROOT/worker-provenance.json ]]
+
+hashes > "$RUNS_ROOT/sha256.after"
+printf '%s\n' "$(cat /proc/sys/kernel/random/boot_id)" > "$RUNS_ROOT/boot-id.after"
+cmp "$RUNS_ROOT/sha256.before" "$RUNS_ROOT/sha256.after"
+cmp "$RUNS_ROOT/boot-id.before" "$RUNS_ROOT/boot-id.after"
+[[ $(cat "$RUNS_ROOT/boot-id.after") == "$BOOT" ]]
+[[ $(sha256sum "$CANDIDATE_TREE/vllm/_rocm_C.abi3.so" | cut -d' ' -f1) == "$EXPECTED_SO" ]]
+[[ $(sha256sum "$CANDIDATE_TREE/csrc/rocm/mono_k2_rdna2.cu" | cut -d' ' -f1) == "$EXPECTED_CU" ]]
+[[ $(sha256sum "$CANDIDATE_TREE/vllm/v1/engine/core.py" | cut -d' ' -f1) == "$EXPECTED_CORE_PY" ]]
+"$VENV/bin/python" -S "$TIMING/stage_verify.py" verify \
+  --tree "$CANDIDATE_TREE" --healthy-tree "$HEALTHY_TREE" \
+  --frozen-source-tree "$FROZEN_TREE"
+for required in 'MONO ROUTE' 'MTP K2 DISPATCH' 'PROBE PASS' 'PPL PROBE PASS' \
+  'PREFIX PASS' 'CONCURRENCY PASS' 'PROBE-AFTER-LOAD PASS' \
+  'LOAD HOOK rc=0 PASS' 'fault markers in serve.log: 0' 'new amdgpu dmesg faults: 0'; do
+  grep -Fq "$required" "$RUNS_ROOT/summary.txt"
+done
+! grep -Eq 'ROUTE FAIL|DISPATCH FAIL|PROBE FAIL|PREFIX FAIL|CONCURRENCY FAIL|fault markers in serve.log: [1-9]|new amdgpu dmesg faults: [1-9]' "$RUNS_ROOT/summary.txt"
+grep -Fq 'monokernel=True' "$RUNS_ROOT/serve.log"
+if [[ $MTP_DRAFTER == 1 ]]; then
+  mtp_rank_markers=$(grep -Fc 'MTP drafter K1/K2' "$RUNS_ROOT/serve.log" || true)
+  dense_k2_markers=$(grep -Fc 'dense MTP K2 call' "$RUNS_ROOT/serve.log" || true)
+  (( mtp_rank_markers >= 4 && dense_k2_markers >= 4 )) || {
+    echo "dense drafter route missing on ranks: mtp=$mtp_rank_markers dense_k2=$dense_k2_markers" >&2
+    exit 6
+  }
+else
+  ! grep -Fq 'MTP drafter K1/K2' "$RUNS_ROOT/serve.log"
+  ! grep -Fq 'dense MTP K2 call' "$RUNS_ROOT/serve.log"
+fi
+cell="16384x1024-c$PROFILE_CONC"
+grep -Fq "PREFIX RESET PASS before bench-$cell" "$RUNS_ROOT/summary.txt"
+test -s "$RUNS_ROOT/bench-$cell.json"
+grep -Fq 'VLLM_RDNA_PHASE_TIMING=16' "$RUNS_ROOT/config.env"
+grep -Fq 'VLLM_RDNA_OP_TIMING=0' "$RUNS_ROOT/config.env"
+grep -Fq '"timing":true' "$RUNS_ROOT/config.env"
+grep -Fq '"mtp_drafter":true' "$RUNS_ROOT/config.env"
+grep -Fq '"mtp_k2_max_rows":24' "$RUNS_ROOT/config.env"
+grep -Fq 'MTP_DRAFTER=1' "$RUNS_ROOT/config.env"
+grep -Fq "k2_max_rows\":$TARGET_CAP" "$RUNS_ROOT/config.env"
+"$VENV/bin/python" -S "$STAGE/kernel_journal_v2.py" check \
+  --before "$RUNS_ROOT/kernel.before.json" \
+  --after "$RUNS_ROOT/kernel.after.json"
+"$VENV/bin/python" -S "$HERE/extract_profile.py" --log "$RUNS_ROOT/serve.log" \
+  --out "$RUNS_ROOT/profile-extracted.json" --expected-target-width "$EXPECTED_WIDTH" --expected-mtp-width "$EXPECTED_MTP_WIDTH" \
+  --expected-target-kernel-min "$KERNEL_MIN" --expected-target-kernel-max "$KERNEL_MAX"
+if [[ $PROFILE_CONC == 8 && $TARGET_CAP == 8 ]]; then route=modules; else route='mono kernel'; fi
+grep -Eq "mono k2_rdna2: $EXPECTED_WIDTH rows .* -> $route" "$RUNS_ROOT/serve.log"
+printf 'PROFILE TIMING PASS targetwidth=%s mtpwidth=%s targetcap=%s route=%s (diagnostic only)\n' "$EXPECTED_WIDTH" "$EXPECTED_MTP_WIDTH" "$TARGET_CAP" "$route" | tee -a "$RUNS_ROOT/summary.txt"
+printf 'DIAGNOSTIC PROFILE PASS arm=%s mode=%s core=%s cu=%s engine_core_py=%s boot=%s\n' \
+  "$ARM" "$LABEL" "$EXPECTED_SO" "$EXPECTED_CU" "$EXPECTED_CORE_PY" "$BOOT" | tee "$RUNS_ROOT/ARM-PASS.txt"

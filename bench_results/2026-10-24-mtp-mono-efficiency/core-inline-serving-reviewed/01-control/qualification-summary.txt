@@ -1,0 +1,65 @@
+Arm 01-control qualification evidence (generated text removed).
+
+[summary.txt]
+[06:48:56] boot TREE=/home/chenco_adm/vllm-rdna-mtp-mono RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=6,7,8,9 PORT=18871 overrides=PLE=int4 PLE_QUANT_DIR=/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4 KV=4026531840 GMEM=0.92 LPTH=1024 PREFILL_INTERVAL=2 SEQS=8 bench_extra=--temperature 0 --save-detailed
+[06:53:17] READY in 260s served=flash-next
+[06:53:17] MONO ROUTE monokernel=1 ranks=4 mtp_ranks=0 requested_drafter=0 dense_calls=0
+[06:53:17] GDN ROUTE requested=1 opaque_marker_count=1
+[06:53:24] PROBE PASS
+RESULT PASS (3/3)
+[06:53:32] PPL PROBE PASS
+    PPL 4.85 (mean NLL 1.579 over 261 tokens) PASS
+    RESULT PASS
+[06:53:44] PREFIX PASS
+    cold TTFT 5.63 s, warm TTFT 0.65 s, speedup 8.7x -> PASS
+    decode batch 7:   0.92 s
+    decode batch 6:   0.91 s
+    prefill  2048 tok:   0.88 s
+[06:54:50] CONCURRENCY PASS
+    RESULT PASS: 0 failing, 13 near-tie, 2 soft, 0 solo-noise, 33 identical of 48 checks (47.9s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+[06:54:50] MTP K2 DISPATCH dense_calls=0 mono_route_markers=36
+[06:54:54] PREFIX RESET PASS before bench-1024x512-c1
+    bench-1024x512-c1            prefill   2295.6 tok/s/req (agg  2242.1) | decode  59.00 tok/s/req (agg out   56.22) | TTFT    0.45 s | ITL med    29.4 ms mean    29.5 ms | ok 8
+[06:56:30] PREFIX RESET PASS before bench-1024x512-c8
+    bench-1024x512-c8            prefill   1000.1 tok/s/req (agg  2250.0) | decode  30.11 tok/s/req (agg out  212.48) | TTFT    1.02 s | ITL med    60.7 ms mean    70.2 ms | ok 32
+[06:58:11] PREFIX RESET PASS before bench-16384x1024-c1
+    bench-16384x1024-c1          prefill   2184.6 tok/s/req (agg  2167.5) | decode  86.17 tok/s/req (agg out   52.86) | TTFT    7.50 s | ITL med    30.0 ms mean    30.0 ms | ok 8
+[07:01:10] PREFIX RESET PASS before bench-16384x1024-c8
+    bench-16384x1024-c8          prefill    923.3 tok/s/req (agg  2124.9) | decode  14.69 tok/s/req (agg out   91.90) | TTFT   17.75 s | ITL med    62.3 ms mean   157.0 ms | ok 32
+[07:07:29] load hook: /home/chenco_adm/vllm-rdna-mtp-mono/tools/rdna/mono/parity_hook.sh
+[07:07:42] LOAD HOOK rc=0 PASS
+    PASS
+[07:07:49] PROBE-AFTER-LOAD PASS
+          1 Model loading took 20.62 GiB memory and 84.874054 seconds
+          1 Model loading took 20.62 GiB memory and 84.871260 seconds
+          1 Model loading took 20.62 GiB memory and 84.870874 seconds
+          1 Model loading took 20.62 GiB memory and 84.865797 seconds
+          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo
+[07:07:49] fault markers in serve.log: 0
+[07:07:49] new amdgpu dmesg faults: 0
+
+[probe.txt]
+RESULT PASS (3/3)
+
+[ppl.txt]
+PPL 4.85 (mean NLL 1.579 over 261 tokens) PASS
+RESULT PASS
+
+[prefix.txt]
+cold TTFT 5.63 s, warm TTFT 0.65 s, speedup 8.7x -> PASS
+
+[concurrency.txt]
+RESULT PASS: 0 failing, 13 near-tie, 2 soft, 0 solo-noise, 33 identical of 48 checks (47.9s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5)
+
+[load_hook.txt]
+      4 mono gdn_rdna2: decode 1 rows -> fused kernel
+      4 mono gdn_rdna2: decode 2 rows -> fused kernel
+      4 mono gdn_rdna2: decode 3 rows -> fused kernel
+      4 mono gdn_rdna2: decode 6 rows -> fused kernel
+      4 mono gdn_rdna2: decode with prefill -> today's path
+      1 mono gdn_rdna2: fused GDN decode core enabled
+      4 mono gdn_rdna2: verify with prefill -> today's path
+PASS
+
+[probe-after.txt]
+RESULT PASS (3/3)

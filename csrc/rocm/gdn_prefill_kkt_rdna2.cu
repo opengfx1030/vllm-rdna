@@ -75,7 +75,11 @@ __device__ __forceinline__ unsigned kkt_scale2(float beta, unsigned raw) {
 // lowers tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k)) to on gfx1030, so the
 // pairwise summation order over k matches the reference.
 __device__ __forceinline__ float kkt_dot2(unsigned a, unsigned b, float acc) {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+  asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(acc) : "v"(a), "v"(b));
+#else
   asm("v_dot2c_f32_f16 %0, %1, %2" : "+v"(acc) : "v"(a), "v"(b));
+#endif
   return acc;
 }
 template <bool IS_VARLEN>

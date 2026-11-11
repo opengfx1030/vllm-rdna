@@ -30,7 +30,7 @@
 # disabled unless this build's four rank files exist; no per-user fallback).
 
 # Print "<name>\t<dir>\t<lib_sha256>" for every profile in the registry.
-# Empty (and non-zero) when the registry is absent or unparseable.
+# Empty (and non-zero) when the registry is absent or unparsable.
 _tunableop_profiles() {
     local registry=$1
     [ -r "$registry" ] || return 1
@@ -123,6 +123,18 @@ configure_tunableop() {
             return 0
         fi
     done
+
+    # Ranks 4 and up (TP*PP > 4: TP8, TP4xPP2 stage 1) have their own rank files. torch opens
+    # tunableop_results<device ordinal>.csv, and a worker whose file is missing runs the default
+    # rocBLAS heuristic without a word (only PYTORCH_TUNABLEOP_VERBOSE=1 prints "could not open").
+    local ranks=${TUNABLEOP_RANKS:-4} missing_high=""
+    for ((rank = 4; rank < ranks; rank++)); do
+        [[ -s $rows_dir/tunableop_results$rank.csv ]] || missing_high+=" $rank"
+    done
+    if [[ -n $missing_high ]]; then
+        printf 'WARNING: TunableOp rows missing for rank(s)%s at %s: those workers run the default rocBLAS heuristic.\n' \
+            "$missing_high" "$rows_dir" >&2
+    fi
 
     tune_state=off
     [[ $PYTORCH_TUNABLEOP_TUNING == 1 ]] && tune_state=enabled

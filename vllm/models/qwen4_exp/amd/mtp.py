@@ -20,6 +20,7 @@ from collections.abc import Iterable
 import regex as re
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, replace, set_current_vllm_config
@@ -36,7 +37,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.utils import configure_quant_config
-from vllm.model_executor.models.interfaces import LocalArgmaxMixin, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    LocalArgmaxMixin,
+    SupportsHCSP,
+    SupportsPP,
+)
 from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -47,15 +52,14 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
+from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
-    _HC_WEIGHTS_MAPPER,
+    _EXTRA_WEIGHTS_MAPPER,
     _QWEN4_EXP_IGNORED_MISSING_SUFFIXES,
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
@@ -184,7 +188,7 @@ def _off_gpu_under_pp():
     }
 )
 class Qwen4ExpMultiTokenPredictor(nn.Module):
-    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _HC_WEIGHTS_MAPPER
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -193,6 +197,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         config: Qwen4ExpTextConfig = model_config.hf_text_config
 
         self.config = config
+        # MoE SP also enables HC SP, while HC SP can be enabled independently.
+        self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         self.vocab_size = config.vocab_size
 
         self.mtp_start_layer_idx = config.num_hidden_layers
@@ -237,7 +243,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             self.layers = nn.ModuleList(
                 Qwen4ExpDecoderLayer(
                     draft_vllm_config,
-                    layer_type="full_attention",
+                    layer_type="qwen_sparse_attention",
                     prefix=f"{prefix}.layers.{self.mtp_start_layer_idx + idx}",
                 )
                 for idx in range(self.num_mtp_layers)
@@ -340,6 +346,9 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
+        full_num_tokens = positions.shape[-1]
+        if self.use_hc_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         layer = self.layers[current_step_idx]
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
@@ -367,6 +376,17 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 hidden_states, block_output, injection
             )
         )
+        if self.use_hc_sequence_parallel:
+            # Gather both outputs together, then restore their contiguous layouts.
+            packed_hidden_states = torch.cat(
+                [sample_hidden_states, multi_hidden], dim=-1
+            )
+            packed_hidden_states = sp_all_gather(packed_hidden_states)[:full_num_tokens]
+            sample_hidden_states, multi_hidden = packed_hidden_states.split(
+                [hidden_size, hc_count * hidden_size], dim=-1
+            )
+            sample_hidden_states = sample_hidden_states.contiguous()
+            multi_hidden = multi_hidden.contiguous()
         return sample_hidden_states, multi_hidden
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -396,7 +416,9 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         "hidden_states": 0,
     }
 )
-class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts, LocalArgmaxMixin):
+class Qwen4ExpMTP(
+    nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts, LocalArgmaxMixin
+):
     # Qwen4Exp builds embed_tokens on every PP stage, so the drafter on the last
     # stage can share the target's copy (see maybe_share_target_embed).
     share_target_embed_under_pp = True
@@ -415,13 +437,6 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts, LocalArgmaxMi
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
-        cache_config = vllm_config.cache_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen4ExpMTP currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
-
         self.quant_config = vllm_config.quant_config
 
         super().__init__()

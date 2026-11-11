@@ -24,7 +24,7 @@ import os as _os
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.envs import VLLM_RDNA_QSA_HIP
+from vllm.envs import VLLM_RDNA_QSA_DECODE_MODE, VLLM_RDNA_QSA_HIP
 from vllm.logger import init_logger
 from vllm.platforms.rocm import on_gfx10x
 
@@ -33,16 +33,52 @@ logger = init_logger(__name__)
 _DEBUG = _os.environ.get("VLLM_QSA_RDNA2_DEBUG", "0") == "1"
 
 
+def qsa_decode_mode() -> str:
+    """Which fused HIP QSA decode the non-monokernel path may use.
+
+    ``auto`` picks the kernel that matches the cache layout, ``int4`` requires
+    the packed-int4 fused decode, ``off`` disables the fused decode. The
+    Triton kernels cannot read the packed record layout, so a deployment that
+    needs the packed decode must have the native kernel.
+    """
+    mode = (VLLM_RDNA_QSA_DECODE_MODE or "auto").strip().lower()
+    if mode not in ("auto", "int4", "off"):
+        raise ValueError(
+            "VLLM_RDNA_QSA_DECODE_MODE must be one of 'auto', 'int4', 'off'"
+        )
+    return mode
+
+
 def qsa_use_rdna2(dtype: torch.dtype | None = None) -> bool:
-    """True iff the HIP QSA decode path is enabled for this process.
+    """True iff the fp16 HIP QSA decode path is enabled for this process.
 
     The HIP kernels implement fp16 only; ``dtype`` (when given) additionally
     gates on the caller's tensor dtype so a bf16 model keeps the Triton path.
     """
+    mode = qsa_decode_mode()
+    if mode in ("off", "int4"):
+        return False
     return (
         bool(VLLM_RDNA_QSA_HIP)
         and on_gfx10x()
         and (dtype is None or dtype == torch.float16)
+    )
+
+
+def qsa_use_rdna2_int4() -> bool:
+    """True iff the native packed-INT4 QSA decode is available.
+
+    The packed ``int4_fp16_block`` record layout has no Triton counterpart,
+    so the packed path is only available when the HIP kernel is compiled in.
+    Callers must refuse rather than fall back: reading a packed record as
+    fp16 yields finite, plausible, silently wrong numbers.
+    """
+    if qsa_decode_mode() == "off":
+        return False
+    return (
+        bool(VLLM_RDNA_QSA_HIP)
+        and on_gfx10x()
+        and hasattr(ops, "qsa_sparse_paged_attention_int4_rdna2")
     )
 
 
@@ -146,6 +182,7 @@ def qsa_expand_indices(
     compress_ratio: int,
     token_topk: int,
     out: torch.Tensor | None = None,
+    canonical_order: bool = False,
 ) -> torch.Tensor:
     """Expand compressed block indices and compact the causal tail.
 
@@ -161,6 +198,7 @@ def qsa_expand_indices(
         compress_ratio,
         token_topk,
         out,
+        canonical_order,
     )
 
 
@@ -183,12 +221,45 @@ def qsa_sparse_paged_attention(
     )
 
 
+def qsa_sparse_paged_attention_int4(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Sparse GQA attention over a packed INT4 + FP16 block-scale KV cache.
+
+    ``k_cache``/``v_cache`` are the payload views ``[pages, heads, slots,
+    D/2]`` and ``k_scale``/``v_scale`` the scale views ``[pages, heads,
+    slots, D/32]``; the scale words are a window onto the tail of the same
+    physical records. The kernel dequantizes into the same fp16 tile the
+    fp16 path fills, so the attention math is identical.
+    """
+    return ops.qsa_sparse_paged_attention_int4_rdna2(
+        q,
+        k_cache,
+        v_cache,
+        k_scale,
+        v_scale,
+        logical_indices,
+        block_table,
+        token_to_req,
+        out,
+    )
+
+
 __all__ = [
     "qsa_compress_groups",
     "qsa_compress_groups_with_ratio_compat",
     "qsa_expand_indices",
     "qsa_mqa_paged",
     "qsa_sparse_paged_attention",
+    "qsa_sparse_paged_attention_int4",
     "qsa_store_cache_rows",
     "qsa_store_cache_rows_compat",
     "qsa_use_rdna2",

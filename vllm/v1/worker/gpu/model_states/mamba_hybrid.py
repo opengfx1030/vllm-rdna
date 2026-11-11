@@ -10,7 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
-from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -22,6 +22,7 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -35,7 +36,6 @@ from vllm.v1.worker.mamba_utils import (
     validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
-
 
 # Read once at import: Dynamo-traced hot paths must not re-evaluate the gate.
 _ON_RDNA2 = on_rdna2_hip()
@@ -118,6 +118,7 @@ def _update_num_accepted_tokens(
         )
         return
     _fill_num_accepted_kernel[(num_reqs,)](idx_mapping, num_accepted_tokens, value)
+
 
 @dataclass
 class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
@@ -210,14 +211,13 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
-            # RDNA: the state table uses Mamba blocks, not the minimum cache
-            # grid (they differ in the Flash-Next hybrid layout).
-            block_size = self.cache_config.block_size
-            if on_rdna_family():
-                assert self._mamba_spec is not None
-                block_size = self._mamba_spec.block_size
+            # The column is in mamba blocks. cache_config.block_size is the
+            # min over prefix-cacheable groups, so a drafter group with its own
+            # smaller block (e.g. DFlash) pulls it below mamba_block_size.
+            mamba_block_size = self.cache_config.mamba_block_size
+            assert mamba_block_size is not None
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // block_size
+                (new_req_data.num_computed_tokens - 1) // mamba_block_size
             )
 
     def _get_mamba_group_info(
@@ -242,41 +242,50 @@ class MambaHybridModelState(DefaultModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
+        """Return the align-mode spec-decode context.
+
+        v0.32 constructs it eagerly in ``initialize_kv_cache``, so this is a
+        pure accessor; the per-step block-table rebinds stay at the call sites.
+        """
+        assert self._mamba_ctx is not None, "align-mode mamba ctx not initialized"
+        return self._mamba_ctx
+
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
+    ) -> None:
+        if not self._align_mode:
+            return
+        mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
             copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
             validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
             self._mamba_state_copy_funcs = copy_funcs
-        copy_funcs = self._mamba_state_copy_funcs
-        if self._mamba_ctx is None:
-            # Both SD and DS conv layouts support a >0 spec-decode shift: the
-            # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
-            # ``token_bias = num_accepted - 1`` window shift per conv layout
-            # (SD: contiguous slice; DS: per-dim-row strided slice), matching
-            # the V1 ``get_conv_copy_spec`` semantics.
-            self._mamba_ctx = MambaSpecDecodeGPUContext.create(
-                max_num_reqs=self.max_num_reqs,
-                kv_cache_config=kv_cache_config,
-                copy_funcs=copy_funcs,
-                device=self.device,
-                make_buffer=lambda n, dtype: CpuGpuBuffer(
-                    n, dtype=dtype, device=self.device
-                ),
-            )
-        ctx = self._mamba_ctx
-        if not ctx.is_initialized:
-            forward_context = self.vllm_config.compilation_config.static_forward_context
-            # block_tables are batch-order slices of the persistent
-            # input_block_tables (stable data_ptr), so the metadata is captured
-            # once here and reused across steps.
-            ctx.initialize_from_forward_context(
-                kv_cache_config,
-                forward_context,
-                copy_funcs,
-                [block_tables[gid] for gid in mamba_group_ids],
-            )
-        return ctx
+        # Both SD and DS conv layouts support a >0 spec-decode shift: the
+        # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
+        # ``token_bias = num_accepted - 1`` window shift per conv layout
+        # (SD: contiguous slice; DS: per-dim-row strided slice), matching
+        # the V1 ``get_conv_copy_spec`` semantics.
+        self._mamba_ctx = MambaSpecDecodeGPUContext.create(
+            max_num_reqs=self.max_num_reqs,
+            kv_cache_config=kv_cache_config,
+            copy_funcs=self._mamba_state_copy_funcs,
+            device=self.device,
+            make_buffer=lambda n, dtype: CpuGpuBuffer(
+                n, dtype=dtype, device=self.device
+            ),
+        )
+        # Under PP a step's postprocess runs after later steps re-gathered the
+        # batch-ordered input tables, so state copies read the per-request-slot
+        # tables. Aligned state indices are for the current batch only.
+        self._mamba_ctx.initialize_from_forward_context(
+            kv_cache_config,
+            self.vllm_config.compilation_config.static_forward_context,
+            self._mamba_state_copy_funcs,
+            [block_tables.block_tables[gid].gpu for gid in mamba_group_ids],
+            [block_tables.input_block_tables[gid] for gid in mamba_group_ids],
+        )
 
     def preprocess_state(
         self,
@@ -382,18 +391,26 @@ class MambaHybridModelState(DefaultModelState):
             ]
 
             # GDN uses >= 0 to select spec-decode rows, so non-decode rows
-            # need the -1 sentinel rather than a raw zero draft count.
+            # need the -1 sentinel. Decode rows without drafts stay spec rows:
+            # only that path applies the previous step's accepted offset.
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-            if num_draft_tokens_per_req is not None:
-                # Test request state, not num_scheduled_tokens == draft_count+1:
-                # adaptive rewrites num_scheduled_tokens to an even split, so that
-                # equality rarely holds and would demote every verify row to decode.
-                is_decode = ~is_prefilling_np & (input_batch.num_scheduled_tokens > 0)
-                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
-                num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask, num_draft_tokens_per_req, -1
+            if num_draft_tokens_per_req is None:
+                num_draft_tokens_per_req = np.zeros(input_batch.num_reqs, np.int32)
+            # Test request state, not num_scheduled_tokens == draft_count+1:
+            # adaptive rewrites num_scheduled_tokens to an even split, so that
+            # equality rarely holds and would demote every verify row to decode.
+            is_decode = (
+                ~is_prefilling_np
+                & (input_batch.num_scheduled_tokens > 0)
+                & (
+                    input_batch.num_scheduled_tokens
+                    <= self.vllm_config.num_speculative_tokens + 1
                 )
+            )
+            num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
+                is_decode, num_draft_tokens_per_req, -1
+            )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
         if self._align_mode:

@@ -1,0 +1,319 @@
+{
+  "manifest": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-build/build_manifest.json",
+  "checks": [
+    {
+      "name": "generated-HIP-to-tracked-CU normalization",
+      "generated_hip_sha256": "6f0f83d2897f6578530261cd63e3b7698c5857f33b09d515cb6529747c1af9c8",
+      "tracked_cu_sha256": "101e623a65c1cbb0057845b6accd35d20a04b0f30d6faa00c3684418ef6d5fd1",
+      "status": "exact match",
+      "normalization_map": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-core-inline/hipify_normalization.json"
+    },
+    {
+      "name": "single annotation source delta",
+      "candidate_hip_sha256": "8a0e8aec0167d3c89a45fc78c2f99dc89f7c4e16875de484d0cc6d149f2e9514",
+      "status": "exact expected transform"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/csrc/rocm/mono_k2_rdna2.hip",
+      "sha256": "6f0f83d2897f6578530261cd63e3b7698c5857f33b09d515cb6529747c1af9c8",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/mono_k2_rdna2.hip.o",
+      "sha256": "dbcbe71d8fe16bd016804029d7c7fcb32ee49a06fc6c91fa50bd86610415d351",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-build/mono_k2_rdna2.inline.hip.o",
+      "sha256": "de9eff2cd5bea0b688ef9306d2d28ce0f36cc77e84c4b0d4fddc18a39f5529cd",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-build/_rocm_C.abi3.so",
+      "sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/csrc/rocm/mono_k2_rdna2.cu",
+      "sha256": "101e623a65c1cbb0057845b6accd35d20a04b0f30d6faa00c3684418ef6d5fd1",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/vllm/_rocm_C.abi3.so",
+      "sha256": "6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/attention.hip.o",
+      "sha256": "c41a960afa1b28f4f3a8986b18041985f001d7fff1ea58a9f52df2fc2128575e",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/causal_conv1d_rdna2.hip.o",
+      "sha256": "771dac2a06cfd5b9456650ac90709ba6411d7aef5e7948f612aa4be581d60f9d",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/exl3_dot2_dense.hip.o",
+      "sha256": "3b70ce1a028ee5fcf54da702f1334174031e5ee96fececc48add50b9fe04797b",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/exl3_dot2_dequant.hip.o",
+      "sha256": "91e85f228636236a8919838f5acc1b0c3e4056d2224463df3ca3045bd9e6fb9d",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/exl3_dot2_moe.hip.o",
+      "sha256": "b0b249360f90e02685e38ae3b934558f616d8aa2d7ce4058247d8f8143182452",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/exl3_hadamard.hip.o",
+      "sha256": "69dbe5ead7532aef629cf8e9346855084742b105a11b2c72c88f9a687bcd20a9",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/fa_rdna2.hip.o",
+      "sha256": "990f0b4c2c9d1e2903ac00eb786fec268e1fcd7745d2fc660d979262b7d6d2c6",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/gdn_decode_rdna2.hip.o",
+      "sha256": "886d6bc5947c61abbaba40c2de51d63b92edaacfdfe6be652c4593ef01fab0fc",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/gdn_prefill_delta_h_rdna2.hip.o",
+      "sha256": "20b0993e222531686446a8b58e5b623ac1a57d5e32212fd33849827c4946f4e2",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/gdn_prefill_kkt_rdna2.hip.o",
+      "sha256": "84f750a2069f7c1c534d61bf97458021f26da8f48fb7d51876ef56edb8c4ccfb",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/gdn_prefill_o_rdna2.hip.o",
+      "sha256": "229b4f89802bc8ccbcef8eeaa19dcce774635c4cdc4cb0aa5ffe72370ec9f0d1",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/gdn_prefill_prep_rdna2.hip.o",
+      "sha256": "2edd0637482c31eccdd5f023b35773fb8e0d76f31812d5a0d74de6893c39fb79",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/gdn_prefill_solve_wy_rdna2.hip.o",
+      "sha256": "8c4072afca3d05702b2cfffe84bce8462746ffa631ad755032e7bfa08d36176c",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/gemm_w8a8_fp8_dense_rdna2.hip.o",
+      "sha256": "cfdf78fcdb6e8e709cc9cac33750663ece4a072addb76ab2f001a4eeea448061",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/hc_prefill_rdna2.hip.o",
+      "sha256": "7c42749232cca5e8d7f844edc4b4fca1398014172d30ffbd33be2af5f4204199",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/hc_rdna2.hip.o",
+      "sha256": "80ebc78a24a4ad9f1127ae126ab0d511fd7843632a610937216a2c86ef71d7ef",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/layernorm.hip.o",
+      "sha256": "db724a727287a03f1e33daac9ff3bf2c3e39839e39897190aa9b486ac70712e8",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/moe_q_gemm_rdna2.hip.o",
+      "sha256": "025b17b0c90de88c8e80f68a9eaf73013b1e49fd8a7be17a6d525232e4f5f96d",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/moe_unquantized_rdna2.hip.o",
+      "sha256": "5a61038bebe9609183c657207615c4a6813d85587fd084c06c9886b30ac34cd9",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/moe_w4a8_rdna2.hip.o",
+      "sha256": "92547861c03333075871dd85c19632d5a13319279e76d1905b4b1dba0c8396ce",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/moe_w8a16_rdna2.hip.o",
+      "sha256": "75a124adfd73e6e48ca80a764cd1c8d6f2c2c8b49e4bba204b254531c5eaf89f",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/mono_gdn_rdna2.hip.o",
+      "sha256": "0615b8eb0b85c80efa8580bffb65499da4bd21d4db3ebd30716fa3ea39afc7cf",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/mono_qsa_decode_rdna2.hip.o",
+      "sha256": "72591daa820973bea36a8d71f7b3b19e91ff20b259642c7e041b713e289a03a5",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/mrope_rdna2.hip.o",
+      "sha256": "5b3e0e6b8ff4018b76149411056cd1b4d840a740f4efd35b3cc9fa70f45f6c15",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/mxfp4_dot2_dense.hip.o",
+      "sha256": "eda537505e64bb1ed161b49cd7769c70a400e6904f48581e46b277f3869228cc",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/mxfp4_dot2_moe.hip.o",
+      "sha256": "0d64a832423900a8c2b563374afb763dac86c1b2aba8371037c383a04dd31f97",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/ple_short_conv_rdna2.hip.o",
+      "sha256": "8e784c8e5b99d06d06b36a046177c56fc107f045c732bda4d508c60e9064b97d",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/q_gemm_rdna2.hip.o",
+      "sha256": "92fc1ce58376685956665324d8dda34a38649b0ac4871e1eab74113bcf967413",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/q_gemm_rdna2_prefill.hip.o",
+      "sha256": "4c70410464efd9480bafc5271f8bceabddc0d0c22c9750ecf0706d3506c565d5",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/q_gemm_w8a16_fp8_rdna2.hip.o",
+      "sha256": "bc2f6406bee6302566ebfe8b3ec8beb03a11fc145746c84704b9a4674d2041e2",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/qsa_metadata_rdna2.hip.o",
+      "sha256": "9698d757fc1c7c7d762a3275307252f50566ccb28e6ad1fb1bee1a6933f65c7e",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/qsa_rdna2.hip.o",
+      "sha256": "67038ea9b6d0340f1d783226c829057efa7d1d0fd8aa0f6a21057770b9c27afe",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/rdna/dsv4/indexer_mqa_logits.hip.o",
+      "sha256": "93a2ce59090fe1fdaba9f158bc5923cd703a3ed02dc2b9f9a97ddbc5b6165401",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/rdna/dsv4/kv_insert.hip.o",
+      "sha256": "5d806018f98b62db3f00e82eacca48a35f8be0c8145845172373bc4ba0c36d34",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/rdna/dsv4/mhc.hip.o",
+      "sha256": "df624ca7773b8bd0db762b6d98088834bd5fba1627f46ab11fc3769395123689",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/rdna/dsv4/sparse_mla_decode.hip.o",
+      "sha256": "c03f953270a05e919016d5345441f2147de403b658a7935c96bd51b6473a7b5b",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/rdna_allreduce.hip.o",
+      "sha256": "81ef5e22e13a0c8a458eb8bdad3b05688e6db891c59e6041471771ea5414fa92",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/rdna_fused_glue.hip.o",
+      "sha256": "fa63ebdbde2b47f1027c3be8a4f79a4f79ded54c20d55ad755c8aed6c12fb7c0",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/torch_bindings.cpp.o",
+      "sha256": "21c5b59d842f67fd960b2db188c6106194789b7e6adcc8d747d741ae154274fc",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/v1_input_batch_rdna2.hip.o",
+      "sha256": "857d81abc5021e0a12f92dfaa1960447f06ed2006905252cc474b8f2f2d8ff19",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/v1_mamba_rdna2.hip.o",
+      "sha256": "9f6f8f31d9c6db9af059683fd0e1b40734b3aa3bd6f5eed47189d20f749afae4",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/v1_rope_struct_rdna2.hip.o",
+      "sha256": "8f8228215401c14a9fb807dddef63b51f7ec36abacd2556a8b228a4ce13a0c7d",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/v1_sample_rdna2.hip.o",
+      "sha256": "f487f5be2fabad4b9b99f3746f102e89c5889d5083dc17672f400e59c7aa7b32",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/v1_spec_decode_rdna2.hip.o",
+      "sha256": "340c2ffcf0480eb0ac4c369b51e1110cc56bfa9aa3a686f2bdab0ef86ecf426a",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/v1_topk_topp_rdna2.hip.o",
+      "sha256": "f1b09ae49b7cb1da74e42d666150b776bfe010624082585f32c745310ebb066b",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/v1_worker_rdna2.hip.o",
+      "sha256": "59bbe3ed2d7f4db37a3166170905996775495146a281ba498ddf1a5701e09471",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/vit_pos_embed_rdna2.hip.o",
+      "sha256": "2a52f06c2ca32cda1133a66c57e280a789e830ac580fc31bd06b5fc1b6cb82e6",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C.dir/csrc/rocm/w4a8_sdot4_rdna2.hip.o",
+      "sha256": "d26d6fb3c66287a59c03bb28f0258515602472c145106bbf770813ddbe89fa2e",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C_skinny.dir/csrc/rocm/moe_resident_decode.hip.o",
+      "sha256": "75b554f4744a907735e18c4e0c977b1a841289f3a82dc83658b9b23dba94273b",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C_skinny.dir/csrc/rocm/skinny_gemms.hip.o",
+      "sha256": "9331cbe5a4dc0d15d7c108aefcf23bd0cf5956e8388734b73df5c6150c9c4ba6",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/CMakeFiles/_rocm_C_skinny.dir/csrc/rocm/skinny_gemms_int4.hip.o",
+      "sha256": "12b5d8e31af6f6d2024b53afb7af36f34595a420999195d6d4457b328d96d85a",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/csrc/rocm/q_gemm_rdna2_common.cuh",
+      "sha256": "a588eb8af888bbb7bb7c92fcfaf60d955c79635c8d32cb947b694a43f4016c59",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/csrc/rocm/qdq_4_rdna2.cuh",
+      "sha256": "2c8373f93e8fd9cac94c34f8ca544b1e11b28ae0897f0608c426620403fb71b0",
+      "status": "unchanged"
+    },
+    {
+      "path": "/home/chenco_adm/vllm-rdna-mtp-mono/build/temp.linux-x86_64-cpython-312/csrc/rocm/rdna_allreduce.cuh",
+      "sha256": "0b840fb84c1726ff4dfef0a62abfa6ef1186aa6439875ee9852016ce5ae868bd",
+      "status": "unchanged"
+    }
+  ],
+  "status": "PASS",
+  "candidate_binary_sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f"
+}

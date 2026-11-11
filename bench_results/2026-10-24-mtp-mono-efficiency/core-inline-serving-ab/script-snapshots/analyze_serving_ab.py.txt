@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""Analyze one-arm MonoKernel serving outputs from the core-inline ABBA run.
+
+Uses only the Python standard library. Run from a machine where the four arm
+directories have been recovered, for example:
+
+  python3 analyze_serving_ab.py --root /path/to/serve-inline-ab
+
+The analyzer does not infer a win from one aggregate metric. It exports every
+request, per-cell pooled metrics, true whole-run throughput, and an explicitly
+labeled TTFT-derived wave-prefill proxy. It also checks each cell's textual
+benchmark log against the detailed JSON metrics and compares saved greedy
+logprob parity probes across control/candidate arms.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+import re
+import statistics
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+ARMS = (
+    ("01-control", "control"),
+    ("02-candidate", "candidate"),
+    ("03-candidate", "candidate"),
+    ("04-control", "control"),
+)
+CELLS = ((1024, 512, 1), (1024, 512, 8), (16384, 1024, 1), (16384, 1024, 8))
+LOG_METRICS = {
+    "completed": (r"Successful requests:\s*([\d,]+)", int),
+    "failed": (r"Failed requests:\s*([\d,]+)", int),
+    "duration_s": (r"Benchmark duration \(s\):\s*([\d,.]+)", float),
+    "input_tokens": (r"Total input tokens:\s*([\d,]+)", int),
+    "output_tokens": (r"Total generated tokens:\s*([\d,]+)", int),
+    "output_tokps": (r"Output token throughput \(tok/s\):\s*([\d,.]+)", float),
+    "mean_ttft_ms": (r"Mean TTFT \(ms\):\s*([\d,.]+)", float),
+    "median_ttft_ms": (r"Median TTFT \(ms\):\s*([\d,.]+)", float),
+    "p99_ttft_ms": (r"P99 TTFT \(ms\):\s*([\d,.]+)", float),
+    "mean_tpot_ms": (r"Mean TPOT \(ms\):\s*([\d,.]+)", float),
+    "median_tpot_ms": (r"Median TPOT \(ms\):\s*([\d,.]+)", float),
+    "mean_itl_ms": (r"Mean ITL \(ms\):\s*([\d,.]+)", float),
+    "median_itl_ms": (r"Median ITL \(ms\):\s*([\d,.]+)", float),
+    "p99_itl_ms": (r"P99 ITL \(ms\):\s*([\d,.]+)", float),
+    "acceptance_pct": (r"Acceptance rate \(%\):\s*([\d,.]+)", float),
+    "acceptance_length": (r"Acceptance length:\s*([\d,.]+)", float),
+    "drafts": (r"Drafts:\s*([\d,]+)", int),
+    "draft_tokens": (r"Draft tokens:\s*([\d,]+)", int),
+    "accepted_tokens": (r"Accepted tokens:\s*([\d,]+)", int),
+}
+
+
+def percentile(values: list[float], p: float) -> float:
+    if not values:
+        return math.nan
+    ordered = sorted(values)
+    pos = (len(ordered) - 1) * p
+    lo = int(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+
+def parse_log(path: Path) -> dict[str, Any]:
+    text = path.read_text(errors="replace")
+    result: dict[str, Any] = {}
+    for name, (pattern, typ) in LOG_METRICS.items():
+        found = re.search(pattern, text)
+        if found:
+            value = found.group(1).replace(",", "")
+            result[name] = typ(value)
+    # The per-position values are useful for interpreting aggregate changes.
+    result["position_acceptance_pct"] = {
+        int(pos): float(value)
+        for pos, value in re.findall(r"Position\s+(\d+):\s*([\d,.]+)", text)
+    }
+    return result
+
+
+def require_close(label: str, logged: Any, detail: Any, *, abs_tol: float = 0.02) -> None:
+    if logged is None or detail is None:
+        raise ValueError(f"missing log/JSON metric for {label}: log={logged!r}, json={detail!r}")
+    if isinstance(logged, (int, float)) and isinstance(detail, (int, float)):
+        if not math.isclose(float(logged), float(detail), rel_tol=0, abs_tol=abs_tol):
+            raise ValueError(f"log/JSON mismatch for {label}: {logged} vs {detail}")
+
+
+def load_cell(root: Path, arm: str, variant: str, cell: tuple[int, int, int]):
+    input_len, output_len, concurrency = cell
+    stem = f"bench-{input_len}x{output_len}-c{concurrency}"
+    json_path = root / arm / f"{stem}.json"
+    log_path = root / arm / f"{stem}.log"
+    if not json_path.is_file() or not log_path.is_file():
+        raise FileNotFoundError(f"missing serving output: {json_path} and/or {log_path}")
+    data = json.loads(json_path.read_text())
+    log = parse_log(log_path)
+    n = int(data["completed"])
+    if n <= 0 or int(data.get("failed", -1)) != 0:
+        raise ValueError(f"cell is not clean: {json_path}: completed={n}, failed={data.get('failed')}")
+    for key in ("latencies", "ttfts", "itls", "input_lens", "output_lens", "queue_times", "errors", "generated_texts"):
+        if len(data[key]) != n:
+            raise ValueError(f"{json_path}: {key} has {len(data[key])} entries, completed={n}")
+    if any(data["errors"]):
+        raise ValueError(f"cell has per-request errors: {json_path}")
+
+    # Exact timed-window log values cross-check the JSON from that same bench.
+    checks = {
+        "completed": (log.get("completed"), data.get("completed"), 0.02),
+        "failed": (log.get("failed"), data.get("failed"), 0.02),
+        "duration_s": (log.get("duration_s"), data.get("duration"), 0.011),
+        "input_tokens": (log.get("input_tokens"), data.get("total_input_tokens"), 0.02),
+        "output_tokens": (log.get("output_tokens"), data.get("total_output_tokens"), 0.02),
+        "output_tokps": (log.get("output_tokps"), data.get("output_throughput"), 0.02),
+        "mean_ttft_ms": (log.get("mean_ttft_ms"), data.get("mean_ttft_ms"), 0.011),
+        "median_ttft_ms": (log.get("median_ttft_ms"), data.get("median_ttft_ms"), 0.011),
+        "p99_ttft_ms": (log.get("p99_ttft_ms"), data.get("p99_ttft_ms"), 0.011),
+        "mean_itl_ms": (log.get("mean_itl_ms"), data.get("mean_itl_ms"), 0.011),
+        "median_itl_ms": (log.get("median_itl_ms"), data.get("median_itl_ms"), 0.011),
+        "p99_itl_ms": (log.get("p99_itl_ms"), data.get("p99_itl_ms"), 0.011),
+    }
+    for key, (logged, detailed, tol) in checks.items():
+        require_close(f"{arm}/{stem}/{key}", logged, detailed, abs_tol=tol)
+
+    requests: list[dict[str, Any]] = []
+    all_itls_ms: list[float] = []
+    for i in range(n):
+        ttft_s = float(data["ttfts"][i])
+        latency_s = float(data["latencies"][i])
+        in_tokens = int(data["input_lens"][i])
+        out_tokens = int(data["output_lens"][i])
+        itls_ms = [float(x) * 1000 for x in data["itls"][i]]
+        if ttft_s <= 0 or latency_s < ttft_s or in_tokens <= 0 or out_tokens <= 0:
+            raise ValueError(f"invalid request timing/token count at {json_path} request {i}")
+        all_itls_ms.extend(itls_ms)
+        decode_s = latency_s - ttft_s
+        text = str(data["generated_texts"][i])
+        requests.append({
+            "arm": arm,
+            "variant": variant,
+            "input_length_requested": input_len,
+            "output_length_requested": output_len,
+            "concurrency": concurrency,
+            "request_index": i,
+            "input_tokens": in_tokens,
+            "output_tokens": out_tokens,
+            "ttft_ms": ttft_s * 1000,
+            "latency_ms": latency_s * 1000,
+            "queue_ms": float(data["queue_times"][i]) * 1000,
+            "prefill_tokps_per_request_input_over_ttft": in_tokens / ttft_s,
+            "decode_tokps_per_request_output_over_decode_window": out_tokens / decode_s if decode_s > 0 else math.nan,
+            "decode_tokps_per_request_stream_chunks": (out_tokens - 1) / (sum(itls_ms) / 1000) if itls_ms and sum(itls_ms) > 0 else math.nan,
+            "itl_chunk_count": len(itls_ms),
+            "mean_itl_ms": statistics.mean(itls_ms) if itls_ms else math.nan,
+            "median_itl_ms": statistics.median(itls_ms) if itls_ms else math.nan,
+            "p99_itl_ms": percentile(itls_ms, .99),
+            "response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "response_chars": len(text),
+        })
+
+    in_total = int(data["total_input_tokens"])
+    out_total = int(data["total_output_tokens"])
+    duration = float(data["duration"])
+    mean_input = statistics.mean(int(x) for x in data["input_lens"])
+    # This is the historical TTFT-wave proxy, not measured prefill throughput.
+    wave_proxy = min(concurrency, n) * mean_input / (float(data["p99_ttft_ms"]) / 1000)
+    acceptance = data.get("spec_decode_acceptance_rate")
+    position_rates = data.get("spec_decode_per_position_acceptance_rates") or []
+    rollup = {
+        "arm": arm,
+        "variant": variant,
+        "input_length_requested": input_len,
+        "output_length_requested": output_len,
+        "concurrency": concurrency,
+        "completed": n,
+        "failed": int(data["failed"]),
+        "duration_s": duration,
+        "total_input_tokens": in_total,
+        "total_output_tokens": out_total,
+        "whole_run_input_tokps_true": in_total / duration,
+        "whole_run_output_tokps_true": out_total / duration,
+        "prefill_tokps_per_request_mean": statistics.mean(r["prefill_tokps_per_request_input_over_ttft"] for r in requests),
+        "prefill_tokps_wave_proxy_from_p99_ttft_NOT_TRUE_THROUGHPUT": wave_proxy,
+        "decode_tokps_per_request_mean": statistics.mean(r["decode_tokps_per_request_output_over_decode_window"] for r in requests),
+        "decode_tokps_pooled_over_request_decode_windows": out_total / sum(float(x) - float(t) for x, t in zip(data["latencies"], data["ttfts"])),
+        "mean_ttft_ms": float(data["mean_ttft_ms"]),
+        "median_ttft_ms": float(data["median_ttft_ms"]),
+        "p99_ttft_ms": float(data["p99_ttft_ms"]),
+        "mean_itl_ms": float(data["mean_itl_ms"]),
+        "median_itl_ms": float(data["median_itl_ms"]),
+        "p99_itl_ms": float(data["p99_itl_ms"]),
+        "pooled_stream_itl_chunk_count": len(all_itls_ms),
+        "pooled_stream_mean_itl_ms": statistics.mean(all_itls_ms) if all_itls_ms else math.nan,
+        "pooled_stream_median_itl_ms": statistics.median(all_itls_ms) if all_itls_ms else math.nan,
+        "pooled_stream_p99_itl_ms": percentile(all_itls_ms, .99),
+        # vLLM's detailed JSON stores this metric in percent units already.
+        "acceptance_rate_pct_json": float(acceptance) if acceptance is not None else math.nan,
+        "acceptance_length_json": data.get("spec_decode_acceptance_length", math.nan),
+        "drafts_json": data.get("spec_decode_num_drafts", math.nan),
+        "draft_tokens_json": data.get("spec_decode_draft_tokens", math.nan),
+        "accepted_tokens_json": data.get("spec_decode_accepted_tokens", math.nan),
+        "position0_acceptance_pct_json": 100 * float(position_rates[0]) if len(position_rates) > 0 else math.nan,
+        "position1_acceptance_pct_json": 100 * float(position_rates[1]) if len(position_rates) > 1 else math.nan,
+        "acceptance_rate_pct_log_exact_cell_window": log.get("acceptance_pct", math.nan),
+        "acceptance_length_log_exact_cell_window": log.get("acceptance_length", math.nan),
+        "drafts_log_exact_cell_window": log.get("drafts", math.nan),
+        "draft_tokens_log_exact_cell_window": log.get("draft_tokens", math.nan),
+        "accepted_tokens_log_exact_cell_window": log.get("accepted_tokens", math.nan),
+        "position_acceptance_pct_log_exact_cell_window": json.dumps(log.get("position_acceptance_pct", {}), sort_keys=True),
+        "mean_tpot_ms_json_reference_only": data.get("mean_tpot_ms", math.nan),
+        "median_tpot_ms_json_reference_only": data.get("median_tpot_ms", math.nan),
+    }
+    # Verify all acceptance-window fields when the serving bench log exposes them.
+    acceptance_checks = (
+        ("acceptance_pct", acceptance),
+        ("acceptance_length", data.get("spec_decode_acceptance_length")),
+        ("drafts", data.get("spec_decode_num_drafts")),
+        ("draft_tokens", data.get("spec_decode_draft_tokens")),
+        ("accepted_tokens", data.get("spec_decode_accepted_tokens")),
+    )
+    for key, val in acceptance_checks:
+        if key in log and val is not None:
+            require_close(f"{arm}/{stem}/{key}", log[key], val, abs_tol=0.02)
+    for pos, rate in enumerate(position_rates):
+        if pos in log.get("position_acceptance_pct", {}):
+            require_close(f"{arm}/{stem}/position{pos}_acceptance", log["position_acceptance_pct"][pos], float(rate) * 100, abs_tol=0.02)
+    return data, log, requests, rollup
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        raise ValueError(f"no rows for {path.name}")
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def run_parity(root: Path, left: str, right: str, label: str) -> tuple[str, int | None]:
+    a = root / left / "parity.json"
+    b = root / right / "parity.json"
+    if not a.is_file() or not b.is_file():
+        return f"{label}: missing parity.json ({a.exists()=}, {b.exists()=})\n", None
+    tool = Path(__file__).resolve().parents[3] / "tools/rdna/mono/logprob_parity.py"
+    proc = subprocess.run([sys.executable, str(tool), "compare", str(a), str(b)], text=True, capture_output=True)
+    output = f"### {label} ({left} vs {right})\n{proc.stdout}{proc.stderr}"
+    return output, proc.returncode
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, required=True, help="Recovered ABBA run directory")
+    parser.add_argument("--allow-failed-gates", action="store_true", help="Analyze partial evidence while marking gate failures")
+    args = parser.parse_args()
+    root = args.root.resolve()
+    if not root.is_dir():
+        parser.error(f"root does not exist: {root}")
+    request_rows: list[dict[str, Any]] = []
+    rollups: list[dict[str, Any]] = []
+    raw: dict[tuple[str, tuple[int, int, int]], dict[str, Any]] = {}
+    gate_rows: list[dict[str, Any]] = []
+    for arm, variant in ARMS:
+        arm_dir = root / arm
+        if not arm_dir.is_dir():
+            raise FileNotFoundError(f"missing arm directory: {arm_dir}")
+        pass_marker = arm_dir / "ARM-PASS.txt"
+        gate_rows.append({"arm": arm, "arm_pass_marker": pass_marker.exists(), "summary_exists": (arm_dir / "summary.txt").is_file()})
+        if not pass_marker.exists() and not args.allow_failed_gates:
+            raise ValueError(f"arm lacks ARM-PASS.txt: {arm_dir}")
+        for cell in CELLS:
+            data, log, reqs, rollup = load_cell(root, arm, variant, cell)
+            raw[(arm, cell)] = data
+            request_rows.extend(reqs)
+            rollups.append(rollup)
+
+    # Aggregate across timed cells; these are the actual aggregate input/output
+    # token rates for the serial four-cell run, not the TTFT wave proxy.
+    whole_rows = []
+    for arm, variant in ARMS:
+        rows = [r for r in rollups if r["arm"] == arm]
+        duration = sum(float(r["duration_s"]) for r in rows)
+        input_total = sum(int(r["total_input_tokens"]) for r in rows)
+        output_total = sum(int(r["total_output_tokens"]) for r in rows)
+        whole_rows.append({
+            "arm": arm,
+            "variant": variant,
+            "timed_cells": len(rows),
+            "sum_cell_durations_s": duration,
+            "sum_input_tokens": input_total,
+            "sum_output_tokens": output_total,
+            "whole_run_input_tokps_true": input_total / duration,
+            "whole_run_output_tokps_true": output_total / duration,
+            "mean_cell_prefill_tokps_wave_proxy_NOT_TRUE_THROUGHPUT": statistics.mean(float(r["prefill_tokps_wave_proxy_from_p99_ttft_NOT_TRUE_THROUGHPUT"]) for r in rows),
+        })
+
+    response_rows = []
+    for cell in CELLS:
+        for a, b in (("01-control", "02-candidate"), ("04-control", "03-candidate"),
+                     ("01-control", "04-control"), ("02-candidate", "03-candidate")):
+            left = raw[(a, cell)]["generated_texts"]
+            right = raw[(b, cell)]["generated_texts"]
+            if len(left) != len(right):
+                raise ValueError(f"request count mismatch for {a}/{b}/{cell}")
+            for i, (ta, tb) in enumerate(zip(left, right)):
+                common = 0
+                for ca, cb in zip(ta, tb):
+                    if ca != cb:
+                        break
+                    common += 1
+                response_rows.append({
+                    "cell": f"{cell[0]}x{cell[1]}-c{cell[2]}",
+                    "arm_a": a,
+                    "arm_b": b,
+                    "request_index": i,
+                    "exact_text_match_diagnostic_only": ta == tb,
+                    "common_prefix_chars_diagnostic_only": common,
+                    "text_a_sha256": hashlib.sha256(ta.encode()).hexdigest(),
+                    "text_b_sha256": hashlib.sha256(tb.encode()).hexdigest(),
+                    "text_a_chars": len(ta),
+                    "text_b_chars": len(tb),
+                })
+
+    write_csv(root / "per-request-analysis.csv", request_rows)
+    write_csv(root / "per-cell-analysis.csv", rollups)
+    write_csv(root / "whole-run-analysis.csv", whole_rows)
+    write_csv(root / "response-text-comparisons.csv", response_rows)
+    write_csv(root / "arm-gates.csv", gate_rows)
+
+    parity_text = []
+    parity_codes = []
+    for a, b, label in (("01-control", "02-candidate", "first AB pair"),
+                        ("04-control", "03-candidate", "second AB pair"),
+                        ("01-control", "04-control", "control repeat drift"),
+                        ("02-candidate", "03-candidate", "candidate repeat drift")):
+        text, code = run_parity(root, a, b, label)
+        parity_text.append(text)
+        if code is not None:
+            parity_codes.append(code)
+    (root / "cross-arm-logprob-parity.txt").write_text("\n".join(parity_text))
+    report = [
+        "Serving AB analysis complete.",
+        "Prefill wave values are TTFT-derived proxies, not measured throughput.",
+        "Whole-run input/output tok/s are total timed-cell tokens divided by the sum of timed-cell durations.",
+        "Per-request decode tok/s uses output tokens / (latency - TTFT); the stream-chunk estimate is exported separately.",
+        "ITL reports are stream inter-token chunk gaps, not TPOT.",
+        "Generated-text differences are diagnostic only; consult cross-arm-logprob-parity.txt for fixed-prompt greedy/top-logprob comparisons.",
+        "Generated files: per-request-analysis.csv, per-cell-analysis.csv, whole-run-analysis.csv, response-text-comparisons.csv, arm-gates.csv, cross-arm-logprob-parity.txt",
+    ]
+    (root / "ANALYSIS.txt").write_text("\n".join(report) + "\n")
+    print("\n".join(report))
+    return 0 if all(code == 0 for code in parity_codes) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

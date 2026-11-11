@@ -1,0 +1,101 @@
+{
+  "status": "PASS",
+  "native_sha256_before_sha256": "3e43ffb880c268f8a8b6a5c6db721e03f1969470013fb677870e2f41808fe645",
+  "mono_sha256_before_sha256": "87171c451d52c70c9ae64abc26f5c257ef1a61580bc0f30da79022fe91584350",
+  "native_sha256_after_sha256": "3e43ffb880c268f8a8b6a5c6db721e03f1969470013fb677870e2f41808fe645",
+  "mono_sha256_after_sha256": "87171c451d52c70c9ae64abc26f5c257ef1a61580bc0f30da79022fe91584350",
+  "checked_keys": [
+    {
+      "path": "vllm/_rocm_C.abi3.so",
+      "sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed"
+    },
+    {
+      "path": "csrc/rocm/mono_k2_rdna2.cu",
+      "sha256": "c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434"
+    },
+    {
+      "path": "csrc/rocm/ops.h",
+      "sha256": "32dba52938936b317f2eb546e5db75e90ff4ec067eb8b395e47b6f2b7878b469"
+    },
+    {
+      "path": "csrc/rocm/torch_bindings.cpp",
+      "sha256": "14c0e4c76a3aea05e1611dff54096fe91c0ddb2832c14ecead1c26f9ee0287e1"
+    },
+    {
+      "path": "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py",
+      "sha256": "f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono/rdna2/failstop.py",
+      "sha256": "786c22ec3d33d3758f7c447f0c254a027d8785e40faa4f6e922937d7b943d83b"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono/rdna2/k1.py",
+      "sha256": "6318fc36513b664993a8feab4b37a63cd6366473842eaaaa58aec204d01c67d0"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono_decode_rdna2.py",
+      "sha256": "3dea31fa8fce0cab59d8e4d7b3d0bd5f22acf2f5381efe445fe17382dd6e3c27"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py",
+      "sha256": "64cc1b2a22737b59f2e6113ceeaa551509a63e4a307abe44c286849a426788dc"
+    },
+    {
+      "path": "vllm/models/qwen4_exp/amd/mono/rdna2/layout.py",
+      "sha256": "00e730f8d40b5ec9966ff096040e872be2547068e60e4af87d93b8bb17a575c1"
+    },
+    {
+      "path": "vllm/v1/worker/gpu_model_runner.py",
+      "sha256": "43792477dab6fcd1abdbb143d47b37a27a65d571e073b65c0167c14693116966"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/model_runner.py",
+      "sha256": "20e84bda462a19991e955fb20977b9829bea1b6785299c9a5ff7744fed409927"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/async_utils.py",
+      "sha256": "49a454592c80f4813d47ebf811e543ba53c7fbdeed30b1350f0f2ea422478095"
+    },
+    {
+      "path": "vllm/v1/engine/core.py",
+      "sha256": "d68e8983fa59059cdfa34be018aba291b7ffb0970cb4390fb3e6742b1e08228e"
+    },
+    {
+      "path": "tools/rdna/serve_rdna.sh",
+      "sha256": "2f5010fc3cf0892203e60ef4a482cf9585296ced067a8a5f3b0c926acbb1c94b"
+    },
+    {
+      "path": "tools/rdna/recipes/flashnext-mtp2.env",
+      "sha256": "f6faa5a98508c33d2e3b91beb23640098c36876e11f5acfecfb16b3ab32f90f4"
+    },
+    {
+      "path": "overlay_manifest.json",
+      "sha256": "db735e5d0fcc119800132bed016a52681ce86a9eb7a33a89f3c0d1337cf139bc"
+    },
+    {
+      "path": "config.json",
+      "sha256": "316307706e38b7db23ecb6a94b1343d8846b52ddb65a217b18c6e242eab20fe9"
+    },
+    {
+      "path": "META.json",
+      "sha256": "e9a1863008450b7ac329d50a3b6b908f21122b8bf5da999bdeff05004161884a"
+    },
+    {
+      "path": "tunableop_results0.csv",
+      "sha256": "788fe4744672f2c7a776caa59897487a84a632b650f87b7bb379a29d920ac703"
+    },
+    {
+      "path": "tunableop_results1.csv",
+      "sha256": "5915b3ae2fd41ab882f9a8c6884ba48057a824109726a7a7b6053323b760e2bb"
+    },
+    {
+      "path": "tunableop_results2.csv",
+      "sha256": "4a56858972be35bc8538e44d6793729305c2c5d7abb6d0e34d7ec3532b708a84"
+    },
+    {
+      "path": "tunableop_results3.csv",
+      "sha256": "267436d3bd2da71e8dc5e4f3b6937ad9b529f6af4ccf583aa356974a859834ae"
+    }
+  ]
+}

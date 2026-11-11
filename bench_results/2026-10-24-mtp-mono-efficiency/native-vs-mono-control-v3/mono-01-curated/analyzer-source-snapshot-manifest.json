@@ -1,0 +1,39 @@
+{
+  "purpose": "Exact source snapshots for CPU validation and metric extraction. The .txt suffix prevents hooks from rewriting evidence.",
+  "copy_back_commands": [
+    "cp mono-01-curated/analyze_native_vs_mono_v3.py.txt native-vs-mono-control-v3/analyze_native_vs_mono_v3.py",
+    "cp mono-01-curated/test_analyze_native_vs_mono_v3.py.txt native-vs-mono-control-v3/test_analyze_native_vs_mono_v3.py",
+    "cp mono-01-curated/analyze_pair_v1.py.txt correctness-core-serving-ab/tools/analyze_pair_v1.py",
+    "cp mono-01-curated/curate_mono_arm_v3.py.txt native-vs-mono-control-v3/curate_mono_arm_v3.py"
+  ],
+  "run_commands": [
+    "/private/tmp/mono-local-validation-venv/bin/python -m unittest discover -s bench_results/2026-10-24-mtp-mono-efficiency/native-vs-mono-control-v3 -p test_analyze_native_vs_mono_v3.py -v",
+    "/private/tmp/mono-local-validation-venv/bin/python bench_results/2026-10-24-mtp-mono-efficiency/native-vs-mono-control-v3/curate_mono_arm_v3.py --arm-dir bench_results/2026-10-24-mtp-mono-efficiency/dense-mtp-failstop-healthy-v3-results --remote-out /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-v3-results --repo-root \"$PWD\" --output-dir /tmp/mono-curated-rebuild"
+  ],
+  "snapshots": [
+    {
+      "snapshot": "analyze_native_vs_mono_v3.py.txt",
+      "source": "../analyze_native_vs_mono_v3.py",
+      "sha256": "766e5e20b21eaf3e0384eb5a70f74bafdd6932f2c3eef7d70ee48dbb7455e699",
+      "size_bytes": 36480
+    },
+    {
+      "snapshot": "test_analyze_native_vs_mono_v3.py.txt",
+      "source": "../test_analyze_native_vs_mono_v3.py",
+      "sha256": "5ff58ed10895d41bff8cd28d1d567b40e82b4e44c683362d628aaa6dae157062",
+      "size_bytes": 2829
+    },
+    {
+      "snapshot": "analyze_pair_v1.py.txt",
+      "source": "../../correctness-core-serving-ab/tools/analyze_pair_v1.py",
+      "sha256": "62f766cf1007aef0e4c6f45d1fbc7a56819949c0cb45a85c241c4d59951436cb",
+      "size_bytes": 25398
+    },
+    {
+      "snapshot": "curate_mono_arm_v3.py.txt",
+      "source": "../curate_mono_arm_v3.py",
+      "sha256": "8d22f4f84d7cb15e8b1409d91cc0b20a8b51625620f6bb7182eb9292d3e2f5ef",
+      "size_bytes": 8765
+    }
+  ]
+}

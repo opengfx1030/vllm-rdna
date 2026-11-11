@@ -1,0 +1,7 @@
+7a0538cfb63646af313c08c5275874316fd2077f4cca0e02099c75a163d9827e  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/torch-extensions-router-half-v2-20261024/mono_k2_router_half_quantized_v2_scratch_20261024/mono_k2_router_half_quantized_v2_scratch_20261024.so
+6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3  /home/chenco_adm/vllm-rdna-mtp-mono/vllm/_rocm_C.abi3.so
+101e623a65c1cbb0057845b6accd35d20a04b0f30d6faa00c3684418ef6d5fd1  /home/chenco_adm/vllm-rdna-mtp-mono/csrc/rocm/mono_k2_rdna2.cu
+b2cdb9b6a4e5886749ad0530b76f26072f9e38d93c34f8743111160afc09de77  /home/chenco_adm/vllm-rdna-mtp-mono/csrc/rocm/moe_unquantized_rdna2.cu
+aa845c720d6f7c70eb276141fa654d850a4ae9b4990dbdad67d3f1afbfb718c5  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-router-half-quantized-v2/mono_k2_rdna2_router_half_quantized_v2.cu
+db3c65048a476219f6ef9dd084c12aa9eb0c5df137f603e5db7facf2c205384a  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-router-half-quantized-v2/binding.cpp
+0378a8767e63cedc1e6ee35b93ccf5595174e55b9030601dac352bec05e0145d  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/router-half-v2-trace-bootstrap/rocprof/par1-cs25/193356_kernel_trace.csv

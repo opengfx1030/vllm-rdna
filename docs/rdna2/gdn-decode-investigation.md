@@ -52,6 +52,7 @@ closer to ~2.8 µs.
 - 391 `v_` instructions, 25 `s_waitcnt`.
 
 Remaining micro-inefficiencies (immaterial given the size):
+
 - Occupancy 4 waves/SIMD (capped by `amdgpu_waves_per_eu(2, 4)` + 62 VGPRs).
 - 49 fp16→fp32 conversions (from the new fp16-state path; fp32 state needs 0).
 - Scalar `global_load_ushort` ×9 and one `global_store_short` (a/b/q/k/out
@@ -94,3 +95,34 @@ The leverage is in **launch count**, not the kernel body:
 The real decode bottleneck is elsewhere — the MoE dominates (~0.98 ms/layer
 vs ~3 µs for GDN). Use the `decode-profile` skill (rocprofv3) to get the
 per-kernel breakdown of a live decode window.
+
+## 2026-11-02: the glue around the kernel
+
+With MTP the spec-verify path launched about eight small kernels per GDN layer
+around `gdn_spec_verify_rdna2`: `rearrange_mixed_qkv` (one cat and three
+contiguous copies), one copy each for `a` and `b`, one for `z`, and the copy
+of the kernel output into `core_attn_out`. The launch-site attribution of the
+unmodified tree puts those at about 260 kernels and 1.3 ms per decode step.
+
+`VLLM_GDN_STRIDED_INPUTS=1` (default) removes them. The spec-verify kernel
+reads q/k/v and `a`/`b` at their token strides, as views into the conv output
+and the projections, and writes `core_attn_out` itself when the batch is
+pure-spec. The gated RMSNorm reads `z` in place at its token stride.
+Mixed prefill+decode batches and every non-dense layout still take the copies.
+The results are bitwise identical to the copy path
+(`test_gdn_decode_rdna2.py`, `test_gdn_output_projection.py`).
+
+Flash-Next MTP2 TP4, AR gate 256 KiB, 1k/512 (16k/1024 for the last row), HC
+and shared-expert batch already in, ITL p50 in ms, one run per cell:
+
+| cell | before | after |
+|---|---:|---:|
+| c1 | 24.9 | 23.8 |
+| c6 | 49.6 | 47.9 |
+| c8 | 52.9 | 51.8 |
+| 16k c8 | 54.6 | 53.8 |
+
+That is 1.5-4.4 % of the step. Mean accepted length moves by 0.1 or more
+between runs of the same build, so decode tokens/s is within noise; prefill
+tokens/s and solo TTFT did not change (1k c8 2057 to 2075 tok/s, 4k / 16k solo
+1.86 / 7.49 s to 1.82 / 7.33 s).

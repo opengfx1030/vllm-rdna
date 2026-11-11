@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from abc import abstractmethod
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -17,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_gather_via_all_reduce,
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
@@ -31,6 +33,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
+    maybe_pad_weight_avoid_cache_aliasing,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -229,6 +232,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers import rdna_dense_int8
 
             rdna_dense_int8.make_shadow(layer)
+
+            layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
 
     def apply(
         self,
@@ -526,6 +531,20 @@ class ColumnParallelLinear(LinearBase):
         self._maybe_allow_fp8_block_shape_mismatch()
         self.gather_output = gather_output
 
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+
+        quant_method = self.quant_method
+        if (
+            isinstance(quant_method, OnlineLinearBase)
+            and quant_method.requantization_source is not None
+        ):
+            quant_method = quant_method.requantization_source
+        weight_loader = (
+            self.weight_loader_v2
+            if quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+            else self.weight_loader
+        )
+
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -533,11 +552,7 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=(
-                self.weight_loader_v2
-                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
-                else self.weight_loader
-            ),
+            weight_loader=weight_loader,
         )
 
         if bias:
@@ -621,7 +636,12 @@ class ColumnParallelLinear(LinearBase):
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
-            output = tensor_model_parallel_all_gather(output_parallel)
+            if os.environ.get("VLLM_RDNA_GATHER_ALLREDUCE") == "1":
+                output = tensor_model_parallel_all_gather_via_all_reduce(
+                    output_parallel
+                )
+            else:
+                output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
 
@@ -1388,6 +1408,11 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
     *replication* path when ``tp_size > total_num_kv_heads`` (this is what makes
     a TP size greater than the KV-head count work). ``index_k`` is a single
     shared head, replicated to every rank.
+
+    ``replicate_index_q`` moves ``index_q`` onto that replicated path too, so
+    every rank projects all the index heads rather than its own. That is what
+    indexer context parallelism needs: it inverts the split, scoring every head
+    against a shard of the blocks instead of one head against all of them.
     """
 
     def __init__(
@@ -1401,6 +1426,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         bias: bool = False,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        replicate_index_q: bool = False,
     ) -> None:
         # index_q rides the KV-head sharding/replication path, so its head count
         # must match the KV heads.
@@ -1415,6 +1441,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         self.total_num_kv_heads = total_num_kv_heads
         self.total_num_index_heads = total_num_index_heads
         self.index_head_size = index_head_size
+        self.replicate_index_q = replicate_index_q
 
         tp_size = get_tensor_model_parallel_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)
@@ -1424,8 +1451,11 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         else:
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
-        # index_q shards identically to the KV heads.
-        self.num_index_heads = self.num_kv_heads
+        # index_q shards identically to the KV heads, unless CP has asked for
+        # every head on every rank.
+        self.num_index_heads = (
+            self.total_num_index_heads if replicate_index_q else self.num_kv_heads
+        )
 
         # Global per-group sizes (replicated groups counted x tp_size, matching
         # the QKVParallelLinear convention). index_k is a single replicated head.
@@ -1502,12 +1532,14 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
                 weight_block_size, shard_size, shard_offset
             )
 
-        # index_k is fully replicated: num_heads == tp_size makes
-        # load_qkv_weight pick shard_id_int == 0 on every rank. q/k/v/index_q ride
-        # the KV-head replication factor.
-        num_heads = (
-            self.tp_size if loaded_shard_id == "index_k" else self.num_kv_head_replicas
+        # A replicated group takes num_heads == tp_size, which makes
+        # load_qkv_weight pick shard_id_int == 0 on every rank and so copy the
+        # whole group everywhere. index_k always is; index_q is too under CP.
+        # The rest ride the KV-head replication factor.
+        replicated = loaded_shard_id == "index_k" or (
+            loaded_shard_id == "index_q" and self.replicate_index_q
         )
+        num_heads = self.tp_size if replicated else self.num_kv_head_replicas
         param.load_qkv_weight(
             loaded_weight=loaded_weight,
             num_heads=num_heads,
@@ -1541,7 +1573,9 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         param_data = param.data.narrow(output_dim, shard_offset, shard_size)
         if loaded_shard_id == "q":
             shard_rank = self.tp_rank
-        elif loaded_shard_id == "index_k":
+        elif loaded_shard_id == "index_k" or (
+            loaded_shard_id == "index_q" and self.replicate_index_q
+        ):
             shard_rank = 0  # replicated to every rank
         else:
             shard_rank = self.tp_rank // self.num_kv_head_replicas
@@ -1717,6 +1751,20 @@ class RowParallelLinear(LinearBase):
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+
+        quant_method = self.quant_method
+        if (
+            isinstance(quant_method, OnlineLinearBase)
+            and quant_method.requantization_source is not None
+        ):
+            quant_method = quant_method.requantization_source
+        weight_loader = (
+            self.weight_loader_v2
+            if quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+            else self.weight_loader
+        )
+
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -1724,11 +1772,7 @@ class RowParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
-            weight_loader=(
-                self.weight_loader_v2
-                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
-                else self.weight_loader
-            ),
+            weight_loader=weight_loader,
         )
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError(

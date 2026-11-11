@@ -1,0 +1,33 @@
+{
+  "steps": 2000,
+  "hub_hit": 0.5820204817439543,
+  "cold_max_touched_per_step": 904.3164999999999,
+  "cold_mean_touched_per_step": 733.61125,
+  "cold_imbalance": 1.2326917014972165,
+  "cold_max_touched_p95_per_step": 944.0,
+  "hub_touched_per_step": 3091.6539999999995,
+  "comm_us_per_step": 3124.4826623999984,
+  "step_us": 9935.295603200002,
+  "step_us_no_spill": 12932.9386096,
+  "hub_spilled_per_step": 830.2955000000001,
+  "hub_kept_per_layer_per_hub": 47.11163541666667,
+  "cold_distinct_experts_per_step": 2934.445,
+  "cold_touches_per_step": 2934.445,
+  "cold_replica_touch_ratio": 1.0,
+  "analytic": {
+    "decode_hub_hit": 0.5855480391381175,
+    "prefill_hub_hit": 0.3774838238706881,
+    "cold_touched_critical_per_step": 1090.5789123246261,
+    "cold_touched_mean_per_step": 1082.4983665465631,
+    "cold_imbalance": 1.0074647186802155,
+    "prefill_pair_load_imbalance": 1.068314543501158,
+    "prefill_pair_load_imbalance_primary_only": 1.1253671224194919,
+    "hub_experts_per_layer": {
+      "min": 130,
+      "mean": 137.79591836734693,
+      "max": 512,
+      "total": 6752
+    },
+    "step_rows_mean": 23.53432077867118
+  }
+}

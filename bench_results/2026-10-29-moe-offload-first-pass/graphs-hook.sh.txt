@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading
+.venv/bin/python - <<'PY'
+import json, urllib.request, os, pathlib
+req=urllib.request.Request('http://127.0.0.1:18766/collective_rpc',data=json.dumps({'method':'rdna_expert_cache_control','kwargs':{'copy_mode':'tensor'}}).encode(),headers={'Content-Type':'application/json'})
+with urllib.request.urlopen(req,timeout=60) as r:d=json.load(r)
+assert all(x['copy_modes']==['tensor'] and x['post_step_checks']=='collective' and x['debug_timing'] is False for x in d['results'])
+pathlib.Path(os.environ['OUT'],'tensor-control.json').write_text(json.dumps(d,indent=2)+'\n')
+PY
+.venv/bin/python tools/probe_greedy_correctness.py --url "$URL" --model "$SERVED" --max-tokens 48 > "$OUT/tensor-greedy.txt" 2>&1
+.venv/bin/python tools/rdna/port_v031/ppl_probe.py --url "$URL" --model "$SERVED" --max-ppl 6 > "$OUT/tensor-ppl.txt" 2>&1
+.venv/bin/python tools/rdna/port_v031/prefix_probe.py --url "$URL" --model "$SERVED" > "$OUT/tensor-prefix.txt" 2>&1
+.venv/bin/python tools/rdna/port_v031/concurrency_probe.py --url "$URL" --model "$SERVED" --no-ignore-eos --verbose --save-results "$OUT/tensor-concurrency.json" > "$OUT/tensor-concurrency.txt" 2>&1
+.venv/bin/python tools/rdna/port_v031/ladder_warmup.py --url http://127.0.0.1:18766 --model "$SERVED" --sizes 3072,4096 --max-seqs 1 --decode-tokens 1 > "$OUT/large-warmup.txt" 2>&1
+.venv/bin/python -m tools.rdna.mono.qualify_expert_copy --base-url http://127.0.0.1:18766 --model "$SERVED" --tokenizer "$MODEL" --out "$OUT/copy-abba" --cells 1k-c1 1k-c8 16k-c1 16k-c8 --arms tensor native native tensor

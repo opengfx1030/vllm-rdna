@@ -27,6 +27,68 @@ def _prepare(
     return float(scale), out
 
 
+def int4_fp16_kernels_available() -> bool:
+    return all(
+        hasattr(torch.ops._rocm_C, name)
+        for name in (
+            "reshape_and_cache_int4_fp16_rdna2",
+            "fa_rdna2_paged_int4_fp16_block",
+        )
+    )
+
+
+def reshape_and_cache_int4_fp16_rdna2(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Write into inline uint8 [2, pages, block_size, heads, record_bytes]."""
+    torch.ops._rocm_C.reshape_and_cache_int4_fp16_rdna2(key, value, cache, slot_mapping)
+
+
+def fa_rdna2_paged_int4_fp16_block(
+    Q: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_query_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    kv_splits: int = 16,
+    sliding_window: int = 0,
+    scale: float | None = None,
+    decode: bool = True,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Read INT4 payloads and raw packed FP16-scale/zero-point words.
+
+    Payloads are uint8 [pages, heads, block_size, D/2]. Scale words are
+    uint16 [pages, heads, block_size, D/32], including their zero-point bits.
+    All cache views may carry padded page strides. Queries and output are FP16.
+    """
+    scale, out = _prepare(Q, scale, out)
+    torch.ops._rocm_C.fa_rdna2_paged_int4_fp16_block(
+        Q,
+        key_cache,
+        value_cache,
+        k_scale,
+        v_scale,
+        block_table,
+        cu_query_lens,
+        seq_lens,
+        block_size,
+        kv_splits,
+        sliding_window,
+        scale,
+        decode,
+        out,
+    )
+    return out
+
+
 def fa_rdna2_decode_paged(
     Q: torch.Tensor,
     key_cache: torch.Tensor,

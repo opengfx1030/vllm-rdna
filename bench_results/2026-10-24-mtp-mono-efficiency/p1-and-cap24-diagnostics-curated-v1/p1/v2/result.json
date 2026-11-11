@@ -1,0 +1,180 @@
+{
+  "status": "PASS",
+  "complete": true,
+  "scope": "untimed M128 seed250252 actual FP32 P1 trace; no serving claim",
+  "boot": "1e8b5da1-759f-4dbb-ae87-e58c2faaff48",
+  "trace_build_manifest": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2-build/compiled/build_manifest.json",
+  "trace_build_manifest_sha256": "f20f4063351882bc611456f6587f34f1f6606a022ab0069c5ca829abdcf5b63e",
+  "core_sha256": "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed",
+  "tests_sha256": "f698334b167d69cd05d77bcf5b1779f07382f29ef22fa41492ebafcc93650fd7",
+  "records": [
+    {
+      "label": "eager_seed250252",
+      "checks": {
+        "native_res_bit_exact": true,
+        "native_xn_bit_exact": true,
+        "global_outputs_bit_exact": true,
+        "global_xn_bit_exact": true,
+        "global_route_ids_bit_exact": true,
+        "native_global_combined_res_bit_exact": true,
+        "trace_values_finite": true
+      },
+      "errors": {
+        "baseline": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          118
+        ],
+        "old_route": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          118
+        ],
+        "new_trace": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          118
+        ]
+      },
+      "native_sum_fp32": 3129.26806640625,
+      "native_rrms_fp32": 0.9044788479804993,
+      "global_sum_fp32": 3129.267822265625,
+      "global_rrms_fp32": 0.904478907585144,
+      "native_xn_row104_index1690": 0.98828125,
+      "global_xn_row104_index1690": 0.98876953125,
+      "global_route_ids_row104": [
+        0,
+        17,
+        112,
+        250,
+        278,
+        369,
+        387,
+        443,
+        468,
+        489
+      ]
+    },
+    {
+      "label": "graph_seed250252",
+      "checks": {
+        "native_res_bit_exact": true,
+        "native_xn_bit_exact": true,
+        "global_outputs_bit_exact": true,
+        "global_xn_bit_exact": true,
+        "global_route_ids_bit_exact": true,
+        "native_global_combined_res_bit_exact": true,
+        "trace_values_finite": true
+      },
+      "errors": {
+        "baseline": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          118
+        ],
+        "old_route": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          118
+        ],
+        "new_trace": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          118
+        ]
+      },
+      "native_sum_fp32": 3129.26806640625,
+      "native_rrms_fp32": 0.9044788479804993,
+      "global_sum_fp32": 3129.267822265625,
+      "global_rrms_fp32": 0.904478907585144,
+      "native_xn_row104_index1690": 0.98828125,
+      "global_xn_row104_index1690": 0.98876953125,
+      "global_route_ids_row104": [
+        0,
+        17,
+        112,
+        250,
+        278,
+        369,
+        387,
+        443,
+        468,
+        489
+      ]
+    },
+    {
+      "label": "graph_seed250253",
+      "checks": {
+        "native_res_bit_exact": true,
+        "native_xn_bit_exact": true,
+        "global_outputs_bit_exact": true,
+        "global_xn_bit_exact": true,
+        "global_route_ids_bit_exact": true,
+        "native_global_combined_res_bit_exact": true,
+        "trace_values_finite": true
+      },
+      "errors": {
+        "baseline": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          116
+        ],
+        "old_route": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          116
+        ],
+        "new_trace": [
+          0,
+          0,
+          0,
+          32,
+          0,
+          116
+        ]
+      },
+      "native_sum_fp32": 3325.756591796875,
+      "native_rrms_fp32": 0.8773534893989563,
+      "global_sum_fp32": 3325.756591796875,
+      "global_rrms_fp32": 0.8773534893989563,
+      "native_xn_row104_index1690": 0.0992431640625,
+      "global_xn_row104_index1690": 0.0992431640625,
+      "global_route_ids_row104": [
+        24,
+        54,
+        85,
+        238,
+        263,
+        264,
+        371,
+        386,
+        457,
+        462
+      ]
+    }
+  ]
+}

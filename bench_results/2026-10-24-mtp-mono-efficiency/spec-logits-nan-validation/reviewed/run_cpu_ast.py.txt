@@ -1,0 +1,174 @@
+"""Validate V1 speculative NaN accounting without importing torch or using GPUs.
+
+This executes the actual mapping function and async output class extracted from
+the checked-out source AST with tiny CPU fakes. It complements the normal pytest
+test, which requires the vLLM/PyTorch environment on the build host.
+"""
+
+import ast
+import hashlib
+import json
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+ROOT = Path(__file__).resolve().parents[3]
+SOURCE = ROOT / "vllm/v1/worker/gpu_model_runner.py"
+source_text = SOURCE.read_text()
+source_sha256 = hashlib.sha256(source_text.encode()).hexdigest()
+tree = ast.parse(source_text)
+selected = [
+    node
+    for node in tree.body
+    if (
+        isinstance(node, ast.FunctionDef)
+        and node.name == "nans_to_dict"
+    )
+    or (
+        isinstance(node, ast.ClassDef)
+        and node.name == "AsyncGPUModelRunnerOutput"
+    )
+]
+assert len(selected) == 2
+
+
+class FakeTensor:
+    def __init__(self, data):
+        self.data = data
+        self.shape = (
+            (len(data), len(data[0]))
+            if isinstance(data[0], list)
+            else (len(data),)
+        )
+
+    def to(self, *args, **kwargs):
+        return self
+
+    def tolist(self):
+        return self.data
+
+
+class FakeCuda:
+    def Event(self, **kwargs):
+        return Mock()
+
+    def current_stream(self):
+        return object()
+
+    def stream(self, stream):
+        return nullcontext()
+
+
+def raise_if_nan_logits(counts):
+    if any(counts.values()):
+        raise RuntimeError(f"NaNs detected: {counts}")
+
+
+namespace = {
+    "AsyncModelRunnerOutput": object,
+    "torch": SimpleNamespace(cuda=FakeCuda()),
+    "envs": SimpleNamespace(VLLM_RAISE_ON_LOGIT_NANS=False),
+    "raise_if_nan_logits": raise_if_nan_logits,
+    "RejectionSampler": SimpleNamespace(
+        parse_output=Mock(return_value=([[1, 2], [4]], None))
+    ),
+}
+module = ast.fix_missing_locations(
+    ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__", names=[ast.alias(name="annotations")], level=0
+            ),
+            *selected,
+        ],
+        type_ignores=[],
+    )
+)
+exec(compile(module, str(SOURCE), "exec"), namespace)
+map_counts = namespace["nans_to_dict"]
+AsyncOutput = namespace["AsyncGPUModelRunnerOutput"]
+
+checks = []
+
+
+def check(name, condition):
+    assert condition, name
+    checks.append(name)
+
+
+check(
+    "c1_late_verification_and_bonus",
+    map_counts([0, 2, 3], {"r": 0}, [2]) == {"r": 5},
+)
+lens = [2, 0, 1, 2, 0, 2, 1, 2]
+counts = [0] * sum(n + 1 for n in lens)
+counts[2], counts[11], counts[-1] = 1, 2, 3
+check(
+    "c8_variable_lengths_and_late_requests",
+    map_counts(counts, {f"r{i}": i for i in range(8)}, lens)
+    == {f"r{i}": n for i, n in enumerate([1, 0, 0, 0, 0, 2, 0, 3])},
+)
+check("non_spec_short", map_counts([2], {"a": 0, "b": 1}) == {"a": 2, "b": 0})
+check("non_spec_empty", map_counts([], {"a": 0, "b": 1}) == {"a": 0, "b": 0})
+check(
+    "spec_clean",
+    map_counts([0, 0, 0, 0], {"a": 0, "b": 1}, [2, 0])
+    == {"a": 0, "b": 0},
+)
+for bad_counts in ([], [0, 0, 0]):
+    try:
+        map_counts(bad_counts, {"a": 0, "b": 1}, [2, 0])
+    except ValueError:
+        checks.append(f"spec_missing_rows_fail_closed_{len(bad_counts)}")
+    else:
+        raise AssertionError("missing speculative rows did not fail closed")
+
+copy_stream = Mock()
+for raise_on_nan in (False, True):
+    namespace["envs"].VLLM_RAISE_ON_LOGIT_NANS = raise_on_nan
+    output = SimpleNamespace(req_id_to_index={"a": 0, "b": 1})
+    draft_lens = [1, 0]
+    async_output = AsyncOutput(
+        output,
+        FakeTensor([[1, 2, 3], [4, 5, 6]]),
+        None,
+        [],
+        copy_stream,
+        10,
+        num_nans=FakeTensor([0, 2, 3]),
+        num_draft_tokens=draft_lens,
+    )
+    draft_lens[:] = [0, 0]
+    if raise_on_nan:
+        try:
+            async_output.get_output()
+        except RuntimeError:
+            checks.append("async_late_row_raises")
+        else:
+            raise AssertionError("async late-row NaN did not raise")
+    else:
+        async_output.get_output()
+        checks.append("async_output_completes_when_raise_disabled")
+    check(
+        f"async_rejection_parse_branch_raise_{raise_on_nan}",
+        namespace["RejectionSampler"].parse_output.call_count
+        == 1 + int(raise_on_nan),
+    )
+    check(
+        f"async_owns_step_metadata_raise_{raise_on_nan}",
+        output.num_nans_in_logits == {"a": 2, "b": 3},
+    )
+
+result = {
+    "status": "pass",
+    "gpu_used": False,
+    "torch_imported": False,
+    "source": str(SOURCE.relative_to(ROOT)),
+    "source_sha256": source_sha256,
+    "checks": checks,
+}
+Path(__file__).with_name("cpu-ast-result.json").write_text(
+    json.dumps(result, indent=2) + "\n"
+)
+print(json.dumps(result, indent=2))

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+VENV=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final
+export HIP_VISIBLE_DEVICES= ROCR_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES=
+unset GPU_DEVICE_ORDINAL
+export PYTHONPATH=/home/chenco_adm/vllm-rdna-mtp-mono
+export VLLM_TARGET_DEVICE=cpu
+SDK_LIB="$VENV/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"
+SDK="$VENV/lib/python3.12/site-packages/_rocm_sdk_core/lib"
+export LD_LIBRARY_PATH="$SDK_LIB:$SDK/host-math/lib:$SDK/rocm_sysdeps/lib:$SDK/core/lib:$VENV/lib/python3.12/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+cd /tmp
+timeout 180 "$VENV/bin/python" "$HERE/run_cpu_tests.py" > "$HERE/cpu-tests.log" 2>&1

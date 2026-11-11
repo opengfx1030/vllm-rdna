@@ -18,11 +18,13 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
     "stall_probe", ROOT / "tools/rdna/port_v031/stall_probe.py"
 )
+assert _spec is not None and _spec.loader is not None
 sp = importlib.util.module_from_spec(_spec)
 sys.modules["stall_probe"] = sp
 _spec.loader.exec_module(sp)
@@ -294,6 +296,92 @@ class EndToEndTests(unittest.TestCase):
         )  # fmt: skip
         self.assertEqual(rc, 0)
         self.assertEqual(res["verdict"], "PASS")
+
+
+class KfdEvictionTests(unittest.TestCase):
+    """Per-worker KFD evicted_ms and INVALID windows (kfd_evictions.py)."""
+
+    ev = sys.modules["kfd_evictions"]
+
+    def fake_host(self, root: Path) -> tuple[str, str]:
+        proc, kfd = root / "proc", root / "kfd"
+        # 100 serve script -> 101 api server -> 102 engine -> 103/104 workers;
+        # 200 is another server's worker.
+        tree = {
+            100: (1, "bash"),
+            101: (100, "python3"),
+            102: (101, "VLLM::EngineCore"),
+            103: (102, "VLLM::Worker_TP0_EP0"),
+            104: (102, "VLLM::Worker_TP1_EP1"),
+            200: (1, "VLLM::Worker_TP0"),
+        }
+        for pid, (ppid, title) in tree.items():
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / "stat").write_text(f"{pid} (a b) S {ppid} 0 0\n")
+            (proc / str(pid) / "cmdline").write_bytes(title.encode() + b"\0")
+        for pid, ms in ((103, 5), (104, 0), (200, 9)):
+            for gpu in ("8425", "11353"):
+                d = kfd / str(pid) / f"stats_{gpu}"
+                d.mkdir(parents=True)
+                (d / "evicted_ms").write_text(f"{ms}\n")
+        return str(proc), str(kfd)
+
+    def test_snapshot_reads_only_this_servers_workers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, kfd = self.fake_host(Path(tmp))
+            self.assertEqual(
+                self.ev.worker_pids(100, proc),
+                {"Worker_TP0_EP0": 103, "Worker_TP1_EP1": 104},
+            )
+            snap = self.ev.snapshot(100, proc, kfd)
+        self.assertEqual(snap, {"Worker_TP0_EP0": 5, "Worker_TP1_EP1": 0})
+
+    def test_verdict_line(self):
+        ok = self.ev.verdict_line(self.ev.jumps({"W0": 5, "W1": 0}, {"W0": 5, "W1": 0}))
+        self.assertEqual(ok, "evicted_ms W0=+0 W1=+0 -> ok")
+        bad = self.ev.verdict_line(self.ev.jumps({"W0": 5}, {"W0": 8205}))
+        self.assertTrue(bad.startswith("evicted_ms W0=+8200 -> INVALID"), bad)
+
+    def sampler(self, samples):
+        s = self.ev.Sampler(0, time.monotonic, read=dict)
+        s.samples = samples
+        return s
+
+    def test_overlap_attributes_an_eviction_to_the_windows_it_covers(self):
+        # 8.2 s eviction of W1 that ended between t=20 and t=20.5.
+        s = self.sampler(
+            [(0.0, {"W0": 0, "W1": 0}), (20.0, {"W0": 0, "W1": 0}),
+             (20.5, {"W0": 0, "W1": 8200}), (30.0, {"W0": 0, "W1": 8200})]
+        )  # fmt: skip
+        self.assertEqual(s.overlap_ms(13.0, 14.0), {"W1": 8200})
+        self.assertEqual(s.overlap_ms(0.0, 11.0), {})
+        self.assertEqual(s.overlap_ms(21.0, 30.0), {})
+        self.assertEqual(s.totals(), {"W0": 0, "W1": 8200})
+
+    def test_mark_evictions_invalidates_windows_baseline_and_solo(self):
+        solo = sp.Run("solo", 0)
+        s = sp.Stream("i0", "inject", 1024, 1, submit=1.0)
+        s.chunks.append((2.0, 1))
+        solo.streams.append(s)
+        inject = sp.Run("inject", 0)
+        analyses: list[dict[str, Any]] = [
+            {"scenario": "solo", "repeat": 0, "windows": []},
+            {"scenario": "inject", "repeat": 0,
+             "baseline": {"t0": 3.0, "t1": 5.0},
+             "windows": [{"len": 4096, "t0": 6.0, "t1": 8.0},
+                         {"len": 8192, "t0": 9.0, "t1": 12.0}]},
+        ]  # fmt: skip
+
+        def overlap(t0, t1):
+            return {"W0": 700} if t0 <= 10.0 <= t1 or t0 <= 1.5 <= t1 else {"W0": 0}
+
+        invalid = sp.mark_evictions([solo, inject], analyses, overlap)
+        self.assertEqual(
+            invalid, ["solo r0 solo 1024: W0=+700", "inject r0 8192: W0=+700"]
+        )
+        self.assertEqual(analyses[1]["windows"][1]["invalid"], "kfd eviction")
+        self.assertNotIn("invalid", analyses[1]["windows"][0])
+        self.assertEqual(analyses[1]["baseline"]["evicted_ms"], {"W0": 0})
 
 
 if __name__ == "__main__":

@@ -1,0 +1,53 @@
+{
+  "status": "COMPILED_CPU_ONLY_UNQUALIFIED",
+  "visible_gpu_count": 0,
+  "source_manifest_sha256": "52930808ad7cf3e26460cef890f1626e7660c9c51f9e45ae2479db5728ed9d1a",
+  "input_sha256": {
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/csrc/rocm/hc_rdna2.cu": "a01bf43fe5563cff8ab3d26086cb293bf1130878d494870b6a4bcf65e556880e",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-router-half-trace-v1/mono_k2_global_quant_router_half_trace.cu": "a03041f587a4837d28d56c25062c85635ecf422cf455020bf2307a8d10c5df1e",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-quant-router-half-trace-v1/binding.cpp": "9783e80505b4dc8833350271175f408b17e22446e1cb803a1cd96268bc5f46ca",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/csrc/rocm/q_gemm_rdna2_common.cuh": "a588eb8af888bbb7bb7c92fcfaf60d955c79635c8d32cb947b694a43f4016c59",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/csrc/rocm/qdq_4_rdna2.cuh": "2c8373f93e8fd9cac94c34f8ca544b1e11b28ae0897f0608c426620403fb71b0",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/csrc/rocm/rdna_allreduce.cuh": "0b840fb84c1726ff4dfef0a62abfa6ef1186aa6439875ee9852016ce5ae868bd",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2/generated/global_binding.cpp": "3517fc30286791af0269d744649e8464225a0adbfce654770be18a563acaeab5",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2/generated/global_trace.cu": "980f78cbaebc67ac52f36a8779d589f0685999cba05ae43cbbfc1bd26d825dd6",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2/generated/native_binding.cpp": "557a59c5efb2857445b7c3e8b52152339ea58799ab5a14f329b1ee9927931712",
+    "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2/generated/native_trace.cu": "e147172220c56210257245161ee303653749cffc7b4f15e335f837523ed03357"
+  },
+  "builds": {
+    "native": {
+      "module": "hc_p1_boundary_trace_v2_20261024",
+      "binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2-build/compiled/torch_extensions/hc_p1_boundary_trace_v2_20261024/hc_p1_boundary_trace_v2_20261024.so",
+      "binary_sha256": "bf02252dd481513abe6597e027636714d39b1586f9ebbf57e37da14a283cb0fb",
+      "ninja_sha256": "5e0212d1d56d514964ef82a9abf48666ffde8353966da2901857981d38ddcfda",
+      "ninja": "ninja_required_version = 1.3\ncxx = c++\nnvcc = /opt/rocm/core-7.14/bin/hipcc\n\ncflags = -DTORCH_EXTENSION_NAME=hc_p1_boundary_trace_v2_20261024 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/csrc/rocm -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include/THH -isystem /opt/rocm/core-7.14/include -isystem /usr/include/python3.12 -fPIC -std=c++20 -O2\npost_cflags = -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC\ncuda_cflags = -DWITH_HIP -DTORCH_EXTENSION_NAME=hc_p1_boundary_trace_v2_20261024 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/csrc/rocm -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include/THH -isystem /opt/rocm/core-7.14/include -isystem /usr/include/python3.12 -O2 -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -std=c++20 --offload-arch=gfx1030 -fno-gpu-rdc -O2\ncuda_post_cflags = \ncuda_dlink_post_cflags = \nsycl_dlink_post_cflags = \nldflags = -shared -L/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/lib -lc10 -lc10_hip -ltorch_cpu -ltorch_hip -ltorch -ltorch_python -L/opt/rocm/core-7.14/lib -lamdhip64\n\nrule compile\n  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags\n  depfile = $out.d\n  deps = gcc\n\nrule cuda_compile\n  command = $nvcc  $cuda_cflags -c $in -o $out $cuda_post_cflags\n\n\n\n\n\nrule link\n  command = $cxx $in $ldflags -o $out\n\nbuild native_trace.cuda.o: cuda_compile /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2/generated/native_trace.hip\nbuild native_binding.o: compile /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2/generated/native_binding.cpp\n\n\n\n\n\nbuild hc_p1_boundary_trace_v2_20261024.so: link native_trace.cuda.o native_binding.o\n\ndefault hc_p1_boundary_trace_v2_20261024.so\n",
+      "requested_cflags": [
+        "-O2"
+      ],
+      "requested_cuda_cflags": [
+        "-O2"
+      ],
+      "source_sha256": "e147172220c56210257245161ee303653749cffc7b4f15e335f837523ed03357",
+      "binding_sha256": "557a59c5efb2857445b7c3e8b52152339ea58799ab5a14f329b1ee9927931712"
+    },
+    "global": {
+      "module": "mono_global_p1_boundary_trace_v2_20261024",
+      "binary": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2-build/compiled/torch_extensions/mono_global_p1_boundary_trace_v2_20261024/mono_global_p1_boundary_trace_v2_20261024.so",
+      "binary_sha256": "7123645a7433170e3d7213bb0ceae0e5aa3f61ef6613175a9dd53da60e361d4b",
+      "ninja_sha256": "595eae026b8fff64868c14da3b3ad1ed5f711d45b7245a4d2db52e4413e00732",
+      "ninja": "ninja_required_version = 1.3\ncxx = c++\nnvcc = /opt/rocm/core-7.14/bin/hipcc\n\ncflags = -DTORCH_EXTENSION_NAME=mono_global_p1_boundary_trace_v2_20261024 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/csrc/rocm -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include/THH -isystem /opt/rocm/core-7.14/include -isystem /usr/include/python3.12 -fPIC -std=c++20 -O3\npost_cflags = -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC\ncuda_cflags = -DWITH_HIP -DTORCH_EXTENSION_NAME=mono_global_p1_boundary_trace_v2_20261024 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-mtp-failstop-healthy-tree-v1/csrc/rocm -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/include/THH -isystem /opt/rocm/core-7.14/include -isystem /usr/include/python3.12 -O3 -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -std=c++20 --offload-arch=gfx1030 -fno-gpu-rdc -O3\ncuda_post_cflags = \ncuda_dlink_post_cflags = \nsycl_dlink_post_cflags = \nldflags = -shared -ldl -L/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/lib64/python3.12/site-packages/torch/lib -lc10 -lc10_hip -ltorch_cpu -ltorch_hip -ltorch -ltorch_python -L/opt/rocm/core-7.14/lib -lamdhip64\n\nrule compile\n  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags\n  depfile = $out.d\n  deps = gcc\n\nrule cuda_compile\n  command = $nvcc  $cuda_cflags -c $in -o $out $cuda_post_cflags\n\n\n\n\n\nrule link\n  command = $cxx $in $ldflags -o $out\n\nbuild global_binding.o: compile /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2/generated/global_binding.cpp\nbuild global_trace.cuda.o: cuda_compile /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/p1-boundary-trace-v2/generated/global_trace.hip\n\n\n\n\n\nbuild mono_global_p1_boundary_trace_v2_20261024.so: link global_binding.o global_trace.cuda.o\n\ndefault mono_global_p1_boundary_trace_v2_20261024.so\n",
+      "requested_cflags": [
+        "-O3"
+      ],
+      "requested_cuda_cflags": [
+        "-O3"
+      ],
+      "source_sha256": "980f78cbaebc67ac52f36a8779d589f0685999cba05ae43cbbfc1bd26d825dd6",
+      "binding_sha256": "3517fc30286791af0269d744649e8464225a0adbfce654770be18a563acaeab5"
+    }
+  },
+  "python": "/home/chenco_adm/Apps/vllm/venv-7.14.0_0.31.0-final/bin/python",
+  "torch": "2.12.0+rocm7.14.0",
+  "hip": "7.14.60850",
+  "hipcc": "HIP version: 7.14.60850-0000000\nAMD clang version 23.0.0git (https://github.com/ROCm/llvm-project.git f30ae3e6b680ad23dcf522e668c6d4c5c90838d0+PATCHED:440716f8b87be9d8e20ed910e10e5b6d14d57cf6)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /opt/rocm-7.2.0/core-7.14/lib/llvm/bin\n"
+}

@@ -610,6 +610,182 @@ def _run_resident_skinny(layer, x, ids, weights, emap, act, out):
 
 
 @gfx1030_only
+@pytest.mark.parametrize("m", [16, 64])
+@pytest.mark.parametrize("k,n", [(256, 128), (2560, 640)])
+def test_cached_moe_fixedpoint_ignores_capacity_policy_and_history(
+    monkeypatch, m, k, n
+):
+    """Integer accumulators eliminate K-slice and expert-pass ordering drift."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+        PAYLOAD_NAMES,
+        PackedExpertCache,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_rdna2 import (  # noqa: E501
+        _apply_cached_moe,
+        _rdna2_fused_moe,
+    )
+
+    layer, x, ids, weights, emap, w13, w2 = _resident_skinny_case(m, k, n)
+    layer.expert_map = emap
+    layer.apply_router_weight_on_input = False
+    # The unchanged resident reference uses its existing fp32 option.
+    monkeypatch.setattr(ops, "_RDNA2_MOE_FP32_ACCUM", True)
+    resident = _rdna2_fused_moe(
+        x, weights, ids, layer, MoEActivation.SILU, False, emap.numel(), emap
+    )
+    accumulator = torch.zeros(m, k + 1, device=device, dtype=torch.int64)
+    _rdna2_fused_moe(
+        x,
+        weights,
+        ids,
+        layer,
+        MoEActivation.SILU,
+        False,
+        emap.numel(),
+        emap,
+        routed_accumulator=accumulator,
+    )
+    fixed_reference = torch.empty_like(x)
+    ops.moe_fixedpoint_to_half_rdna2(accumulator, fixed_reference)
+    torch.testing.assert_close(fixed_reference, resident, atol=3e-3, rtol=1e-2)
+
+    # Independent dequantized per-expert arithmetic retains each weighted
+    # pair before reducing, rather than summing FP16 partial expert groups.
+    dense_pairs = torch.zeros(m * 10, k, device=device, dtype=torch.float32)
+    local = emap[ids.long()].reshape(-1)
+    for expert in range(4):
+        positions = (local == expert).nonzero().flatten()
+        gate_up = (x[positions // 10].float() @ w13[expert].float()).half()
+        gate, up = gate_up.chunk(2, dim=-1)
+        activated = torch.nn.functional.silu(gate) * up
+        weighted = (activated.float() @ w2[expert].float()) * weights.reshape(-1)[
+            positions, None
+        ]
+        dense_pairs[positions] = weighted
+    dense_reference = dense_pairs.view(m, 10, k).sum(1).half()
+    torch.testing.assert_close(fixed_reference, dense_reference, atol=3e-3, rtol=1e-2)
+
+    host = {name: getattr(layer, name).cpu() for name in PAYLOAD_NAMES}
+    # The cache's explicit int64 contract overrides the global legacy mode.
+    monkeypatch.setattr(ops, "_RDNA2_MOE_FP32_ACCUM", False)
+    for capacity in (1, 2, 4):
+        for policy in ("lru", "lfu_lru"):
+            for history in ((0, 1, 2, 3), (3, 2, 1, 0)):
+                cache = PackedExpertCache(host, capacity, device, policy=policy)
+                cached_layer = SimpleNamespace(**vars(layer))
+                for name, payload in cache.payload.items():
+                    setattr(cached_layer, name, payload)
+                cached_layer._rdna_expert_cache = cache
+                for expert in history:
+                    cache.policy.observe([expert] * (expert + 1))
+                    cache.release(cache.ensure([expert]))
+                result = torch.empty_like(x)
+                _apply_cached_moe(
+                    result, cached_layer, x, weights, ids, MoEActivation.SILU
+                )
+                torch.accelerator.synchronize()
+                torch.testing.assert_close(result, fixed_reference, rtol=0, atol=0)
+                # An empty rank must overwrite the previous invocation.
+                _apply_cached_moe(
+                    result,
+                    cached_layer,
+                    x,
+                    weights,
+                    torch.full_like(ids, 1),
+                    MoEActivation.SILU,
+                )
+                assert torch.equal(result, torch.zeros_like(result))
+
+
+@gfx1030_only
+def test_fixedpoint_cast_preserves_sign_and_reads_new_graph_inputs():
+    values = [0, 1 << 32, -(1 << 31), 1 << 44, -(1 << 44), 1 << 29, 4297064449]
+    accumulator = torch.zeros(1, len(values) + 1, dtype=torch.int64, device=device)
+    accumulator[0, :-1] = torch.tensor(values, dtype=torch.int64, device=device)
+    output = torch.empty(1, len(values), dtype=torch.half, device=device)
+    original = accumulator.clone()
+    ops.moe_fixedpoint_to_half_rdna2(accumulator, output)
+    expected = (accumulator[:, :-1].float() / (1 << 32)).half()
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
+    # int64 -> FP32 lands exactly on the half-way value; FP16 ties to even.
+    assert output[0, -1].item() == 1.0
+    assert (accumulator[0, -2].double() / (1 << 32)).half().item() == 1.0009765625
+    assert torch.equal(accumulator, original)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        ops.moe_fixedpoint_to_half_rdna2(accumulator, output)
+    accumulator.neg_()
+    graph.replay()
+    torch.testing.assert_close(output, -expected, atol=0, rtol=0)
+
+
+@gfx1030_only
+@pytest.mark.parametrize("bad", ["nan", "inf", "neg_inf", "limit", "neg_limit"])
+@pytest.mark.parametrize("k,topk", [(256, 1), (512, 2)])
+def test_fixedpoint_bad_partials_poison_only_their_row_and_stay_sticky(bad, k, topk):
+    """Bad real rows fail closed; ignored padding and valid neighbors survive."""
+    n, group = 128, 128
+    # Uniform quantized 9 means dequantized weight 128 at scale 128.
+    packed = torch.full((1, k // 8, n), -1717986919, dtype=torch.int32, device=device)
+    scales = torch.full((1, k // group, n), 128.0, dtype=torch.half, device=device)
+    zeros = _make_qzeros(1, k // group, n)
+    limit_input = 32768.0 / ((k // 256) * topk)
+    value = {
+        "nan": float("nan"),
+        "inf": float("inf"),
+        "neg_inf": -float("inf"),
+        "limit": limit_input,
+        "neg_limit": -limit_input,
+    }[bad]
+    x = torch.full((3, k), 1.0 / (128 * k * topk), dtype=torch.half, device=device)
+    x[0].fill_(value)
+    x[2].fill_(float("nan"))
+    ids = torch.zeros(3, topk, dtype=torch.int32, device=device)
+    ids[2].fill_(-1)
+    sorted_ids, expert_ids, padded = moe_align_block_size(
+        ids, 1, 1, ignore_invalid_experts=True
+    )
+    accumulator = torch.zeros(3, n + 1, dtype=torch.int64, device=device)
+    output = torch.empty(3, n, dtype=torch.half, device=device)
+
+    def accumulate():
+        ops.moe_gptq_gemm_rdna2(
+            x,
+            accumulator,
+            packed,
+            scales,
+            zeros,
+            torch.empty(0, dtype=torch.float32, device=device),
+            sorted_ids,
+            expert_ids,
+            padded,
+            topk,
+            1,
+            False,
+            output_topk=topk,
+        )
+
+    accumulate()
+    ops.moe_fixedpoint_to_half_rdna2(accumulator, output)
+    assert accumulator[:, -1].tolist() == [1, 0, 0]
+    assert bool(torch.isnan(output[0]).all())
+    torch.testing.assert_close(output[1], torch.ones_like(output[1]), atol=0, rtol=0)
+    assert torch.equal(output[2], torch.zeros_like(output[2]))
+    # A later valid pass cannot erase the status or poison a neighboring row.
+    previous_neighbor = accumulator[1, :-1].clone()
+    x[0].fill_(1.0 / (128 * k * topk))
+    accumulate()
+    ops.moe_fixedpoint_to_half_rdna2(accumulator, output)
+    assert accumulator[:, -1].tolist() == [1, 0, 0]
+    assert bool(torch.isnan(output[0]).all())
+    assert torch.equal(accumulator[1, :-1], previous_neighbor * 2)
+    torch.testing.assert_close(output[1], torch.full_like(output[1], 2), atol=0, rtol=0)
+    assert torch.equal(output[2], torch.zeros_like(output[2]))
+
+
+@gfx1030_only
 @pytest.mark.parametrize("m", [1, 3, 4])
 @pytest.mark.parametrize("k,n", [(256, 128), (2560, 640)])
 def test_resident_skinny_decode_reference_and_graph(m, k, n):
@@ -883,10 +1059,10 @@ def test_fp32_accum_rel_l2_vs_cas(
 def test_fp32_accum_cudagraph_capture_stable():
     """The fp32 scratch pointer survives a HIP graph capture-replay cycle.
 
-    Workspace allocation must stay capture-stable: the fp32 scratch is a
-    persistent per-(rows, n, device) allocation that is allocated eagerly,
-    before graph capture. The per-call zero is a hipMemsetAsync (a
-    capture-legal node). A captured graph must therefore observe changed
+    Workspace allocation must stay capture-stable: a call under capture takes
+    its fp32 scratch from the graph's private memory pool, which keeps the
+    pointer baked into the graph valid. The per-call zero is a hipMemsetAsync
+    (a capture-legal node). A captured graph must therefore observe changed
     inputs on replay without aliasing.
     """
     E, K, N, top_k, group_size, block_size_m, M = 16, 2048, 512, 8, 32, 4, 4
@@ -1068,3 +1244,171 @@ def test_fp32_accum_env_on_enables_fp32_scratch(monkeypatch):
         f"None-default with VLLM_RDNA2_MOE_FP32_ACCUM=1 not run-to-run stable "
         f"(max diff {diff} > 4 fp16 ULPs)"
     )
+
+
+gfx1030_route_zero = pytest.mark.skipif(
+    not (
+        on_gfx10x()
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "rdna_moe_route_zero")
+        and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna2")
+    ),
+    reason="Requires gfx1030 with rdna_moe_route_zero and moe_gptq_gemm_rdna2",
+)
+
+
+def _per_expert(sorted_ids, expert_ids, num_post, block_size):
+    """Order-free view of an align result: the sorted entry ids of each expert."""
+    padded = int(num_post.item())
+    ids = sorted_ids[:padded].tolist()
+    per_expert: dict[int, list[int]] = {}
+    for block, expert in enumerate(expert_ids[: padded // block_size].tolist()):
+        per_expert.setdefault(expert, []).extend(
+            ids[block * block_size : (block + 1) * block_size]
+        )
+    return {expert: sorted(ids) for expert, ids in per_expert.items()}
+
+
+@gfx1030_route_zero
+@pytest.mark.parametrize("ep", [False, True])
+@pytest.mark.parametrize("block_size", [1, 2, 4, 8])
+@pytest.mark.parametrize(
+    "m,top_k,experts",
+    [
+        (1, 10, 512),
+        (2, 10, 512),
+        (3, 10, 512),
+        (5, 10, 512),
+        (9, 10, 512),
+        (24, 10, 512),
+        (32, 10, 512),
+        (32, 10, 16),  # heavy collisions: many entries per expert
+        (3, 2, 1),  # a single expert
+        (64, 16, 992),  # 1024 entries; four experts per scan thread
+    ],
+)
+def test_route_zero_matches_align(m, top_k, experts, block_size, ep):
+    """One launch == moe_align_block_size + two zero fills.
+
+    The order inside an expert may differ (flat index vs atomic arrival), so the
+    per-expert id sets are compared; everything else must match exactly,
+    including the sentinel tails and the expert ids of the unused blocks.
+    """
+    torch.manual_seed(m * 131 + top_k * 7 + experts + block_size)
+    ids = torch.randint(0, experts, (m, top_k), device=device, dtype=torch.int32)
+    ids[0, 0] = -1  # invalid entries are ignored, not routed
+    ids[-1, -1] = experts
+    expert_map = None
+    if ep:
+        expert_map = torch.full((experts,), -1, device=device, dtype=torch.int32)
+        local = torch.arange(0, experts, 2, device=device)
+        expert_map[local] = torch.arange(
+            local.numel(), device=device, dtype=torch.int32
+        )
+    ref_sorted, ref_experts, ref_post = moe_align_block_size(
+        ids, block_size, experts, expert_map, ignore_invalid_experts=True
+    )
+
+    # w1 is a row-strided slice of a wider buffer; neither may leak outside.
+    wide = torch.ones(m * top_k, 328, device=device, dtype=torch.float16)
+    out = torch.ones(m, 2560, device=device, dtype=torch.float16)
+    got_sorted, got_experts, got_post = ops.rdna_moe_route_zero(
+        ids, block_size, experts, expert_map, wide[:, :320], out
+    )
+
+    assert got_sorted.shape == ref_sorted.shape
+    assert got_experts.shape == ref_experts.shape
+    assert torch.equal(got_post, ref_post)
+    assert torch.equal(got_experts, ref_experts)
+    padded = int(ref_post.item())
+    assert torch.equal(got_sorted[padded:], ref_sorted[padded:])
+    assert _per_expert(got_sorted, got_experts, got_post, block_size) == _per_expert(
+        ref_sorted, ref_experts, ref_post, block_size
+    )
+    assert not wide[:, :320].any()
+    assert not out.any()
+    assert bool((wide[:, 320:] == 1).all())
+
+
+@gfx1030_route_zero
+def test_route_zero_unaligned_zero_buffers():
+    """Odd widths and misaligned bases take the scalar store path."""
+    ids = torch.randint(0, 64, (3, 10), device=device, dtype=torch.int32)
+    wide = torch.ones(30, 104, device=device, dtype=torch.float16)
+    flat = torch.ones(3 * 40 + 1, device=device, dtype=torch.float16)
+    out = flat[1:].view(3, 40)  # base is 2 bytes off a 16-byte boundary
+    _, _, _ = ops.rdna_moe_route_zero(ids, 4, 64, None, wide[:, 1:101], out)
+    assert not wide[:, 1:101].any()
+    assert bool((wide[:, 0] == 1).all()) and bool((wide[:, 101:] == 1).all())
+    assert not out.any() and bool(flat[0] == 1)
+
+
+@gfx1030_route_zero
+@pytest.mark.parametrize("m", [1, 5, 24])
+@pytest.mark.parametrize("k,n", [(256, 128), (2560, 640)])
+@pytest.mark.parametrize("scratch_rows", [None, 8])
+def test_fused_moe_route_zero_end_to_end(monkeypatch, m, k, n, scratch_rows):
+    """The one-launch routing path equals align + fills end to end (EP holes).
+
+    fp16 atomic accumulation makes every run differ by about two fp16 ulps of
+    the largest output (the unfused path does it against itself), so both
+    paths are held to a dense fp32 reference with a tolerance relative to it.
+    """
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_wna16_rdna2 as moe_mod,
+    )
+
+    layer, x, ids, weights, emap, w13, w2 = _resident_skinny_case(m, k, n)
+    if scratch_rows is not None:  # an eager step above the sized scratch
+        layer.rdna2_w1_buf = torch.zeros(
+            scratch_rows, 2 * n, device=device, dtype=torch.float16
+        )
+        layer.rdna2_act_buf = torch.empty(
+            scratch_rows, n, device=device, dtype=torch.float16
+        )
+    layer.expert_map = emap
+    layer.apply_router_weight_on_input = False
+    ids = ids.to(torch.int32)
+
+    top_k = ids.shape[1]
+    dense_pairs = torch.zeros(m * top_k, k, device=device, dtype=torch.float32)
+    local = emap[ids.long()].reshape(-1)
+    for expert in range(4):
+        positions = (local == expert).nonzero().flatten()
+        if positions.numel() == 0:
+            continue
+        gate_up = (x[positions // top_k].float() @ w13[expert].float()).half()
+        gate, up = gate_up.chunk(2, dim=-1)
+        activated = torch.nn.functional.silu(gate) * up
+        dense_pairs[positions] = (activated.float() @ w2[expert].float()) * (
+            weights.reshape(-1)[positions, None]
+        )
+    dense = dense_pairs.view(m, top_k, k).sum(1)
+    atol = 4e-3 * dense.abs().max().item()
+
+    for fused in (False, True):
+        monkeypatch.setattr(moe_mod, "_ROUTE_ZERO", fused)
+        layer.rdna2_w1_buf.fill_(1.0)  # the fused path has to zero the scratch itself
+        got = moe_mod._rdna2_fused_moe(
+            x, weights, ids, layer, MoEActivation.SILU, False, emap.numel(), emap
+        )
+        err = (got.float() - dense).abs().max().item()
+        assert err <= atol, f"fused={fused}: max error {err} > {atol}"
+
+
+def test_decode_scratch_rows():
+    """Scratch rows: floor of 16 tokens at top-k 8, capture size x top-k above."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_wna16_rdna2 as moe_mod,
+    )
+
+    rows = moe_mod._decode_scratch_rows
+    assert rows(None) == 128  # the resident layouts have no MoE config
+    assert rows(SimpleNamespace(experts_per_token=0, max_capture_size=None)) == 128
+    assert rows(SimpleNamespace(experts_per_token=10, max_capture_size=4)) == 128
+    # Flash-Next: capture sizes up to 24 tokens x top-k 10 (6 decoders x 3 + pad)
+    assert rows(SimpleNamespace(experts_per_token=10, max_capture_size=24)) == 240
+    # bigger capture ladders stop at the fused router's entry limit
+    assert rows(SimpleNamespace(experts_per_token=10, max_capture_size=512)) == 1024

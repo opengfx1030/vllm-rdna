@@ -181,6 +181,11 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         p_a += HV
 
 
+def _dense_heads(t: torch.Tensor) -> bool:
+    """True when each token's [heads, dim] block is dense (any token stride)."""
+    return t.stride(-1) == 1 and t.stride(-2) == t.shape[-1]
+
+
 def fused_sigmoid_gating_delta_rule_update(
     A_log: torch.Tensor,
     a: torch.Tensor,
@@ -199,11 +204,16 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    out: torch.Tensor | None = None,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
+
+    ``out`` (contiguous [B, T, HV, V], q's dtype) receives the result in place;
+    q/k/v may be views into a packed projection when the RDNA2 HIP kernel
+    takes them (it reads a token stride per tensor).
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -225,7 +235,8 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         assert scale > 0, "scale must be positive"
 
-    o = q.new_empty(NK, *v.shape)
+    assert out is None or out.is_contiguous(), "out must be contiguous"
+    o = q.new_empty(NK, *v.shape) if out is None else out.unsqueeze(0)
     if inplace_final_state:
         final_state = initial_state
     else:
@@ -266,11 +277,11 @@ def fused_sigmoid_gating_delta_rule_update(
         and V >= 32
         and V % 32 == 0
         and HV % H == 0
-        and q.is_contiguous()
-        and k.is_contiguous()
-        and v.is_contiguous()
-        and a.is_contiguous()
-        and b.is_contiguous()
+        and _dense_heads(q)
+        and _dense_heads(k)
+        and _dense_heads(v)
+        and a.stride(-1) == 1
+        and b.stride(-1) == 1
         and initial_state.stride(-1) == 1
         # cu_seqlens / num_accepted_tokens are read with a unit stride.
         and cu_seqlens.stride(0) == 1

@@ -7,7 +7,7 @@
       "rocm": "7.14.60850",
       "torch": "2.12.0+rocm7.14.0",
       "lib_sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
-      "rows_per_rank": 1860,
+      "rows_per_rank": 3330,
       "venv": "venv-7.14.0_0.28.0; venv-7.14.0_0.31.0",
       "status": "canonical",
       "covers": [
@@ -16,7 +16,9 @@
         "Qwen3.8-27B-exl3-3.00bpw (MTP=0/2)",
         "Qwen3.6-35B-A3B-GPTQ-Int4 (MTP=0/2)",
         "DeepSeek-V4-Flash-0731-K128-v2",
-        "Qwen3.8-Flash-Next-DFlash2 BF16 draft regular GEMMs (94 measured shapes; includes 36 two-token graph shapes)"
+        "Qwen3.8-Flash-Next-DFlash2 BF16 draft regular GEMMs (94 measured shapes; includes 36 two-token graph shapes)",
+        "Qwen3.5-4B rdna_hint_flex 3.0 bpw and dense fp16 (TP=1/2/4), Qwen2.5-0.5B-Instruct rdna_hint_flex / dense / AWQ (TP=1): prefill, mixed and decode shapes from the four bench cells (2026-10-25)",
+        "OLMoE-1B-7B-0924 rdna_hint_flex (r4, b3.0) and dense fp16, TP=1: attention/router/lm_head shapes from the four bench cells (2026-10-26)"
       ]
     },
     "rocm10-rocblas5.6": {

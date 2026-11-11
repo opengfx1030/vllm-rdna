@@ -17,6 +17,9 @@ PLE_QUANT_DIR=${PLE_QUANT_DIR:-/home/chenco_adm/hfcache/hub/models--primitive-ai
 export RECIPE=${RECIPE:-flashnext-mtp2} GPUS PORT=${PORT:-18790} TAG=${TAG:-2a-$ARM}
 export OUT=$RUN/serve-$TAG CACHE=${CACHE:-$RUN/cache-2a-$ARM}
 export VENV=${VENV:-$HOME/Apps/vllm/venv-7.14.0_0.31.0-final}
+# Keep the Flash-Next mono recipe on the validated 0.92 memory target unless
+# the caller explicitly overrides it (e.g. for a controlled memory study).
+export GMEM=${GMEM:-0.92}
 export LOAD_HOOK=${LOAD_HOOK:-$HERE/parity_hook.sh}
 # ARM=on-t / off-t: serve timing marks (mono/rdna2/debug.py); off-t keeps
 # today's modules under the same marks. gdn: the GDN part alone. cfg: the
@@ -29,8 +32,8 @@ case $ARM in
     off-t) KN="\"k1\":false,\"gdn\":false,\"qsa\":false,\"timing\":true,\"modules\":true$X" ;;
     gdn) KN="\"k1\":false,\"k2\":false,\"qsa\":false$X" ;;
     cfg) KN=${MONO_CFG:-} ;;
-    env) MK= KN=${MONO_CFG:-}; export VLLM_ROCM_MONO_DECODE=1 ;;
-    off) MK= KN= ;;
+    env) MK='' KN=${MONO_CFG:-}; export VLLM_ROCM_MONO_DECODE=1 ;;
+    off) MK='' KN='' ;;
     *) echo "ARM=on|off|env|on-t|off-t|gdn|cfg" >&2; exit 2 ;;
 esac
 [[ -n $MK ]] && export EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }$MK"

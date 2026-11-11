@@ -1,0 +1,7 @@
+PASS  prompt='The capital of France is'
+      reply=' Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of'
+PASS  prompt='1+1='
+      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '
+PASS  prompt='The capital of Germany is'
+      reply=' Berlin, which is also the largest city in the country. It is one of the 16 German federal states and is the third most populous city in the European Union. Berlin is a major cultural, political, and scientific center, and'
+RESULT PASS (3/3)

@@ -42,6 +42,8 @@
   #define __HIP__RDNA2__
 #endif
 
+void moe_fixedpoint_to_half_rdna2(const torch::Tensor&, torch::Tensor&);
+
 namespace vllm {
 namespace gptq_rdna2 {
 
@@ -77,7 +79,8 @@ __global__ void gemm_q4_kernel_rdna2(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset, const int* __restrict__ b_q_perm,
+    long long* fixed) {
   const int t = threadIdx.x;
   const int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
   const int offset_m = blockIdx.y * M_COUNT;
@@ -212,7 +215,7 @@ __global__ void gemm_q4_kernel_rdna2(
 
   // Pack partial sums into two half2 pairs and atomically add to the
   // zero-initialized fp16 output.
-  epilogue<M_COUNT>(block_c, offset_m, size_m, size_n, n, c);
+  epilogue<M_COUNT>(block_c, offset_m, size_m, size_n, n, c, fixed);
 }
 
 #else  // non-RDNA2 device pass: empty __global__ for symbol parity.
@@ -221,7 +224,7 @@ template <typename T, int M_COUNT>
 __global__ void gemm_q4_kernel_rdna2(const T*, const uint32_t*, const uint32_t*,
                                      const T*, T*, const int, const int,
                                      const int, const int, const int,
-                                     const int*) {}
+                                     const int*, long long*) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
@@ -234,7 +237,8 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
                                const uint32_t* b_qzeros, const T* b_scales,
                                const int* b_q_perm, T* c, int size_m,
                                int size_n, int size_k, int groups,
-                               int zero_offset, cudaStream_t stream) {
+                               int zero_offset, cudaStream_t stream,
+                               long long* fixed = nullptr) {
   dim3 block(THREADS_X);
   dim3 grid((size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_m + M_COUNT - 1) / M_COUNT,
@@ -242,7 +246,7 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
 
   gemm_q4_kernel_rdna2<T, M_COUNT><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+      zero_offset, b_q_perm, fixed);
 }
 // Dispatch to the largest M_COUNT template that doesn't waste more than
 // half a tile. Caps at 8: above that, larger M_COUNT wastes too many
@@ -260,21 +264,21 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
                     const uint32_t* b_qzeros, const T* b_scales,
                     const int* b_q_perm, T* c, int size_m, int size_n,
                     int size_k, int groups, bool use_v2_format,
-                    cudaStream_t stream) {
+                    cudaStream_t stream, long long* fixed = nullptr) {
   const int zero_offset = use_v2_format ? 0 : 1;
 
   if (size_m == 1) {
     launch_gemm_q4_for_mcount<T, 1>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                     c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+                                    zero_offset, stream, fixed);
   } else if (size_m <= 3) {
     launch_gemm_q4_for_mcount<T, 2>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                     c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+                                    zero_offset, stream, fixed);
   } else if (size_m <= 7) {
     launch_gemm_q4_for_mcount<T, 4>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                     c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+                                    zero_offset, stream, fixed);
   } else {
     // M_COUNT=8 covers M in [8, 15]. For M >= 16, the public entry
     // point's caller should dispatch to a separate path; this kernel
@@ -282,7 +286,7 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
     // is unlikely to be throughput-competitive at large M.
     launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                     c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+                                    zero_offset, stream, fixed);
   }
 }
 
@@ -306,7 +310,40 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
 
 torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
-                              torch::Tensor b_g_idx, bool use_v2_format) {
+                              torch::Tensor b_g_idx, bool use_v2_format,
+                              bool deterministic) {
+  if (deterministic) {
+    TORCH_CHECK(
+        a.dim() == 2 && a.size(1) > 0 && a.size(1) % 32 == 0,
+        "deterministic dense: a must be [M,K], positive K divisible by 32");
+    TORCH_CHECK(
+        b_q_weight.dim() == 2 && b_qzeros.dim() == 2 && b_scales.dim() == 2,
+        "deterministic dense: weights must be matrices");
+    TORCH_CHECK(b_q_weight.scalar_type() == torch::kInt32 &&
+                    b_qzeros.scalar_type() == torch::kInt32,
+                "deterministic dense: packed weights/zeros must be int32");
+    TORCH_CHECK(b_q_weight.device() == a.device() &&
+                    b_qzeros.device() == a.device() &&
+                    b_scales.device() == a.device(),
+                "deterministic dense: all inputs must share a device");
+    TORCH_CHECK(b_q_weight.is_contiguous() && b_qzeros.is_contiguous() &&
+                    b_scales.is_contiguous(),
+                "deterministic dense: weights must be contiguous");
+    const int64_t k = a.size(1), n = b_q_weight.size(1),
+                  groups = b_qzeros.size(0);
+    TORCH_CHECK(n > 0 && n % 8 == 0 && b_q_weight.size(0) * 8 == k &&
+                    groups > 0 && k % groups == 0 && k / groups >= 32 &&
+                    (k / groups) % 32 == 0 && b_qzeros.size(1) * 8 == n &&
+                    b_scales.size(0) == groups && b_scales.size(1) == n,
+                "deterministic dense: incompatible weight/group shapes");
+    TORCH_CHECK(
+        b_g_idx.numel() == 0 ||
+            (b_g_idx.device() == a.device() &&
+             b_g_idx.scalar_type() == torch::kInt32 && b_g_idx.numel() == k &&
+             b_g_idx.is_contiguous()),
+        "deterministic dense: g_idx must be empty or contiguous int32[K]");
+    if (!a.is_contiguous()) a = a.contiguous();
+  }
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
   TORCH_CHECK(b_qzeros.is_cuda(), "b_qzeros must be a CUDA/HIP tensor");
@@ -343,7 +380,17 @@ torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
   // shared persistent buffer aliased every W4A16 GEMM output: two projections
   // alive at once, or an output fed back as the next GEMM's input after an
   // in-place norm, were silently clobbered.
-  at::Tensor c = torch::zeros({size_m, size_n}, opts);
+  at::Tensor c = deterministic ? torch::empty({size_m, size_n}, opts)
+                               : torch::zeros({size_m, size_n}, opts);
+  // Per-invocation storage is graph-pool owned during capture, never a
+  // process-global alias. Finalization uses Q32 -> FP32 -> FP16 once.
+  at::Tensor fixed;
+  long long* fixed_ptr = nullptr;
+  if (deterministic) {
+    fixed = torch::zeros({size_m, (int64_t)size_n + 1},
+                         a.options().dtype(torch::kInt64));
+    fixed_ptr = reinterpret_cast<long long*>(fixed.data_ptr<int64_t>());
+  }
 
   const int* g_idx_ptr = nullptr;
   if (!b_g_idx.device().is_meta() && b_g_idx.numel() > 0) {
@@ -356,7 +403,8 @@ torch::Tensor gptq_gemm_rdna2(torch::Tensor a, torch::Tensor b_q_weight,
       (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
       (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
       g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
-      use_v2_format, stream);
+      use_v2_format, stream, fixed_ptr);
 
+  if (deterministic) moe_fixedpoint_to_half_rdna2(fixed, c);
   return c;
 }

@@ -46,12 +46,19 @@ details`` lines. Each window is then annotated with the scheduler steps that
 ran in it (prefill vs decode tokens per step, step time, steps that left
 decoders out). Log stamps have 1 s resolution, so this is +-1 s.
 
+``--server-pid`` (optional): the server's process tree. Every vLLM worker
+under it is sampled for KFD queue-eviction time (``kfd_evictions.py``) while
+the scenarios run. A window, baseline or solo request that overlaps an
+eviction gets ``evicted_ms`` per worker and is INVALID: the host, not the
+code, stalled it.
+
 Outputs in ``--out``: ``stall_probe.json`` (config, per-run windows,
 aggregates, verdict), ``summary.txt`` and, with ``--timeline``,
 ``timeline.csv`` (one row per streamed chunk and per event, for plotting).
 
 Exit code: 0 = pass (or no gates set), 1 = a gate failed, 2 = request
-errors / no steady state. Stdlib only.
+errors / no steady state, 3 = INVALID (a measured window overlapped a KFD
+queue eviction; rerun). Stdlib only.
 """
 
 from __future__ import annotations
@@ -71,8 +78,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kfd_evictions  # noqa: E402
 
 # Fixed, self-written corpus: tokenized once, repeated to exact lengths.
 CORPUS = (
@@ -1103,6 +1114,11 @@ def summary_text(result: dict[str, Any]) -> str:
                 f"  gate {g['gate']:<34} {g['window']:<20} {fmt(g['value'], 2):>10} "
                 f"vs {g['limit']:<8} {'ok' if g['ok'] else 'FAIL'}"
             )
+    ev = result.get("kfd_evictions")
+    if ev:
+        total = " ".join(f"{w}=+{ms}" for w, ms in ev["worker_total_ms"].items())
+        lines.append(f"  kfd evicted_ms over the probe: {total or 'no workers found'}")
+        lines.extend(f"  INVALID {line}" for line in ev["invalid"])
     lines.append(f"verdict: {result['verdict']}")
     return "\n".join(lines)
 
@@ -1199,6 +1215,35 @@ def int_list(s: str) -> list[int]:
     return [int(x) for x in s.split(",") if x.strip()]
 
 
+def mark_evictions(
+    runs: list[Run],
+    analyses: list[dict[str, Any]],
+    overlap: Callable[[float, float], dict[str, int]],
+) -> list[str]:
+    """Tag every baseline, window and solo request with the KFD eviction time
+    (ms per worker) that overlaps it; return the INVALID ones."""
+    invalid = []
+    for run, a in zip(runs, analyses):
+        spans: list[tuple[str, float, float, dict[str, Any]]] = []
+        if run.scenario == "solo":
+            for s in run.injects:
+                if not math.isnan(s.first):
+                    spans.append((f"solo {s.prompt_tokens}", s.submit, s.first, {}))
+        base = a.get("baseline")
+        if base and "t0" in base:
+            spans.append(("baseline", base["t0"], base["t1"], base))
+        for w in a.get("windows", []):
+            spans.append((str(w.get("len")), w["t0"], w["t1"], w))
+        for name, t0, t1, rec in spans:
+            ev = overlap(t0, t1)
+            rec["evicted_ms"] = ev
+            if any(ms > 0 for ms in ev.values()):
+                rec["invalid"] = "kfd eviction"
+                per = " ".join(f"{w}=+{ms}" for w, ms in ev.items())
+                invalid.append(f"{a['scenario']} r{a['repeat']} {name}: {per}")
+    return invalid
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1263,6 +1308,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="serve log with --enable-logging-iteration-details lines",
     )
+    ap.add_argument(
+        "--server-pid",
+        type=int,
+        default=None,
+        help="server process tree whose vLLM workers are sampled for KFD "
+        "queue-eviction time; overlapping windows are INVALID",
+    )
     ap.add_argument("--timeline", action="store_true", help="write timeline.csv")
     # Gates.
     ap.add_argument("--max-stall-ms", type=float, default=None)
@@ -1314,6 +1366,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.warmup:
         probe.warmup()
         print("[stall_probe] warmup done", flush=True)
+    sampler = None
+    if args.server_pid:
+        sampler = kfd_evictions.Sampler(args.server_pid, probe.clock.now)
+        sampler.start()
     solo_needed = {args.periodic_len, args.reverse_len, *args.prefill_lens}
     for scen in args.scenarios:
         for r in range(args.repeats):
@@ -1357,6 +1413,8 @@ def main(argv: list[str] | None = None) -> int:
     ]
     ref_dec_ttft = statistics.median(dec_ttfts) if dec_ttfts else math.nan
 
+    if sampler:
+        sampler.stop()
     iters: list[Iteration] = []
     if args.server_log:
         iters = parse_iteration_log(
@@ -1366,11 +1424,20 @@ def main(argv: list[str] | None = None) -> int:
         analyze_run(run, args, solo_ttft, ref_dec_ttft, iters, probe.clock.wall0)
         for run in runs
     ]
+    evictions: dict[str, Any] | None = None
+    if sampler:
+        evictions = {
+            "server_pid": args.server_pid,
+            "worker_total_ms": sampler.totals(),
+            "invalid": mark_evictions(runs, analyses, sampler.overlap_ms),
+        }
     agg = aggregate(analyses)
     gates = evaluate_gates(agg, args)
     errors = any(a.get("error") or a.get("stream_errors") for a in analyses)
     if errors:
         verdict = "ERROR"
+    elif evictions and evictions["invalid"]:
+        verdict = "INVALID"
     elif not gates:
         verdict = "NO-GATES"
     else:
@@ -1385,6 +1452,7 @@ def main(argv: list[str] | None = None) -> int:
         "runs": analyses,
         "aggregate": agg,
         "gates": gates,
+        "kfd_evictions": evictions,
         "verdict": verdict,
     }
     with open(os.path.join(args.out, "stall_probe.json"), "w") as f:
@@ -1397,6 +1465,8 @@ def main(argv: list[str] | None = None) -> int:
     print(text)
     if verdict == "ERROR":
         return 2
+    if verdict == "INVALID":
+        return 3
     return 1 if verdict == "FAIL" else 0
 
 

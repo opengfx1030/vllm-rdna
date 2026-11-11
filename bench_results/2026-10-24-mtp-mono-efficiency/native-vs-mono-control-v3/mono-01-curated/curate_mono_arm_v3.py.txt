@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Create a response-free, validated evidence package for one Mono v3 arm."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import re
+import shutil
+from pathlib import Path
+from typing import Any
+
+import analyze_native_vs_mono_v3 as validation
+
+CELL_FIELDS = (
+    "arm", "variant", "input_length_requested", "output_length_requested",
+    "concurrency", "completed", "failed", "duration_s", "total_input_tokens",
+    "total_output_tokens", "whole_run_input_tokps_true",
+    "whole_run_output_tokps_true", "prefill_tokps_per_request_mean",
+    "prefill_tokps_wave_proxy_from_p99_ttft_NOT_TRUE_THROUGHPUT",
+    "decode_tokps_per_request_mean", "decode_tokps_pooled_over_request_decode_windows",
+    "mean_ttft_ms", "median_ttft_ms", "p99_ttft_ms", "mean_itl_ms",
+    "median_itl_ms", "p99_itl_ms", "pooled_stream_mean_itl_ms",
+    "pooled_stream_median_itl_ms", "pooled_stream_p99_itl_ms",
+    "acceptance_rate_pct_json", "acceptance_length_json",
+    "acceptance_rate_pct_log_exact_cell_window",
+    "acceptance_length_log_exact_cell_window", "drafts_json", "draft_tokens_json",
+    "accepted_tokens_json", "position0_acceptance_pct_json",
+    "position1_acceptance_pct_json",
+)
+REQUEST_FIELDS = (
+    "arm", "variant", "input_length_requested", "output_length_requested",
+    "concurrency", "request_index", "input_tokens", "output_tokens", "ttft_ms",
+    "latency_ms", "queue_ms",
+    "prefill_tokps_per_request_input_over_ttft",
+    "decode_tokps_per_request_output_over_decode_window",
+    "decode_tokps_per_request_stream_chunks", "itl_chunk_count", "mean_itl_ms",
+    "median_itl_ms", "p99_itl_ms",
+)
+SAFE_FILES = (
+    "ARM-PASS.txt", "arm-provenance.txt", "boot-id.before", "boot-id.after",
+    "sha256.before", "sha256.after", "worker-provenance.json",
+    "worker-environment-audit.json", "api-environment-audit.json",
+    "config.env", "models.json",
+)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fields: tuple[str, ...]) -> None:
+    with path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def filtered_summary(summary: str, remote_out: str) -> str:
+    """Keep numeric gate lines and omit every prompt/reply excerpt."""
+    out = [
+        "Validated serving arm: MonoKernel target and dense Mono MTP2 drafter",
+        f"Remote run directory: {remote_out}",
+    ]
+    patterns = (
+        r"^\[[^]]+\] (?:boot TREE=.*|READY in .*|MONO ROUTE .*|GDN ROUTE .*)$",
+        r"^\s*RESULT PASS \(3/3\)$",
+        r"^\s*PPL [0-9.]+ \(mean NLL [0-9.]+ over \d+ tokens\) PASS$",
+        r"^\s*cold TTFT [0-9.]+ s, warm TTFT [0-9.]+ s, speedup [0-9.]+x -> PASS$",
+        (
+            r"^\s*RESULT PASS: 0 failing, \d+ near-tie, 0 soft, "
+            r"\d+ solo-noise, \d+ identical of \d+ checks \(.*\)$"
+        ),
+        r"^\[[^]]+\] MTP K2 DISPATCH dense_calls=\d+ mono_route_markers=\d+$",
+        r"^\[[^]]+\] PREFIX RESET PASS before bench-\S+$",
+        r"^\[[^]]+\] LOAD HOOK rc=0 PASS$",
+        r"^\[[^]]+\] PROBE-AFTER-LOAD PASS$",
+        r"^\[[^]]+\] fault markers in serve\.log: 0$",
+        r"^\[[^]]+\] new amdgpu dmesg faults: 0$",
+        r"^\[[^]]+\] done$",
+    )
+    for line in summary.splitlines():
+        if any(re.fullmatch(pattern, line) for pattern in patterns):
+            out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--arm-dir", type=Path, required=True)
+    parser.add_argument("--remote-out", required=True)
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+    arm_dir = args.arm_dir.resolve()
+    repo = args.repo_root.resolve()
+    output = args.output_dir.resolve()
+    if output.exists():
+        parser.error(f"refusing to overwrite {output}")
+    arm = validation.validate_arm(arm_dir, "mono", args.remote_out)
+    metric_module = validation.load_metric_module(repo)
+    output.mkdir(parents=True)
+    for name in SAFE_FILES:
+        source = arm_dir / name
+        if not source.is_file():
+            validation.fail(f"validated arm unexpectedly lacks {name}")
+        shutil.copyfile(source, output / name)
+
+    cells: list[dict[str, Any]] = []
+    requests: list[dict[str, Any]] = []
+    receipts: list[dict[str, Any]] = []
+    for source in sorted(arm_dir.iterdir()):
+        if source.is_file():
+            receipts.append({
+                "path": source.name,
+                "size_bytes": source.stat().st_size,
+                "sha256": sha256(source),
+            })
+    for input_len, output_len, concurrency in validation.CELLS:
+        cell = (input_len, output_len, concurrency)
+        data, _log, request_rows, rollup = metric_module.load_cell(
+            arm_dir.parent, arm_dir.name, "mono-v3", cell
+        )
+        cells.append({key: rollup.get(key) for key in CELL_FIELDS})
+        requests.extend(
+            {key: row.get(key) for key in REQUEST_FIELDS} for row in request_rows
+        )
+        if int(data["completed"]) != (8 if concurrency == 1 else 32):
+            validation.fail(f"unexpected request count in {cell}")
+
+    write_csv(output / "per-cell-metrics.csv", cells, CELL_FIELDS)
+    write_csv(output / "per-request-metrics.csv", requests, REQUEST_FIELDS)
+    (output / "quality-and-gates.txt").write_text(
+        filtered_summary(arm["summary"], args.remote_out)
+    )
+    (output / "raw-file-sha256-receipts.json").write_text(
+        json.dumps({
+            "source_directory": str(arm_dir),
+            "scope": (
+                "Hashes and sizes only; raw response-bearing files are not copied."
+            ),
+            "files": receipts,
+            "excluded": ["cache/ subtree", "serve.pid"],
+        }, indent=2) + "\n"
+    )
+    tool = Path(__file__).resolve()
+    analyzer = Path(validation.__file__).resolve()
+    metric_source = (
+        repo / "bench_results/2026-10-24-mtp-mono-efficiency/"
+        "correctness-core-serving-ab/tools/analyze_pair_v1.py"
+    )
+    manifest = {
+        "validation": "PASS",
+        "arm": arm["arm"],
+        "mode": arm["mode"],
+        "boot": arm["boot"],
+        "remote_out": args.remote_out,
+        "source_core_sha256": arm["core"],
+        "kernel_source_sha256": arm["cu"],
+        "engine_core_py_sha256": arm["core_py"],
+        "model_snapshot": validation.EXPECTED_MODEL,
+        "ple_snapshot": validation.EXPECTED_PLE,
+        "cell_count": len(cells),
+        "completed_request_count": sum(int(row["completed"]) for row in cells),
+        "curation_tool": tool.name,
+        "curation_tool_sha256": sha256(tool),
+        "analyzer_sha256": sha256(analyzer),
+        "metric_extractor_sha256": sha256(metric_source),
+        "privacy_note": (
+            "No generated responses, raw journals, binaries, caches, or raw "
+            "benchmark JSON/log bodies were copied."
+        ),
+    }
+    (output / "curation-manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
+    (output / "README.md").write_text(
+        "# Curated Mono v3 serving arm\n\n"
+        "This package contains one validated 80-request MonoKernel target with "
+        "dense Mono MTP2 drafting enabled. The matched native no-Mono arm is "
+        "still required for "
+        "comparison.\n\n"
+        "per-cell-metrics.csv has four cold-prefix cells. "
+        "per-request-metrics.csv has request timings and token counts. "
+        "The TTFT-derived prefill wave value is a proxy; whole-run input/output "
+        "rates are reported separately. ITL uses stream chunks, not TPOT.\n\n"
+        "raw-file-sha256-receipts.json records hashes and sizes for original "
+        "top-level files. Response-bearing JSON, text and logs are not included. "
+        "The cache subtree is excluded. quality-and-gates.txt contains numeric "
+        "gate results only.\n\n"
+        "Validation checked boot/core/source, all four TP-rank to physical HIP "
+        "6–9 mappings, API-server initial environment, all four benchmark "
+        "windows, quality probes, after-load probe and fault gates. The native "
+        "arm and matched comparison remain pending.\n"
+    )
+    print(json.dumps({
+        "output": str(output), "validation": "PASS", "requests": len(requests)
+    }))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

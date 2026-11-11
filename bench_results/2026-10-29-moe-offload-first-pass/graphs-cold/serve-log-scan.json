@@ -1,0 +1,10 @@
+{
+  "sha256": "0ee22b50ba6bea5466ff83fe1960dccf3fc26d2f48bca2f79bc3bc901d2398a0",
+  "fault_marker_counts": {
+    "NaNs detected in logits": 0,
+    "Mono K2 fault": 0,
+    "Memory Fault": 0,
+    "HSA_STATUS_ERROR": 0
+  },
+  "remote_log": "/home/chenco_adm/w4a8_runs/moe-offload/final-optimization-pass/graphs-cold/serve.log"
+}

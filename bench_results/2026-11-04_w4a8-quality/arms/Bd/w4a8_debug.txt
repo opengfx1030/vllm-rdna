@@ -1,0 +1,6 @@
+      4 [W4A8-MOE-DEBUG] fast path fired: M=10230 K=640 N=2560 G=128 bsm=8
+      4 [W4A8-MOE-DEBUG] fast path fired: M=1023 K=2560 N=1280 G=128 bsm=8
+      4 [W4A8-MOE-DEBUG] fast path fired: M=10240 K=640 N=2560 G=128 bsm=8
+      4 [W4A8-MOE-DEBUG] fast path fired: M=1024 K=2560 N=1280 G=128 bsm=8
+      4 [W4A8-MOE-DEBUG] fast path fired: M=20480 K=640 N=2560 G=128 bsm=8
+      4 [W4A8-MOE-DEBUG] fast path fired: M=2048 K=2560 N=1280 G=128 bsm=8

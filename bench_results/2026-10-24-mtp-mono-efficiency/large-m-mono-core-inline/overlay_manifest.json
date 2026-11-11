@@ -1,0 +1,12 @@
+{
+  "source": "/home/chenco_adm/vllm-rdna-mtp-mono",
+  "overlay": "/home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree",
+  "allowed_changes": [
+    "vllm/_rocm_C.abi3.so",
+    "csrc/rocm/mono_k2_rdna2.cu"
+  ],
+  "original_core_sha256": "6e8e486e548213d159236298a24b0f9ffbc18e49ccc234dcace7e8c1d59f4df3",
+  "candidate_core_sha256": "25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f",
+  "original_source_sha256": "101e623a65c1cbb0057845b6accd35d20a04b0f30d6faa00c3684418ef6d5fd1",
+  "candidate_source_sha256": "aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf"
+}

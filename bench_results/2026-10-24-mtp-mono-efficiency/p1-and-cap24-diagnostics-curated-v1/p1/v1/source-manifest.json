@@ -1,0 +1,22 @@
+{
+  "purpose": "disposable P1 row104 stream0 actual FP32 sum and rrms trace",
+  "source_pins": {
+    "native_source": "a01bf43fe5563cff8ab3d26086cb293bf1130878d494870b6a4bcf65e556880e",
+    "global_source": "a03041f587a4837d28d56c25062c85635ecf422cf455020bf2307a8d10c5df1e",
+    "global_binding": "9783e80505b4dc8833350271175f408b17e22446e1cb803a1cd96268bc5f46ca"
+  },
+  "generated_sha256": {
+    "native_trace.cu": "55a9f8f27e44cd9ff919532647681261b8ae2277d960f9faf667501521847069",
+    "native_binding.cpp": "557a59c5efb2857445b7c3e8b52152339ea58799ab5a14f329b1ee9927931712",
+    "global_trace.cu": "980f78cbaebc67ac52f36a8779d589f0685999cba05ae43cbbfc1bd26d825dd6",
+    "global_binding.cpp": "3517fc30286791af0269d744649e8464225a0adbfce654770be18a563acaeab5"
+  },
+  "native_extra_cuda_cflags": [
+    "-O2"
+  ],
+  "global_extra_cuda_cflags": [
+    "-O3"
+  ],
+  "production_modified": false,
+  "runtime_qualified": false
+}

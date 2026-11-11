@@ -1,0 +1,11 @@
+25f3fc556ad5b77aabb0faa561d19a7fc95addfd8692bbda0ea26441d8d9913f  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/vllm/_rocm_C.abi3.so
+aec873933fde435846249935243945a6fe9a53572c3f6435d4e46bdafca3a5bf  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/csrc/rocm/mono_k2_rdna2.cu
+b2cdb9b6a4e5886749ad0530b76f26072f9e38d93c34f8743111160afc09de77  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/csrc/rocm/moe_unquantized_rdna2.cu
+788fe4744672f2c7a776caa59897487a84a632b650f87b7bb379a29d920ac703  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tunableop/rocm7.14-rocblas5.5/tunableop_results0.csv
+5915b3ae2fd41ab882f9a8c6884ba48057a824109726a7a7b6053323b760e2bb  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tunableop/rocm7.14-rocblas5.5/tunableop_results1.csv
+4a56858972be35bc8538e44d6793729305c2c5d7abb6d0e34d7ec3532b708a84  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tunableop/rocm7.14-rocblas5.5/tunableop_results2.csv
+267436d3bd2da71e8dc5e4f3b6937ad9b529f6af4ccf583aa356974a859834ae  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tunableop/rocm7.14-rocblas5.5/tunableop_results3.csv
+4d334bc5f64b6542695ef452789bc1cc56d375a84d022d6ece7a7f5095788f25  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-global-validation/validate_global_m_fixture.py
+ace918aa41073ea8a0a3fd9aabfc13f6a6a85aa0cb06429b2971b0bc3fc9ba56  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/core-inline-serve-tree/tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py
+741f988f5db1eaa0de5b2332908773de70a01edf9e5b0d929cc673201ac683ca  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/dense-native-reference/validate_actual_rdna_dense_v2.py
+3d6b97b78177d30f821194ee42e0990c927902dbeef46bd807a1ef5b4e9e3a5b  /home/chenco_adm/w4a8_runs/mono-large-m-2026-10-24/large-m-mono-dense-native-round-v2/run_prebuilt_actual_reference.sh

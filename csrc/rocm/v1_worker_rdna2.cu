@@ -32,15 +32,17 @@ __global__ void gather_block_tables_kernel(
     const uint64_t* __restrict__ src_ptrs,
     const uint64_t* __restrict__ dst_ptrs,
     const int64_t* __restrict__ block_table_strides,
-    const int32_t* __restrict__ num_blocks_ptr,
-    const int64_t num_blocks_stride, const int num_reqs) {
+    const int32_t* __restrict__ num_blocks_ptr, const int64_t num_blocks_stride,
+    const int num_reqs, const int32_t* __restrict__ num_computed_tokens,
+    const int32_t* __restrict__ sliding_window_reach,
+    const int32_t* __restrict__ block_sizes, const bool mask_sliding_window) {
   const int group = blockIdx.x;
   const int batch_idx = blockIdx.y;
   const int stride = (int)block_table_strides[group];
 
-  int32_t* __restrict__ dst = reinterpret_cast<int32_t*>(
-                                  (uintptr_t)dst_ptrs[group]) +
-                              (int64_t)batch_idx * stride;
+  int32_t* __restrict__ dst =
+      reinterpret_cast<int32_t*>((uintptr_t)dst_ptrs[group]) +
+      (int64_t)batch_idx * stride;
 
   if (batch_idx >= num_reqs) {
     for (int i = threadIdx.x; i < stride; i += blockDim.x) {
@@ -56,8 +58,23 @@ __global__ void gather_block_tables_kernel(
       reinterpret_cast<const int32_t*>((uintptr_t)src_ptrs[group]) +
       (int64_t)req_idx * stride;
 
+  // Sliding-window groups: entries wholly below the window of this request's
+  // first scheduled token may already be freed and reused, but attention can
+  // still load them inside a KV tile that straddles the window start. Null
+  // them exactly like _gather_block_tables_kernel does.
+  int num_null = 0;
+  if (mask_sliding_window) {
+    const int reach = sliding_window_reach[group];
+    if (reach > 0) {
+      const int first_pos = num_computed_tokens[req_idx];
+      const int below = first_pos - reach;
+      const int block_size = block_sizes[group];
+      num_null = (below > 0 ? below : 0) / block_size;
+    }
+  }
+
   for (int i = threadIdx.x; i < num_blocks; i += blockDim.x) {
-    dst[i] = src[i];
+    dst[i] = (i >= num_null) ? src[i] : 0;
   }
 }
 
@@ -68,24 +85,23 @@ __global__ void gather_block_tables_kernel(
 // with PAD_SLOT_ID. slot_mappings is int64.
 // ---------------------------------------------------------------------------
 __global__ void compute_slot_mappings_kernel(
-    const int64_t max_num_tokens,
-    const int32_t* __restrict__ idx_mapping,
+    const int64_t max_num_tokens, const int32_t* __restrict__ idx_mapping,
     const int32_t* __restrict__ query_start_loc,
     const int64_t* __restrict__ pos,
     const uint64_t* __restrict__ block_table_ptrs,
     const int64_t* __restrict__ block_table_strides,
     const int32_t* __restrict__ block_sizes,
-    const int32_t* __restrict__ kernel_block_sizes,
     const uint8_t* __restrict__ slot_mapping_enabled,
     const uint8_t* __restrict__ dcp_sharded,
-    int64_t* __restrict__ slot_mappings,
-    const int64_t slot_mappings_stride, const int cp_rank, const int cp_size,
-    const int cp_interleave, const int64_t pad_id) {
+    int64_t* __restrict__ slot_mappings, const int64_t slot_mappings_stride,
+    const int cp_rank, const int cp_size, const int cp_interleave,
+    const int64_t pad_id) {
   const int group = blockIdx.x;
   const int batch_idx = blockIdx.y;
   const int num_reqs = gridDim.y - 1;
 
-  int64_t* __restrict__ out = slot_mappings + (int64_t)group * slot_mappings_stride;
+  int64_t* __restrict__ out =
+      slot_mappings + (int64_t)group * slot_mappings_stride;
 
   if (batch_idx == num_reqs) {
     const int actual_num_tokens = query_start_loc[batch_idx];
@@ -100,7 +116,6 @@ __global__ void compute_slot_mappings_kernel(
       reinterpret_cast<const int32_t*>((uintptr_t)block_table_ptrs[group]);
   const int64_t block_table_stride = block_table_strides[group];
   const int64_t kv_block_size = block_sizes[group];
-  const int64_t kernel_block_size = kernel_block_sizes[group];
   const bool mapping_enabled = slot_mapping_enabled[group] != 0;
   bool sharded = false;
   if (cp_size != 1) {
@@ -136,20 +151,24 @@ __global__ void compute_slot_mappings_kernel(
     }
 
     const int64_t block_index =
-        mapping_enabled ? local_positions / kernel_block_size : 0;
-    const int64_t block_offset = local_positions % kernel_block_size;
+        mapping_enabled ? local_positions / kv_block_size : 0;
+    const int64_t block_offset = local_positions % kv_block_size;
+    // Recurrent/circular cache rows can be shorter than the sequence. Their
+    // state metadata handles indexing, so never read the next request's row.
+    const bool valid =
+        mapping_enabled && block_index >= 0 && block_index < block_table_stride;
 
     int64_t block_number = 0;
-    if (is_local && is_real_req) {
-      block_number =
-          block_table[(int64_t)req_state_idx * block_table_stride + block_index];
+    if (is_local && is_real_req && valid) {
+      block_number = block_table[(int64_t)req_state_idx * block_table_stride +
+                                 block_index];
     }
 
-    int64_t slot_id = block_number * kernel_block_size + block_offset;
+    int64_t slot_id = block_number * kv_block_size + block_offset;
     if (cp_size != 1 && !is_local) {
       slot_id = pad_id;
     }
-    if (!(mapping_enabled && is_real_req)) {
+    if (!(valid && is_local && is_real_req)) {
       slot_id = pad_id;
     }
     out[t] = slot_id;
@@ -162,12 +181,12 @@ __global__ void compute_slot_mappings_kernel(
 // `out` is the target tensor's data pointer, `out_stride` its row stride.
 // ---------------------------------------------------------------------------
 template <typename T>
-__global__ void apply_write_kernel(
-    T* __restrict__ out, const int64_t out_stride,
-    const int32_t* __restrict__ write_indices,
-    const int32_t* __restrict__ write_starts,
-    const T* __restrict__ write_contents,
-    const int32_t* __restrict__ write_cu_lens) {
+__global__ void apply_write_kernel(T* __restrict__ out,
+                                   const int64_t out_stride,
+                                   const int32_t* __restrict__ write_indices,
+                                   const int32_t* __restrict__ write_starts,
+                                   const T* __restrict__ write_contents,
+                                   const int32_t* __restrict__ write_cu_lens) {
   const int pid = blockIdx.x;
   const int64_t row_idx = write_indices[pid];
   const int64_t start_idx = write_starts[pid];
@@ -222,8 +241,7 @@ __global__ void zero_kv_blocks_kernel(
     const uint64_t* __restrict__ seg_addrs,
     const int64_t* __restrict__ seg_block_strides,
     const int64_t* __restrict__ seg_page_sizes,
-    const int64_t* __restrict__ block_ids,
-    const int64_t chunk_size) {
+    const int64_t* __restrict__ block_ids, const int64_t chunk_size) {
   const int seg_index = blockIdx.y;
   const int64_t chunk_begin = (int64_t)blockIdx.z * chunk_size;
   const int64_t page_size = seg_page_sizes[seg_index];
@@ -236,7 +254,8 @@ __global__ void zero_kv_blocks_kernel(
   const int64_t block_offset = block_id * block_stride;
 
   int32_t* __restrict__ ptr =
-      reinterpret_cast<int32_t*>((uintptr_t)seg_addrs[seg_index]) + block_offset;
+      reinterpret_cast<int32_t*>((uintptr_t)seg_addrs[seg_index]) +
+      block_offset;
 
   const int64_t chunk_limit = chunk_begin + chunk_size;
   const int64_t chunk_end = chunk_limit < page_size ? chunk_limit : page_size;
@@ -300,15 +319,16 @@ inline bool supported_write_dtype(const torch::Tensor& t) {
 
 // Host wrappers stay at global scope so the torch_bindings importer resolves
 // them (same pattern as causal_conv1d_rdna2.cu / mrope_rdna2.cu).
-void gather_block_tables_rdna2(torch::Tensor batch_idx_to_req_idx,
-                               torch::Tensor src_block_table_ptrs,
-                               torch::Tensor dst_block_table_ptrs,
-                               torch::Tensor block_table_strides,
-                               torch::Tensor num_blocks_ptr,
-                               int64_t num_blocks_stride, int64_t num_reqs,
-                               int64_t num_reqs_padded) {
+void gather_block_tables_rdna2(
+    torch::Tensor batch_idx_to_req_idx, torch::Tensor src_block_table_ptrs,
+    torch::Tensor dst_block_table_ptrs, torch::Tensor block_table_strides,
+    torch::Tensor num_blocks_ptr, int64_t num_blocks_stride, int64_t num_reqs,
+    int64_t num_reqs_padded, torch::Tensor num_computed_tokens,
+    torch::Tensor sliding_window_reach, torch::Tensor block_sizes,
+    bool mask_sliding_window) {
   using namespace vllm::rdna2_v1_worker;
-  TORCH_CHECK(batch_idx_to_req_idx.is_cuda() && src_block_table_ptrs.is_cuda() &&
+  TORCH_CHECK(batch_idx_to_req_idx.is_cuda() &&
+                  src_block_table_ptrs.is_cuda() &&
                   dst_block_table_ptrs.is_cuda() &&
                   block_table_strides.is_cuda() && num_blocks_ptr.is_cuda(),
               "gather_block_tables_rdna2: all tensors must be on HIP");
@@ -316,6 +336,10 @@ void gather_block_tables_rdna2(torch::Tensor batch_idx_to_req_idx,
               "idx_mapping must be int32");
   TORCH_CHECK(num_blocks_ptr.scalar_type() == at::kInt,
               "num_blocks must be int32");
+  TORCH_CHECK(num_computed_tokens.scalar_type() == at::kInt &&
+                  sliding_window_reach.scalar_type() == at::kInt &&
+                  block_sizes.scalar_type() == at::kInt,
+              "gather_block_tables_rdna2: window tensors must be int32");
 
   const int num_groups = (int)src_block_table_ptrs.numel();
   if (num_groups == 0 || num_reqs_padded == 0) {
@@ -330,7 +354,11 @@ void gather_block_tables_rdna2(torch::Tensor batch_idx_to_req_idx,
       reinterpret_cast<const uint64_t*>(dst_block_table_ptrs.data_ptr()),
       reinterpret_cast<const int64_t*>(block_table_strides.data_ptr()),
       reinterpret_cast<const int32_t*>(num_blocks_ptr.data_ptr()),
-      num_blocks_stride, (int)num_reqs);
+      num_blocks_stride, (int)num_reqs,
+      reinterpret_cast<const int32_t*>(num_computed_tokens.data_ptr()),
+      reinterpret_cast<const int32_t*>(sliding_window_reach.data_ptr()),
+      reinterpret_cast<const int32_t*>(block_sizes.data_ptr()),
+      mask_sliding_window);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -338,10 +366,10 @@ void compute_slot_mappings_rdna2(
     int64_t max_num_tokens, torch::Tensor idx_mapping,
     torch::Tensor query_start_loc, torch::Tensor pos,
     torch::Tensor block_table_ptrs, torch::Tensor block_table_strides,
-    torch::Tensor block_sizes, torch::Tensor kernel_block_sizes,
-    torch::Tensor slot_mapping_enabled, torch::Tensor dcp_sharded,
-    torch::Tensor slot_mappings, int64_t slot_mappings_stride,
-    int64_t cp_rank, int64_t cp_size, int64_t cp_interleave, int64_t pad_id) {
+    torch::Tensor block_sizes, torch::Tensor slot_mapping_enabled,
+    torch::Tensor dcp_sharded, torch::Tensor slot_mappings,
+    int64_t slot_mappings_stride, int64_t cp_rank, int64_t cp_size,
+    int64_t cp_interleave, int64_t pad_id) {
   using namespace vllm::rdna2_v1_worker;
   TORCH_CHECK(pos.scalar_type() == at::kLong, "positions must be int64");
   TORCH_CHECK(slot_mappings.scalar_type() == at::kLong,
@@ -358,14 +386,12 @@ void compute_slot_mappings_rdna2(
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid((unsigned)num_groups, (unsigned)(num_reqs + 1));
   compute_slot_mappings_kernel<<<grid, kThreads, 0, stream.stream()>>>(
-      max_num_tokens,
-      reinterpret_cast<const int32_t*>(idx_mapping.data_ptr()),
+      max_num_tokens, reinterpret_cast<const int32_t*>(idx_mapping.data_ptr()),
       reinterpret_cast<const int32_t*>(query_start_loc.data_ptr()),
       reinterpret_cast<const int64_t*>(pos.data_ptr()),
       reinterpret_cast<const uint64_t*>(block_table_ptrs.data_ptr()),
       reinterpret_cast<const int64_t*>(block_table_strides.data_ptr()),
       reinterpret_cast<const int32_t*>(block_sizes.data_ptr()),
-      reinterpret_cast<const int32_t*>(kernel_block_sizes.data_ptr()),
       reinterpret_cast<const uint8_t*>(slot_mapping_enabled.data_ptr()),
       reinterpret_cast<const uint8_t*>(dcp_sharded.data_ptr()),
       reinterpret_cast<int64_t*>(slot_mappings.data_ptr()),
@@ -445,7 +471,8 @@ void fused_apply_write_rdna2(torch::Tensor output_ptrs,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void zero_kv_blocks_rdna2(torch::Tensor seg_addrs, torch::Tensor seg_block_strides,
+void zero_kv_blocks_rdna2(torch::Tensor seg_addrs,
+                          torch::Tensor seg_block_strides,
                           torch::Tensor seg_page_sizes, torch::Tensor block_ids,
                           int64_t chunk_size, int64_t max_chunks) {
   using namespace vllm::rdna2_v1_worker;

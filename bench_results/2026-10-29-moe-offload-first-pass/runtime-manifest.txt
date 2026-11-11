@@ -1,0 +1,10 @@
+x86_64
+Model name:                              AMD EPYC 7K62 48-Core Processor
+Thread(s) per core:                      2
+Core(s) per socket:                      48
+Socket(s):                               1
+c65bc9fa53735a539f465883ef0e1bbed6e23fb47817bd3b52f1e2a0682e41e3  vllm/_rocm_C.abi3.so
+ef9986a25bcdea32c1801b2f2c12e39fe13c8e0773cf1e0e5f92ca2ca2609878  csrc/rocm/mono_gdn_rdna2.cu
+b5d918cb2602fa7e997fcd171fd378cba89f795602c3fd0ddb67ec2b7d7c4723  csrc/rocm/rdna_expert_cache.cu
+36eac11e1ef0556e15d385840439c33f0fe0e74eac8afa33a33b51bded99f2b9  vllm/model_executor/layers/fused_moe/rdna_expert_cache.py
+90171d0d9b013a0fb35d29e0dd598e5b4e1a5ba14432cea4daacb854c9b7035c  tools/rdna/mono/qualify_expert_copy.py

@@ -34,12 +34,12 @@ from vllm.platforms.rocm import on_gfx10x  # noqa: E402
 if not on_gfx10x():
     pytest.skip("RDNA2 QSA kernels are gfx1030-only", allow_module_level=True)
 
-from vllm.triton_utils import triton  # noqa: E402
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops  # noqa: E402
 from vllm.models.qwen4_exp.amd.ops import qsa_rdna2  # noqa: E402
 from vllm.models.qwen4_exp.amd.ops.qsa import (  # noqa: E402
     _store_qsa_rows_kernel,
 )
+from vllm.triton_utils import triton  # noqa: E402
 
 device = "cuda"
 ATOL = 1e-3
@@ -69,10 +69,12 @@ def triton_gate(monkeypatch):
 def test_qsa_op_registered(op):
     assert _op(op), f"{op} not registered (rebuild _rocm_C.abi3.so)"
 
+
 def test_qsa_env_gate_defaults_on():
     from vllm.envs import VLLM_RDNA_QSA_HIP
 
     assert VLLM_RDNA_QSA_HIP is True, "HIP QSA path is on by default (S6)"
+
 
 def test_qsa_dispatcher_env_gate(monkeypatch):
     monkeypatch.setattr(qsa_rdna2, "on_gfx10x", lambda: True)
@@ -89,17 +91,30 @@ def test_qsa_dispatcher_env_gate(monkeypatch):
 
 def test_mqa_paged_routes_to_hip_only_for_fp16(monkeypatch):
     """The dispatcher sends fp16 to the HIP op and bf16 to Triton."""
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import qsa as mono_qsa
+
     seen: list[torch.dtype] = []
 
-    def spy(q, k_cache, page_table, token_to_req, query_positions,
-            sequence_lengths, compress_ratio, num_columns, score_scale):
+    def spy(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        compress_ratio,
+        score_divisor,
+        logits,
+        visible_blocks,
+    ):
         seen.append(q.dtype)
-        return (
-            torch.empty(q.shape[0], num_columns, dtype=torch.float32, device=device),
-            torch.empty(q.shape[0], dtype=torch.int32, device=device),
-        )
+        return True
 
-    monkeypatch.setattr(qsa_rdna2, "qsa_mqa_paged", spy)
+    # The dispatcher scores through the MonoKernel's HIP scoring module, not
+    # through the wrapper in `qsa_rdna2`: `mqa_paged` returns True when the
+    # layout is one the HIP kernel covers and the caller then skips Triton.
+    monkeypatch.setattr(mono_qsa, "mqa_paged", spy)
+    monkeypatch.setattr(qsa_ops, "MONO_QSA", None)
     monkeypatch.setattr(qsa_rdna2, "VLLM_RDNA_QSA_HIP", True)
     monkeypatch.setattr(qsa_rdna2, "on_gfx10x", lambda: True)
 
@@ -165,7 +180,7 @@ def test_store_cache_rows_parity(num_rows, width, page_size, num_blocks):
     hip = torch.zeros_like(ref)
     _store_rows_reference(rows, slots, ref, page_size, width)
     qsa_rdna2.qsa_store_cache_rows(rows, slots, hip, page_size, width)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     maxdiff = (ref - hip).abs().max().item()
     print(f"store_cache_rows atol=0 maxdiff={maxdiff} rows={num_rows}")
@@ -192,7 +207,7 @@ def test_store_cache_rows_matches_scatter_semantics():
             expected[slot // page_size, slot % page_size, 0] = rows[row]
     hip = torch.full_like(expected, -1.0)
     qsa_rdna2.qsa_store_cache_rows(rows, slots, hip, page_size, width)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.equal(expected, hip)
 
 
@@ -207,14 +222,13 @@ def test_store_cache_rows_all_element_sizes_and_strides(dtype, strided):
     """
     num_rows, width, page_size, num_blocks = 24, 16, 4, 6
     torch.manual_seed(11)
+    fill = -7.0
     if dtype == torch.int64:
         rows = torch.randint(0, 4096, (num_rows, width), device=device)
         rows = rows.reshape(width, num_rows).t() if strided else rows
-        fill = -7
     else:
         base = torch.randn(width, num_rows, dtype=dtype, device=device)
         rows = base.t() if strided else base.t().contiguous()
-        fill = -7.0
 
     capacity = num_blocks * page_size
     slots = torch.full((num_rows,), -1, dtype=torch.int64, device=device)
@@ -237,7 +251,7 @@ def test_store_cache_rows_all_element_sizes_and_strides(dtype, strided):
             expected[slot // page_size, slot % page_size, 0] = rows[row]
 
     qsa_rdna2.qsa_store_cache_rows(rows, slots, cache, page_size, width)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.equal(expected, cache), f"rows stride {rows.stride()}"
     if interleave > 1:
         assert bool((backing[..., 1::2] == fill).all()), "clobbered interleaved columns"
@@ -253,9 +267,7 @@ def _compress_inputs(rows, head_dim, ratio, num_requests, num_blocks, load_rope)
     state_size = max(ratio * 2, 2)
     torch.manual_seed(rows + head_dim + ratio + num_requests + int(load_rope))
     raw_keys = torch.randn(rows, 1, head_dim, dtype=torch.float16, device=device)
-    raw_positions = torch.randint(
-        0, 64, (rows, 1, 3), dtype=torch.int64, device=device
-    )
+    raw_positions = torch.randint(0, 64, (rows, 1, 3), dtype=torch.int64, device=device)
     state_cache = torch.zeros(
         num_blocks, state_size, 1, head_dim, dtype=torch.float16, device=device
     )
@@ -264,27 +276,25 @@ def _compress_inputs(rows, head_dim, ratio, num_requests, num_blocks, load_rope)
         0, 512, (num_blocks, state_size, 1, 3), dtype=torch.int64, device=device
     )
     # Half the requests fall back to the raw rows (NULL_BLOCK_ID).
-    state_table = torch.full(
-        (num_requests, 1), -1, dtype=torch.int32, device=device
+    state_table = torch.full((num_requests, 1), -1, dtype=torch.int32, device=device)
+    state_table[::2, 0] = (
+        torch.arange((num_requests + 1) // 2, dtype=torch.int32, device=device)
+        % num_blocks
     )
-    state_table[::2, 0] = torch.arange(
-        (num_requests + 1) // 2, dtype=torch.int32, device=device
-    ) % num_blocks
 
     per_request = max(rows // num_requests, 1)
-    token_to_req = (torch.arange(rows, device=device) // per_request).clamp_max(
-        num_requests - 1
-    ).to(torch.int32)
+    token_to_req = (
+        (torch.arange(rows, device=device) // per_request)
+        .clamp_max(num_requests - 1)
+        .to(torch.int32)
+    )
     query_start_loc = torch.empty(num_requests + 1, dtype=torch.int32, device=device)
     query_start_loc[0] = 0
-    query_start_loc[1:] = torch.arange(
-        1, num_requests + 1, device=device
-    ) * per_request
+    query_start_loc[1:] = torch.arange(1, num_requests + 1, device=device) * per_request
     query_start_loc[-1] = rows
     # Positions advance within each request so chunk_start_position moves too.
     logical_positions = (
-        torch.arange(rows, device=device) - query_start_loc[token_to_req.long()]
-        + ratio
+        torch.arange(rows, device=device) - query_start_loc[token_to_req.long()] + ratio
     ).to(torch.int64)
     logical_positions[::9] = -1  # unmapped rows
     compressed_slots = torch.full((rows,), -1, dtype=torch.int64, device=device)
@@ -313,9 +323,7 @@ def test_compress_groups_parity(
     triton_gate, rows, head_dim, ratio, num_requests, load_rope
 ):
     num_blocks = max(num_requests, 2)
-    args = _compress_inputs(
-        rows, head_dim, ratio, num_requests, num_blocks, load_rope
-    )
+    args = _compress_inputs(rows, head_dim, ratio, num_requests, num_blocks, load_rope)
     (
         raw_keys,
         raw_positions,
@@ -352,7 +360,7 @@ def test_compress_groups_parity(
         ratio,
         rope_cache,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert hip_pooled.shape == ref_pooled.shape
     maxdiff = (ref_pooled - hip_pooled).abs().max().item()
@@ -383,14 +391,30 @@ def test_compress_groups_all_null_state_table(triton_gate):
     state_table = torch.full((num_requests, 1), -1, dtype=torch.int32, device=device)
 
     ref_pooled, ref_first = qsa_ops.qsa_compress_groups_with_ratio(
-        raw_keys, raw_positions, state_cache, state_table, token_to_req,
-        query_start_loc, logical_positions, compressed_slots, ratio, rope_cache,
+        raw_keys,
+        raw_positions,
+        state_cache,
+        state_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        ratio,
+        rope_cache,
     )
     hip_pooled, hip_first = qsa_rdna2.qsa_compress_groups_with_ratio_compat(
-        raw_keys, raw_positions, state_cache, state_table, token_to_req,
-        query_start_loc, logical_positions, compressed_slots, ratio, rope_cache,
+        raw_keys,
+        raw_positions,
+        state_cache,
+        state_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        ratio,
+        rope_cache,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(hip_pooled, ref_pooled, atol=ATOL, rtol=RTOL)
     assert torch.equal(hip_first, ref_first)
 
@@ -410,9 +434,7 @@ def _mqa_inputs(
     )
     table = torch.randperm(num_pages, device=device)[: num_requests * table_width]
     table = table.to(torch.int32).reshape(num_requests, table_width)
-    token_to_req = (
-        torch.arange(rows, device=device) % num_requests
-    ).to(torch.int32)
+    token_to_req = (torch.arange(rows, device=device) % num_requests).to(torch.int32)
     token_to_req[::11] = -1  # padding rows
     query_positions = torch.arange(rows, dtype=torch.int64, device=device) + ratio
     query_positions[::13] = -1
@@ -436,8 +458,17 @@ def _mqa_inputs(
         (1, 4, 128, 8, 16, 4, 1, 8),
     ],
 )
-def test_mqa_paged_parity(triton_gate, rows, heads, head_dim, num_pages, page_size,
-                          table_width, num_requests, ratio):
+def test_mqa_paged_parity(
+    triton_gate,
+    rows,
+    heads,
+    head_dim,
+    num_pages,
+    page_size,
+    table_width,
+    num_requests,
+    ratio,
+):
     q, k_cache, table, token_to_req, positions, seq_lens = _mqa_inputs(
         rows, heads, head_dim, num_pages, page_size, table_width, num_requests, ratio
     )
@@ -449,7 +480,7 @@ def test_mqa_paged_parity(triton_gate, rows, heads, head_dim, num_pages, page_si
     hip_logits, hip_visible = qsa_rdna2.qsa_mqa_paged(
         q, k_cache, table, token_to_req, positions, seq_lens, ratio, columns, scale
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert hip_logits.shape == ref_logits.shape == (rows, columns)
     assert hip_visible.shape == ref_visible.shape == (rows,)
@@ -488,16 +519,21 @@ def test_mqa_paged_smaller_num_columns_matches_capacity(triton_gate):
     )
     narrow = 8
     hip_logits, _ = qsa_rdna2.qsa_mqa_paged(
-        q, k_cache, table, token_to_req, positions, seq_lens, 4, narrow,
+        q,
+        k_cache,
+        table,
+        token_to_req,
+        positions,
+        seq_lens,
+        4,
+        narrow,
         128**0.5,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     ref = wide_logits[:, :narrow]
     finite = ~torch.isneginf(ref)
     assert torch.equal(torch.isneginf(ref), torch.isneginf(hip_logits))
-    torch.testing.assert_close(
-        hip_logits[finite], ref[finite], atol=ATOL, rtol=RTOL
-    )
+    torch.testing.assert_close(hip_logits[finite], ref[finite], atol=ATOL, rtol=RTOL)
 
 
 def test_mqa_paged_rejects_bf16():
@@ -558,7 +594,7 @@ def test_dispatched_mqa_paged_matches_gate_off(monkeypatch):
     hip_logits, hip_visible = qsa_ops.qsa_mqa_paged(
         q, k_cache, table, token_to_req, positions, seq_lens, 4, columns
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert torch.equal(hip_visible, ref_visible)
     finite = ~torch.isneginf(ref_logits)
@@ -586,8 +622,16 @@ def test_dispatched_compress_and_store_match_gate_off(monkeypatch):
 
     def run():
         pooled, first = qsa_ops.qsa_compress_groups_with_ratio(
-            raw_keys, raw_positions, state_cache, state_table, token_to_req,
-            query_start_loc, logical_positions, compressed_slots, ratio, rope_cache,
+            raw_keys,
+            raw_positions,
+            state_cache,
+            state_table,
+            token_to_req,
+            query_start_loc,
+            logical_positions,
+            compressed_slots,
+            ratio,
+            rope_cache,
         )
         cache = torch.zeros(2, 64, 1, head_dim, dtype=torch.float16, device=device)
         qsa_ops.qsa_store_cache_rows(cache, store_slots, store_rows)
@@ -598,7 +642,7 @@ def test_dispatched_compress_and_store_match_gate_off(monkeypatch):
     monkeypatch.setattr(qsa_rdna2, "VLLM_RDNA_QSA_HIP", True)
     monkeypatch.setattr(qsa_rdna2, "on_gfx10x", lambda: True)
     hip = run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     torch.testing.assert_close(hip[0], ref[0], atol=ATOL, rtol=RTOL)
     assert torch.equal(hip[1], ref[1])
@@ -614,7 +658,7 @@ def test_dispatched_compress_and_store_match_gate_off(monkeypatch):
 def test_dispatched_indexer_selection_matches_gate_off(monkeypatch):
     """S3: end-to-end indexer selection (score -> top-k -> expand) must agree."""
     rows, heads, head_dim, ratio, token_topk = 6, 4, 128, 4, 64
-    num_pages, page_size, table_width, num_requests = 32, 64, 16, 2
+    num_pages, page_size, num_requests = 32, 64, 2
     torch.manual_seed(5)
     q = torch.randn(rows, heads, head_dim, dtype=torch.float16, device=device)
     k_cache = torch.randn(
@@ -625,12 +669,8 @@ def test_dispatched_indexer_selection_matches_gate_off(monkeypatch):
         .reshape(1, -1)
         .repeat(num_requests, 1)
     )
-    token_to_req = torch.tensor(
-        [0, 0, 0, 1, 1, 1], dtype=torch.int32, device=device
-    )
-    positions = torch.tensor(
-        [8, 9, 10, 40, 41, 42], dtype=torch.int64, device=device
-    )
+    token_to_req = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32, device=device)
+    positions = torch.tensor([8, 9, 10, 40, 41, 42], dtype=torch.int64, device=device)
     seq_lens = torch.tensor([100, 200], dtype=torch.int32, device=device)
 
     monkeypatch.setattr(qsa_rdna2, "qsa_use_rdna2", lambda dtype=None: False)
@@ -642,7 +682,7 @@ def test_dispatched_indexer_selection_matches_gate_off(monkeypatch):
     hip = qsa_ops.qsa_select_paged_tokens(
         q, k_cache, table, token_to_req, positions, seq_lens, token_topk, ratio
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     for row in range(rows):
         ref_set = set(int(v) for v in ref[row] if v >= 0)
@@ -677,11 +717,26 @@ def test_qsa_hip_ops_are_cudagraph_safe(triton_gate):
             store_rows, store_slots, store_cache, store_cache.shape[1], head_dim
         )
         qsa_rdna2.qsa_compress_groups_with_ratio_compat(
-            raw_keys, raw_positions, state_cache, state_table, ctoken_to_req,
-            query_start_loc, logical_positions, compressed_slots, 4, rope_cache,
+            raw_keys,
+            raw_positions,
+            state_cache,
+            state_table,
+            ctoken_to_req,
+            query_start_loc,
+            logical_positions,
+            compressed_slots,
+            4,
+            rope_cache,
         )
         qsa_rdna2.qsa_mqa_paged(
-            q, k_cache, table, token_to_req, positions, seq_lens, 4, columns,
+            q,
+            k_cache,
+            table,
+            token_to_req,
+            positions,
+            seq_lens,
+            4,
+            columns,
             head_dim**0.5,
         )
 
@@ -690,14 +745,14 @@ def test_qsa_hip_ops_are_cudagraph_safe(triton_gate):
     with torch.cuda.stream(side):
         run()
     torch.cuda.current_stream().wait_stream(side)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         run()
     store_cache.zero_()
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert bool((store_cache != 0).any()), "store_cache_rows did not replay"
 
@@ -720,9 +775,7 @@ def _expand_inputs(rows, block_topk, ratio, num_requests, seed=0, strided=False)
     if strided:
         # Force a non-unit row stride: the kernel takes both strides, so this
         # exercises the stride path rather than assuming contiguity.
-        wide = torch.full(
-            (rows, block_topk * 2), -7, device=device, dtype=torch.int32
-        )
+        wide = torch.full((rows, block_topk * 2), -7, device=device, dtype=torch.int32)
         wide[:, ::2] = blocks
         blocks = wide[:, ::2]
     token_to_req = torch.randint(
@@ -734,8 +787,12 @@ def _expand_inputs(rows, block_topk, ratio, num_requests, seed=0, strided=False)
     # expanded, some have an open tail, and some exceed the sequence length.
     query_positions = torch.arange(rows, device=device, dtype=torch.int64) * ratio + 1
     sequence_lengths = torch.randint(
-        ratio, ratio * (rows + 2) + 1, (num_requests,), device=device,
-        dtype=torch.int32, generator=gen,
+        ratio,
+        ratio * (rows + 2) + 1,
+        (num_requests,),
+        device=device,
+        dtype=torch.int32,
+        generator=gen,
     )
     return blocks, query_positions, sequence_lengths, token_to_req
 
@@ -808,11 +865,12 @@ def test_expand_indices_routes_to_hip_behind_the_gate(monkeypatch):
     restriction does not apply -- but the env/platform gate still must.
     """
     seen: list[torch.dtype] = []
-    monkeypatch.setattr(
-        qsa_rdna2,
-        "qsa_expand_indices",
-        lambda *a, **kw: seen.append(a[0].dtype) or torch.empty(0),
-    )
+
+    def spy(*a, **kw):
+        seen.append(a[0].dtype)
+        return torch.empty(0)
+
+    monkeypatch.setattr(qsa_rdna2, "qsa_expand_indices", spy)
     monkeypatch.setattr(qsa_rdna2, "VLLM_RDNA_QSA_HIP", True)
     monkeypatch.setattr(qsa_rdna2, "on_gfx10x", lambda: True)
     blocks, positions, seq_lens, token_to_req = _expand_inputs(4, 2, 4, 2, seed=3)
@@ -834,7 +892,14 @@ def test_expand_indices_routes_to_hip_behind_the_gate(monkeypatch):
 
 
 def _sparse_inputs(
-    rows, heads, kv_heads, head_dim, topk, page_size, num_pages, num_requests,
+    rows,
+    heads,
+    kv_heads,
+    head_dim,
+    topk,
+    page_size,
+    num_pages,
+    num_requests,
     seed=0,
 ):
     """Paged K/V plus an index selection for the sparse attention.
@@ -852,17 +917,21 @@ def _sparse_inputs(
     v_cache = torch.randn(
         num_pages, page_size, kv_heads, head_dim, device=device, generator=gen
     ).half()
-    block_table = torch.arange(
-        num_pages, dtype=torch.int32, device=device
-    ).reshape(num_requests, table_width)
+    block_table = torch.arange(num_pages, dtype=torch.int32, device=device).reshape(
+        num_requests, table_width
+    )
     token_to_req = torch.randint(
         0, num_requests, (rows,), dtype=torch.int32, device=device, generator=gen
     )
     if rows:
         token_to_req[0] = -1  # invalid request -> fully masked row
     logical = torch.randint(
-        0, table_width * page_size, (rows, topk), dtype=torch.int32,
-        device=device, generator=gen,
+        0,
+        table_width * page_size,
+        (rows, topk),
+        dtype=torch.int32,
+        device=device,
+        generator=gen,
     )
     if topk > 1:
         logical[:, -1] = -1
@@ -872,17 +941,26 @@ def _sparse_inputs(
 # Heads 4 / kv 1 and heads 2 / kv 2 are the GQA shapes the model uses; topk
 # 8 forces num_tiles == 1 (the single-split path that writes straight to fp16)
 # while 64 forces multi-split partials through the merge kernel.
-@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (2, 2)])
+@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (2, 2), (6, 1), (16, 2)])
 @pytest.mark.parametrize("topk", [8, 64, 129])
 @pytest.mark.parametrize("rows", [1, 7, 40])
 @pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize("pipe", ["0", "1"])
 def test_sparse_paged_attention_parity(
-    triton_gate, heads, kv_heads, topk, rows, head_dim
+    triton_gate, monkeypatch, heads, kv_heads, topk, rows, head_dim, pipe
 ):
     """HIP sparse attention must match the Triton splitk + merge pair."""
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", pipe)
     page_size, num_pages, num_requests = 16, 64, 4
     q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(
-        rows, heads, kv_heads, head_dim, topk, page_size, num_pages, num_requests,
+        rows,
+        heads,
+        kv_heads,
+        head_dim,
+        topk,
+        page_size,
+        num_pages,
+        num_requests,
         seed=rows * 7 + topk,
     )
     ref = qsa_ops.qsa_sparse_paged_attention(
@@ -893,11 +971,15 @@ def test_sparse_paged_attention_parity(
     )
     assert hip.shape == ref.shape == q.shape
     assert hip.dtype == ref.dtype == torch.float16
-    # The single-split path is bit-exact against Triton; with splits, the only
-    # difference is the merge summing the partials in a different order, which
-    # lands within 1-2 fp16 ulps (measured: <=6e-5 abs, ~1e-3 rel at |ref|~0.5).
-    # Bound it tightly so a real error cannot hide.
-    torch.testing.assert_close(hip.float(), ref.float(), rtol=5e-3, atol=1e-4)
+    # The two paths can use different split counts (the pipelined kernel picks
+    # fewer splits at small row counts, Triton keeps its own ladder). The split
+    # count changes which running maximum the fp16 probabilities are rounded
+    # against and the order the partials are merged in, which moves an output
+    # by about one fp16 ulp (measured: <= 2.5e-4 abs at |ref| ~ 0.5, mean ~1.5e-5
+    # against an fp64 reference, identical for the legacy kernel at equal
+    # splits). A real indexing or masking error is O(0.1), so this still
+    # catches it.
+    torch.testing.assert_close(hip.float(), ref.float(), rtol=5e-3, atol=3e-4)
 
 
 def test_sparse_paged_attention_fully_masked_rows_are_zero():
@@ -912,6 +994,86 @@ def test_sparse_paged_attention_fully_masked_rows_are_zero():
     )
     assert torch.equal(hip, torch.zeros_like(hip)), "masked rows must be 0"
     assert not torch.isnan(hip.float()).any()
+
+
+@pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize(
+    "block_n,splits", [(16, 0), (64, 0), (32, 1), (16, 3), (32, 4)]
+)
+def test_sparse_paged_attention_env_knobs_match_default(
+    monkeypatch, head_dim, block_n, splits
+):
+    """VLLM_RDNA_QSA_BLOCK_N / _SPLITS change the tiling, not the result.
+
+    BLOCK_N 64 only exists for head_dim <= 128 (256 clamps to 32), and the split
+    count only changes how the partials are merged.
+    """
+    rows, heads, kv_heads, topk = 40, 4, 1, 300
+    q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(
+        rows, heads, kv_heads, head_dim, topk, 16, 64, 4, seed=11
+    )
+    monkeypatch.delenv("VLLM_RDNA_QSA_BLOCK_N", raising=False)
+    monkeypatch.delenv("VLLM_RDNA_QSA_SPLITS", raising=False)
+    ref = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    monkeypatch.setenv("VLLM_RDNA_QSA_BLOCK_N", str(block_n))
+    if splits:
+        monkeypatch.setenv("VLLM_RDNA_QSA_SPLITS", str(splits))
+    got = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    torch.testing.assert_close(got.float(), ref.float(), rtol=5e-3, atol=3e-4)
+
+
+# Group sizes 4/6/8 at head_dim 256 take the pipelined kernel (6 is the TP4
+# Flash-Next shape, 16 heads / 2 kv heads checks the kv-head offset). topk 2049
+# is 65 tiles = 2080 keys, more than the pipelined kernel's 2048-key LDS table
+# holds per block, so it has to pick at least 2 splits.
+@pytest.mark.parametrize("heads,kv_heads", [(4, 1), (6, 1), (8, 1), (16, 2)])
+@pytest.mark.parametrize("topk", [100, 2048, 2049])
+@pytest.mark.parametrize("rows", [1, 40, 600])
+@pytest.mark.parametrize("idx_dtype", [torch.int32, torch.int64])
+def test_sparse_paged_attention_pipe_matches_legacy(
+    monkeypatch, heads, kv_heads, topk, rows, idx_dtype
+):
+    """VLLM_RDNA_QSA_PIPE=1 (pipelined) and =0 (legacy) kernels must agree."""
+    q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(
+        rows, heads, kv_heads, 256, topk, 16, 64, 4, seed=rows + topk
+    )
+    logical = logical.to(idx_dtype)
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", "0")
+    legacy = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", "1")
+    piped = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    torch.testing.assert_close(piped.float(), legacy.float(), rtol=5e-3, atol=3e-4)
+
+
+# The pipelined kernel picks its own split count; an explicit
+# VLLM_RDNA_QSA_SPLITS (including non-power-of-two counts, which leave uneven
+# per-split tile ranges) must give the same result as the legacy kernel's
+# default tiling. topk 2049 with 1 split is over the LDS table and falls back.
+@pytest.mark.parametrize("splits", [1, 2, 3, 5, 6, 16])
+@pytest.mark.parametrize("rows,topk", [(1, 2048), (18, 2048), (100, 2048), (24, 2049)])
+def test_sparse_paged_attention_pipe_split_counts(monkeypatch, splits, rows, topk):
+    q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(
+        rows, 6, 1, 256, topk, 16, 64, 4, seed=rows + splits
+    )
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", "0")
+    monkeypatch.delenv("VLLM_RDNA_QSA_SPLITS", raising=False)
+    legacy = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    monkeypatch.setenv("VLLM_RDNA_QSA_PIPE", "1")
+    monkeypatch.setenv("VLLM_RDNA_QSA_SPLITS", str(splits))
+    piped = qsa_rdna2.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, logical, block_table, token_to_req
+    )
+    torch.testing.assert_close(piped.float(), legacy.float(), rtol=5e-3, atol=3e-4)
 
 
 def test_sparse_paged_attention_out_param_is_in_place():
@@ -929,11 +1091,12 @@ def test_sparse_paged_attention_out_param_is_in_place():
 def test_sparse_paged_attention_routes_to_hip_only_for_fp16(monkeypatch):
     """fp16 goes to the HIP op; bf16 must keep Triton (the kernels are fp16)."""
     seen: list[torch.dtype] = []
-    monkeypatch.setattr(
-        qsa_rdna2,
-        "qsa_sparse_paged_attention",
-        lambda *a, **kw: seen.append(a[0].dtype) or torch.empty(0),
-    )
+
+    def spy(*a, **kw):
+        seen.append(a[0].dtype)
+        return torch.empty(0)
+
+    monkeypatch.setattr(qsa_rdna2, "qsa_sparse_paged_attention", spy)
     monkeypatch.setattr(qsa_rdna2, "VLLM_RDNA_QSA_HIP", True)
     monkeypatch.setattr(qsa_rdna2, "on_gfx10x", lambda: True)
     q, k_cache, v_cache, logical, block_table, token_to_req = _sparse_inputs(

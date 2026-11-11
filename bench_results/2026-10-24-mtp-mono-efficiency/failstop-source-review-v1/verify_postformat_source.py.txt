@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Verify the 11 reviewed source snapshots against the formatted local tree.
+
+This check is CPU-only and uses Python's AST plus a small C++ lexer. It does
+not import Torch, invoke a compiler, or initialize a GPU.
+"""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import re
+from pathlib import Path
+
+BUNDLE = Path(__file__).resolve().parent
+REPO = BUNDLE.parents[2]
+RAW = BUNDLE / "raw-candidate"
+MANIFEST = BUNDLE / "validation/proposal-source-sha256.json"
+
+CANDIDATE_TO_REPO = {
+    "csrc/rocm/mono_k2_rdna2.cu": ("csrc-rocm-mono_k2_rdna2.cu.txt", "cpp"),
+    "csrc/rocm/ops.h": ("csrc-rocm-ops.h.txt", "cpp"),
+    "csrc/rocm/torch_bindings.cpp": ("csrc-rocm-torch_bindings.cpp.txt", "cpp"),
+    "tests/models/qwen4_exp/test_amd_mono_rdna2_kernels.py": (
+        "tests-models-qwen4_exp-test_amd_mono_rdna2_kernels.py.txt",
+        "python",
+    ),
+    "vllm/models/qwen4_exp/amd/mono/rdna2/failstop.py": ("failstop.py.txt", "python"),
+    "vllm/models/qwen4_exp/amd/mono/rdna2/k1.py": ("k1.py.txt", "python"),
+    "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py": ("k2.py.txt", "python"),
+    "vllm/models/qwen4_exp/amd/mono/rdna2/layout.py": ("layout.py.txt", "python"),
+    "vllm/v1/worker/gpu/async_utils.py": ("async_utils.py.txt", "python"),
+    "vllm/v1/worker/gpu/model_runner.py": ("model_runner.py.txt", "python"),
+    "vllm/v1/worker/gpu_model_runner.py": ("gpu_model_runner.py.txt", "python"),
+}
+
+CPP_TOKEN = re.compile(
+    r"(?P<space>\s+)"
+    r"|(?P<line>//[^\n]*)"
+    r"|(?P<block>/\*.*?\*/)"
+    r'|(?P<raw>(?:u8|u|U|L)?R"(?P<delim>[^\s()\\]{0,16})\(.*?\)(?P=delim)")'
+    r'|(?P<string>(?:u8|u|U|L)?"(?:\\.|[^"\\])*")'
+    r"|(?P<char>(?:u8|u|U|L)?'(?:\\.|[^'\\])*')"
+    r"|(?P<ident>[A-Za-z_$][A-Za-z0-9_$]*)"
+    r"|(?P<number>(?:[0-9]|\.[0-9])[A-Za-z0-9_'.]*)"
+    r"|(?P<punct>::|->\*|\.\.\.|<<=|>>=|<=>|->|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\|"
+    r"|\*=|/=|%=|\+=|-=|&=|\^=|\|=|##|[{}\[\]();:?~!%^&*+=|,<.>/#\\-])",
+    re.DOTALL,
+)
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def cpp_tokens(text: str) -> list[tuple[str, str]]:
+    tokens: list[tuple[str, str]] = []
+    position = 0
+    while position < len(text):
+        match = CPP_TOKEN.match(text, position)
+        if match is None:
+            raise ValueError(f"unrecognized C++ token at offset {position}")
+        position = match.end()
+        kind = match.lastgroup
+        if kind in {"space", "line", "block"}:
+            continue
+        if kind == "raw":
+            tokens.append(("string", match.group("raw")))
+        elif kind == "string":
+            tokens.append(("string", match.group("string")))
+        else:
+            tokens.append((kind or "", match.group()))
+
+    # The only formatting-sensitive C++ changes in this review split or join
+    # adjacent string literals. Normalize C++ literal concatenation by joining
+    # literal bodies while retaining prefixes and escape spelling.
+    merged: list[tuple[str, str]] = []
+    for kind, value in tokens:
+        if kind != "string":
+            merged.append((kind, value))
+            continue
+        literal = split_string(value)
+        if merged and merged[-1][0] == "string-sequence":
+            previous = merged[-1][1]
+            prior_prefix, prior_body = split_string(previous)
+            prefix, body = literal
+            if prior_prefix == prefix:
+                merged[-1] = (
+                    "string-sequence",
+                    join_string(prior_prefix, prior_body + body),
+                )
+                continue
+        merged.append(("string-sequence", value))
+    return merged
+
+
+def split_string(value: str) -> tuple[str, str]:
+    raw = re.fullmatch(r'(u8|u|U|L)?R"([^\s()\\]{0,16})\((.*)\)\2"', value, re.DOTALL)
+    if raw:
+        return f"{raw.group(1) or ''}R:{raw.group(2)}", raw.group(3)
+    normal = re.fullmatch(r'(u8|u|U|L)?"((?:\\.|[^"\\])*)"', value, re.DOTALL)
+    if normal:
+        return normal.group(1) or "", normal.group(2)
+    raise ValueError(f"cannot normalize C++ string literal: {value[:40]!r}")
+
+
+def join_string(prefix: str, body: str) -> str:
+    if ":" in prefix and prefix.split(":", 1)[0].endswith("R"):
+        actual_prefix, delimiter = prefix.split(":", 1)
+        return f'{actual_prefix}"{delimiter}({body}){delimiter}"'
+    return f'{prefix}"{body}"'
+
+
+def python_ast(text: str) -> str:
+    return ast.dump(ast.parse(text), include_attributes=False)
+
+
+def main() -> None:
+    assert cpp_tokens('const char *s = "ab" /* comment */ "cd";') == cpp_tokens(
+        'const char *s = "abcd"; // comment'
+    ), "C++ comment/adjacent-literal normalization self-check failed"
+    hashes = json.loads(MANIFEST.read_text())
+    assert set(hashes) == set(CANDIDATE_TO_REPO), (
+        "expected exactly 11 pinned source files"
+    )
+    checked = []
+    for relative, (snapshot_name, kind) in CANDIDATE_TO_REPO.items():
+        candidate = (RAW / snapshot_name).read_bytes()
+        local_path = REPO / relative
+        local = local_path.read_bytes()
+        expected = hashes[relative]["candidate"]
+        assert sha256(candidate) == expected, f"raw candidate hash mismatch: {relative}"
+        if kind == "python":
+            assert python_ast(candidate.decode()) == python_ast(local.decode()), (
+                f"Python AST differs: {relative}"
+            )
+            equivalence = "Python AST identical; formatting/comments only"
+        else:
+            assert cpp_tokens(candidate.decode()) == cpp_tokens(local.decode()), (
+                f"C++ token stream differs: {relative}"
+            )
+            equivalence = (
+                "C++ tokens identical after adjacent string-literal concatenation; "
+                "comments/formatting only"
+            )
+        checked.append(
+            {
+                "path": relative,
+                "candidate_sha256": expected,
+                "formatted_local_sha256": sha256(local),
+                "equivalence": equivalence,
+            }
+        )
+    assert len(checked) == 11
+    report = {
+        "schema": "mtp-failstop-postformat-equivalence-v1",
+        "core_sha256": (
+            "6facdbd60118fc14a5cf1ceb5c2494d38ed1be09f55e4636bb0f0825678e2eed"
+        ),
+        "candidate_mono_cu_sha256": (
+            "c2f189cf559432bf56fd9443fb52d3e91308c2cb255799d60f897a9d4dabc434"
+        ),
+        "checks": checked,
+    }
+    (BUNDLE / "postformat-equivalence-current.json").write_text(
+        json.dumps(report, indent=2) + "\n"
+    )
+    print("PASS: 11 raw candidate sources match local Python AST/C++ token semantics")
+
+
+if __name__ == "__main__":
+    main()
