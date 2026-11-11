@@ -375,6 +375,18 @@ class Scheduler(SchedulerInterface):
                 )
             )
         )
+        # A P/D decoder resumes a prompt whose KV the connector loaded. Its first
+        # step, the recompute of the cut prompt tokens, is padded like a first
+        # decode step, while the monolithic engine's own last prompt step has one
+        # row. The decoder opts out of the padding for it
+        # (kv_connector_extra_config `unpadded_resume_step`).
+        self.unpadded_resume_step = (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_consumer
+            and bool(
+                kv_transfer_config.get_from_extra_config("unpadded_resume_step", False)
+            )
+        )
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -675,6 +687,20 @@ class Scheduler(SchedulerInterface):
             min_num_output_tokens += 1
         # Reaching max_tokens finishes the request, so no step verifies the drafts.
         return min_num_output_tokens >= request.max_tokens
+
+    def _is_unpadded_resume_step(self, request: Request) -> bool:
+        """Whether the consumer opted out of the spec-decode padding for this request.
+
+        The NIXL pull scheduler marks a request that arrived with a remote
+        prefill `_remote_blocks_processed`. Requests without the mark, such as
+        prefix-cache hits in normal serving, keep the padding.
+        """
+        params = request.kv_transfer_params
+        return (
+            self.unpadded_resume_step
+            and params is not None
+            and bool(params.get("_remote_blocks_processed"))
+        )
 
     def _mamba_block_aligned_split(
         self,
@@ -1587,6 +1613,7 @@ class Scheduler(SchedulerInterface):
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
+                        and not self._is_unpadded_resume_step(request)
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
