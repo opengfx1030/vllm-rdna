@@ -14,6 +14,8 @@ promise tok/s.
     python tools/rdna/hetero_moe/perf_model.py            # all tables
     python tools/rdna/hetero_moe/perf_model.py --sens     # + sensitivity
     python tools/rdna/hetero_moe/perf_model.py --json     # machine readable
+    python tools/rdna/hetero_moe/perf_model.py --t10-tables W1.json W2.json
+                                                          # re-derive T10_N / T10_HIT
 
 Standard library only.
 """
@@ -107,6 +109,123 @@ AR_US = {2: (18.0, 28.0), 4: (OLD_AR, 45.0), 8: (29.0, 107.0)}
 
 PCIE_BW = 25.0e9  # push, per GPU link, per direction (audit)
 PCIE_LAT_US = 6.3  # one-way flag latency intra-switch (6.1-6.3)
+# HxServer's torch-free loopback, four V620 (hub HIP 1, three servers, real kernels,
+# graph mode, synthetic server compute): hx layer time p50 in us at T rows
+# (docs/rdna2/hetero-hx-2026-11-07.md section 8.3, feat/hetero-hx).  Exchange alone.
+LOOPBACK_US = {3: 35.9, 24: 64.2, 48: 98.6}
+LOOPBACK_D = 3
+LOOPBACK_MODE = {3: "c1", 24: "c8"}  # the decode step width each row stands for
+# T5 on four V620 (HxServer: hub stand-in HIP 1, three servers, plan_coldonly, graph
+# mode, mean us per layer, docs/rdna2/hetero-hx-2026-11-07.md 8.5): real W4A16
+# weights, and the same replay with synthetic servers (exchange through Python).
+T5_MEAS_US = {3: 152.8, 24: 379.0, 48: 569.5}
+T5_SYNTH_US = {3: 86.1, 24: 99.3, 48: 134.0}
+T5_GATE_OLD_US = {3: 47.0, 24: 161.0, 48: 256.0}  # the H2 remote path, not this plan
+# Experts of the busiest server per layer under the T5 input family (Zipf 1.1
+# popularity, Gumbel top-10 per row, `t5_common.make_inputs`; plan_coldonly stripe
+# (j + j // D) % D; mean over 16 pattern draws x 48 layers), by server count and W.
+T5_NMAX = {3: {3: 10.5, 24: 41.3, 48: 62.4}, 4: {3: 8.7, 24: 32.4, 48: 48.4}}
+# HxServer with the W7800 as the hub (HIP 0, gfx1100) and four V620 servers (HIP 1-4),
+# `plan_coldonly`, measured before the 2026-11-07 hardware move (hetero-hx doc 8.6,
+# feat/hetero-hx @ 888e14a3f4): torch-free loopback layer time (graph mode, step p50 /
+# 48 layers), the T5 replay with synthetic servers (the exchange through the Python
+# stack), T5 with real weights, and the experts of the busiest server per layer as
+# HxServer counts them for its gate.
+W7800_D = 4
+W7800_LOOPBACK_US = {3: 48.0, 24: 90.4, 48: 157.3}
+W7800_T5_SYNTH_US = {3: 80.4, 24: 123.0, 48: 178.2}
+W7800_T5_MEAS_US = {3: 141.7, 24: 337.9, 48: 508.3}
+W7800_T5_NMAX = {3: 8.5, 24: 32.5, 48: 48.4}
+W7800_MODES = {3: "c1", 24: "c8", 48: "c16"}
+# the T5 data sets: servers, real-weights layer time, synthetic-server layer time, n_max
+T5_SETS = {
+    "v620": (LOOPBACK_D, T5_MEAS_US, T5_SYNTH_US, T5_NMAX[LOOPBACK_D]),
+    "w7800": (W7800_D, W7800_T5_MEAS_US, W7800_T5_SYNTH_US, W7800_T5_NMAX),
+}
+
+# G7 (Rdna3Port, W7800 HIP 0, venv-7.14.0): graph-timed us per call at W = 3 / 24 / 48,
+# logs ~/w4a8_runs/rdna3_port/gpu/20261107-{143512,155515}/G7-*.log on par1-cs25.
+# Cache-warm micro benchmarks (96 MB Infinity Cache): small shapes are exact, large
+# ones read low.
+G7_W = (3, 24, 48)
+G7 = {
+    "hc": {
+        "torch": (32.9, 88.5, 90.4),
+        "hip": (33.2, 41.7, 59.8),
+    },  # per call, 2 per layer
+    "se": {  # shared expert per call; the fused op falls back to torch above 32 tokens
+        1: {"op": (22.8, 35.3, 77.2), "torch": (74.2, 73.8, 77.6)},
+        2: {"op": (15.3, 23.6, 61.6), "torch": (59.1, 62.2, 62.0)},
+    },
+    "lm_head": {
+        1: (1769.0, 2429.0, 2823.0),
+        2: (898.0, 1466.0, 1208.0),
+    },  # F.linear, per pass
+}
+G7_ROUTE = {
+    "best": {"hc": "hip", "se": "op"},
+    "default": {"hc": "torch", "se": "torch"},
+}
+
+# T10 (ExpertStats, `bench_results/2026-11-07_expert-stats-t10` on feat/expert-stats):
+# routing marginals of the V620 TP4 `flashnext-mtp2` server under the agentic bench
+# (hi2 suite behind cline_act, seeds 1-7, 8 workers): windows W1 (9,099 decode steps,
+# 207,534 rows) and W2 (278,058 rows).  Per layer, a row selects expert e with
+# probability p_e (counts / rows).  T10_N is the mean over the 48 target layers of the
+# expected distinct experts at W independent rows, sum_e 1 - (1 - p_e)^W (W1 and W2
+# pooled).  T10_HIT is the share of those distinct experts that sits on a hub holding
+# the most popular experts of the OTHER window (held out, the two directions
+# averaged); the plans ExpertStats solved on one window and evaluated on the other
+# give the same values within 0.002.  Rows are treated as independent, as in
+# ExpertStats' simulator.
+# Keyed by `Topo.n_hubs`: 1 = H1 (130 hub slots per layer of the 512), 2 = H2 (115 per
+# hub within its 256-expert island).  `t10_tables` re-derives all of it from the two
+# converted stats JSON (`--t10-tables W1.json W2.json`).
+T10_W = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
+T10_N = (10.00, 19.57, 28.75, 37.57, 54.24, 69.74, 97.79, 122.56, 164.44, 198.53,
+         250.65, 288.44, 339.07, 371.00)  # fmt: skip
+T10_HIT = {
+    1: (0.585, 0.580, 0.574, 0.569, 0.559, 0.550, 0.533, 0.518, 0.492, 0.470, 0.435,
+        0.408, 0.370, 0.346),
+    2: (0.788, 0.784, 0.781, 0.778, 0.771, 0.766, 0.755, 0.745, 0.726, 0.710, 0.682,
+        0.658, 0.621, 0.593),
+}  # fmt: skip
+ROUTING = ("", "t10", "t10c")  # central; measured marginals; + correlated rows (T10C)
+T10_SLOTS = {
+    1: (130, 1),
+    2: (115, 2),
+}  # n_hubs -> (hub slots per layer and island, islands)
+# T10C: the rows of a step are NOT independent.  ExpertStats' id trace (24 rows per
+# step, layers 0/12/24/36/47; T10 report section 6) shows 11-34 % fewer distinct experts
+# than independent draws, because the rows of an MTP group and the sequences of a step
+# share experts; its fitted row model `flashnext-mtp2` is the default of `simulate` and
+# `solve` since feat/expert-stats b0a52c197b.  The tables are that simulator at a fixed
+# number of rows per step (800 steps, seed 1, the hx broadcast exchange, the plans' cost
+# constants), plans solved on window W1 and scored on the statistics of W2 (held out):
+# H1 = `H1.W1` (130 hub slots per layer), H2 = `H2.W1` (115 per hub), H1v = HubMethod's
+# V620-hub stand-in plan `H1v.W1` (40 slots).  N: mean over the 48 target layers of the
+# distinct experts one layer touches (all hubs; every plan gives the same).  HIT: the
+# share of them resident on a hub.  DUP: (row, expert) copies streamed per distinct cold
+# expert under the row dispatch rule (touches / distinct; decision 16; 1.0 = primary).
+# Fit on eight sequences of one workload mix: 48 rows (16 sequences) extrapolate, 3/6/12
+# rows are truncations of 24-row steps, prefill rows were not traced.  Re-derive per
+# plan and width with `python -m tools.rdna.hetero_moe.simulate PLAN --stats
+# W2.stats.json --rows W --steps 800 --seed 1 --decode-dispatch row` (feat/expert-
+# stats d36a43d46d) and n = `n_eval_layers`: N = (`hub_touched_all_per_step` +
+# `cold_distinct_experts_per_step`) / n, HIT = `hub_touched_all_per_step` / n / N,
+# DUP = `cold_replica_touch_ratio`; `hub_touched_per_step` is the busiest hub's only.
+T10C_W = (1, 3, 6, 12, 24, 48)
+T10C_N = (10.00, 22.94, 42.56, 75.53, 127.53, 201.60)
+T10C_HIT = {
+    "H1": (0.583, 0.571, 0.559, 0.540, 0.510, 0.465),
+    "H2": (0.786, 0.778, 0.771, 0.758, 0.738, 0.705),
+    "H1v": (0.286, 0.272, 0.259, 0.239, 0.209, 0.172),
+}
+T10C_DUP = {
+    "H1": (1.0, 1.181, 1.197, 1.216, 1.238, 1.283),
+    "H2": (1.0, 1.268, 1.299, 1.339, 1.372, 1.416),
+    "H1v": (1.0, 1.170, 1.190, 1.213, 1.244, 1.305),
+}
 
 EMAX = {1: 0.0, 2: 0.564, 4: 1.029, 8: 1.424}  # E[max of D std normals]
 
@@ -131,6 +250,20 @@ class Assume:
     lmhead_remote: bool = False  # vocab-parallel lm_head on the expert servers
     mtp_w4: bool = True  # hub MTP experts requantized to W4A16
     locality: float = 0.90  # distinct experts at W>=24 vs uniform (TP4 delta fit)
+    g7: str = ""  # model only; "best" or "default": G7 per-op numbers on that route
+    routing: str = (
+        ""  # "" central (uniform x locality, `hit`); "t10" measured marginals
+    )
+    # with independent rows; "t10c" measured, correlated rows (T10C tables)
+    dispatch: str = "primary"  # decode: cold copy of a (row, expert).  "primary" = the
+    # first listed copy (no expert streams twice: the model's original assumption);
+    # "row" = (row + layer) % n_cold, the plan format's rule (decision 16; "t10c" only)
+    digest: bool = False  # VLLM_HX_FLUSH=256: +12.0 / 16.5 / 16.8 us per exchange
+    pcie_bw: float = PCIE_BW  # per GPU link per direction, B/s: 25e9 on x16, ~13.9e9 x8
+    anchor: str | None = None  # routing under which TP4's two measured steps are
+    # reproduced (`s_l`): None = the scenario's own, so TP4 stays on its measurements
+    # whatever the routing; "" = the central routing, i.e. the latency scale as
+    # calibrated and the other engines see only the scenario's expert counts
 
 
 @dataclass
@@ -145,6 +278,7 @@ class Topo:
     dense_scale: float = 1.0
     srv_share: float = 1.0  # hubs sharing one expert-server set (2 = H2')
     s_l: dict = field(default_factory=dict)  # calibrated latency scale per mode
+    plan: str = ""  # key of the T10C tables; "" = H1 or H2 by `n_hubs`
 
 
 def bytes_us(mib: float, gpu: Gpu, rho: float = 1.0) -> float:
@@ -152,11 +286,128 @@ def bytes_us(mib: float, gpu: Gpu, rho: float = 1.0) -> float:
     return mib * MiB * (rho / gpu.bw + (1.0 - rho) / V620.bw) * 1e6
 
 
+def interp_at(xs: tuple[int, ...], ys: tuple[float, ...], x: float) -> float:
+    """Piecewise linear through (xs, ys), flat outside the table."""
+    if xs[0] >= x:
+        return ys[0]
+    for i in range(1, len(xs)):
+        if xs[i] >= x:
+            f = (x - xs[i - 1]) / (xs[i] - xs[i - 1])
+            return ys[i - 1] + f * (ys[i] - ys[i - 1])
+    return ys[-1]
+
+
+def g7_at(vals: tuple[float, ...], W: int) -> float:
+    """Measured value at W: piecewise linear between the G7 widths, flat outside."""
+    return interp_at(G7_W, vals, W)
+
+
+def g7_op(t: Topo, a: Assume, op: str, W: int) -> float | None:
+    """G7 microseconds of one call of `op` on this topology at W rows; None when the
+    model alone applies (V620 engines, and TP sizes G7 did not measure)."""
+    if not a.g7 or t.gpu.arch != "gfx1100" or t.tp not in (1, 2):
+        return None
+    if op == "lm_head":
+        return g7_at(G7["lm_head"][t.tp], W)
+    route = G7_ROUTE[a.g7][op]
+    return g7_at(G7[op][route] if op == "hc" else G7[op][t.tp][route], W)
+
+
 def n_touched(W: int, a: Assume) -> float:
+    """Distinct experts one layer touches at W rows."""
     q = TOPK / N_EXP
-    n = N_EXP * (1.0 - (1.0 - q) ** W)
+    uniform = N_EXP * (1.0 - (1.0 - q) ** W)
+    if a.routing == "t10":
+        if T10_W[-1] < W:  # beyond the table: the last measured ratio to uniform
+            return uniform * T10_N[-1] / (N_EXP * (1.0 - (1.0 - q) ** T10_W[-1]))
+        return interp_at(T10_W, T10_N, W)
+    if a.routing == "t10c":
+        if T10C_W[-1] < W:  # beyond 48 rows: the last ratio to uniform
+            return uniform * T10C_N[-1] / (N_EXP * (1.0 - (1.0 - q) ** T10C_W[-1]))
+        return interp_at(T10C_W, T10C_N, W)
+    if a.routing:
+        raise ValueError(f"routing {a.routing!r} is not one of {ROUTING}")
     loc = 1.0 - (1.0 - a.locality) * min(1.0, (W - 1) / 23.0)
-    return n * loc
+    return uniform * loc
+
+
+def plan_key(t: Topo) -> str:
+    """Key of the plan the routing tables of this topology belong to."""
+    return t.plan or {1: "H1", 2: "H2"}[t.n_hubs]
+
+
+def hit_at(t: Topo, W: int, a: Assume) -> float:
+    """Share of the touched experts that is resident on the hub (`T10_HIT` is keyed
+    by the number of hubs: 1 = H1's 130 slots per layer, 2 = H2's 115 per hub;
+    `T10C_HIT` by plan)."""
+    if a.routing == "t10":
+        return interp_at(T10_W, T10_HIT[t.n_hubs], W)
+    if a.routing == "t10c":
+        return interp_at(T10C_W, T10C_HIT[plan_key(t)], W)
+    return a.hit
+
+
+def dup_at(t: Topo, W: int, a: Assume) -> float:
+    """Copies a decode step streams per distinct cold expert: 1.0 under `primary`; under
+    `row` the rows that reach a replicated expert are split over its V620 copies, so it
+    is streamed on each copy that gets a row (flat beyond 48 rows)."""
+    if a.dispatch == "primary":
+        return 1.0
+    if a.dispatch != "row":
+        raise ValueError(f"dispatch {a.dispatch!r} is not 'primary' or 'row'")
+    if a.routing != "t10c":
+        raise ValueError("dispatch 'row' needs the correlated tables (routing 't10c')")
+    return interp_at(T10C_W, T10C_DUP[plan_key(t)], W)
+
+
+def t10_tables(paths: tuple[str, str]) -> dict:
+    """Re-derive `T10_N` and `T10_HIT` from the converted stats JSON
+    (`hetero-moe-expert-stats/1`) of the two T10 windows: decode phase, target layers.
+    The hub of an island holds the most popular experts of the window it was solved on
+    and is scored on the other window (both directions averaged); in H2 the islands
+    are the experts with equal `e % 2`."""
+    wins = []
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+        rows = doc["phases"]["decode"]["tokens"]
+        layers = [
+            [c / rows for c in lay["decode"]["counts"]]
+            for lay in doc["layers"]
+            if lay["kind"] == "target"
+        ]
+        wins.append((rows, layers))
+    (r0, l0), (r1, l1) = wins
+    if len(l0) != len(l1):
+        raise ValueError("the two windows have different layer counts")
+
+    def touched(p: float, w: int) -> float:
+        return 1.0 - (1.0 - min(p, 1.0)) ** w
+
+    pooled = [
+        [(r0 * x + r1 * y) / (r0 + r1) for x, y in zip(a, b)] for a, b in zip(l0, l1)
+    ]
+    n = tuple(
+        sum(sum(touched(p, w) for p in lay) for lay in pooled) / len(pooled)
+        for w in T10_W
+    )
+    hit: dict[int, tuple[float, ...]] = {}
+    for hubs, (slots, groups) in T10_SLOTS.items():
+        res = [0.0] * len(T10_W)
+        tot = [0.0] * len(T10_W)
+        for train, ev in ((l0, l1), (l1, l0)):
+            for ptr, pev in zip(train, ev):
+                for k in range(groups):
+                    idx = range(k, len(ptr), groups)
+                    hub = set(sorted(idx, key=lambda e: -ptr[e])[:slots])
+                    for i, w in enumerate(T10_W):
+                        for e in idx:
+                            x = touched(pev[e], w)
+                            tot[i] += x
+                            if e in hub:
+                                res[i] += x
+        hit[hubs] = tuple(r / t for r, t in zip(res, tot))
+    return dict(w=T10_W, n=n, hit=hit, rows=(r0, r1), layers=len(l0))
 
 
 def n_max(mu: float, D: int) -> float:
@@ -186,7 +437,10 @@ def attn_core_us(t: Topo, W: int, S: int, a: Assume, s: float) -> float:
     return b + lat + tok
 
 
-def hc_us(t: Topo, a: Assume, s: float) -> float:
+def hc_us(t: Topo, a: Assume, s: float, W: int = 3) -> float:
+    meas = g7_op(t, a, "hc", W)
+    if meas is not None:
+        return 2.0 * meas  # two HC calls per layer
     kap = a.kappa if t.gpu.arch == "gfx1100" else 1.0
     lat = max(2 * OLD_HC - bytes_us(HC_MIB, V620, a.rho_hc), 10.0)
     return bytes_us(HC_MIB, t.gpu, a.rho_hc) + lat * kap * s
@@ -198,11 +452,18 @@ def router_us(t: Topo, a: Assume, s: float) -> float:
     return bytes_us(ROUTER_MIB, t.gpu, a.rho_small) + lat * kap * s
 
 
-def shared_us(t: Topo, a: Assume, s: float) -> float:
+def shared_us(t: Topo, a: Assume, s: float, W: int = 3) -> float:
     kap = a.kappa if t.gpu.arch == "gfx1100" else 1.0
     mib = SHARED_MIB * t.dense_scale / t.tp
     lat = max(OLD_SHARED - bytes_us(SHARED_MIB / 4, V620, a.rho_small), 3.0)
-    return bytes_us(mib, t.gpu, a.rho_small) + lat * kap * s
+    model = bytes_us(mib, t.gpu, a.rho_small) + lat * kap * s
+    meas = g7_op(t, a, "se", W)
+    if meas is None:
+        return model
+    ref = bytes_us(SHARED_MIB / t.tp, t.gpu, a.rho_small) + lat * kap * s
+    return (
+        meas * model / ref
+    )  # a dense-weight lever scales the measured time as modelled
 
 
 def expert_us(n: float, gpu: Gpu, a: Assume, mib: float = EXPERT_MIB) -> float:
@@ -218,12 +479,29 @@ def experts_local_us(t: Topo, W: int, a: Assume, s: float, mib: float) -> float:
     return expert_us(n_touched(W, a) / t.tp, t.gpu, a, mib) + 5.0 * kap * s
 
 
+DIGEST_W = (3, 24, 48)
+DIGEST_US = (12.0, 16.5, 16.8)  # four V620 servers, device-verified loopback (hx 8.8)
+
+
+def digest_us(W: int) -> float:
+    """Added time of one exchange with the digest check (`VLLM_HX_FLUSH=256`) on."""
+    return interp_at(DIGEST_W, DIGEST_US, W)
+
+
+def transport_us(W: int, D: int, a: Assume, s: float = 1.0) -> float:
+    """The hx exchange of one layer with no expert compute: hub dispatch kernel 3 us,
+    push, flag detection, server fixed part 5 us, pull (and the digest, when on)."""
+    push = PCIE_LAT_US + D * W * ROW_REQ_B / a.pcie_bw * 1e6
+    pull = PCIE_LAT_US + D * W * ROW_B / a.pcie_bw * 1e6
+    dig = digest_us(W) if a.digest else 0.0
+    return 3.0 + push + a.detect_us + 5.0 * s + pull + dig
+
+
 def remote_us(n_rem: float, W: int, t: Topo, a: Assume, s: float) -> float:
     D = t.servers_per_hub
-    push = PCIE_LAT_US + D * W * ROW_REQ_B / PCIE_BW * 1e6
-    pull = PCIE_LAT_US + D * W * ROW_B / PCIE_BW * 1e6
-    srv = expert_us(n_max(n_rem / D, D) * t.srv_share, V620, a) + 5.0 * s
-    return 3.0 + push + a.detect_us + srv + pull  # 3.0 = hub dispatch kernel
+    return transport_us(W, D, a, s) + expert_us(
+        n_max(n_rem / D, D) * t.srv_share, V620, a
+    )
 
 
 def moe_hub_us(t: Topo, W: int, a: Assume, s: float) -> tuple[float, dict]:
@@ -233,19 +511,23 @@ def moe_hub_us(t: Topo, W: int, a: Assume, s: float) -> tuple[float, dict]:
     just because it has the memory."""
     kap = a.kappa if t.gpu.arch == "gfx1100" else 1.0
     N = n_touched(W, a) / t.n_hubs
-    n_res = a.hit * N
-    t_sh = shared_us(t, a, s)
+    n_res = hit_at(t, W, a) * N
+    dup = dup_at(t, W, a)
+    t_sh = shared_us(t, a, s, W)
     best = None
     steps = 40
     for i in range(steps + 1):
         n_hub = n_res * i / steps
         t_h = t_sh + expert_us(n_hub, t.gpu, a) + 5.0 * kap * s
-        t_r = remote_us(N - n_hub, W, t, a, s)
+        # experts the servers stream: every cold one on each copy a row reaches
+        # (`dup`), a spilled resident one once
+        t_r = remote_us(N - n_hub + (N - n_res) * (dup - 1.0), W, t, a, s)
         tt = max(t_h, t_r)
         if best is None or tt < best[0]:
             best = (tt, n_hub, t_h, t_r)
     tt, n_hub, t_h, t_r = best
-    return tt + 3.0, dict(hub=t_h, remote=t_r, n_hub=n_hub, n_res=n_res, N=N)
+    info = dict(hub=t_h, remote=t_r, n_hub=n_hub, n_res=n_res, N=N, dup=dup)
+    return tt + 3.0, info
 
 
 def layer_us(t: Topo, W: int, S: int, a: Assume, s: float) -> tuple[float, dict]:
@@ -253,7 +535,7 @@ def layer_us(t: Topo, W: int, S: int, a: Assume, s: float) -> tuple[float, dict]
     ar = ar1 if W <= 3 else ar8 if W >= 24 else ar1 + (ar8 - ar1) * (W - 3) / 21.0
     kap = a.kappa if t.gpu.arch == "gfx1100" else 1.0
     c = {
-        "hc": hc_us(t, a, s),
+        "hc": hc_us(t, a, s, W),
         "attn_core": attn_core_us(t, W, S, a, s),
         "router": router_us(t, a, s),
         "resid": OLD_RESID * kap * s,
@@ -261,27 +543,30 @@ def layer_us(t: Topo, W: int, S: int, a: Assume, s: float) -> tuple[float, dict]
     }
     info: dict = {}
     if t.experts == "local":
-        c["shared"] = shared_us(t, a, s)
+        c["shared"] = shared_us(t, a, s, W)
         c["experts"] = experts_local_us(t, W, a, s, EXPERT_MIB)
     else:
         c["moe"], info = moe_hub_us(t, W, a, s)
     return sum(c.values()), {**c, **info}
 
 
-def lm_head_us(t: Topo, a: Assume) -> float:
+def lm_head_us(t: Topo, a: Assume, M: int = 3) -> float:
     if t.experts == "hub" and a.lmhead_remote:
         shard = LM_HEAD_MIB * t.dense_scale / (t.tp * t.servers_per_hub)
         return bytes_us(shard, V620) + 2 * (PCIE_LAT_US + 5.0)
+    meas = g7_op(t, a, "lm_head", M)
+    if meas is not None:
+        return meas * t.dense_scale  # bytes bound: follows the weight bytes
     return bytes_us(LM_HEAD_MIB * t.dense_scale / t.tp, t.gpu)
 
 
 def mtp_layer_us(t: Topo, W: int, S: int, a: Assume, s: float) -> float:
     kap = a.kappa if t.gpu.arch == "gfx1100" else 1.0
     c = {
-        "hc": hc_us(t, a, s),
+        "hc": hc_us(t, a, s, W),
         "attn_core": attn_core_us(t, W, S, a, s),
         "router": router_us(t, a, s),
-        "shared": shared_us(t, a, s),
+        "shared": shared_us(t, a, s, W),
         "resid": OLD_RESID * kap * s,
     }
     mib = EXPERT_MIB if (t.experts == "hub" and a.mtp_w4) else t.mtp_expert_mib
@@ -295,11 +580,11 @@ def step_us(t: Topo, W: int, S: int, a: Assume, mode: str) -> dict:
     s = t.s_l[mode]
     per_layer, comp = layer_us(t, W, S, a, s)
     target = per_layer * N_LAYERS + 300.0
-    head = lm_head_us(t, a) + 200.0 * s
+    head = lm_head_us(t, a, W) + 200.0 * s
     wd = (3, 1) if W <= 3 else (W, S)
     draft = 0.0
     for w in wd:
-        draft += mtp_layer_us(t, w, max(S, 1), a, s) + lm_head_us(t, a) + 350.0 * s
+        draft += mtp_layer_us(t, w, max(S, 1), a, s) + lm_head_us(t, a, w) + 350.0 * s
     gap = 500.0
     return dict(target=target, head=head, draft=draft, gap=gap, layer=per_layer,
                 comp=comp, step=target + head + draft + gap)  # fmt: skip
@@ -346,7 +631,7 @@ def topos(a: Assume) -> dict[str, Topo]:
 def setup(a: Assume | None = None) -> tuple[Assume, dict[str, Topo]]:
     a = a or Assume()
     ts = topos(a)
-    calibrate(ts["TP4"], a)
+    calibrate(ts["TP4"], a if a.anchor is None else replace(a, routing=a.anchor))
     for t in ts.values():
         t.s_l = dict(ts["TP4"].s_l)
     return a, ts
@@ -668,12 +953,373 @@ def md_traffic() -> str:
     return table(head, body)
 
 
+def loopback_rows(
+    a: Assume, table: dict[int, float] | None = None, d: int = LOOPBACK_D
+) -> list[dict]:
+    """The model's exchange time against a measured one for `d` servers: HxServer's
+    torch-free loopback by default (three servers, V620 hub), `T5_SYNTH_US` for the same
+    exchange through the Python stack, the `W7800_*` tables with `W7800_D` servers."""
+    out = []
+    for w, meas in (table or LOOPBACK_US).items():
+        mod = transport_us(w, d, a)
+        out.append(dict(w=w, model=mod, measured=meas, delta=meas - mod,
+                        pct=100.0 * (meas / mod - 1.0)))  # fmt: skip
+    return out
+
+
+def loopback_refit(
+    base: Assume,
+    table: dict[int, float] | None = None,
+    d: int = LOOPBACK_D,
+    modes: dict[int, str] = LOOPBACK_MODE,
+) -> list[dict]:
+    """H1 decode steps with `detect_us` raised so that the model's exchange equals the
+    measured one at that width (V620 hub with three senders: approximate; the W7800 hub
+    with four servers is H1's own shape)."""
+    ref = rows_for(base)["H1"]
+    out = []
+    for r in loopback_rows(base, table, d):
+        mode = modes.get(r["w"])
+        if mode is None:
+            continue
+        det = base.detect_us + r["delta"]
+        step = rows_for(base, detect_us=det)["H1"][mode]["step"]
+        out.append(dict(mode=mode, w=r["w"], detect_us=det, before=ref[mode]["step"],
+                        after=step))  # fmt: skip
+    return out
+
+
+def t5_rows(a: Assume, hub: str = "v620") -> list[dict]:
+    """T5 with real weights against the model for the plan under test: the exchange
+    plus the expert chain of the busiest server (`hub` picks HxServer's V620-hub run
+    with three servers or its W7800-hub run with four)."""
+    d, meas_us, synth_us, nmax = T5_SETS[hub]
+    out = []
+    for w, meas in meas_us.items():
+        comp = expert_us(nmax[w], V620, a)
+        mod = transport_us(w, d, a) + comp
+        replay = synth_us[w] + comp
+        out.append(
+            dict(w=w, measured=meas, old_gate=T5_GATE_OLD_US[w], model=mod,
+                 model_replay=replay, ratio=meas / mod, ratio_replay=meas / replay,
+                 compute=comp, compute_meas=meas - synth_us[w])
+        )  # fmt: skip
+    return out
+
+
+def t5_budget(a: Assume) -> list[dict]:
+    """Layer-time budget of T5 for a plan with D servers and every pair on a server."""
+    out = []
+    for d in sorted(T5_NMAX):
+        for w in T5_MEAS_US:
+            mod = transport_us(w, d, a) + expert_us(T5_NMAX[d][w], V620, a)
+            out.append(dict(d=d, w=w, model=mod, limit=1.3 * mod))
+    return out
+
+
+def md_loopback(base: Assume) -> str:
+    head = [
+        "rows T",
+        "model us (3 servers)",
+        "loopback us",
+        "delta",
+        "Python stack us",
+        "delta",
+    ]
+    lb = loopback_rows(base)
+    py = loopback_rows(base, T5_SYNTH_US)
+    body = [
+        [str(a["w"]), f"{a['model']:.1f}", f"{a['measured']:.1f}", f"{a['pct']:+.0f} %",
+         f"{b['measured']:.1f}", f"{b['pct']:+.0f} %"]
+        for a, b in zip(lb, py, strict=True)
+    ]  # fmt: skip
+    head2 = [
+        "H1 mode",
+        "T",
+        "step ms (model)",
+        "loopback exchange",
+        "Python-stack exchange",
+    ]
+    lr, pr = loopback_refit(base), loopback_refit(base, T5_SYNTH_US)
+    body2 = [
+        [a["mode"], str(a["w"]), f"{a['before']:.1f}", f"{a['after']:.1f}",
+         f"{b['after']:.1f}"]
+        for a, b in zip(lr, pr, strict=True)
+    ]  # fmt: skip
+    head3 = ["T5, W", "measured us", "old budget", "model, this plan", "ratio",
+             "model + replay", "ratio", "server compute meas / model"]  # fmt: skip
+    body3 = [
+        [str(r["w"]), f"{r['measured']:.1f}", f"{r['old_gate']:.0f}",
+         f"{r['model']:.1f}", f"{r['ratio']:.2f}", f"{r['model_replay']:.1f}",
+         f"{r['ratio_replay']:.2f}", f"{r['compute_meas']:.0f} / {r['compute']:.0f}"]
+        for r in t5_rows(base)
+    ]  # fmt: skip
+    head4 = [
+        "servers D",
+        "W",
+        "model us (exchange + busiest server)",
+        "T5 limit (1.3 x)",
+    ]
+    body4 = [
+        [str(r["d"]), str(r["w"]), f"{r['model']:.1f}", f"{r['limit']:.0f}"]
+        for r in t5_budget(base)
+    ]  # fmt: skip
+    return "\n\n".join(
+        [
+            table(head, body),
+            table(head2, body2),
+            table(head3, body3),
+            table(head4, body4),
+        ]
+    )
+
+
+def md_w7800(base: Assume) -> str:
+    """The loopback and T5 tables with the W7800 as the hub (four servers)."""
+    d = W7800_D
+    head = ["rows T", f"model us ({d} servers)", "loopback us", "delta",
+            "Python stack us", "delta"]  # fmt: skip
+    lb = loopback_rows(base, W7800_LOOPBACK_US, d)
+    py = loopback_rows(base, W7800_T5_SYNTH_US, d)
+    body = [
+        [str(a["w"]), f"{a['model']:.1f}", f"{a['measured']:.1f}", f"{a['pct']:+.0f} %",
+         f"{b['measured']:.1f}", f"{b['pct']:+.0f} %"]
+        for a, b in zip(lb, py, strict=True)
+    ]  # fmt: skip
+    head2 = ["H1 mode", "T", "step ms (model)", "loopback exchange",
+             "Python-stack exchange", "T10: model", "T10: Python stack"]  # fmt: skip
+    cols = [
+        loopback_refit(a, tab, d, W7800_MODES)
+        for a, tab in (
+            (base, W7800_LOOPBACK_US),
+            (base, W7800_T5_SYNTH_US),
+            (replace(base, routing="t10"), W7800_T5_SYNTH_US),
+        )
+    ]
+    body2 = [
+        [x["mode"], str(x["w"]), f"{x['before']:.1f}", f"{x['after']:.1f}",
+         f"{y['after']:.1f}", f"{z['before']:.1f}", f"{z['after']:.1f}"]
+        for x, y, z in zip(*cols, strict=True)
+    ]  # fmt: skip
+    head3 = ["T5 W7800, W", "measured us", "model, this plan", "layer / 1.3 x model",
+             "chain meas / model", "chain limit us"]  # fmt: skip
+    body3 = [
+        [str(r["w"]), f"{r['measured']:.1f}", f"{r['model']:.1f}",
+         f"{r['ratio'] / 1.3:.2f}", f"{r['compute_meas'] / r['compute']:.2f}",
+         f"{1.15 * r['compute']:.1f}"]
+        for r in t5_rows(base, "w7800")
+    ]  # fmt: skip
+    return "\n\n".join([table(head, body), table(head2, body2), table(head3, body3)])
+
+
+G7_ENGINES = ("H1", "W2", "H2")
+G7_VARIANTS = (
+    ("model", {}),
+    ("G7, best routes", {"g7": "best"}),
+    ("G7, default routes (torch HC and shared expert)", {"g7": "default"}),
+    (
+        "G7, best routes + both levers",
+        {"g7": "best", "lmhead_remote": True, "hub_dense_scale": 0.5},
+    ),
+)
+
+
+def g7_refit(base: Assume) -> list[dict]:
+    """Engine steps with the G7 numbers for HC, the shared expert and lm_head replacing
+    the model's; the attention core, router and routed experts stay modelled."""
+    t4 = TODAY["TP4"]
+    out = []
+    for kind in G7_ENGINES:
+        for name, kw in G7_VARIANTS:
+            r = rows_for(base, **kw)[kind]
+            c1, c8, c16 = r["c1"]["step"], r["c8"]["step"], r["c16"]["step"]
+            out.append(
+                dict(engine=kind, name=name, c1=c1, c8=c8, c16=c16,
+                     c1_ratio=c1 / t4["c1"], c8_ratio=c8 / t4["c8"])
+            )  # fmt: skip
+    return out
+
+
+def g7_ops(base: Assume) -> list[dict]:
+    """G7 per-call microseconds against the model's value of the same op."""
+    a0, ts = setup(replace(base, g7=""))
+    out = []
+    for kind, tp in (("H1", 1), ("H2", 2)):
+        t = ts[kind]
+        for op, label, routes in (
+            ("hc", "HC preamble", G7["hc"]),
+            ("se", f"shared expert TP{tp}", G7["se"][tp]),
+            ("lm_head", f"lm_head TP{tp} (F.linear)", {"": G7["lm_head"][tp]}),
+        ):
+            if op == "hc" and kind == "H2":
+                continue  # the HC call does not depend on TP
+            model = []
+            for W, mode in ((3, "c1"), (24, "c8"), (48, "c16")):
+                s = t.s_l[mode]
+                if op == "hc":
+                    model.append(hc_us(t, a0, s, W) / 2.0)
+                elif op == "se":
+                    model.append(shared_us(t, a0, s, W))
+                else:
+                    model.append(lm_head_us(t, a0, W))
+            for route, vals in routes.items():
+                out.append(
+                    dict(op=label, route=route or "-", us=vals, model=tuple(model))
+                )
+    return out
+
+
+def stage2_variants(base: Assume, variants: tuple[tuple[str, dict], ...]) -> dict:
+    """Stage-2 candidates under each assumption set: aggregate tok/s of D3 and D5
+    (W8A16 on W2) and H2 + both levers' ITL and its ratio to the best deployment
+    without `hx`, by users (5.7.5)."""
+    out = {}
+    for label, kw in variants:
+        a = replace(base, **kw)
+        tps = {r["name"]: r["tps"] for r in stage2(a)}
+        cur = itl_curve(a)
+        out[label] = dict(
+            d3=tps["D3 W2 + 2 x TP4"],
+            d3l=tps["D3 with W8A16 on W2"],
+            d5l=tps["D5 with W8A16 on W2"],
+            h2l_itl=dict(cur["H2 + both levers"]),
+            ratio=h2_ratio(cur),
+        )
+    return out
+
+
+def g7_stage2(base: Assume) -> dict:
+    """`stage2_variants` with the model and with the G7 numbers."""
+    return stage2_variants(base, (("model", {}), ("G7, best routes", {"g7": "best"})))
+
+
+def md_g7(base: Assume) -> str:
+    head = ["op, us per call", "route", "W=3", "W=24", "W=48", "model W=3 / 24 / 48"]
+    body = [
+        [r["op"], r["route"], *(f"{v:.1f}" for v in r["us"]),
+         " / ".join(f"{v:.1f}" for v in r["model"])]
+        for r in g7_ops(base)
+    ]  # fmt: skip
+    head2 = ["engine", "variant", "c1 ms", "c8 ms", "c16 ms", "c1 / TP4", "c8 / TP4"]
+    body2 = [
+        [r["engine"], r["name"], f"{r['c1']:.1f}", f"{r['c8']:.1f}", f"{r['c16']:.1f}",
+         f"{r['c1_ratio']:.2f}", f"{r['c8_ratio']:.2f}"]
+        for r in g7_refit(base)
+    ]  # fmt: skip
+    return "\n\n".join(
+        [table(head, body), table(head2, body2), md_variants_stage2(g7_stage2(base))]
+    )
+
+
 # Scenario sets shared by the scenario table, the H1 ladder and the stage-2 table.
 PESSIMISTIC = {"eta_h": 0.65, "kappa": 1.4, "phi": 0.25, "detect_us": 30.0}
 OPTIMISTIC = {"eta_h": 0.95, "kappa": 0.8, "phi": 1.0}
 LEVERS = {"lmhead_remote": True, "hub_dense_scale": 0.5}
 GATE_GREEN = 1.15  # first H1 boot: within 15 % of the central model
 GATE_PARITY = 1.10  # H1 with both levers against measured TP4 slot A
+BEST_LEVERS = {"g7": "best", **LEVERS}
+ROUTING_VARIANTS = (
+    ("central routing", {}),
+    ("T10 measured routing", {"routing": "t10"}),
+    ("T10 + G7 best routes", {"routing": "t10", "g7": "best"}),
+    ("T10 + G7 best routes + both levers", {"routing": "t10", **BEST_LEVERS}),
+    ("T10 correlated rows", {"routing": "t10c"}),
+    ("T10 correlated rows, calibration kept", {"routing": "t10c", "anchor": ""}),
+    ("T10 correlated + G7 best routes", {"routing": "t10c", "g7": "best"}),
+)
+ROUTING_STAGE2 = (0, 1, 2, 4, 5, 6)  # the variants `routing_stage2` evaluates
+ROUTING_ENGINES = ("TP4", "TP8", "W2", "H1", "H2")
+
+
+def routing_refit(base: Assume) -> list[dict]:
+    """Engine steps under each routing variant: the T10 marginals (independent or
+    correlated rows) replace the central touched-expert count and hub hit; TP4 stays
+    calibrated to its two measured steps unless the variant keeps the calibration."""
+    t4 = TODAY["TP4"]
+    out = []
+    for kind in ROUTING_ENGINES:
+        for name, kw in ROUTING_VARIANTS:
+            r = rows_for(base, **kw)[kind]
+            c1, c8, c16 = r["c1"]["step"], r["c8"]["step"], r["c16"]["step"]
+            out.append(
+                dict(engine=kind, name=name, c1=c1, c8=c8, c16=c16,
+                     c1_ratio=c1 / t4["c1"], c8_ratio=c8 / t4["c8"])
+            )  # fmt: skip
+    return out
+
+
+def routing_touched(base: Assume) -> list[dict]:
+    """Distinct experts per layer, the hub's resident share and the spill count K at the
+    capture widths: central routing, T10 (independent rows) and T10C (correlated rows,
+    K under the primary and the row dispatch rule)."""
+    a0, a1, a2 = (replace(base, routing=r) for r in ("", "t10", "t10c"))
+    a3 = replace(a2, dispatch="row")
+    k = {
+        (kind, i): spill_k(a, kind)
+        for kind in ("H1", "H2")
+        for i, a in enumerate((a0, a1, a2, a3))
+    }
+    ts = setup(a0)[1]
+    out = []
+    for w in SPILL_WIDTHS:
+        out.append(
+            dict(w=w, n_central=n_touched(w, a0), n_t10=n_touched(w, a1),
+                 n_t10c=n_touched(w, a2), hit_central=a0.hit,
+                 hit_h1=hit_at(ts["H1"], w, a1), hit_h2=hit_at(ts["H2"], w, a1),
+                 hit_h1c=hit_at(ts["H1"], w, a2), hit_h2c=hit_at(ts["H2"], w, a2),
+                 k_h1=(k["H1", 0][w], k["H1", 1][w]),
+                 k_h2=(k["H2", 0][w], k["H2", 1][w]),
+                 k_h1c=(k["H1", 2][w], k["H1", 3][w]),
+                 k_h2c=(k["H2", 2][w], k["H2", 3][w]))
+        )  # fmt: skip
+    return out
+
+
+def routing_stage2(base: Assume) -> dict:
+    """`stage2_variants` under the routing variants of `ROUTING_STAGE2`."""
+    return stage2_variants(base, tuple(ROUTING_VARIANTS[i] for i in ROUTING_STAGE2))
+
+
+def md_variants_stage2(s2: dict) -> str:
+    head = ["stage 2", "D3 tok/s", "D3 + W8A16", "D5 + W8A16",
+            *(f"H2L ITL {u}u" for u in ITL_USERS[:5]),
+            *(f"H2L / best {u}u" for u in ITL_USERS[:5])]  # fmt: skip
+    body = [
+        [label, f"{v['d3']:.0f}", f"{v['d3l']:.0f}", f"{v['d5l']:.0f}",
+         *(f"{v['h2l_itl'][u]:.2f}" for u in ITL_USERS[:5]),
+         *(f"{v['ratio'][u]:.3f}" for u in ITL_USERS[:5])]
+        for label, v in s2.items()
+    ]  # fmt: skip
+    return table(head, body)
+
+
+def md_routing(base: Assume) -> str:
+    head = ["W", "distinct experts, central", "T10", "T10C", "T10C / T10",
+            "hit, central", "hit H1 (T10 / T10C)", "hit H2 (T10 / T10C)",
+            "K H1 central / T10 / T10C primary / row",
+            "K H2 central / T10 / T10C primary / row"]  # fmt: skip
+    body = [
+        [str(r["w"]), f"{r['n_central']:.1f}", f"{r['n_t10']:.1f}",
+         f"{r['n_t10c']:.1f}", f"{r['n_t10c'] / r['n_t10']:.3f}",
+         f"{r['hit_central']:.2f}", f"{r['hit_h1']:.3f} / {r['hit_h1c']:.3f}",
+         f"{r['hit_h2']:.3f} / {r['hit_h2c']:.3f}",
+         " / ".join(f"{v:.1f}" for v in (*r["k_h1"], *r["k_h1c"])),
+         " / ".join(f"{v:.1f}" for v in (*r["k_h2"], *r["k_h2c"]))]
+        for r in routing_touched(base)
+    ]  # fmt: skip
+    head2 = ["engine", "variant", "c1 ms", "c8 ms", "c16 ms", "c1 / TP4", "c8 / TP4"]
+    body2 = [
+        [r["engine"], r["name"], f"{r['c1']:.1f}", f"{r['c8']:.1f}", f"{r['c16']:.1f}",
+         f"{r['c1_ratio']:.2f}", f"{r['c8_ratio']:.2f}"]
+        for r in routing_refit(base)
+    ]  # fmt: skip
+    return "\n\n".join(
+        [
+            table(head, body),
+            table(head2, body2),
+            md_variants_stage2(routing_stage2(base)),
+        ]
+    )
 
 
 ENGINES = ("W2", "H1", "H2")
@@ -962,6 +1608,192 @@ def md_spill_k(base: Assume) -> str:
     return table(head, body)
 
 
+# ---------------------------------------------------------------------------
+# Decision 16 (decode dispatch rule), the stack as built, the V620-hub stand-in
+# ---------------------------------------------------------------------------
+DISPATCH_RULES = ("primary", "row")
+CALIBRATIONS = (("anchored", None), ("calibration kept", ""))  # `Assume.anchor`
+
+
+def dispatch_rows(base: Assume) -> list[dict]:
+    """Decision 16 with the correlated rows of T10C: `row` is the plan format's
+    `(row + layer) % n_cold`, `primary` uses the first cold copy only.  Engine steps
+    at c1 / c8 / c16, the copies streamed per distinct cold expert and K per capture
+    width, under both calibrations of `Assume.anchor`."""
+    out = []
+    for kind in ("H1", "H2"):
+        for calib, anchor in CALIBRATIONS:
+            for rule in DISPATCH_RULES:
+                a = replace(base, routing="t10c", dispatch=rule, anchor=anchor)
+                r = rows_for(a)[kind]
+                t = setup(a)[1][kind]
+                out.append(
+                    dict(engine=kind, calib=calib, rule=rule,
+                         steps=tuple(r[m]["step"] for m in ("c1", "c8", "c16")),
+                         dup=tuple(dup_at(t, w, a) for w in SPILL_WIDTHS),
+                         k=tuple(spill_k(a, kind).values()))
+                )  # fmt: skip
+    return out
+
+
+def md_dispatch(base: Assume) -> str:
+    rows = dispatch_rows(base)
+    by = {(r["engine"], r["calib"], r["rule"]): r for r in rows}
+    head = [
+        "engine",
+        "calibration",
+        "primary c1 / c8 / c16 ms",
+        "row c1 / c8 / c16 ms",
+        "row - primary ms",
+        "row / primary, c8",
+    ]
+    body = []
+    for kind in ("H1", "H2"):
+        for calib, _ in CALIBRATIONS:
+            p, r = by[kind, calib, "primary"], by[kind, calib, "row"]
+            body.append(
+                [kind, calib, " / ".join(f"{v:.1f}" for v in p["steps"]),
+                 " / ".join(f"{v:.1f}" for v in r["steps"]),
+                 " / ".join(f"{b - a:+.2f}" for a, b in zip(p["steps"], r["steps"])),
+                 f"{r['steps'][1] / p['steps'][1]:.3f}"]
+            )  # fmt: skip
+    widths = " / ".join(str(w) for w in SPILL_WIDTHS)
+    head2 = ["engine", "rule", f"copies per cold expert, W = {widths}",
+             f"K per hub, W = {widths}"]  # fmt: skip
+    body2 = [
+        [r["engine"], r["rule"], " / ".join(f"{v:.3f}" for v in r["dup"]),
+         " / ".join(f"{v:.1f}" for v in r["k"])]
+        for r in rows
+        if r["calib"] == "anchored"
+    ]  # fmt: skip
+    return table(head, body) + "\n\n" + table(head2, body2)
+
+
+def asbuilt_ladder(base: Assume) -> list[dict]:
+    """H1 (W7800 hub, four V620 servers) step ms at c1 / c8 / c16 from the design
+    assumptions to the stack the recipes run; every row adds one thing to the rows
+    above.  The last row refits `detect_us` per width so that the model's exchange (the
+    digest not counted) equals the synthetic-server replay measured with the W7800 hub
+    (`W7800_T5_SYNTH_US`, taken before the digest existed); the digest sits on top."""
+    rungs: tuple[tuple[str, dict], ...] = (
+        ("design: central routing, 3 us wake", {}),
+        ("+ T10 routing, independent rows", {"routing": "t10"}),
+        ("+ correlated rows (T10C)", {"routing": "t10c"}),
+        ("+ row dispatch (the plan format's rule)", {"dispatch": "row"}),
+        ("+ digest check (`VLLM_HX_FLUSH=256`)", {"digest": True}),
+        ("+ the Python-stack exchange (T5 replay, W7800 hub)", {"stack": True}),
+    )
+    out = []
+    kw: dict = {}
+    for name, add in rungs:
+        kw = {**kw, **add}
+        row: dict = dict(name=name)
+        for calib, anchor in CALIBRATIONS:
+            steps = []
+            for w, mode in W7800_MODES.items():
+                b = replace(
+                    base, anchor=anchor, **{k: v for k, v in kw.items() if k != "stack"}
+                )
+                if kw.get("stack"):
+                    gap = W7800_T5_SYNTH_US[w] - transport_us(
+                        w, W7800_D, replace(b, digest=False)
+                    )
+                    b = replace(b, detect_us=b.detect_us + gap)
+                steps.append(rows_for(b)["H1"][mode]["step"])
+            row[calib] = tuple(steps)
+        out.append(row)
+    return out
+
+
+def md_asbuilt(base: Assume) -> str:
+    g = h1_gates(base)
+    head = [
+        "H1 step with a W7800 hub (each row adds to the rows above)",
+        "anchored c1 / c8 / c16 ms",
+        "calibration kept, c1 / c8 / c16 ms",
+    ]
+    body = [
+        [r["name"], *(" / ".join(f"{v:.1f}" for v in r[c]) for c, _ in CALIBRATIONS)]
+        for r in asbuilt_ladder(base)
+    ]
+    foot = (
+        f"Gates (5.4a): green c1 <= {g['green_c1']:.1f} and c8 <= {g['green_c8']:.1f} "
+        f"ms; red above c1 {g['red_c1']:.1f} or c8 {g['red_c8']:.1f} ms."
+    )
+    return table(head, body) + "\n\n" + foot
+
+
+# The interim box (six V620 behind one PEX88096, every GPU link Gen4 x8; hub HIP 1, four
+# servers HIP 2-5).  `hx_loopback --dev-verify` layer exchange p50 in us at T rows, with
+# and without the digest (hetero-hx doc 8.8; the device-side verification is in the
+# loop, so these are upper bounds of the exchange).
+INTERIM_BW = 13.9e9  # B/s per x8 link, measured P2P and host to GPU (box rules)
+INTERIM_D = 4
+INTERIM_LOOPBACK_US = {3: 58.1, 24: 115.9, 48: 189.5}
+INTERIM_LOOPBACK_DIGEST_US = {3: 70.1, 24: 132.4, 48: 206.3}
+# HubMethod's V620 stand-in, compiled mode, MTP2, 2 GiB KV (hub doc 13): resident
+# requests and the measured median ITL in ms.  The c8 cell is a batch of two (the pool
+# holds two 1k-token requests).
+STANDIN = (("c1", 1, 43.9), ("c8 cell, two requests resident", 2, 50.2))
+STANDIN_ASSUME: dict[str, Any] = dict(
+    routing="t10c", dispatch="row", digest=True, pcie_bw=INTERIM_BW
+)
+
+
+def standin_rows(base: Assume) -> list[dict]:
+    """HubMethod's V620-hub stand-in (hub TP1 with 40 slots per layer, four V620
+    servers, plan `H1v.W1`, x8 links) against the model of that topology, with the
+    run's routing (correlated rows), dispatch (row), digest and link figure: the
+    model's own exchange, or the measured four-server loopback exchange instead."""
+    out = []
+    xs = tuple(INTERIM_LOOPBACK_US)
+    ys = tuple(INTERIM_LOOPBACK_US.values())
+    for calib, anchor in CALIBRATIONS:
+        a, ts = setup(replace(base, anchor=anchor, **STANDIN_ASSUME))
+        topo = Topo("H1v (V620 hub TP1 + 4 V620, x8)", V620, 1, "hub", 1, INTERIM_D)
+        t = replace(topo, plan="H1v", s_l=dict(ts["TP4"].s_l))
+        for exchange in ("model", "loopback"):
+            for case, users, meas in STANDIN:
+                b = a
+                if exchange == "loopback":
+                    w = 3 * users
+                    gap = interp_at(xs, ys, w) - transport_us(
+                        w, INTERIM_D, replace(a, digest=False)
+                    )
+                    b = replace(a, detect_us=a.detect_us + gap)
+                step = step_ms_at(t, users, b)
+                out.append(
+                    dict(calib=calib, exchange=exchange, case=case, measured=meas,
+                         model=step, pct=100.0 * (step / meas - 1.0))
+                )  # fmt: skip
+    return out
+
+
+def md_standin(base: Assume) -> str:
+    a = replace(base, pcie_bw=INTERIM_BW)
+    head = ["rows T", "model us (x8, 4 servers)", "loopback us", "delta",
+            "loopback with digest us", "model with digest us"]  # fmt: skip
+    body = []
+    for r, d in zip(
+        loopback_rows(a, INTERIM_LOOPBACK_US, INTERIM_D),
+        loopback_rows(a, INTERIM_LOOPBACK_DIGEST_US, INTERIM_D),
+        strict=True,
+    ):
+        body.append(
+            [str(r["w"]), f"{r['model']:.1f}", f"{r['measured']:.1f}",
+             f"{r['pct']:+.0f} %", f"{d['measured']:.1f}",
+             f"{r['model'] + digest_us(r['w']):.1f}"]
+        )  # fmt: skip
+    rows = standin_rows(base)
+    head2 = ["calibration", "exchange", "case", "model ms", "measured ms", "delta"]
+    body2 = [
+        [r["calib"], r["exchange"], r["case"], f"{r['model']:.1f}",
+         f"{r['measured']:.1f}", f"{r['pct']:+.1f} %"]
+        for r in rows
+    ]  # fmt: skip
+    return table(head, body) + "\n\n" + table(head2, body2)
+
+
 # Engines of each deployment (keys of `topos`); the levers apply to hub engines.
 ITL_SETS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("TP8 (today)", ("TP8",), False),
@@ -1110,6 +1942,27 @@ def stage_plan(base: Assume) -> dict:
             for name, kw in ITL_SCENARIOS
         },
         dense_offload=dense_offload(base),
+        g7=g7_refit(base),
+        g7_stage2=g7_stage2(base),
+        loopback=loopback_rows(base),
+        loopback_python_stack=loopback_rows(base, T5_SYNTH_US),
+        t5=t5_rows(base),
+        t5_budget=t5_budget(base),
+        loopback_w7800=loopback_rows(base, W7800_LOOPBACK_US, W7800_D),
+        loopback_python_stack_w7800=loopback_rows(base, W7800_T5_SYNTH_US, W7800_D),
+        loopback_refit_w7800=loopback_refit(
+            base, W7800_T5_SYNTH_US, W7800_D, W7800_MODES
+        ),
+        t5_w7800=t5_rows(base, "w7800"),
+        routing=routing_refit(base),
+        routing_touched=routing_touched(base),
+        routing_stage2=routing_stage2(base),
+        dispatch=dispatch_rows(base),
+        asbuilt=asbuilt_ladder(base),
+        standin=standin_rows(base),
+        loopback_interim=loopback_rows(
+            replace(base, pcie_bw=INTERIM_BW), INTERIM_LOOPBACK_US, INTERIM_D
+        ),
     )
 
 
@@ -1196,7 +2049,18 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--sens", action="store_true")
+    ap.add_argument("--t10-tables", nargs=2, metavar=("W1", "W2"))
     args = ap.parse_args()
+    if args.t10_tables:
+        w1, w2 = args.t10_tables
+        t = t10_tables((w1, w2))
+        r0, r1 = t["rows"]
+        print(f"# {t['layers']} target layers, decode rows {r0:.0f} / {r1:.0f}")
+        print(f"T10_W = {t['w']}")
+        print("T10_N = (" + ", ".join(f"{v:.2f}" for v in t["n"]) + ")")
+        for hubs, vals in t["hit"].items():
+            print(f"T10_HIT[{hubs}] = (" + ", ".join(f"{v:.3f}" for v in vals) + ")")
+        return
     a, ts = setup()
     o = results(a, ts)
     if args.json:
@@ -1214,6 +2078,20 @@ def main() -> None:
     print(md_memory(a))
     print()
     print(md_traffic())
+    print()
+    print(md_loopback(Assume()))
+    print()
+    print(md_w7800(Assume()))
+    print()
+    print(md_g7(Assume()))
+    print()
+    print(md_routing(Assume()))
+    print()
+    print(md_dispatch(Assume()))
+    print()
+    print(md_asbuilt(Assume()))
+    print()
+    print(md_standin(Assume()))
     print()
     print(prefill_table(a))
     print()
