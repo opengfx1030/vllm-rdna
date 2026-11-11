@@ -14,9 +14,53 @@ Three questions, in the order they have to be answered:
 Status: **this is a design document.** Nothing in this PR changes the serving
 path. Every V620 cell in `TESTPLAN.md` is empty on purpose, and every number
 below is either read out of the tree or produced by a script that is committed
-here or in PR #134. No hardware measurement was taken for this PR.
+in this tree (`docs/explore/kv-int4-fp16-scales/reference_codec.py`). No
+hardware measurement was taken for this PR.
 
-All `file:line` references are against `origin/rdna_extras` at `30d6e82dcd`.
+All `file:line` references are against `origin/rdna_extras` at `1136bb952b`
+(refreshed 2026-11-11; the first draft used `30d6e82dcd` of 2026-10-21). Every
+reference is written as a full `path:line`, so `check_citations.py` resolves it.
+
+### What changed since the first draft
+
+`rdna_extras` moved by 2,166 commits between the two bases. Five changes
+matter here:
+
+1. **`int4_fp16_block` shipped, so RDNA_ATTN is no longer FP16-only.** PR #134
+   (the explore document, merged 2026-10-25) was followed by the
+   implementation, PR #138 (`8dec4520e4`, `cf578e3a95`). `RDNA_ATTN` lists the
+   dtype (`vllm/v1/attention/backends/rdna_attn.py:764-769`), validates it in
+   `__init__` (`vllm/v1/attention/backends/rdna_attn.py:283-300`) and branches
+   to its own reader and writer (`vllm/v1/attention/backends/rdna_attn.py:352-357`,
+   `vllm/v1/attention/backends/rdna_attn.py:709-714`) before the FP16-only gate
+   that every other quantised dtype still hits
+   (`vllm/v1/attention/backends/rdna_attn.py:329-330`). The fork-only
+   `KVQuantMode.INT4_FP16_BLOCK` is at `vllm/v1/kv_cache_interface.py:61`. The
+   V620 numbers for it are in the commit message of `8dec4520e4` (27B AWQ, TP4,
+   MTP2, one boot, paired FP16 / INT4): 3.24x the tokens at a fixed KV budget
+   (438,210 to 1,420,392), 16k/1k c=1 decode per request +11.2 %, c=8 aggregate
+   decode -12.4 % (a mixed prefill + decode batch path), paired PPL 4.98 vs
+   4.94. Those are INT4 numbers; this document still has none for INT8.
+2. **The int8 prefill op is registered, for one test.** `a948ee01de`
+   (2026-11-04) registered `fa_rdna2_prefill_paged_varlen_int8` and a workspace
+   test hook (`csrc/rocm/torch_bindings.cpp:464-476`,
+   `tests/kernels/attention/test_fa_rdna2_int8_prefill_workspaces.py`).
+   `fa_rdna2_decode_paged_int8` is still not registered, and
+   `reshape_and_cache_int8_rdna2` is registered but nothing in `vllm/` calls it.
+3. **The writer defect is still there** (`csrc/rocm/fa_rdna2.cu:4905`,
+   `csrc/rocm/fa_rdna2.cu:4907`). Every other `fa_rdna2.cu` reference moved by
+   13 to 250 lines.
+4. **The Triton writer changed slightly.** It floors the scale at `1e-6` and
+   rounds half away from zero before the int8 store; the clamp limits are
+   `[-128, 127]`.
+5. **The INT4 document grew an INT8 section.**
+   `docs/explore/kv-int4-fp16-scales/README.md` now carries "The INT8
+   backport: what it actually costs" and "Why INT8 is not the answer at this
+   budget". The first overlaps items 1, 3, 5, 6 and 7 below at shorter length;
+   the second concludes that at the 8-bit budget FP8 already wins and that a new
+   INT8 format is not worth building on a synthetic SNR argument. This document
+   adds what that one does not cover: the cache-geometry mismatch (item 4), the
+   read-path question (N1 to N3) and the wiring map.
 
 ---
 
@@ -28,15 +72,15 @@ All `file:line` references are against `origin/rdna_extras` at `30d6e82dcd`.
 
 | Piece | Where |
 | --- | --- |
-| the dtype literal | `vllm/config/cache.py:54` |
-| dtype to torch dtype | `vllm/utils/torch_utils.py:44` (`torch.int8`) |
-| the quant mode | `vllm/v1/kv_cache_interface.py:48` (`KVQuantMode.INT8_PER_TOKEN_HEAD`), mapped at `:88` |
-| "does this dtype need per-token-head scales" | `vllm/v1/kv_cache_interface.py:132` |
-| the Triton backend serves it | `vllm/v1/attention/backends/triton_attn.py:313-321` |
-| the writer | `vllm/v1/attention/ops/triton_reshape_and_cache_flash.py:272` (`triton_reshape_and_cache_flash_per_token_head_quant`) |
-| the scale | `absmax / 127` per (token, head), computed in the kernel (`:207`, `:239`), values clamped to `[127, -128]` (`:267`) |
-| the scale cache | `vllm/v1/attention/backends/triton_attn.py:405` (`_ensure_scale_caches`) carves FP32 scale views out of the packed cache |
-| the cache geometry | per (head, slot) the content dim is `[K(hs) \| K_scale(4 B) \| V(hs) \| V_scale(4 B)]` (`vllm/v1/attention/backends/triton_attn.py:425-427`); the scale views are physical `(num_blocks, block_size, num_kv_heads)` (`:451`, `:460` of the same file) |
+| the dtype literal | `vllm/config/cache.py:64` |
+| dtype to torch dtype | `vllm/utils/torch_utils.py:52` (`torch.int8`) |
+| the quant mode | `vllm/v1/kv_cache_interface.py:49` (`KVQuantMode.INT8_PER_TOKEN_HEAD`), mapped at `vllm/v1/kv_cache_interface.py:134-135` |
+| "does this dtype need per-token-head scales" | `vllm/v1/kv_cache_interface.py:74-79` (`KVQuantMode.is_per_token_head`) |
+| the Triton backend serves it | `vllm/v1/attention/backends/triton_attn.py:345-355` (`supported_kv_cache_dtypes`); `vllm/v1/attention/backends/triton_attn.py:327-337` (`customize_spec` sizes the page with the inline scales) |
+| the writer | `vllm/v1/attention/ops/triton_reshape_and_cache_flash.py:286` (`triton_reshape_and_cache_flash_per_token_head_quant`) |
+| the scale | `absmax / 127` per (token, head), floored at `1e-6`, computed in the kernel (`vllm/v1/attention/ops/triton_reshape_and_cache_flash.py:221`, `vllm/v1/attention/ops/triton_reshape_and_cache_flash.py:253`); the codes are rounded half away from zero and clamped to `[-128, 127]` (`vllm/v1/attention/ops/triton_reshape_and_cache_flash.py:234`, `vllm/v1/attention/ops/triton_reshape_and_cache_flash.py:266`; limits at `vllm/v1/attention/ops/triton_reshape_and_cache_flash.py:197-198`) |
+| the scale cache | `vllm/v1/attention/backends/triton_attn.py:450` (`_ensure_scale_caches`) carves FP32 scale views out of the packed cache |
+| the cache geometry | per (head, slot) the content dim is `[K(hs) \| K_scale(4 B) \| V(hs) \| V_scale(4 B)]` (`vllm/v1/attention/backends/triton_attn.py:451-458`); the scale views are physical `(num_blocks, block_size, num_kv_heads)` (`vllm/v1/attention/backends/triton_attn.py:459-464`, built at `vllm/v1/attention/backends/triton_attn.py:496` and `vllm/v1/attention/backends/triton_attn.py:505`) |
 | the tests | `tests/quantization/test_per_token_kv_cache.py` (the Triton path) |
 
 So the gap is narrow and specific: **the RDNA2 backend cannot serve a dtype
@@ -48,29 +92,32 @@ that the Triton backend already serves.**
 
 | Op | Where |
 | --- | --- |
-| `fa_rdna2_decode_paged_int8` (host wrapper) | `:4457` |
-| the decode kernel it launches | `fa_decode_paged_splitk_kernel<int8_t, false, true>` — the `IS_INT8` branch of the shared decode template |
-| the INT8 load in that kernel | `:443` (D=128) and `:689` (D=256) |
-| `fa_rdna2_prefill_paged_varlen_int8` (host wrapper) | `:4270` |
-| the INT8 split-K prefill kernels | `fa_prefill_paged_varlen_splitk_kernel_int8_128` / `_256` |
-| `reshape_and_cache_int8_rdna2` (the writer) | `:4699` |
+| `fa_rdna2_decode_paged_int8` (host wrapper; defined, not declared in `ops.h`, not registered) | `csrc/rocm/fa_rdna2.cu:4681` |
+| the decode kernel it launches | `fa_decode_paged_splitk_kernel<int8_t, false, true>` (`csrc/rocm/fa_rdna2.cu:4739-4741`) — the `IS_INT8` branch of the shared decode template |
+| the INT8 load in that kernel | `csrc/rocm/fa_rdna2.cu:520-526` (D=128) and `csrc/rocm/fa_rdna2.cu:831-837` (D=256) |
+| `fa_rdna2_prefill_paged_varlen_int8` (host wrapper) | `csrc/rocm/fa_rdna2.cu:4497` (registered for a test, see above) |
+| the INT8 split-K prefill kernels | `fa_prefill_paged_varlen_splitk_kernel_int8_128` (`csrc/rocm/fa_rdna2.cu:2601`) / `_256` (`csrc/rocm/fa_rdna2.cu:2849`) |
+| `reshape_and_cache_int8_rdna2` (the writer) | host wrapper `csrc/rocm/fa_rdna2.cu:4923`, kernel `csrc/rocm/fa_rdna2.cu:4831`; registered at `csrc/rocm/torch_bindings.cpp:653-656` |
 
-**None of those kernels is a native INT8 dot.** The comment at `:2429` calls
-the prefill kernel a "native int8 prefill kernel"; it is native in the
-*storage* sense (the cache holds int8), not in the *dot* sense:
+**None of those kernels is a native INT8 dot.** The comment at
+`csrc/rocm/fa_rdna2.cu:2575` calls the prefill kernel a "native int8 prefill
+kernel"; it is native in the *storage* sense (the cache holds int8), not in the
+*dot* sense:
 
 - The decode path takes the `IS_INT8` branch of the shared FP16-shaped kernel.
-  At `:443` it does, per element, `(float)*k_ptr * k_s` and then
-  `__float2half_rn`, and writes the result into an FP16 shared tile. The score
-  is then a `v_dot2_f32_f16` (`fdot2`) against an FP16 Q (`:472-477`) and the PV
-  product is a scalar FP32 FMA over that FP16 tile (`:508-517`).
+  At `csrc/rocm/fa_rdna2.cu:520-526` it does, per element, `(float)*k_ptr * k_s`
+  and then `__float2half_rn`, and writes the result into an FP16 shared tile.
+  The score is then a `v_dot2_f32_f16` (`fdot2`) against an FP16 Q
+  (`csrc/rocm/fa_rdna2.cu:550-554`) and the PV product is a scalar FP32 FMA
+  over that FP16 tile (`csrc/rocm/fa_rdna2.cu:587-592`).
 - The prefill path is the same idea: a packed dword load of K, a per-element
   `v_cvt_f32_i32` + `v_mul_f32` + `v_cvt_f16_f32` promote, and `fdot2` against
-  an FP16 Q (`:2588-2621`).
+  an FP16 Q (`csrc/rocm/fa_rdna2.cu:2735-2767`).
 
-That is worth stating plainly, because PR #134 describes this work as
-"native INT8 prefill and decode kernels". It is not. The cache is INT8; the
-arithmetic is FP16.
+That is worth stating plainly, because PR #134's first draft described this
+work as "native INT8 prefill and decode kernels". It is not. The cache is INT8;
+the arithmetic is FP16. PR #134 corrected that wording on 2026-10-23
+(`997e37aa1a`), and its merged README now says the same.
 
 ### The primitive is available
 
@@ -89,35 +136,47 @@ it, and the answer is not obvious: see the ISA study below.
 This is the part that was mapped against this tree. It is the difference
 between "a backlog item" and "a plan".
 
-### 1. The two read ops are not registered
+### 1. The decode read op and the writer are not wired
 
-`csrc/rocm/torch_bindings.cpp` registers only the writer
-(`:543-546`), and the comment above it already says why:
+`csrc/rocm/torch_bindings.cpp` registers the writer
+(`csrc/rocm/torch_bindings.cpp:646-656`) and, since `a948ee01de`, the prefill
+read op (`csrc/rocm/torch_bindings.cpp:464-472`). The comment above the
+writer still says why nothing calls it:
 
 > *"Not wired up yet: RDNA_ATTN still rejects quantized KV caches, and
 > fa_rdna2_decode_paged_int8 is not registered."*
 
-`fa_rdna2_prefill_paged_varlen_int8` and `fa_rdna2_decode_paged_int8` are
-absent. The legacy tree reached these kernels through a `load_inline` JIT
-build; this tree loads them through `torch.ops._rocm_C`, so
-`csrc/rocm/torch_bindings.cpp` and the shim in
-`vllm/v1/attention/ops/fa_rdna2_backend.py` both have to change.
+That comment is itself out of date for `int4_fp16_block` (see "What changed"),
+but it is right for INT8. The prefill comment
+(`csrc/rocm/torch_bindings.cpp:464-465`) says the same: "only tests call it".
+`fa_rdna2_decode_paged_int8` has no schema, and `csrc/rocm/ops.h` does not
+declare it. The shim in `vllm/v1/attention/ops/fa_rdna2_backend.py` has no int8
+wrapper; its quantised wrappers are the two INT4 ones. The legacy tree
+reached these kernels through a `load_inline` JIT build; this tree loads them
+through `torch.ops._rocm_C`, so `csrc/rocm/torch_bindings.cpp` and the shim
+both have to change.
 
-### 2. The backend gate rejects every quantised KV dtype
+### 2. The backend gate still rejects every quantised dtype except one
 
-`vllm/v1/attention/backends/rdna_attn.py:283`:
+`vllm/v1/attention/backends/rdna_attn.py:329-330`:
 
 ```python
 if get_kv_quant_mode(self.kv_cache_dtype) != KVQuantMode.NONE:
     return False
 ```
 
-and `supported_kv_cache_dtypes` (`:601-605`) lists `auto`, `float16`,
-`bfloat16`. Both have to open for `int8_per_token_head`.
+and `supported_kv_cache_dtypes`
+(`vllm/v1/attention/backends/rdna_attn.py:764-769`) lists `auto`, `float16`,
+`bfloat16` and `int4_fp16_block`. `int4_fp16_block` does not pass through the
+gate: `forward` branches to `_forward_int4_fp16` first
+(`vllm/v1/attention/backends/rdna_attn.py:352-357`), and the writer branches the
+same way (`vllm/v1/attention/backends/rdna_attn.py:709-714`). That is the
+pattern an `int8_per_token_head` port would copy: add the dtype to the list
+and give it its own branch, instead of opening the FP16 gate.
 
 ### 3. The writer writes the scale bytes at the wrong address
 
-`csrc/rocm/fa_rdna2.cu:4681` (K) and `:4683` (V):
+`csrc/rocm/fa_rdna2.cu:4905` (K) and `csrc/rocm/fa_rdna2.cu:4907` (V):
 
 ```c
 k_dst[HEAD_DIM * block_size + slot_in_block + d] = ...
@@ -167,11 +226,12 @@ content dim carries the scale inline, per (head, slot):
 [ K(hs) | K_scale(4 B) | V(hs) | V_scale(4 B) ]
 ```
 
-(`vllm/v1/attention/backends/triton_attn.py:405-427`). The two geometries are
-not the same thing, and the RDNA2 backend's own cache plumbing assumes the
-FP16 geometry: `vllm/v1/attention/backends/rdna_attn.py:306` calls
-`PagedAttention.split_kv_cache(kv_cache.transpose(0, 1), ...)` and
-`split_kv_cache` (`vllm/v1/attention/ops/paged_attn.py:25-29`) does
+(`vllm/v1/attention/backends/triton_attn.py:451-464`). The two geometries are
+not the same thing, and the RDNA2 backend's FP16 cache plumbing assumes the
+FP16 geometry: `vllm/v1/attention/backends/rdna_attn.py:359-361` calls
+`PagedAttention.split_kv_cache(kv_cache.transpose(0, 1), ...)` (and
+`vllm/v1/attention/backends/rdna_attn.py:715-717` does the same in the
+writer) and `split_kv_cache` (`vllm/v1/attention/ops/paged_attn.py:25-29`) does
 
 ```python
 key_cache = kv_cache[0].view(num_blocks, num_kv_heads, head_size // x, -1, x)
@@ -185,23 +245,42 @@ So the port has to decide, explicitly:
 
 - **(a) Adapt the writer to vLLM's geometry** — write the int8 data into the
   two data planes and the FP32 scale into the inline scale bytes, in the same
-  packed tensor, and hand the kernel an int8-aware cache split that strips the
-  pad. The Triton backend already does exactly this with `as_strided` views
-  over the same allocation (`vllm/v1/attention/backends/triton_attn.py:451`, `:460`), so the pattern
-  exists to copy.
+  packed tensor, and hand the kernel an int8-aware cache view that strips the
+  pad. The Triton backend already does this with `as_strided` views over the
+  same allocation (`vllm/v1/attention/backends/triton_attn.py:496`,
+  `vllm/v1/attention/backends/triton_attn.py:505`), so the pattern exists to
+  copy.
 - **(b) Give the RDNA2 backend its own cache** for quantised dtypes, and keep
   the legacy geometry. This is a bigger change and it splits the allocator.
 
 (a) is the smaller change and keeps one KV cache for both backends. It is the
-one this document assumes.
+one this document assumes. `int4_fp16_block` chose (a) as well, and shows the
+two pieces an int8 port needs:
+
+- **A page spec for the dtype.** `RDNA_ATTN.customize_spec`
+  (`vllm/v1/attention/backends/rdna_attn.py:861-876`) gives the INT4 dtype
+  `num_head_slots=2` and `state_content_bytes = num_kv_heads * record_bytes`,
+  so the allocator reserves the scale bytes inside the page. The generic
+  branch below it (`vllm/v1/attention/backends/rdna_attn.py:877-888`) sizes
+  the content as `num_kv_heads * head_size * dtype_size`, with no scale bytes,
+  so an `int8_per_token_head` cache on `RDNA_ATTN` would need its own branch
+  there. [INFERENCE: the sizing follows from the code; nothing has allocated
+  an int8 cache on this backend.]
+- **Backend-owned views.** `int4_fp16_cache_view`
+  (`vllm/v1/attention/ops/int4_fp16_kv_layout.py:44`) and
+  `int4_fp16_read_views` (`vllm/v1/attention/ops/int4_fp16_kv_layout.py:72`)
+  re-view the packed `[blocks, 2, slots, heads * record_bytes]` allocation
+  as `[2, blocks, slots, heads, record_bytes]` and keep the scale window's
+  own strides, and the INT4 branch never calls `split_kv_cache`. An int8
+  equivalent would do the same for `[K | K_scale | V | V_scale]`.
 
 ### 5. The scale index convention differs three ways — and the fix is local
 
 | Party | Scale index |
 | --- | --- |
-| the FA-RDNA2 int8 kernels | **logical** sequence position — `k_scale_per_tok[n_global * H_kv + h_kv]` (`:443`, `:689`) |
+| the FA-RDNA2 int8 kernels | **logical** sequence position — `k_scale_per_tok[n_global * H_kv + h_kv]` (`csrc/rocm/fa_rdna2.cu:521-522`, `csrc/rocm/fa_rdna2.cu:832-833`) |
 | the legacy Python bridge | **physical** `(block, slot)` |
-| vLLM's canonical scale cache (this tree) | **physical** `(num_blocks, block_size, num_kv_heads)` (`vllm/v1/attention/backends/triton_attn.py:451-467`) |
+| vLLM's canonical scale cache (this tree) | **physical** `(num_blocks, block_size, num_kv_heads)` (`vllm/v1/attention/backends/triton_attn.py:450-464`) |
 
 Physical and logical indexing differ whenever a block is partially filled,
 which is the normal case under chunked prefill.
@@ -230,7 +309,7 @@ k_scale_per_slot = kv_cache[0, :, :, _hs:_hs + 4, :].view(torch.float32)
 byte dimension: it packs four consecutive slots' byte 0 into one FP32. Even
 with the writer fixed, that does not recover the scales. Under vLLM's
 geometry the scale is read with an `as_strided` view of the packed tensor
-(`vllm/v1/attention/backends/triton_attn.py:451`), which is the correct shape of the answer.
+(`vllm/v1/attention/backends/triton_attn.py:496`), which is the correct shape of the answer.
 
 ### 7. The legacy evidence is a throughput number
 
@@ -250,10 +329,10 @@ existed, not re-apply something that worked.
 
 - The int8 ops return a `Tensor` while every other `fa_rdna2` op writes into
   an `out` parameter. Worth normalising while the binding is written.
-- The writer takes an int32 `slot_mapping` (`TORCH_CHECK` at `:4710`); vLLM
-  passes int64.
-- `csrc/rocm/ops.h` declares `reshape_and_cache_int8_rdna2` twice (`:458` and
-  `:763`).
+- The writer takes an int32 `slot_mapping` (`TORCH_CHECK` at
+  `csrc/rocm/fa_rdna2.cu:4933`); vLLM passes int64.
+- `csrc/rocm/ops.h` declares `reshape_and_cache_int8_rdna2` twice
+  (`csrc/rocm/ops.h:505` and `csrc/rocm/ops.h:815`).
 - The legacy int8 work is a seven-commit chain, not one commit, so it should
   be reviewed as a series.
 
@@ -286,11 +365,14 @@ Three things follow, and they are the most useful thing in this document:
    loses at D=256 and we lose SDOT4's single-thread advantage when we
    parallelize across threads (which production does with 128 thr/CTA)".
 2. **The pattern the fork ships today is the measured loser.** The fork's
-   `IS_INT8` decode branch (`:443`) is a per-element scalar dequantise into an
+   `IS_INT8` decode branch (`csrc/rocm/fa_rdna2.cu:520-526`) is a per-element scalar dequantise into an
    FP16 shared tile — the `v1`/`v0` family. The study measured that family at
    0.877× of the FP16 ceiling (v1, D=256) and 0.654× (v0, D=128), and says
    of the legacy baseline: "The current `fa_rdna2_decode_paged_int8` is
    leaving 30%+ on the table at the typical Qwen3.x head dim (128)."
+   The INT4 reader that shipped since uses the same pattern (`int4_load_half`
+   into the same FP16 shared tile, `csrc/rocm/fa_rdna2.cu:513-519`), so an N1
+   rewrite would apply to both dtypes.
 3. **The one native-dot opportunity nobody has measured is the PV product.**
    The study says so twice: "The PV (output) update is scalar in all variants.
    A future optimization could quantize P to int8 and use `v_dot4c_i32_i8` for
@@ -384,8 +466,9 @@ work rather than in tension with it.
 
 ### What it buys, measured
 
-The numbers below come from PR #134's `reference_codec.py`, run for this
-document on the same synthetic rows it uses (64 rows of `N(0, 0.5)`,
+The numbers below come from `docs/explore/kv-int4-fp16-scales/reference_codec.py`
+(PR #134, on this branch since 2026-10-25), re-run on 2026-11-11 on the same
+synthetic rows it uses (64 rows of `N(0, 0.5)`,
 `head_size=128`, two x40 outlier channels for K and two x40 outlier tokens for
 V). **They are arithmetic on synthetic data, not V620 measurements.**
 
@@ -457,10 +540,12 @@ stays symmetric and the 0.25 bits/value is never spent.
 ### The budget question, stated honestly
 
 PR #134's conclusion for the 8-bit end of the table applies here too: FP8
-e4m3 with a per-tensor scale already ships, costs 8.000 bits/value, and is the
-only KV dtype with a measurement on the V620 (about 2× the memory saved and
-+0.1 PPL). A new 8-bit format that costs *more* than that has to earn its
-place on something other than memory.
+e4m3 with a per-tensor scale already ships and costs 8.000 bits/value. Its V620
+measurement (about 2× the memory saved and +0.1 PPL) is a figure kept outside
+this tree; PR #134's README calls it a recollection, not a citation. The
+only quantised-KV dtype with a V620 measurement in the tree is now
+`int4_fp16_block` (see "What changed"). A new 8-bit format that costs *more*
+than FP8 has to earn its place on something other than memory.
 
 What it can offer instead:
 
@@ -469,7 +554,7 @@ What it can offer instead:
 - **A decode path that is cheaper to read than the FP8 one.** FP8 on gfx1030
   has no hardware decoder: the shipped kernel decodes e4m3 in software
   (sign/exponent/mantissa, a subnormal branch, a select — about 7 ops per
-  element, `csrc/rocm/fa_rdna2.cu:203-226`). INT8 with a native dot has no
+  element, `csrc/rocm/fa_rdna2.cu:216-239`). INT8 with a native dot has no
   such tax. That is the real argument for INT8 over FP8 on this chip, and it
   is the one this document is about.
 - **Better accuracy than FP8 at a similar budget**: 36.4 dB (k=64) or 39.5 dB
@@ -488,14 +573,15 @@ touch.
 
 | Piece | File | What changes |
 | --- | --- | --- |
-| op registration | `csrc/rocm/torch_bindings.cpp:543-546` | register `fa_rdna2_prefill_paged_varlen_int8` and `fa_rdna2_decode_paged_int8` |
-| binding shim | `vllm/v1/attention/ops/fa_rdna2_backend.py` | the `fa_rdna2_*` wrappers the backend calls |
-| backend gate | `vllm/v1/attention/backends/rdna_attn.py:283`, `:601-605` | open for `int8_per_token_head` |
-| cache split | `vllm/v1/attention/backends/rdna_attn.py:306` + `vllm/v1/attention/ops/paged_attn.py:25-29` | an int8-aware split that strips the scale pad and exposes the scale views |
-| writer | `csrc/rocm/fa_rdna2.cu:4699` | write into vLLM's packed geometry; fix the scale offset at `:4681`/`:4683` |
-| scale lookup | `csrc/rocm/fa_rdna2.cu:443`, `:689` | physical `(block, slot, head)` instead of logical position |
-| decode kernel | `csrc/rocm/fa_rdna2.cu:443` | the `v3_128` pattern (N1), then the native PV (N2) |
-| new dtype (format) | `vllm/config/cache.py`, `vllm/utils/torch_utils.py`, `vllm/v1/kv_cache_interface.py:48` | a `KVQuantMode` for `int8_fp16_block`, and the page-size arithmetic for the scale bytes |
+| op registration | `csrc/rocm/torch_bindings.cpp:464-472` (prefill, already registered for a test), `csrc/rocm/torch_bindings.cpp:646-656` (writer, registered, unused) | register `fa_rdna2_decode_paged_int8` (it has no schema and no `ops.h` declaration) and keep the other two |
+| binding shim | `vllm/v1/attention/ops/fa_rdna2_backend.py` | add int8 wrappers next to the two INT4 ones the backend calls |
+| backend gate | `vllm/v1/attention/backends/rdna_attn.py:764-769`; `vllm/v1/attention/backends/rdna_attn.py:352-357` and `vllm/v1/attention/backends/rdna_attn.py:709-714` as the pattern | list `int8_per_token_head` and give it its own branch, as `int4_fp16_block` has |
+| page spec | `vllm/v1/attention/backends/rdna_attn.py:861-888` | an `int8_per_token_head` branch of `customize_spec` that reserves the scale bytes |
+| cache view | `vllm/v1/attention/backends/rdna_attn.py:359-361` + `vllm/v1/attention/ops/paged_attn.py:25-29` | an int8-aware view that strips the scale pad and exposes the scale views (copy `vllm/v1/attention/ops/int4_fp16_kv_layout.py`) |
+| writer | `csrc/rocm/fa_rdna2.cu:4923` | write into vLLM's packed geometry; fix the scale offset at `csrc/rocm/fa_rdna2.cu:4905`/`csrc/rocm/fa_rdna2.cu:4907` |
+| scale lookup | `csrc/rocm/fa_rdna2.cu:521-522`, `csrc/rocm/fa_rdna2.cu:832-833` | physical `(block, slot, head)` instead of logical position |
+| decode kernel | `csrc/rocm/fa_rdna2.cu:520-526` | the `v3_128` pattern (N1), then the native PV (N2) |
+| new dtype (format) | `vllm/config/cache.py`, `vllm/utils/torch_utils.py`, `vllm/v1/kv_cache_interface.py:61` | a `KVQuantMode` for `int8_fp16_block` next to `INT4_FP16_BLOCK`, and the page-size arithmetic for the scale bytes |
 
 ---
 
@@ -513,7 +599,7 @@ touch.
 
 ## Order of work
 
-1. **Fix the writer offsets** (`:4681`, `:4683`) and write the writer-to-reader
+1. **Fix the writer offsets** (`csrc/rocm/fa_rdna2.cu:4905`, `csrc/rocm/fa_rdna2.cu:4907`) and write the writer-to-reader
    correctness test (H1). This is the cheapest step and it unblocks everything
    else; it is also the step that has never been done.
 2. **Pick the cache geometry** (item 4 above) and make the writer, the reader
@@ -536,14 +622,16 @@ touch.
 Three things already exist in this area and none of them is superseded here:
 
 - **The shipped Triton INT8 path.** `int8_per_token_head` on the Triton
-  backend (`vllm/v1/attention/backends/triton_attn.py:321`). This document is about the RDNA2 backend
+  backend (`vllm/v1/attention/backends/triton_attn.py:345-355`). This document is about the RDNA2 backend
   serving the same dtype, not about replacing the Triton path.
-- **PR #134, "[explore] INT4 + FP16 block scales for the RDNA2 KV cache".**
-  A different element width at a different budget (4.500 bits/value). This
+- **PR #134, "[explore] INT4 + FP16 block scales for the RDNA2 KV cache",
+  and PR #138, its implementation.** A different element width at a different
+  budget (4.500 bits/value), now a serving dtype on `RDNA_ATTN`. This
   document's format is its INT8 sibling and deliberately reuses its codec,
   its measurements and its reasoning about grouping axes; it does not fork
   them. Where the two disagree — the packed zero-point, which does not port
-  to INT8 — this document says so.
+  to INT8 — this document says so. Its README carries a shorter INT8 section;
+  see "What changed" above.
 - **The INT8 ISA study** in the parent project
   (`.omo/plans/rdna2-int8-isa-benchmark/isa-report.md`), and the legacy
   `humanwork-legacy` commit `3baecdb516` it studied. This document does not
@@ -588,8 +676,8 @@ And one thing that is *not* prior work but might look like it:
 
 ## Reproducing the numbers
 
-The INT8 SNR rows come from PR #134's codec, which is not on this branch.
-From a checkout that has it:
+The INT8 SNR rows come from PR #134's codec, which is on this branch
+(`docs/explore/kv-int4-fp16-scales/reference_codec.py`). From the repository root:
 
 ```bash
 python3 - <<'PY'
@@ -630,7 +718,9 @@ numbers in this document were checked.
 
 ## AI assistance
 
-This draft was written with AI assistance. Every `file:line` reference above
-was checked against `origin/rdna_extras` at `30d6e82dcd`, and the numbers come
-from the committed codec rather than from the author. No hardware measurement
-was taken for this PR: the V620 cells in `TESTPLAN.md` are empty on purpose.
+This draft was written with AI assistance. Every `path:line` reference above
+was re-read against `origin/rdna_extras` at `1136bb952b` on 2026-11-11 (the
+checker only proves that a line exists; each cited line was read and compared
+with the sentence that cites it). The SNR numbers were re-run from the
+committed codec and match. No hardware measurement was taken for this PR: the
+V620 cells in `TESTPLAN.md` are empty on purpose.

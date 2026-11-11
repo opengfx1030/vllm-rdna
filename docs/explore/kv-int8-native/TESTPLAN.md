@@ -20,7 +20,7 @@ judged against it.
 ## What has to be true
 
 1. **H1 - the writer and the reader agree.** The legacy path's scales were
-   written to the wrong address (`csrc/rocm/fa_rdna2.cu:4681`, `:4683`) and
+   written to the wrong address (`csrc/rocm/fa_rdna2.cu:4905`, `csrc/rocm/fa_rdna2.cu:4907`) and
    read back with a view that reinterpreted the slot dimension as bytes. Until
    a writer-to-reader test exists, every number this path has ever produced is
    uninterpretable. This is the first step and it is not optional.
@@ -164,20 +164,26 @@ implementation steps will use.
 
 ```bash
 # correctness (step 1)
-.venv/bin/python -m pytest tests/quantization/test_per_token_kv_cache.py -v
+python -m pytest tests/quantization/test_per_token_kv_cache.py -v
 
-# serving checks (step 5)
+# serving checks (step 5): the Triton path is the reference; the RDNA_ATTN
+# int8 path exists only after the wiring in README.md is done
 python -m vllm.entrypoints.cli.main serve <model> \
-  --kv-cache-dtype int8_per_token_head --kv-cache-dtype <variant>
+  --kv-cache-dtype <int8_per_token_head | variant>
 
-# throughput sweep (step 2 / 3)
-python -m vllm.entrypoints.cli.main bench throughput \
-  --kv-cache-dtype <variant> --input-len 16384 --output-len 128 \
-  --num-prompts 8 --concurrency 1
+# decode sweep at c=1 (step 2 / 3), against that server;
+# `bench throughput` has no concurrency flag, `bench serve` does
+python -m vllm.entrypoints.cli.main bench serve \
+  --backend openai --endpoint /v1/completions \
+  --base-url http://127.0.0.1:<port> --model <served-model-name> \
+  --dataset-name random --random-input-len 16384 --random-output-len 128 \
+  --num-prompts 8 --max-concurrency 1 --ignore-eos --request-rate inf
 ```
 
 ## Reproducing the synthetic numbers
 
-See the *Reproducing the numbers* section of `README.md`. The codec lives in
-PR #134's branch; the snippet in the README reproduces every INT8 row in this
-document and checks itself against PR #134's published table.
+See the *Reproducing the numbers* section of `README.md`. The codec is in this
+tree (`docs/explore/kv-int4-fp16-scales/reference_codec.py`, PR #134); the
+snippet in the README reproduces every INT8 row in this document and checks
+itself against PR #134's published table. Re-run on 2026-11-11: all eight rows
+match.
