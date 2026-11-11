@@ -827,6 +827,27 @@ def test_standin_digest_cost_matches_the_end_to_end_measurement():
         assert abs(r["model"] - r["measured"]) < 0.3, r
 
 
+def test_standin_row_minus_primary_sits_near_the_first_primary_boot():
+    # the first `primary` boot (arm h1v-int-dd-primarya, tree d11682cba9, c1 ITL 45.10
+    # ms) against the row arm of the verify run (tree 97634f2553, 45.29 ms): +0.19 ms,
+    # one boot each on two trees, so inside the noise.  The model gives the rule +0.27
+    # ms at c1 and +0.55 ms at the two-request cell on either calibration: the same
+    # sign, and the measured c1 pair is within 0.15 ms of it.
+    rows = pm.standin_dispatch_rows(pm.Assume())
+    assert len(rows) == 4
+    for r in rows:
+        assert 0.2 < r["model"] < 0.7, r
+    c1 = [r for r in rows if r["measured"] is not None]
+    assert len(c1) == 2 and all(r["case"] == "c1" for r in c1)
+    for r in c1:
+        assert round(r["measured"], 2) == 0.19
+        assert abs(r["model"] - r["measured"]) < 0.15, r
+    # the model's rule effect is the same on both calibrations (the step difference
+    # does not depend on the latency scale)
+    assert rows[0]["model"] == pytest.approx(rows[2]["model"])
+    assert rows[1]["model"] == pytest.approx(rows[3]["model"])
+
+
 def test_routing_stage2_with_correlated_rows_does_not_help_h2():
     s2 = pm.routing_stage2(pm.Assume())
     base = s2["central routing"]

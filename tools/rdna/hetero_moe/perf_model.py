@@ -1740,6 +1740,11 @@ STANDIN = (("c1", 1, 45.29), ("c8 cell, two requests resident", 2, 51.52))
 # The first compiled run (tree 23e1edb1c7: no digest, non-deterministic hub MoE) had
 # 43.9 and 50.2 ms.
 STANDIN_DIGEST_OFF = (44.61, 50.72)
+# The first `primary` boot (arm `h1v-int-dd-primarya`, tree d11682cba9, plan H1v.W1 with
+# the K defaults for both rules): c1 median ITL in ms.  The row arm it is set against is
+# `STANDIN` (tree 97634f2553): one boot each on two trees, 4 prompts, so no speed claim.
+# No c8 cell was run under `primary`.
+STANDIN_PRIMARY_C1 = 45.10
 STANDIN_ASSUME: dict[str, Any] = dict(
     routing="t10c", dispatch="row", digest=True, pcie_bw=INTERIM_BW
 )
@@ -1798,6 +1803,24 @@ def standin_digest_rows(base: Assume) -> list[dict]:
     return out
 
 
+def standin_dispatch_rows(base: Assume) -> list[dict]:
+    """Decision 16 on the stand-in: the model's step with the row rule minus the step
+    with the primary copy only (ms, per calibration) at the two cases of `STANDIN`,
+    against the c1 difference of the first `primary` boot (`STANDIN_PRIMARY_C1`; the
+    c8 cell has no `primary` arm, `measured` is None there)."""
+    out = []
+    for calib, anchor in CALIBRATIONS:
+        a, t = standin_setup(base, anchor)
+        primary = replace(a, dispatch="primary")
+        for case, users, row_ms in STANDIN:
+            out.append(
+                dict(calib=calib, case=case,
+                     model=step_ms_at(t, users, a) - step_ms_at(t, users, primary),
+                     measured=row_ms - STANDIN_PRIMARY_C1 if users == 1 else None)
+            )  # fmt: skip
+    return out
+
+
 def md_standin(base: Assume) -> str:
     a = replace(base, pcie_bw=INTERIM_BW)
     head = ["rows T", "model us (x8, 4 servers)", "loopback us", "delta",
@@ -1825,7 +1848,14 @@ def md_standin(base: Assume) -> str:
         [r["calib"], r["case"], f"{r['model']:+.2f}", f"{r['measured']:+.2f}"]
         for r in standin_digest_rows(base)
     ]
-    return "\n\n".join([table(head, body), table(head2, body2), table(head3, body3)])
+    head4 = ["calibration", "case", "model row minus primary ms", "measured ms"]
+    body4 = [
+        [r["calib"], r["case"], f"{r['model']:+.2f}",
+         "-" if r["measured"] is None else f"{r['measured']:+.2f}"]
+        for r in standin_dispatch_rows(base)
+    ]  # fmt: skip
+    tables = [table(head, body), table(head2, body2), table(head3, body3)]
+    return "\n\n".join([*tables, table(head4, body4)])
 
 
 # Engines of each deployment (keys of `topos`); the levers apply to hub engines.
@@ -1995,6 +2025,7 @@ def stage_plan(base: Assume) -> dict:
         asbuilt=asbuilt_ladder(base),
         standin=standin_rows(base),
         standin_digest=standin_digest_rows(base),
+        standin_dispatch=standin_dispatch_rows(base),
         loopback_interim=loopback_rows(
             replace(base, pcie_bw=INTERIM_BW), INTERIM_LOOPBACK_US, INTERIM_D
         ),
