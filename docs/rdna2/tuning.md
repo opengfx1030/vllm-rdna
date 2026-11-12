@@ -356,7 +356,7 @@ QSA ring alignment requirements remain independent of graph sizes.
 | Env | Default | Notes |
 | --- | --- | --- |
 | `VLLM_USE_RDNA2_FA` | 0 | 1 pins `RDNA_ATTN` (FA-RDNA2) on gfx10x when no backend is set. |
-| `VLLM_FA_RDNA2_GQA_DECODE` | 0 (launcher `ATTN=fa`: 1) | GQA-grouped decode kernel. |
+| `VLLM_FA_RDNA2_GQA_DECODE` | 0 (launcher `ATTN=fa`: 1) | GQA-grouped decode kernel for head_dim 256 and group sizes 2 to 8, used once rows × KV heads ≥ 4 (a TP4 27B rank: four decode, verify or mixed-batch rows). Bit-identical to the per-head kernel; 1.4x to 2.6x faster attention forward at four or more rows. Flash-Next's QSA layers never reach it. [Validation](fa-gqa-decode-validation-2026-11-11.md). |
 | `VLLM_FA_RDNA2_GQA_MODE` | subgroup | GQA prefill mode. `subgroup` was measured faster than varlen/splitk. |
 | `VLLM_FA_RDNA2_SPLIT_DECODE` | 1 | Split-K decode for MTP-verify and mixed batches (gated to ≤ 256 query×head rows). |
 | `VLLM_FA_RDNA2_VERIFY_FULL_GRAPH` | 1 | Capture MTP-verify steps as FULL graphs (`UNIFORM_BATCH`). |

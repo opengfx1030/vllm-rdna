@@ -86,7 +86,7 @@ These are shell variables in the `.env` files. They become flags. They are not e
 | `MTP` | Speculative tokens. `0` is plain decode. The capture ladder becomes `(MTP+1) × {1,2,4,8}` unless `CG_SIZES` is set. | `2` on the MTP recipes. The tuning guide says to keep the ladder on powers of two. |
 | `SPEC_CONFIG` | Replaces the MTP JSON and keeps that capture ladder. | `flashnext-dflash2` sets it. Override with a local drafter path. |
 | `DFLASH_TOKENS` | Draft depth for `flashnext-dflash2` (default 3). Read from the caller environment while the recipe loads. | `3` favors 1k/512 at c=8; `2` favors 16k/1k at c=8 (recipe comment). |
-| `ATTN` | `fa` → `RDNA_ATTN` and `VLLM_FA_RDNA2_GQA_DECODE=1`. `triton` → Triton AMD FA. `none` → the launcher does not pass `--attention-backend`. | Leave `fa` on the Flash-Next and 27B recipes. |
+| `ATTN` | `fa` → `RDNA_ATTN` and `VLLM_FA_RDNA2_GQA_DECODE=1`. `triton` → Triton AMD FA. `none` → the launcher does not pass `--attention-backend`. | Leave `fa` on the Flash-Next and 27B recipes. Only the 27B recipes run the GQA decode kernel; the Flash-Next full-attention layers use QSA ([validation](../rdna2/fa-gqa-decode-validation-2026-11-11.md)). |
 | `MAXLEN` | `--max-model-len`. Empty uses the model's own context. | Lower it when KV memory is tight. |
 | `MIN_MAXLEN` | Refuse to start when `MAXLEN` is set below this. | `full` sets 32768. |
 | `BLOCK_SIZE` | `--block-size`. | 1024 on the current Flash-Next and 27B recipes; 16 on `full`. |
