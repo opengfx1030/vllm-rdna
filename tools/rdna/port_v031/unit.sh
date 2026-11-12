@@ -6,6 +6,8 @@
 #     TAG=baseline-028 GPU=8 bash tools/rdna/port_v031/unit.sh
 #   SKIP='gdn_prefill_kkt' bash tools/rdna/port_v031/unit.sh   # skip a file
 #   ONLY='gdn_prefill_kkt' TAG=kkt bash tools/rdna/port_v031/unit.sh
+#   (gdn_prefill_kkt and test_gdn_prefill_rdna2 skip themselves by default
+#    because of a recorded GPU hang; opt in with VLLM_RUN_GDN_KKT_HANG_TEST=1)
 #
 # Summary: ~/w4a8_runs/port-v031/unit-$TAG/summary.txt
 set -uo pipefail
