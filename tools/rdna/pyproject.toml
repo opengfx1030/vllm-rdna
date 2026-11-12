@@ -1,0 +1,30 @@
+# pciescope packaging (the only installable thing under tools/rdna).
+# On the box:  python3.12 -m venv ~/Apps/pciescope-venv &&
+#              ~/Apps/pciescope-venv/bin/pip install -e 'tools/rdna[mcp,tui,dev]'
+# Then:        ~/Apps/pciescope-venv/bin/python -m pciescope topo
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pciescope"
+version = "0.1.0"
+description = "PCIe fabric monitor and probe for par1-cs25 (PEX88096 switches, GPU links)"
+requires-python = ">=3.11"
+# The core (topo, snap, watch, report, trace export, measure) is stdlib only.
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2"]
+tui = ["textual>=0.80"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+pciescope = "pciescope.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pciescope*"]
+
+[tool.setuptools.package-data]
+pciescope = ["data/*.json"]
