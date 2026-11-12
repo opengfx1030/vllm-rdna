@@ -99,6 +99,7 @@ tests/tools/test_v620_tuning_coverage.py  # fork-only V620 (gfx1030) tuning tabl
 tests/v1/ple_offload/test_exl3_ngram_ring.py  # fork-only exl3 ngram ring decode, CPU unit test; not in CI
 tests/v1/ple_offload/test_ple_quant_gather.py  # fork-only PLE sidecar, skipped on the v0.31 port; not in CI
 tests/tools/test_stall_probe.py  # fork-only stall probe tool, CPU unit test against a fake server; not in CI
+tests/tools/test_concurrency_probe.py  # fork-only concurrency probe tool, CPU unit test against a fake completions server; not in CI
 tests/tools/test_moe_placement.py  # fork-only MoE placement analysis tool, CPU unit test; not in CI
 tests/tools/test_tunableop_missing.py  # fork-only TunableOp missing-shape harness, CPU unit test; not in CI
 tests/tools/test_topk_kl.py  # fork-only top-k KL / agentic bench quality tools, CPU unit test; not in CI

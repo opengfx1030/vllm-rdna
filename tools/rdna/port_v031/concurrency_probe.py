@@ -20,20 +20,32 @@ Every output (solo included) must also keep a sane mean token logprob
 (--min-mean-lp), which catches a request that is wrong even when alone.
 
 Each output is compared token for token with its solo output. fp16 kernels
-can flip a greedy choice when the batch shape changes, but only where the
-top logits are nearly tied, and the alternative continuation stays fluent.
-Corrupted state instead flips confident tokens and/or degrades the text.
-At the first divergence the probe records the solo run's margin between its
-choice and the other run's choice (top-5 logprobs), the mean logprob of both
-continuations from that point, and a garbage check of the continuation:
+can flip a greedy choice when the batch shape changes, and the packed-fp16
+atomics of the production MoE epilogue do it between two identical requests,
+because their sum depends on arrival order. A flip near a tie is therefore
+expected, and a flat distribution can move its runner-up by a nat or more, so
+one run being sure of its token proves nothing. Corrupted state flips tokens
+both runs are sure of and/or degrades the text. At the first divergence the
+probe reads each run's margin between its own token and the other run's token
+from the top-20 logprobs (a token outside them is only bounded by the 20th
+entry, shown as ">"), the mean logprob of both continuations from that point,
+and a garbage check of the continuation:
 
   WARN near-tie : margin <= --tie-nats
   WARN soft     : margin <= --fail-nats, fluent continuation
+  WARN soft     : the flip is after the solo run's stop token: --ignore-eos
+                  forces tokens that serving never shows (looked up by one
+                  normal-stop request, made only for a flip that would fail)
   WARN noise    : margin > --fail-nats, but a second solo run of the same
                   prompt already flips at the same token (measured noise)
-  FAIL          : margin > --fail-nats (or not in the solo top-5), or the
-                  continuation's mean logprob drops by > --max-lp-drop nats
-                  vs solo, or it looks like garbage (repeats, salad)
+  FAIL          : margin > --fail-nats, or the continuation's mean logprob
+                  drops by > --max-lp-drop nats vs solo, or it looks like
+                  garbage (repeats, salad)
+
+The margin is min(solo, got) when the two solo runs differ in their logprobs
+(a noisy server, the default MoE epilogue), and the solo margin alone when
+they agree to the last bit (the deterministic MoE epilogue: there nothing but
+the batch explains a flip).
 
   python tools/rdna/port_v031/concurrency_probe.py \\
       --url http://127.0.0.1:8000/v1/completions --model m
@@ -47,6 +59,10 @@ import sys
 import threading
 import time
 import urllib.request
+from typing import NamedTuple
+
+# Top logprobs requested per step. vLLM serves up to 20 by default.
+TOP_LOGPROBS = 20
 
 PROMPTS = [
     "The capital of France is",
@@ -85,16 +101,21 @@ def long_prompt(k: int, sentences: int) -> str:
 
 
 def complete(
-    url: str, model: str, prompt: str, max_tokens: int, ignore_eos: bool = True
+    url: str,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    ignore_eos: bool = True,
+    top: int = TOP_LOGPROBS,
 ) -> dict:
-    """Greedy completion: tokens, their logprobs and the top-5 per step."""
+    """Greedy completion: tokens, their logprobs and the top-``top`` per step."""
     body = {
         "model": model,
         "prompt": prompt,
         "max_tokens": max_tokens,
         "temperature": 0,
         "ignore_eos": ignore_eos,
-        "logprobs": 5,
+        "logprobs": top,
         "return_tokens_as_token_ids": True,
     }
     req = urllib.request.Request(
@@ -104,11 +125,11 @@ def complete(
         choice = json.load(resp)["choices"][0]
     lp = choice.get("logprobs") or {}
     tokens = lp.get("tokens") or list(choice["text"])
-    top = lp.get("top_logprobs") or [{} for _ in tokens]
+    top_lps = lp.get("top_logprobs") or [{} for _ in tokens]
     token_lps = lp.get("token_logprobs") or [0.0 for _ in tokens]
     return {
         "tokens": list(tokens),
-        "top": [t or {} for t in top],
+        "top": [t or {} for t in top_lps],
         "lps": [x if x is not None else 0.0 for x in token_lps],
         "text": choice["text"],
         "finish_reason": choice.get("finish_reason"),
@@ -116,7 +137,7 @@ def complete(
     }
 
 
-def run_parallel(jobs, url, model, ignore_eos=True):
+def run_parallel(jobs, url, model, ignore_eos=True, top=TOP_LOGPROBS):
     """jobs: list of (key, prompt, max_tokens, start_delay_s)."""
     results: dict = {}
     errors: dict = {}
@@ -125,7 +146,7 @@ def run_parallel(jobs, url, model, ignore_eos=True):
     def worker(key, prompt, max_tokens, delay):
         time.sleep(max(0.0, delay - (time.monotonic() - t0)))
         try:
-            results[key] = complete(url, model, prompt, max_tokens, ignore_eos)
+            results[key] = complete(url, model, prompt, max_tokens, ignore_eos, top)
         except Exception as e:  # noqa: BLE001
             errors[key] = repr(e)
 
@@ -166,11 +187,101 @@ def first_divergence(ref: dict, got: dict) -> int | None:
     return next((i for i in range(n) if ref["tokens"][i] != got["tokens"][i]), None)
 
 
-def compare(ref: dict, got: dict, args, noise_at: int | None = None) -> tuple[str, str]:
+class Margins(NamedTuple):
+    """How sure each run was of its own token at a divergence, in nats."""
+
+    solo: float
+    got: float
+    solo_exact: bool = True
+    got_exact: bool = True
+
+    @property
+    def exact(self) -> bool:
+        return self.solo_exact and self.got_exact
+
+
+def flip_margins(ref: dict, got: dict, i: int) -> Margins:
+    """How sure each run was of its own token at the first divergence ``i``.
+
+    ``solo`` is the solo run's logprob of its token minus its logprob of the
+    other run's token, ``got`` the same for the other run, both from the
+    reported top-k. A token missing from a run's top-k only bounds that margin
+    from below (by the distance to the k-th entry), which the ``*_exact``
+    fields record. A run without logprobs is infinitely sure.
+    """
+    a, b = ref["tokens"][i], got["tokens"][i]
+
+    def margin(top: dict, mine, other) -> tuple[float, bool]:
+        if mine not in top:
+            return float("inf"), False
+        if other in top:
+            return top[mine] - top[other], True
+        return top[mine] - min(top.values()), False
+
+    solo, solo_exact = margin(ref["top"][i] if i < len(ref["top"]) else {}, a, b)
+    other, other_exact = margin(got["top"][i] if i < len(got["top"]) else {}, b, a)
+    return Margins(solo, other, solo_exact, other_exact)
+
+
+def same_input_noise(first: dict, second: dict) -> tuple[float, bool]:
+    """Run-to-run noise of the server for one prompt, from two identical solo
+    requests: ``(biggest, diverged)``, the largest logprob difference of one
+    token over the steps where both runs share the prefix (the first diverging
+    step included) and whether the two runs chose different tokens. A server
+    that is run-to-run deterministic gives (0.0, False)."""
+    n = min(len(first["tokens"]), len(second["tokens"]))
+    stop = first_divergence(first, second)
+    biggest = 0.0
+    for j in range(n if stop is None else stop + 1):
+        top1 = first["top"][j] if j < len(first["top"]) else {}
+        top2 = second["top"][j] if j < len(second["top"]) else {}
+        for tok, lp in top1.items():
+            if tok in top2:
+                biggest = max(biggest, abs(lp - top2[tok]))
+    return biggest, stop is not None
+
+
+def fmt_margin(value: float, exact: bool) -> str:
+    if value == float("inf"):
+        return "no logprobs"
+    return f"{value:.3f}" if exact else f">{value:.3f}"
+
+
+def stop_index(ref: dict, natural: dict) -> int | None:
+    """Where the solo run ``ref``, which was forced past the stop token, would
+    have stopped: the first occurrence of the stop token that ``natural`` (the
+    same prompt run with normal stopping) ended on. None if it ran to the
+    length limit or the forced run never produced that token."""
+    if natural.get("finish_reason") != "stop" or not natural["tokens"]:
+        return None
+    return next(
+        (j for j, t in enumerate(ref["tokens"]) if t == natural["tokens"][-1]), None
+    )
+
+
+def compare(
+    ref: dict,
+    got: dict,
+    args,
+    noise_at: int | None = None,
+    noisy: bool = False,
+    stop_at: int | None = None,
+) -> tuple[str, str]:
     """Return (status, detail) for ``got`` against the solo ``ref``.
 
     ``noise_at`` is where a second solo run of the same prompt already
     diverged; a margin-only divergence at that token is run-to-run noise.
+
+    ``noisy`` says the server is not run-to-run deterministic (identical solo
+    requests give different logprobs, as with the packed-fp16 CAS MoE
+    epilogue). A flip there is a failure only if both runs are sure of their
+    own token, i.e. min(solo margin, got margin) > --fail-nats: one run
+    sitting on a near-tie is what the noise does. On a bit-identical server
+    any flip the solo run is sure about fails.
+
+    ``stop_at`` is the index of the solo run's stop token (see stop_index). A
+    flip after it is in the continuation --ignore-eos forces and serving never
+    shows: reported, not judged.
     """
     n = min(len(ref["tokens"]), len(got["tokens"]))
     stop_note = ""
@@ -190,8 +301,8 @@ def compare(ref: dict, got: dict, args, noise_at: int | None = None) -> tuple[st
         a, b = ref["tokens"][i], got["tokens"][i]
         if a == b:
             continue
-        top = ref["top"][i] if i < len(ref["top"]) else {}
-        margin = top[a] - top[b] if (a in top and b in top) else None
+        margins = flip_margins(ref, got, i)
+        margin = min(margins.solo, margins.got) if noisy else margins.solo
         ref_lp = mean(ref["lps"][i:n])
         got_lp = mean(got["lps"][i:n])
         garbage = looks_like_garbage(got["text"])
@@ -206,16 +317,22 @@ def compare(ref: dict, got: dict, args, noise_at: int | None = None) -> tuple[st
             # A fluent loop (e.g. a list re-stating one sentence) after a
             # near-tie keeps the solo's confidence; corrupted state does not.
             repeat_note, garbage = f", repetitive but fluent ({garbage})", None
-        m = "not in solo top-5" if margin is None else f"margin {margin:.3f}"
+        m = (
+            f"margin solo {fmt_margin(margins.solo, margins.solo_exact)} "
+            f"got {fmt_margin(margins.got, margins.got_exact)}"
+        )
         detail = (
             f"token {i}/{n}: {m}, continuation mean lp {got_lp:.2f} "
             f"vs solo {ref_lp:.2f}{repeat_note}{stop_note}"
         )
+        if stop_at is not None and i > stop_at:
+            note = f"after the solo stop token at {stop_at}, not judged"
+            return "soft", f"{detail}; {note}"
         if garbage:
             return "FAIL", f"{detail}, garbage: {garbage}"
         if ref_lp - got_lp > args.max_lp_drop:
             return "FAIL", f"{detail}, quality drop"
-        if margin is None or margin > args.fail_nats:
+        if margin > args.fail_nats:
             if noise_at == i:
                 return "noise", f"{detail}, same flip in solo2"
             return "FAIL", detail
@@ -268,15 +385,22 @@ def main() -> int:
         default=-2.5,
         help="FAIL any output (solo included) whose mean token logprob is lower",
     )
+    ap.add_argument(
+        "--top-logprobs",
+        type=int,
+        default=TOP_LOGPROBS,
+        help="top logprobs requested per step; a flip's margins are read from them",
+    )
     ap.add_argument("--verbose", action="store_true", help="print texts on failure")
     args = ap.parse_args()
     prompts = PROMPTS[: args.num_prompts]
     n = len(prompts)
     t_start = time.monotonic()
+    top = args.top_logprobs
 
     try:
         solo = {
-            i: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos)
+            i: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos, top)
             for i, p in enumerate(prompts)
         }
     except Exception as e:  # noqa: BLE001
@@ -286,7 +410,7 @@ def main() -> int:
         print("RESULT FAIL: solo requests fail")
         return 1
     solo2 = {
-        i: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos)
+        i: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos, top)
         for i, p in enumerate(prompts)
     }
     together, err_t = run_parallel(
@@ -294,6 +418,7 @@ def main() -> int:
         args.url,
         args.model,
         args.ignore_eos,
+        top,
     )
     # Churn: short and long requests interleaved with staggered starts, so
     # early finishers free slots that later arrivals take while long
@@ -304,11 +429,13 @@ def main() -> int:
         i = (k * 3) % n
         mt = min(lengths[k % len(lengths)], args.max_tokens)
         churn_jobs.append(((k, i), prompts[i], mt, 0.15 * k))
-    churned, err_c = run_parallel(churn_jobs, args.url, args.model, args.ignore_eos)
+    churned, err_c = run_parallel(
+        churn_jobs, args.url, args.model, args.ignore_eos, top
+    )
 
     longs = [long_prompt(k, args.long_sentences) for k in range(args.long_prompts)]
     long_solo = {
-        k: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos)
+        k: complete(args.url, args.model, p, args.max_tokens, args.ignore_eos, top)
         for k, p in enumerate(longs)
     }
     long_together, err_l = run_parallel(
@@ -316,6 +443,7 @@ def main() -> int:
         args.url,
         args.model,
         args.ignore_eos,
+        top,
     )
 
     if args.save_results:
@@ -340,11 +468,36 @@ def main() -> int:
     # Where the second solo run diverged from the first: the measured
     # run-to-run noise of this server for each prompt.
     noise_pos = {i: first_divergence(solo[i], solo2[i]) for i in range(n)}
+    # A server whose identical solo requests agree to the last bit (the
+    # deterministic MoE epilogue) is judged on the solo margin alone; any other
+    # server is noisy, and there a flip needs both runs to be sure of it.
+    spreads = [same_input_noise(solo[i], solo2[i]) for i in range(n)]
+    noise_max = max((s for s, _ in spreads), default=0.0)
+    noisy = noise_max > 0.0 or any(diverged for _, diverged in spreads)
+
+    natural: dict = {}
+
+    def stop_after(prompt, ref):
+        """Index of the stop token in the forced solo run ``ref``: one request
+        per prompt that stops normally, made only for a flip that would fail."""
+        if prompt not in natural:
+            try:
+                natural[prompt] = complete(
+                    args.url, args.model, prompt, args.max_tokens, False, top
+                )
+            except Exception:  # noqa: BLE001
+                natural[prompt] = None
+        return None if natural[prompt] is None else stop_index(ref, natural[prompt])
 
     def check(phase, key, i, got, ref_set=None):
         ref = (ref_set or solo)[i]
         noise_at = noise_pos.get(i) if ref_set is None else None
-        status, detail = compare(ref, got, args, noise_at)
+        status, detail = compare(ref, got, args, noise_at, noisy)
+        flip_at = first_divergence(ref, got)
+        if status == "FAIL" and noisy and args.ignore_eos and flip_at is not None:
+            stop_at = stop_after((prompts if ref_set is None else longs)[i], ref)
+            if stop_at is not None and flip_at > stop_at:
+                status, detail = compare(ref, got, args, noise_at, noisy, stop_at)
         got_lp = mean(got["lps"])
         if got_lp < args.min_mean_lp:
             status, detail = "FAIL", f"{detail}; output mean lp {got_lp:.2f}"
@@ -384,13 +537,18 @@ def main() -> int:
 
     print("\n".join(lines))
     total = sum(counts.values())
+    server = (
+        f"run-to-run noise {noise_max:.2f} nats, a flip fails if both runs are sure"
+        if noisy
+        else "run-to-run bit-identical, a flip fails if the solo run is sure"
+    )
     print(
         f"RESULT {'PASS' if counts['FAIL'] == 0 else 'FAIL'}: {counts['FAIL']} "
         f"failing, {counts['tie']} near-tie, {counts['soft']} soft, "
         f"{counts['noise']} solo-noise, "
         f"{counts['ok']} identical of {total} checks "
         f"({time.monotonic() - t_start:.1f}s; tie <= {args.tie_nats}, "
-        f"fail > {args.fail_nats} nats, lp drop > {args.max_lp_drop})"
+        f"fail > {args.fail_nats} nats, lp drop > {args.max_lp_drop}; {server})"
     )
     return 0 if counts["FAIL"] == 0 else 1
 
