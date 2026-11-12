@@ -28,6 +28,14 @@
 //
 // Output y [M, HV * V] fp16 is today's out_proj input. Null / padded slots
 // (index <= 0) write y = 0 and leave both states untouched.
+//
+// LeapQuant (mono_gdn_lq_rdna2, VLLM_RDNA_GDN_LEAPQUANT=1): the recurrent
+// state is a LeapQuant blob per (block, head) (gdn_leapquant_layout.cuh),
+// normalized beforehand by gdn_lq_normalize_rdna2. Each tile rebuilds its 32
+// rows from the home blob srow[0] (INT8 residual + compensator + replay of
+// `cursor` records), runs the same math, and appends one record per token
+// (u rows per tile, k and g by tile 0) instead of storing per-token states;
+// tile 0 sets pending = T.
 
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -37,6 +45,8 @@
 #include <hip/hip_fp16.h>
 #include <cstdio>
 #include <cstdlib>
+
+#include "gdn_leapquant_layout.cuh"
 
 namespace gdn_fused {
 
@@ -65,6 +75,9 @@ struct Args {
   const float* dtb;   // [HV]
   float* ssm;         // [slots, HV, V, K] fp32
   long ss_slot;
+  uint8_t* lq;  // LeapQuant blobs [slots, HV, nbytes] (LQ) or null
+  long lq_slot, lq_head;
+  rdna2_lq::LqLayout lql;
   const int* sidx;  // non-spec [N]; spec [N, T]
   long sidx_seq;
   const int* nacc;    // spec or null
@@ -187,7 +200,7 @@ __device__ __forceinline__ float ksum8(float x) {
   return x;
 }
 
-template <int KMAP, bool DIAG>
+template <int KMAP, bool DIAG, bool LQ>
 __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
   const int seq = blockIdx.x / a.HV, hv = blockIdx.x % a.HV;
   const int tile = blockIdx.y, h = hv / (a.HV / a.H);
@@ -221,7 +234,9 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
     return;
   }
   const int acc_i = accepted - 1;
-  const long slot0 = srow[acc_i];
+  // LeapQuant: the running state is the home blob srow[0], whose accepted
+  // records gdn_lq_normalize_rdna2 has already committed.
+  const long slot0 = LQ ? cslot : (long)srow[acc_i];
   if (slot0 <= 0 || slot0 >= a.slots) {
     if (tile == 0)  // null / padded: y = 0
       for (int t = 0; t < T; t++)
@@ -266,7 +281,45 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
 
   // ---- 2. gated delta rule
   float hs[16];
-  {
+  uint8_t* blob = nullptr;
+  int lq_c = 0, lq_nrec = 0;
+  if constexpr (LQ) {
+    using namespace rdna2_lq;
+    const LqLayout& L = a.lql;
+    blob = a.lq + slot0 * a.lq_slot + (long)hv * a.lq_head;
+    const int* hdr = lq_ptr<int>(blob, L.header);
+    lq_c = lq_header_ok(hdr[0], hdr[1], L) ? hdr[0] : 0;
+    lq_nrec = min(T, L.cap - lq_c);
+    const float bs = lq_ptr<float>(blob, L.bscale)[o_v];
+    const float* csm = lq_ptr<float>(blob, L.csmooth);
+    const int8_t* zr = lq_ptr<int8_t>(blob, L.z) + (long)o_v * kK;
+#pragma unroll
+    for (int j = 0; j < 16; j++) hs[j] = (float)zr[KIDX(j)] * bs * csm[KIDX(j)];
+    const half* ck = lq_ptr<half>(blob, L.comp_k);
+    const half* cu = lq_ptr<half>(blob, L.comp_u);
+    for (int cc = 0; cc < L.r; cc++) {
+      const float u = __half2float(cu[cc * kV + o_v]);
+#pragma unroll
+      for (int j = 0; j < 16; j++)
+        hs[j] += u * __half2float(ck[cc * kK + KIDX(j)]);
+    }
+    const half* rk = lq_ptr<half>(blob, L.rec_k);
+    const half* ru = lq_ptr<half>(blob, L.rec_u);
+    const float* rg = lq_ptr<float>(blob, L.rec_g);
+    for (int r = 0; r < lq_c; r++) {
+      // exp2 form: the same replay as gdn_lq_decode_rdna2
+      const float d = exp2f(rg[r] * 0x1.715476p+0f);
+      const float u = __half2float(ru[r * kV + o_v]);
+#pragma unroll
+      for (int j = 0; j < 16; j++)
+        hs[j] = hs[j] * d + u * __half2float(rk[r * kK + KIDX(j)]);
+    }
+    if constexpr (DIAG) {
+#pragma unroll
+      for (int j = 0; j < 16; j++)
+        if (!finite32(hs[j])) diagnose(a, 4, hs[j], bos, slot0);
+    }
+  } else {
     const float* p = a.ssm + slot0 * a.ss_slot + ((long)hv * kV + o_v) * kK;
 #pragma unroll
     for (int j = 0; j < 16; j++) {
@@ -332,11 +385,26 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
       else if (!finite32(__half2float(o16)))
         diagnose(a, 8, oa, tok, slot0);
     }
-    const long slot_t = spec ? srow[t] : slot0;
-    if (slot_t > 0 && slot_t < a.slots) {
-      float* p = a.ssm + slot_t * a.ss_slot + ((long)hv * kV + o_v) * kK;
+    if constexpr (LQ) {
+      if (t < lq_nrec) {
+        using namespace rdna2_lq;
+        const int pos = lq_c + t;
+        if (ks == 0)
+          lq_ptr<half>(blob, a.lql.rec_u)[pos * kV + o_v] = __float2half(v2);
+        if (tile == 0 && v_local == 0) {
+          half* rk = lq_ptr<half>(blob, a.lql.rec_k) + pos * kK;
 #pragma unroll
-      for (int j = 0; j < 16; j++) st_state(p + KIDX(j), hs[j]);
+          for (int j = 0; j < 16; j++) rk[KIDX(j)] = __float2half(kk[j]);
+          if (ks == 0) lq_ptr<float>(blob, a.lql.rec_g)[pos] = -A * softplus;
+        }
+      }
+    } else {
+      const long slot_t = spec ? srow[t] : slot0;
+      if (slot_t > 0 && slot_t < a.slots) {
+        float* p = a.ssm + slot_t * a.ss_slot + ((long)hv * kV + o_v) * kK;
+#pragma unroll
+        for (int j = 0; j < 16; j++) st_state(p + KIDX(j), hs[j]);
+      }
     }
     // this tile's 32 outputs + their sum of squares (one lane per v row)
     float sq = 0.f;
@@ -358,6 +426,11 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
           &a.ssq[(tok * a.HV + hv) * (kV / kBV) + tile]) = tot;
     }
     __syncthreads();
+  }
+  if constexpr (LQ) {
+    // Other tiles read only the cursor word, which no tile changes here.
+    if (tile == 0 && tid == 0)
+      rdna2_lq::lq_ptr<int>(blob, a.lql.header)[1] = lq_nrec;
   }
 
   // ---- 3. the last tile of this (sequence, head) normalizes the head
@@ -401,19 +474,23 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
 
 }  // namespace gdn_fused
 
+namespace {
+
 // y = gated-RMSNorm(delta-rule(conv(qkvz))) for a decode / verify batch.
 // Non-spec: sidx [N] int32 (N == M), nacc / qsl empty. Spec: sidx [N, T]
 // int32, nacc [N], qsl [N + 1]. scratch: uint8 >= mono_gdn_rdna2_scratch_bytes,
-// zero-initialized once (the kernel leaves its counters zero).
-void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
-                    const torch::Tensor& conv_w, const torch::Tensor& conv_b,
-                    torch::Tensor& conv_state, torch::Tensor& ssm_state,
-                    const torch::Tensor& A_log, const torch::Tensor& dt_bias,
-                    const torch::Tensor& norm_w, const torch::Tensor& sidx,
-                    const torch::Tensor& nacc, const torch::Tensor& qsl,
-                    torch::Tensor& y, torch::Tensor& scratch,
-                    int64_t num_k_heads, double scale, double eps,
-                    int64_t gate_sigmoid) {
+// zero-initialized once (the kernel leaves its counters zero). lql: null for
+// the fp32 state [slots, HV, 128, 128], else the LeapQuant blob layout of a
+// uint8 state [slots, HV, nbytes].
+void mono_gdn_impl(const torch::Tensor& qkvz, const torch::Tensor& ba,
+                   const torch::Tensor& conv_w, const torch::Tensor& conv_b,
+                   torch::Tensor& conv_state, torch::Tensor& ssm_state,
+                   const torch::Tensor& A_log, const torch::Tensor& dt_bias,
+                   const torch::Tensor& norm_w, const torch::Tensor& sidx,
+                   const torch::Tensor& nacc, const torch::Tensor& qsl,
+                   torch::Tensor& y, torch::Tensor& scratch,
+                   int64_t num_k_heads, double scale, double eps,
+                   int64_t gate_sigmoid, const rdna2_lq::LqLayout* lql) {
   using namespace gdn_fused;
   const int M = qkvz.size(0);
   const int HV = ssm_state.size(1);
@@ -436,12 +513,25 @@ void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
   TORCH_CHECK(conv_state.dim() == 3 && conv_state.size(1) == CD &&
                   conv_state.scalar_type() == at::kHalf,
               "mono_gdn_rdna2: conv state (slots, CD, len)");
-  TORCH_CHECK(ssm_state.dim() == 4 && ssm_state.size(2) == kV &&
-                  ssm_state.size(3) == kK &&
-                  ssm_state.scalar_type() == at::kFloat &&
-                  ssm_state.stride(3) == 1 && ssm_state.stride(2) == kK &&
-                  ssm_state.stride(1) == (int64_t)kV * kK,
-              "mono_gdn_rdna2: ssm state [slots, HV, 128, 128] fp32");
+  if (lql == nullptr) {
+    TORCH_CHECK(ssm_state.dim() == 4 && ssm_state.size(2) == kV &&
+                    ssm_state.size(3) == kK &&
+                    ssm_state.scalar_type() == at::kFloat &&
+                    ssm_state.stride(3) == 1 && ssm_state.stride(2) == kK &&
+                    ssm_state.stride(1) == (int64_t)kV * kK,
+                "mono_gdn_rdna2: ssm state [slots, HV, 128, 128] fp32");
+  } else {
+    TORCH_CHECK(ssm_state.dim() == 3 && ssm_state.scalar_type() == at::kByte &&
+                    ssm_state.size(2) == lql->total &&
+                    ssm_state.stride(2) == 1 &&
+                    ssm_state.stride(0) % rdna2_lq::LQ_ALIGN == 0 &&
+                    ssm_state.stride(1) % rdna2_lq::LQ_ALIGN == 0 &&
+                    reinterpret_cast<uintptr_t>(ssm_state.data_ptr()) %
+                            rdna2_lq::LQ_ALIGN ==
+                        0,
+                "mono_gdn_lq_rdna2: LeapQuant state uint8 [slots, HV, ",
+                lql->total, "], 16-byte aligned");
+  }
   TORCH_CHECK(H > 0 && HV % H == 0 && A_log.numel() == HV &&
                   dt_bias.numel() == HV && A_log.scalar_type() == at::kFloat &&
                   dt_bias.scalar_type() == at::kFloat,
@@ -495,8 +585,15 @@ void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
   a.cs_tok = conv_state.stride(2);
   a.alog = A_log.data_ptr<float>();
   a.dtb = dt_bias.data_ptr<float>();
-  a.ssm = ssm_state.data_ptr<float>();
-  a.ss_slot = ssm_state.stride(0);
+  if (lql == nullptr) {
+    a.ssm = ssm_state.data_ptr<float>();
+    a.ss_slot = ssm_state.stride(0);
+  } else {
+    a.lq = ssm_state.data_ptr<uint8_t>();
+    a.lq_slot = ssm_state.stride(0);
+    a.lq_head = ssm_state.stride(1);
+    a.lql = *lql;
+  }
   a.sidx = sidx.data_ptr<int>();
   a.sidx_seq = sidx.dim() > 1 ? sidx.stride(0) : 1;
   a.nacc = spec ? nacc.data_ptr<int>() : nullptr;
@@ -524,22 +621,68 @@ void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
   }
   const size_t lds = (size_t)tmax * (2 * kK + kBV) * sizeof(float);
   const dim3 grid(N * HV, kV / kBV);
-  if (diagnostics) {
-    if (!spec && M > 16)
-      hipLaunchKernelGGL((gdn_fused_k<0, true>), grid, dim3(kThreads), lds,
-                         stream, a);
+  if (lql != nullptr) {
+    // KMAP 0: 16 contiguous k columns per lane, one 16-byte INT8 row read.
+    if (diagnostics)
+      hipLaunchKernelGGL((gdn_fused_k<0, true, true>), grid, dim3(kThreads),
+                         lds, stream, a);
     else
-      hipLaunchKernelGGL((gdn_fused_k<1, true>), grid, dim3(kThreads), lds,
-                         stream, a);
+      hipLaunchKernelGGL((gdn_fused_k<0, false, true>), grid, dim3(kThreads),
+                         lds, stream, a);
+  } else if (diagnostics) {
+    if (!spec && M > 16)
+      hipLaunchKernelGGL((gdn_fused_k<0, true, false>), grid, dim3(kThreads),
+                         lds, stream, a);
+    else
+      hipLaunchKernelGGL((gdn_fused_k<1, true, false>), grid, dim3(kThreads),
+                         lds, stream, a);
   } else {
     if (!spec && M > 16)
-      hipLaunchKernelGGL((gdn_fused_k<0, false>), grid, dim3(kThreads), lds,
-                         stream, a);
+      hipLaunchKernelGGL((gdn_fused_k<0, false, false>), grid, dim3(kThreads),
+                         lds, stream, a);
     else
-      hipLaunchKernelGGL((gdn_fused_k<1, false>), grid, dim3(kThreads), lds,
-                         stream, a);
+      hipLaunchKernelGGL((gdn_fused_k<1, false, false>), grid, dim3(kThreads),
+                         lds, stream, a);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+}  // namespace
+
+void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
+                    const torch::Tensor& conv_w, const torch::Tensor& conv_b,
+                    torch::Tensor& conv_state, torch::Tensor& ssm_state,
+                    const torch::Tensor& A_log, const torch::Tensor& dt_bias,
+                    const torch::Tensor& norm_w, const torch::Tensor& sidx,
+                    const torch::Tensor& nacc, const torch::Tensor& qsl,
+                    torch::Tensor& y, torch::Tensor& scratch,
+                    int64_t num_k_heads, double scale, double eps,
+                    int64_t gate_sigmoid) {
+  mono_gdn_impl(qkvz, ba, conv_w, conv_b, conv_state, ssm_state, A_log, dt_bias,
+                norm_w, sidx, nacc, qsl, y, scratch, num_k_heads, scale, eps,
+                gate_sigmoid, nullptr);
+}
+
+// The same fused decode core on LeapQuant blobs (VLLM_RDNA_GDN_LEAPQUANT=1).
+// blob: uint8 [slots, HV, nbytes], normalized by gdn_lq_normalize_rdna2 with
+// the batch's num_accepted (spec) or None (non-spec) right before this call.
+void mono_gdn_lq_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
+                       const torch::Tensor& conv_w, const torch::Tensor& conv_b,
+                       torch::Tensor& conv_state, torch::Tensor& blob,
+                       const torch::Tensor& A_log, const torch::Tensor& dt_bias,
+                       const torch::Tensor& norm_w, const torch::Tensor& sidx,
+                       const torch::Tensor& nacc, const torch::Tensor& qsl,
+                       torch::Tensor& y, torch::Tensor& scratch,
+                       int64_t num_k_heads, double scale, double eps,
+                       int64_t gate_sigmoid, int64_t num_comp, int64_t capacity,
+                       int64_t window) {
+  TORCH_CHECK(num_comp >= 0 && window >= 1 && capacity >= window,
+              "mono_gdn_lq_rdna2: bad LeapQuant layout");
+  rdna2_lq::LqLayout L;
+  L.init(gdn_fused::kV, (int)num_comp, (int)capacity, (int)window, 0);
+  mono_gdn_impl(qkvz, ba, conv_w, conv_b, conv_state, blob, A_log, dt_bias,
+                norm_w, sidx, nacc, qsl, y, scratch, num_k_heads, scale, eps,
+                gate_sigmoid, &L);
 }
 
 int64_t mono_gdn_rdna2_scratch_bytes(int64_t M, int64_t HV, int64_t H) {

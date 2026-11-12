@@ -76,7 +76,10 @@ def generate(args: argparse.Namespace, prompt: str) -> dict:
         "logprobs": args.top,
         "return_tokens_as_token_ids": True,
     }
-    out = post(args.url.rstrip("/") + "/v1/completions", body, args.timeout)
+    url = args.url.rstrip("/")
+    if not url.endswith("/v1/completions"):
+        url += "/v1/completions"
+    out = post(url, body, args.timeout)
     lp = out["choices"][0]["logprobs"]
     ids = [token_id(t) for t in lp["tokens"]]
     top = [
@@ -193,7 +196,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("collect")
-    c.add_argument("--url", required=True)
+    c.add_argument("--url", required=True, help="server base or /v1/completions URL")
     c.add_argument("--model", required=True)
     c.add_argument("--out", required=True)
     c.add_argument("--files", nargs="*")

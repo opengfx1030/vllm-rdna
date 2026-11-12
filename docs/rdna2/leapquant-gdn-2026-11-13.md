@@ -44,21 +44,30 @@ once per token. The FP32 oracle is
 * **Readers of slot 0** (chunked prefill, non-spec decodes) commit
   `min(1, pending)`, the same state the FP32 path reads.
 * **Prefill** materializes the blob to an FP32 `[N, HV, V, K]` initial state,
-  runs the unchanged HIP/Triton chunk kernels, and stores the final state
-  back (`gdn_lq_store_rdna2`). Inside a chunk nothing changes; LeapQuant error
-  enters at chunk boundaries (MAXBAT 2048).
+  runs the unchanged HIP prefill chain (`VLLM_GDN_HIP_PREFILL=1`) and stores
+  the final state back (`gdn_lq_store_rdna2`). Inside a chunk nothing
+  changes; LeapQuant error enters at chunk boundaries (MAXBAT 2048).
 * **Prefix caching (`mamba-align`, V2 runner):** the align precopy/postprocess
   HIP kernels (`v1_mamba_rdna2.cu`, `copy_mamba_state_block`) copy the whole
   blob from the home block and write `cursor + min(bias + 1, pending)` into
   the copy's header, which is exactly the FP32 "copy slot `bias`" rule. The V1
   runner's memcpy specs and the Triton precopy fallback raise instead of
   silently copying wrong bytes.
+* **MonoKernel (`EXTRA_ARGS=--monokernel`):** pure decode and pure verify
+  batches run `gdn_lq_normalize_rdna2` and then `mono_gdn_lq_rdna2`, the
+  `mono_gdn_rdna2` fused conv + delta rule + gated norm launch with the
+  LeapQuant load/append in place of the FP32 state load/store (each 32-row
+  tile rebuilds its rows from the blob; records are written per tile). Batches
+  with prefill take the layer's path as with FP32 state.
+* **HIP only.** Every LeapQuant read and write is one of the kernels above;
+  the FP32-state Triton decode warmup is skipped under the flag (it never
+  runs). Paths the flag does not change (conv update, gated norm outside the
+  MonoKernel) are the recipe's, identical with the flag off.
 * **Cudagraphs:** every op is a fixed-shape launch on the current stream that
   reads its metadata from device tensors, so FULL_AND_PIECEWISE captures it
   like the FP32 kernels.
-* **Refused combinations** (raise at init): mono decode op, fused CUDA spec
-  decode, AITER/FlashInfer GDN, align mode on the V1 runner, head dims other
-  than 128.
+* **Refused combinations** (raise at init): fused CUDA spec decode,
+  AITER/FlashInfer GDN, align mode on the V1 runner, head dims other than 128.
 
 ## Use
 

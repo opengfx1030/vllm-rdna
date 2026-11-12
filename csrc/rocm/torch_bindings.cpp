@@ -192,6 +192,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor! scratch, int num_k_heads, float scale, float eps, "
       "int gate_sigmoid) -> ()");
   rocm_ops.impl("mono_gdn_rdna2", torch::kCUDA, &mono_gdn_rdna2);
+  rocm_ops.def(
+      "mono_gdn_lq_rdna2(Tensor qkvz, Tensor ba, Tensor conv_w, Tensor conv_b, "
+      "Tensor! conv_state, Tensor! blob, Tensor A_log, Tensor dt_bias, "
+      "Tensor norm_w, Tensor sidx, Tensor nacc, Tensor qsl, Tensor! y, "
+      "Tensor! scratch, int num_k_heads, float scale, float eps, "
+      "int gate_sigmoid, int num_comp, int capacity, int window) -> ()");
+  rocm_ops.impl("mono_gdn_lq_rdna2", torch::kCUDA, &mono_gdn_lq_rdna2);
   rocm_ops.def("mono_gdn_rdna2_scratch_bytes(int M, int HV, int H) -> int");
   rocm_ops.impl("mono_gdn_rdna2_scratch_bytes", &mono_gdn_rdna2_scratch_bytes);
   rocm_ops.def(

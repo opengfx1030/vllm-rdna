@@ -1006,10 +1006,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         decode, prefill)."""
         if not leapquant_gdn_enabled():
             return None
-        if self._mono_gdn_op is not None or self.enable_fused_gdn_spec_decode:
+        if self.enable_fused_gdn_spec_decode:
             raise ValueError(
-                "VLLM_RDNA_GDN_LEAPQUANT=1 does not cover the GDN monokernel or "
-                "the fused CUDA spec-decode path"
+                "VLLM_RDNA_GDN_LEAPQUANT=1 does not cover the fused CUDA "
+                "spec-decode path"
             )
         if GDN_AITER_TRITON_AVAILABLE or self._checkpoint_alignment is not None:
             raise ValueError(
@@ -1931,7 +1931,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self._decode_kernels_warmed_up:
             return
         self._decode_kernels_warmed_up = True
-        if not on_rdna_family():
+        if not on_rdna_family() or self._lq_layout is not None:
+            # LeapQuant runs the gdn_lq_* HIP kernels, not these (their FP32
+            # state shapes do not fit the blob), and needs the V2 runner,
+            # whose JIT warmup replays the real decode steps.
             return
 
         device = qkv_or_qkvz.device
@@ -2183,6 +2186,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _lq_normalize(
+        self,
+        blob: torch.Tensor,
+        state_indices: torch.Tensor,
+        num_accepted: torch.Tensor | None,
+    ) -> None:
+        """Commit the previous step's accepted records of the home blobs
+        ``state_indices`` (``num_accepted``; one record for slot-0 readers,
+        ``None``) and fold full windows. Runs before every decode / verify
+        launch, the MonoKernel one included."""
+        layout = self._lq_layout
+        assert layout is not None
+        torch.ops._rocm_C.gdn_lq_normalize_rdna2(
+            blob,
+            state_indices,
+            num_accepted,
+            layout.head_v_dim,
+            layout.num_comp,
+            layout.capacity,
+            layout.window,
+            layout.power_iters,
+        )
+
     def _lq_recurrent(
         self,
         q: torch.Tensor,
@@ -2205,16 +2231,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert layout is not None
         num_reqs = cu_seqlens.shape[0] - 1
         state_indices = state_indices[:num_reqs]
-        torch.ops._rocm_C.gdn_lq_normalize_rdna2(
-            blob,
-            state_indices,
-            num_accepted,
-            layout.head_v_dim,
-            layout.num_comp,
-            layout.capacity,
-            layout.window,
-            layout.power_iters,
-        )
+        self._lq_normalize(blob, state_indices, num_accepted)
         if out is None:
             out = torch.zeros(
                 (1, q.shape[1], v.shape[2], v.shape[3]),

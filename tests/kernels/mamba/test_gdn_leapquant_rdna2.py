@@ -321,3 +321,99 @@ def test_align_precopy_commits_accepted_records():
     lq.leapquant_normalize(L, expect, bias.long() + 1)
     got = _materialize(L, blob, block_table[:, 1].contiguous(), n)
     assert _rel(got, lq.leapquant_materialize(L, expect)) < 1e-5
+
+
+def _mono_inputs(m, conv_len, seed):
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    cd = 2 * H * K + HV * V
+
+    def rn(*s, std):
+        return (torch.randn(*s, generator=g) * std).half().cuda()
+
+    qkvz = rn(m, cd + HV * V, std=0.5)
+    ba = rn(m, 2 * HV, std=1.0)
+    conv = rn(SLOTS_MONO, cd, conv_len, std=0.5)
+    return qkvz, ba, conv
+
+
+SLOTS_MONO = 24
+
+
+@pytest.mark.parametrize("spec", [False, True])
+def test_mono_gdn_leapquant_matches_fp32_mono(spec):
+    """The MonoKernel GDN on LeapQuant blobs (mono_gdn_lq_rdna2) is the FP32
+    MonoKernel (mono_gdn_rdna2) run on the materialized state: same outputs
+    and conv state, and every per-token state the FP32 kernel stores is the
+    blob with that many records committed. Two steps, so the second replays
+    the first one's records."""
+    t = 3 if spec else 1
+    L = _layout(t)
+    n = 4
+    cd = 2 * H * K + HV * V
+    A_log, dt_bias = _params(5)
+    g = torch.Generator(device="cpu").manual_seed(6)
+    conv_w = (torch.randn(cd, 4, generator=g) * 0.3).half().cuda()
+    conv_b = (torch.randn(cd, generator=g) * 0.1).half().cuda()
+    norm_w = (1.0 + torch.randn(V, generator=g) * 0.1).half().cuda()
+    perm = torch.randperm(SLOTS_MONO - 1, generator=g)[: n * t] + 1
+    sidx = perm.int().view(n, t).cuda() if spec else perm.int().cuda()
+    sidx[1] = 0  # null / padded sequence
+    home = (sidx[:, 0] if spec else sidx).contiguous()
+    blob = torch.zeros(SLOTS_MONO, HV, L.nbytes, dtype=torch.uint8, device="cuda")
+    live = home[home > 0]
+    _store(L, torch.randn(live.numel(), HV, V, K, device="cuda") * 0.3, blob, live)
+    empty = torch.empty(0, dtype=torch.int32, device="cuda")
+    qsl = torch.arange(0, n * t + 1, t, dtype=torch.int32, device="cuda")
+    scratch = torch.zeros(
+        int(_ops().mono_gdn_rdna2_scratch_bytes(64, HV, H)),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    nacc = None
+    for step in range(2):
+        qkvz, ba, conv = _mono_inputs(n * t, 3 + t - 1, seed=60 + step)
+        if spec:
+            nacc = torch.tensor([3, 1, 2, 1], dtype=torch.int32, device="cuda")
+            if step == 0:
+                nacc.fill_(1)  # fresh blobs hold no pending records
+        _normalize(L, blob, home, nacc)
+        # FP32 reference: the committed home state at the slot it reads.
+        ssm = torch.zeros(SLOTS_MONO, HV, V, K, device="cuda")
+        if nacc is not None:
+            read = sidx[torch.arange(n, device="cuda"), nacc.long() - 1]
+        else:
+            read = sidx
+        ssm[read.long()] = _materialize(L, blob, home, n)
+        ssm[0] = 0
+        conv_ref, y_ref = conv.clone(), torch.empty(n * t, HV * V).half().cuda()
+        y = torch.empty_like(y_ref)
+        common = (A_log.float(), dt_bias.float(), norm_w, sidx)
+        tail = (empty if not spec else nacc, empty if not spec else qsl)
+        _ops().mono_gdn_rdna2(
+            qkvz, ba, conv_w, conv_b, conv_ref, ssm, *common, *tail, y_ref,
+            scratch, H, K**-0.5, 1e-6, 0,
+        )  # fmt: skip
+        _ops().mono_gdn_lq_rdna2(
+            qkvz, ba, conv_w, conv_b, conv, blob, *common, *tail, y,
+            scratch, H, K**-0.5, 1e-6, 0, R, L.capacity, WINDOW,
+        )  # fmt: skip
+        torch.accelerator.synchronize()
+        assert torch.equal(conv, conv_ref)
+        rows = (home > 0).repeat_interleave(t)
+        assert bool((y[~rows] == 0).all())
+        assert _rel(y[rows], y_ref[rows]) < 2e-3
+        # Each per-token FP32 state is the blob with t + 1 records committed.
+        for acc in range(1, t + 1):
+            trial = blob.clone()
+            _normalize(
+                L,
+                trial,
+                home,
+                torch.full((n,), acc, dtype=torch.int32, device="cuda")
+                if spec
+                else None,
+            )
+            got = _materialize(L, trial, home, n)
+            want = ssm[(sidx[:, acc - 1] if spec else sidx).long()]
+            live_rows = home > 0
+            assert _rel(got[live_rows], want[live_rows]) < 2e-3, (step, acc)
