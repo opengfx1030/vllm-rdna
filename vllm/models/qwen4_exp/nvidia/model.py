@@ -75,6 +75,8 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.qwen4_exp.common.dense_mlp import Qwen4DenseMLP
+from vllm.models.qwen4_exp.common.mlp_selection import uses_dense_mlp
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -255,11 +257,28 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        self.mlp = Qwen4ExpSparseMoeBlock(
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.mlp",
-            reduce_results=not self.use_hc_sequence_parallel,
-        )
+        # Dense Qwen4 checkpoints (the leaked 27B) have no routed experts.
+        # Flash-Next keeps the sparse MoE block: uses_dense_mlp is False for
+        # every config with num_experts set.
+        self.is_dense_mlp = uses_dense_mlp(config)
+        if self.is_dense_mlp:
+            if self.use_sequence_parallel or self.use_hc_sequence_parallel:
+                raise ValueError(
+                    "dense Qwen4 MLP does not support sequence-parallel MoE or "
+                    "HC sequence parallelism"
+                )
+            self.mlp = Qwen4DenseMLP(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_hc_sequence_parallel,
+            )
+        else:
+            self.mlp = Qwen4ExpSparseMoeBlock(
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_hc_sequence_parallel,
+            )
 
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
@@ -693,8 +712,11 @@ class Qwen4ExpForCausalLM(
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
 ):
+    # The QSA indexer is not listed: quant configs read this mapping before the
+    # model is built, and `Qwen4ExpQSAAttention` fuses `indexer.index_qk_proj`
+    # into `qkv_proj` only when it is quantized like q/k/v.
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj", "indexer.index_qk_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -713,12 +735,6 @@ class Qwen4ExpForCausalLM(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
-        if vllm_config.lora_config is not None:
-            # LoRA does not support the merged QKV/indexer projection, so its
-            # packed mapping must keep the indexer separate.
-            self.packed_modules_mapping = self.packed_modules_mapping | {
-                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-            }
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.quant_config = vllm_config.quant_config
@@ -963,12 +979,6 @@ class Qwen4ExpForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
         config: Qwen4ExpConfig = vllm_config.model_config.hf_config
-        if vllm_config.lora_config is not None:
-            # LoRA does not support the merged QKV/indexer projection, so its
-            # packed mapping must keep the indexer separate.
-            self.packed_modules_mapping = self.packed_modules_mapping | {
-                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-            }
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is None:
