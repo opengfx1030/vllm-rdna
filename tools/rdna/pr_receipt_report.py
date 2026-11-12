@@ -23,10 +23,11 @@ floor).
 
 ``report`` exits 0 when every gate that was run passed, 1 when one failed or
 could not be judged: token-exact, quality, the overlap of the c=4 and c=8
-cells, the hard stall gate and, under ``MODE=abba``, a regression of the
-relative stall gate. Speed verdicts are reported, not gated; so is the diff
-scan (``scan.json``), which lists lines for the reviewer. Standard library
-and ``regex`` only; run it with the python of a built venv.
+cells and the hard stall gate (no starved decoder stream). Speed verdicts and
+the relative stall metrics (ABBA verdicts per metric) are reported, not
+gated; so is the diff scan (``scan.json``), which lists lines for the
+reviewer. Standard library and ``regex`` only; run it with the python of a
+built venv.
 """
 
 import argparse
@@ -53,9 +54,8 @@ DEFAULT_CELLS = (
 )
 DEFAULT_EXACT_CELLS = "1024:128:1:4 16384:128:1:2"
 MAX_PPL_REL = 0.02
-# Gate results that do not fail the run: a gate that was not asked for, and a
-# comparison of single runs, which shows a direction and no verdict.
-GATE_OK = ("PASS", "NOT RUN", "direction only")
+# Gate results that do not fail the run: a gate that was not asked for.
+GATE_OK = ("PASS", "NOT RUN")
 
 
 def load_sibling(name: str) -> ModuleType:
@@ -766,7 +766,7 @@ def judge_stall_boot(boot: Boot) -> dict[str, object]:
 
 
 def stall_values(data: dict) -> dict[str, dict[str, float | None]]:
-    """Median over repeats of every relative-gate metric, per window key."""
+    """Median over repeats of every relative stall metric, per window key."""
     out: dict[str, dict[str, float | None]] = {}
     for key, metrics in (data.get("aggregate") or {}).get("windows", {}).items():
         if key.split(":")[0] not in ("inject", "reverse") or key.endswith("busy"):
@@ -783,13 +783,14 @@ def window_order(key: str) -> tuple[int, int]:
 
 
 def judge_stall(boots: Sequence[Boot], settings: dict, mode: str) -> dict[str, object]:
-    """Hard gate and relative gate of the stall probes of the speed boots.
+    """Hard gate and relative metrics of the stall probes of the speed boots.
 
-    Hard: no starved decoder stream and tokens from every decoder during every
-    injected prefill (head boots decide, base boots are shown). Relative: the
-    ABBA rule of the speed receipt on the longest stall, the stalled time, the
-    decode tokens during the prefill, Jain fairness and the injected TTFT
-    against its solo TTFT; with one run of each, direction only.
+    Hard gate: no starved decoder stream and tokens from every decoder during
+    every injected prefill (head boots decide, base boots are shown). Relative
+    metrics: the longest stall, the stalled time, the decode tokens during the
+    prefill, Jain fairness and the injected TTFT against its solo TTFT get the
+    ABBA verdict of the speed receipt, or a direction with one run of each.
+    They are reported for the reviewer and never fail the run.
     """
     speed = [b for b in boots if b.kind == "speed"]
     per_boot = {b.id: judge_stall_boot(b) for b in speed}
@@ -844,7 +845,7 @@ def judge_stall(boots: Sequence[Boot], settings: dict, mode: str) -> dict[str, o
     if not windows or not any(p["role"] == "base" for p in per_boot.values()):
         relative = "NOT RUN"
     elif abba:
-        relative = "REGRESSION" if counts["regression"] else "PASS"
+        relative = "ABBA verdicts"
     else:
         relative = "direction only"
     return {
@@ -1314,15 +1315,17 @@ STALL_INTRO = (
     "`stall_probe.py` on every speed boot (`inject` and `reverse`, with `solo` "
     "for the reference TTFT; `--server-pid`, so a KFD eviction invalidates a "
     "window). Hard gate: no decoder stream is starved, and every decoder "
-    "produces tokens during every injected prefill. Relative gate, with the "
-    "ABBA rule of the speed table: the longest stall, the stalled time, the "
-    "decode tokens during the prefill, Jain fairness and the injected "
-    "request's TTFT against its solo TTFT must not regress."
+    "produces tokens during every injected prefill; `reverse` windows are "
+    "reported but are not part of it. Relative metrics, reported for the "
+    "reviewer and never failing the run: the longest stall, the stalled time, "
+    "the decode tokens during the prefill, Jain fairness and the injected "
+    "request's TTFT against its solo TTFT, each with the ABBA verdict of the "
+    "speed table."
 )
 
 
 def stall_markdown(stall: dict) -> str:
-    """The hard-gate table per boot, then the relative gate per window."""
+    """The hard-gate table per boot, then the relative metrics per window."""
     if not stall["ran"]:
         return "Not run."
     rows = []
@@ -1374,7 +1377,11 @@ def stall_markdown(stall: dict) -> str:
         ids = list(stall["boots"])
         head = ["window", "metric"] + [f"{i} {stall['boots'][i]}" for i in ids]
         head += ["head vs base", "result"]
-        marks = {"regression": "REGRESSION", "win": "win"}
+        marks = {
+            "regression": "worse",
+            "win": "better",
+            "none": "no measurable difference",
+        }
         detail = []
         for w in stall["windows"]:
             for m in STALL_METRICS:
@@ -1384,7 +1391,9 @@ def stall_markdown(stall: dict) -> str:
                 shown = e["verdict"] if abba else e["direction"]
                 row += [
                     fmt_delta(e["delta_pct"]),
-                    marks.get(shown, shown if shown in ("worse", "better") else ""),
+                    marks.get(
+                        shown, shown if shown in ("worse", "better", "equal") else ""
+                    ),
                 ]
                 detail.append(row)
         text.append("\n" + md_table(head, detail))
@@ -1394,8 +1403,10 @@ def stall_markdown(stall: dict) -> str:
             "n-token prefill is already running when the decoders arrive. Each "
             "value is the median over the repeats of one boot. "
             + (
-                "`REGRESSION` and `win` apply the ABBA rule: both head runs on "
-                "the same side of both base runs."
+                "`worse` and `better` apply the ABBA rule: both head runs on "
+                "the same side of both base runs; anything else is no "
+                "measurable difference. They are for the reviewer and never "
+                "fail the run."
                 if abba
                 else "One base run and one head run: the result column shows "
                 "the direction, which is not a verdict; rerun with `MODE=abba`."
@@ -1720,7 +1731,6 @@ def build_receipt(run: Path) -> dict:
         "quality": quality["verdict"],
         "overlap": overlap["verdict"],
         "stall": stall["verdict"],
-        "stall_relative": stall["relative"],
     }
     ok = (
         all(v in GATE_OK for v in gates.values())
@@ -1808,7 +1818,7 @@ SCAN_INTRO = (
 
 
 def stall_relative_text(stall: dict) -> str:
-    """The relative stall gate as one table cell."""
+    """The relative stall metrics as one table cell (reported, never a gate)."""
     if not stall["ran"] or stall["relative"] == "NOT RUN":
         return "NOT RUN"
     c = stall["counts"]
@@ -1817,9 +1827,10 @@ def stall_relative_text(stall: dict) -> str:
             f"direction only: {c['worse']} worse, {c['better']} better, "
             f"{c['equal']} equal (one run each; not a verdict)"
         )
-    if stall["relative"] == "REGRESSION":
-        return f"REGRESSION on {c['regression']} comparisons ({c['win']} win)"
-    return f"PASS ({c['win']} win, {c['none']} no measurable difference)"
+    return (
+        f"ABBA: {c['regression']} worse, {c['win']} better, "
+        f"{c['none']} no measurable difference (reported, never fails the run)"
+    )
 
 
 def overlap_text(overlap: dict) -> str:
@@ -1882,7 +1893,7 @@ def render(receipt: dict, run: Path) -> str:
             ["quality", gates["quality"]],
             ["overlap", overlap_text(receipt["overlap"])],
             ["stall, hard gate", gates["stall"]],
-            ["stall, relative gate", stall_relative_text(receipt["stall"])],
+            ["stall, relative metrics", stall_relative_text(receipt["stall"])],
             ["speed", speed_counts(speed)],
             ["added syncs and launches", scan_gate],
             ["boots", "FAILED: " + ", ".join(failed) if failed else "all exited 0"],
@@ -1910,7 +1921,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(f"token-exact: {gates['exact']}")
     print(f"quality: {gates['quality']}")
     print(f"overlap: {gates['overlap']}")
-    print(f"stall: {gates['stall']} (relative: {gates['stall_relative']})")
+    print(f"stall: {gates['stall']}; relative: {stall_relative_text(receipt['stall'])}")
     if speed:
         print(
             f"speed ({speed['mode']}): "

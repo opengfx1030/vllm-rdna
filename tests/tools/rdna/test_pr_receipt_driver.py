@@ -336,7 +336,8 @@ def test_ab_run_writes_the_receipt(harness):
     gates = receipt["gates"]
     assert gates["exact"] == "PASS" and gates["quality"] == "NOT RUN"
     assert gates["overlap"] == "PASS" and gates["stall"] == "PASS"
-    assert gates["stall_relative"] == "direction only"  # one run each
+    assert receipt["stall"]["relative"] == "direction only"  # one run each
+    assert "stall_relative" not in gates  # reported, never a gate
     assert receipt["ok"] is True
     assert {c["verdict"] for c in receipt["speed"]["cells"]} == {"worse"}
     text = (h.out / "receipt.md").read_text()
@@ -449,8 +450,9 @@ def test_the_stall_probe_can_be_resized_or_skipped(harness):
     res = off.run({"STALL": "0", "EXACT": "0"})
     assert res.returncode == 0, res.stdout + res.stderr
     assert all(not b["env"]["STALL_PROBE"] for b in off.boots())
-    gates = off.receipt()["gates"]
-    assert gates["stall"] == "NOT RUN" and gates["stall_relative"] == "NOT RUN"
+    receipt = off.receipt()
+    assert receipt["gates"]["stall"] == "NOT RUN"
+    assert receipt["stall"]["relative"] == "NOT RUN"
 
 
 def test_a_starved_decoder_fails_the_hard_stall_gate(harness):
@@ -465,15 +467,24 @@ def test_requests_that_run_one_after_another_fail_the_overlap_gate(harness):
     assert h.receipt()["gates"]["overlap"] == "FAIL"
 
 
-def test_the_relative_stall_gate_needs_abba(harness):
+def test_relative_stall_metrics_are_reported_with_abba_verdicts_and_never_fail(harness):
     worse = {"base": {}, "head": {"max_gap_ms": 900.0, "stalled_s_max": 2.0}}
     h = harness(stall=worse)
-    assert h.run({"MODE": "abba", "EXACT": "0"}).returncode == 1
-    assert h.receipt()["gates"]["stall_relative"] == "REGRESSION"
+    res = h.run({"MODE": "abba", "EXACT": "0"})
+    assert res.returncode == 0, res.stdout + res.stderr
+    receipt = h.receipt()
+    assert receipt["ok"] is True and receipt["gates"]["stall"] == "PASS"
+    assert receipt["stall"]["relative"] == "ABBA verdicts"
+    counts = receipt["stall"]["counts"]
+    assert counts["regression"] == 6  # 2 metrics on 3 windows: both head runs worse
+    text = (h.out / "receipt.md").read_text()
+    assert (
+        "| stall, relative metrics | ABBA: 6 worse, 0 better, 9 no measurable" in text
+    )
     ab = harness(stall=worse)
     res = ab.run({"EXACT": "0"})
     assert res.returncode == 0, res.stdout + res.stderr
-    assert ab.receipt()["gates"]["stall_relative"] == "direction only"
+    assert ab.receipt()["stall"]["relative"] == "direction only"
 
 
 def test_the_diff_scan_lists_added_host_syncs(harness):

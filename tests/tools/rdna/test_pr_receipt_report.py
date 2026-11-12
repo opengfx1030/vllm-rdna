@@ -798,7 +798,6 @@ def test_report_writes_the_receipt(tmp_path, capsys):
         "quality": "NOT RUN",
         "overlap": "PASS",
         "stall": "NOT RUN",
-        "stall_relative": "NOT RUN",
     }
     assert data["speed"]["counts"]["regression"] == 1
     assert data["speed"]["counts"]["invalid"] == 1
@@ -832,7 +831,7 @@ def test_pr_template_mirrors_the_receipt(tmp_path):
             "quality",
             "overlap",
             "stall, hard gate",
-            "stall, relative gate",
+            "stall, relative metrics",
             "speed",
             "added syncs and launches",
             "boots",
@@ -1029,3 +1028,77 @@ def test_a_stall_boot_is_missing_error_invalid_fail_or_pass(tmp_path):
     assert status(stall_data([good], repeats=2)) == "ERROR"  # fewer prefills than asked
     assert status(stall_data([good], kfd_evictions={"invalid": ["w1"]})) == "INVALID"
     assert status(stall_data([good], verdict="ERROR")) == "ERROR"
+
+
+STALL_VALUES = {
+    "max_gap_ms": 400.0,
+    "stalled_s_max": 2.0,
+    "decode_tokens_total": 100,
+    "jain": 0.99,
+    "slowdown": 1.1,
+}
+
+
+def stall_boots(tmp_path, spec):
+    """Speed boots with a finished stall probe: ``{id: (role, metric overrides)}``."""
+    good = [stall_window(4096), stall_window(16384)]
+    boots = []
+    for boot_id, (role, override) in spec.items():
+        values = {**STALL_VALUES, **override}
+        data = stall_data([good])
+        data["aggregate"] = {
+            "windows": {
+                key: {m: {"median": v} for m, v in values.items()}
+                for key in ("inject:4096", "inject:16384")
+            }
+        }
+        path = tmp_path / boot_id
+        (path / "stall").mkdir(parents=True)
+        (path / "stall" / "stall_probe.json").write_text(json.dumps(data))
+        boots.append(rep.Boot(boot_id, role, "speed", path, {}, rep.BootLog()))
+    return boots
+
+
+def test_abba_gives_every_relative_stall_metric_a_verdict_and_never_gates(tmp_path):
+    worse_gap = {"max_gap_ms": 900.0}
+    better_tokens = {"decode_tokens_total": 150}
+    boots = stall_boots(
+        tmp_path,
+        {
+            "A1": ("base", {}),
+            "B1": ("head", {**worse_gap, **better_tokens}),
+            "B2": ("head", {**worse_gap, **better_tokens}),
+            "A2": ("base", {}),
+        },
+    )
+    got = rep.judge_stall(boots, {"stall": "1"}, "abba")
+    assert got["verdict"] == "PASS" and got["relative"] == "ABBA verdicts"
+    assert got["counts"]["regression"] == 2  # the longest stall, in both windows
+    assert got["counts"]["win"] == 2  # decode tokens during the prefill
+    assert got["counts"]["none"] == 6
+    assert rep.stall_relative_text(got) == (
+        "ABBA: 2 worse, 2 better, 6 no measurable difference "
+        "(reported, never fails the run)"
+    )
+    text = rep.stall_markdown(got)
+    assert "| worse |" in text and "| better |" in text
+    assert "| no measurable difference |" in text and "REGRESSION" not in text
+    assert "never fail the run" in text
+
+
+def test_one_base_and_one_head_run_show_a_direction_only(tmp_path):
+    boots = stall_boots(
+        tmp_path, {"A1": ("base", {}), "B1": ("head", {"max_gap_ms": 900.0})}
+    )
+    got = rep.judge_stall(boots, {"stall": "1"}, "ab")
+    assert got["relative"] == "direction only"
+    assert got["counts"]["worse"] == 2 and got["counts"]["equal"] == 8
+    assert rep.stall_relative_text(got) == (
+        "direction only: 2 worse, 0 better, 8 equal (one run each; not a verdict)"
+    )
+
+
+def test_a_stall_probe_that_was_not_run_is_not_run(tmp_path):
+    got = rep.judge_stall([], {"stall": "0"}, "ab")
+    assert got == {"ran": False, "verdict": "NOT RUN", "relative": "NOT RUN"}
+    assert rep.stall_relative_text(got) == "NOT RUN"

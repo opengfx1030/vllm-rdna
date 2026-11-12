@@ -20,8 +20,8 @@
 # EXACT=1               token-exact gate (default); 0 skips it.
 # QUALITY=1             adds the quality gate (default 0).
 # STALL=1               stall probe on every speed boot (default; 0 skips it): the
-#                       hard gate and the relative gate of the contract.
-# STALL_REPEATS=3       repeats of each scenario (the gates use the median);
+#                       hard gate (no starved decoder) and the relative metrics.
+# STALL_REPEATS=3       repeats of each scenario (the median of them is used);
 #                       STALL_LENS=4096,16384 prefill lengths; STALL_DECODERS:
 #                       decoders (default: the recipe's --max-num-seqs less one, so
 #                       that the injected prefill has a slot).
@@ -62,9 +62,9 @@
 #
 # Results: $OUT/receipt.md and receipt.json (tables of the PR template), the raw
 # boots/<id>/ directories (stall/ holds the stall probe), plans/, quality/. Exit 0:
-# every gate that ran passed (token-exact, quality, overlap, hard stall gate, and under
-# MODE=abba a regression of the relative stall gate); 1: a gate or a boot failed; 2: bad
-# input; 3: aborted (busy GPUs, thermal limit). Speed verdicts are reported, never gated.
+# every gate that ran passed (token-exact, quality, overlap, hard stall gate); 1: a
+# gate or a boot failed; 2: bad input; 3: aborted (busy GPUs, thermal limit). Speed
+# verdicts and the relative stall metrics (ABBA verdicts) are reported, never gated.
 set -uo pipefail
 
 TOOLS=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

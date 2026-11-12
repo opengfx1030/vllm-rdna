@@ -50,9 +50,11 @@ These boots use the recipe's production configuration, so that the floor measure
 Serving is concurrent and asynchronous: requests overlap, and decoders keep producing tokens while another request prefills. A change must not add a sequential step.
 
 - Overlap: the c=4 and c=8 speed cells report every request's submit, first-token and last-token times, and the aggregate output tok/s at c=N divided by the aggregate at c=1 on the same boot. A cell fails when its requests run one after another (never two generating at once) or when the aggregate output at c=N is not above c=1.
-- Stalls: `tools/rdna/port_v031/stall_probe.py` runs on every speed boot, with the scenarios `inject` and `reverse`, prefill lengths 4096 and 16384 and `--server-pid`. The decoders are the recipe's max concurrency less the slot of the injected request (`--max-num-seqs` minus one): the probe cannot inject into a full batch.
+- Stalls: `tools/rdna/port_v031/stall_probe.py` runs on every speed boot, with the scenarios `inject` and `reverse`, prefill lengths 4096 and 16384 and `--server-pid`.
+    - Decoders: the recipe's `--max-num-seqs` less one, because the injected request needs the last slot.
+    - Reverse windows (the decoders arrive behind a running prefill) are reported and are not part of the hard gate.
     - Hard gate: no starved decoder stream, and tokens from every decoder during every injected prefill.
-    - Relative gate, by the ABBA rule: the longest stall, the total stalled time, the decode tokens during the prefill, the Jain fairness and the injected request's TTFT against its solo TTFT must not regress.
+    - Relative metrics: the longest stall, the stalled time of the worst decoder, the decode tokens during the prefill, the Jain fairness and the injected request's TTFT against its solo TTFT. They are reported for the reviewer with the ABBA verdict of the speed receipt (worse, better, or no measurable difference per metric) and never fail the run.
 - Async: the diff is scanned for added host syncs and unchecked launches, and the lines are listed in the receipt for the reviewer. In `vllm/`: `synchronize()` (streams and events), `.item()`, `.cpu()`, `.tolist()` and blocking copies. In `csrc/`: launches on the null stream (a `<<<...>>>` launch with fewer than four launch parameters) and launches without `C10_CUDA_KERNEL_LAUNCH_CHECK`. The scan decides nothing; if the per-step path needs a sync, the pull request says where it measures why.
 
 ### Speed receipt
@@ -122,7 +124,7 @@ NOT_RUN="gfx1100, gfx1200" \
 - `CELLS` replaces the speed cells (`"in:out:conc[:prompts] ..."`) and `EXACT_CELLS` the cells whose greedy texts are hashed. A run with fewer cells than the table is a smoke test, and the receipt lists the cells it ran. `DRY_RUN=1` checks the inputs and prints the launch plans and the boots without booting.
 - The stall probe runs on every speed boot: `STALL=0` skips it, `STALL_REPEATS` (default 3) repeats each scenario, `STALL_LENS` (default `4096,16384`) sets the prefill lengths and `STALL_DECODERS` the decoders (default: the recipe's `--max-num-seqs` less one). The speed boots save per-request times (`--save-detailed`) for the overlap check. The diff scan (`tools/rdna/pr_receipt_scan.py`) runs before the boots and needs no GPU.
 - Boots run one at a time, and the exactness boots come first (with `VLLM_RDNA2_MOE_DETERMINISTIC=1`), then the speed boots in production mode. The base-versus-base floor of the quality gate is the second base boot of `MODE=abba`, and an extra base boot in `MODE=ab`.
-- Results are in `$OUT` (the script header gives the default): `receipt.md`, `receipt.json`, `scan.md`, the raw `boots/<id>/` directories (`stall/` holds the stall probe), `plans/` and `quality/`. The exit status is 0 when every gate that ran passed (token-exact, quality, overlap, the hard stall gate and, with `MODE=abba`, the relative stall gate), 1 when a gate or a boot failed, 2 for bad input and 3 when the run was aborted because the GPUs were busy or too hot.
+- Results are in `$OUT` (the script header gives the default): `receipt.md`, `receipt.json`, `scan.md`, the raw `boots/<id>/` directories (`stall/` holds the stall probe), `plans/` and `quality/`. The exit status is 0 when every gate that ran passed (token-exact, quality, overlap and the hard stall gate), 1 when a gate or a boot failed, 2 for bad input and 3 when the run was aborted because the GPUs were busy or too hot.
 - Plan for hours: the default matrix has eight cells per boot, every speed boot also runs the stall probe, and `MODE=abba` boots four times.
 
 What it does not do:
@@ -130,4 +132,4 @@ What it does not do:
 - It does not reserve the GPUs. If you share the machine, take your reservation first. `serve_validate.sh` takes the boot lock and waits for other users' quiet windows when the machine has them.
 - It does not run the kernel reference tests or the task evals that the table asks for. Run them yourself and add their output to the pull request.
 - It does not build the trees. Build each commit in its own tree and venv first.
-- It reports speed verdicts by the ABBA rule but does not fail on a speed regression. The relative stall gate does fail under `MODE=abba`; under `MODE=ab` it shows the direction only. The added-sync scan never fails.
+- It reports the speed and the relative stall verdicts by the ABBA rule (the direction only with `MODE=ab`) but does not fail on them. The added-sync scan never fails.

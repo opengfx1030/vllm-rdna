@@ -26,7 +26,7 @@
 | quality | <!-- PASS / FAIL / NOT RUN --> |
 | overlap | <!-- c=4 and c=8 cells: PASS / FAIL / INVALID / NOT RUN --> |
 | stall, hard gate | <!-- PASS / FAIL / INVALID / ERROR / NOT RUN --> |
-| stall, relative gate | <!-- PASS / REGRESSION / direction only (MODE=ab) / NOT RUN --> |
+| stall, relative metrics | <!-- worse / better / no measurable difference per metric (MODE=abba), direction only (MODE=ab), NOT RUN; reported, never fails --> |
 | speed | <!-- cells: no measurable difference / win / REGRESSION / invalid --> |
 | added syncs and launches | <!-- lines to review / none / NOT RUN --> |
 | boots | <!-- all exited 0, or the boots that failed --> |
@@ -65,7 +65,7 @@
 
 #### Stall probe
 
-<!-- stall_probe.py on every speed boot (inject and reverse, decoders = the recipe's max concurrency less the injected request's slot, prefill 4096 and 16384; a KFD eviction invalidates a window). Hard gate: no starved decoder stream, tokens from every decoder during every injected prefill. Relative gate (ABBA rule): longest stall, stalled time, decode tokens during the prefill, Jain fairness, injected TTFT against solo. -->
+<!-- stall_probe.py on every speed boot (inject and reverse, decoders = the recipe's max concurrency less the injected request's slot, prefill 4096 and 16384; a KFD eviction invalidates a window). Hard gate: no starved decoder stream, tokens from every decoder during every injected prefill (reverse windows are reported, not gated). Relative metrics, reported with the ABBA verdict (worse / better / no measurable difference) and never failing the run: longest stall, stalled time, decode tokens during the prefill, Jain fairness, injected TTFT against solo. -->
 
 #### Added host syncs and launches
 
