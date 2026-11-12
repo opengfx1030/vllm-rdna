@@ -51,6 +51,11 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
+    LeapQuantLayout,
+    leapquant_gdn_enabled,
+    leapquant_gdn_layout,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -769,6 +774,8 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    supports_leapquant_state = True
+
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -985,11 +992,47 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._mono_gdn_op: Any
         self._mono_gdn: Any
         self._mono_gdn_op, self._mono_gdn = mono if mono else (None, None)
+        self._lq_layout = self._init_leapquant(vllm_config)
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def _init_leapquant(self, vllm_config: VllmConfig) -> LeapQuantLayout | None:
+        """LeapQuant GDN state (VLLM_RDNA_GDN_LEAPQUANT=1): the recurrent
+        state is a uint8 blob per (block, head) read by the gdn_lq_* kernels
+        on every path that reads or writes it here (spec verify, non-spec
+        decode, prefill)."""
+        if not leapquant_gdn_enabled():
+            return None
+        if self._mono_gdn_op is not None or self.enable_fused_gdn_spec_decode:
+            raise ValueError(
+                "VLLM_RDNA_GDN_LEAPQUANT=1 does not cover the GDN monokernel or "
+                "the fused CUDA spec-decode path"
+            )
+        if GDN_AITER_TRITON_AVAILABLE or self._checkpoint_alignment is not None:
+            raise ValueError(
+                "VLLM_RDNA_GDN_LEAPQUANT=1 does not cover the AITER GDN path "
+                "or FlashInfer prefill checkpoints"
+            )
+        if (
+            vllm_config.cache_config.mamba_cache_mode == "align"
+            and not vllm_config.use_v2_model_runner
+        ):
+            raise ValueError(
+                "VLLM_RDNA_GDN_LEAPQUANT=1 with mamba align prefix caching "
+                "needs the V2 model runner (its fused align copies commit "
+                "LeapQuant records)"
+            )
+        layout = leapquant_gdn_layout(self.head_k_dim, self.head_v_dim, self.num_spec)
+        logger.info_once(
+            "GDN recurrent state: LeapQuant INT8 (window %d, r %d, %d B/head)",
+            layout.window,
+            layout.num_comp,
+            layout.nbytes,
+        )
+        return layout
 
     def _init_gdn_state_arenas(self) -> None:
         """Permanent arenas on the layer device, before first BeginCapture."""
@@ -2140,6 +2183,63 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _lq_recurrent(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        blob: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        state_indices: torch.Tensor,
+        num_accepted: torch.Tensor | None,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Decode / MTP verify on LeapQuant blobs.
+
+        Commits the previous step's accepted records (``num_accepted``, or one
+        for slot-0 readers), then runs each request's tokens from its home
+        block ``state_indices`` and appends their records."""
+        layout = self._lq_layout
+        assert layout is not None
+        num_reqs = cu_seqlens.shape[0] - 1
+        state_indices = state_indices[:num_reqs]
+        torch.ops._rocm_C.gdn_lq_normalize_rdna2(
+            blob,
+            state_indices,
+            num_accepted,
+            layout.head_v_dim,
+            layout.num_comp,
+            layout.capacity,
+            layout.window,
+            layout.power_iters,
+        )
+        if out is None:
+            out = torch.zeros(
+                (1, q.shape[1], v.shape[2], v.shape[3]),
+                dtype=q.dtype,
+                device=q.device,
+            )
+        torch.ops._rocm_C.gdn_lq_decode_rdna2(
+            q,
+            k,
+            v,
+            a,
+            b,
+            self.A_log,
+            self.dt_bias,
+            out,
+            blob,
+            cu_seqlens,
+            state_indices,
+            self.head_k_dim**-0.5,
+            layout.num_comp,
+            layout.capacity,
+            layout.window,
+        )
+        return out
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -2171,6 +2271,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         if (
             self.enable_packed_recurrent_decode
+            and self._lq_layout is None
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
@@ -2421,7 +2522,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and core_attn_out.dtype == query_spec.dtype
             and core_attn_out.is_contiguous()
         )
-        if spec_sequence_masks is not None:
+        lq = self._lq_layout
+        if spec_sequence_masks is not None and lq is not None:
+            assert spec_state_indices_tensor is not None
+            core_attn_out_spec = self._lq_recurrent(
+                query_spec,
+                key_spec,
+                value_spec,
+                a_spec,
+                b_spec,
+                ssm_state,
+                cu_seqlens=spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_spec_decodes + 1
+                ],
+                state_indices=spec_state_indices_tensor[:, 0],
+                num_accepted=num_accepted_tokens,
+                out=(
+                    core_attn_out[:num_actual_tokens].unsqueeze(0)
+                    if spec_direct
+                    else None
+                ),
+            )
+            last_recurrent_state = None
+        elif spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2455,22 +2578,36 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             query_decode, key_decode, value_decode = split_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
-            core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
-                A_log=self.A_log,
-                a=a[:num_decode_tokens],
-                b=b[:num_decode_tokens],
-                dt_bias=self.dt_bias,
-                q=query_decode,
-                k=key_decode,
-                v=value_decode,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
-                    : attn_metadata.num_decodes + 1
-                ],
-                ssm_state_indices=non_spec_state_indices_tensor,
-                use_qk_l2norm_in_kernel=True,
-            )
+            decode_cu_seqlens = non_spec_query_start_loc[  # type: ignore[index]
+                : attn_metadata.num_decodes + 1
+            ]
+            if lq is not None:
+                core_attn_out_decode = self._lq_recurrent(
+                    query_decode,
+                    key_decode,
+                    value_decode,
+                    a[:num_decode_tokens],
+                    b[:num_decode_tokens],
+                    ssm_state,
+                    cu_seqlens=decode_cu_seqlens,
+                    state_indices=non_spec_state_indices_tensor,  # type: ignore[arg-type]
+                    num_accepted=None,
+                )
+            else:
+                core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
+                    A_log=self.A_log,
+                    a=a[:num_decode_tokens],
+                    b=b[:num_decode_tokens],
+                    dt_bias=self.dt_bias,
+                    q=query_decode,
+                    k=key_decode,
+                    v=value_decode,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=decode_cu_seqlens,
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    use_qk_l2norm_in_kernel=True,
+                )
         else:
             core_attn_out_decode = None
 
@@ -2484,7 +2621,39 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
+            if lq is not None:
+                # Commit the slot-0 record a previous decode left pending, then
+                # expand the blobs into the FP32 initial state of the chunk.
+                torch.ops._rocm_C.gdn_lq_normalize_rdna2(
+                    ssm_state,
+                    prefill_state_indices,
+                    None,
+                    lq.head_v_dim,
+                    lq.num_comp,
+                    lq.capacity,
+                    lq.window,
+                    lq.power_iters,
+                )
+                initial_state = torch.empty(
+                    (
+                        prefill_state_indices.shape[0],
+                        ssm_state.shape[1],
+                        lq.head_v_dim,
+                        lq.head_k_dim,
+                    ),
+                    dtype=torch.float32,
+                    device=ssm_state.device,
+                )
+                torch.ops._rocm_C.gdn_lq_materialize_rdna2(
+                    ssm_state,
+                    initial_state,
+                    prefill_state_indices,
+                    lq.num_comp,
+                    lq.capacity,
+                    lq.window,
+                )
+            else:
+                initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
             with _GdnPrefillTimer("chain"):
                 plan = attn_metadata.flashinfer_checkpoint_plan
@@ -2557,7 +2726,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         recurrent_rows=plan.rows,
                     )
             # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if lq is not None:
+                torch.ops._rocm_C.gdn_lq_store_rdna2(
+                    last_recurrent_state.float().contiguous(),
+                    ssm_state,
+                    prefill_state_indices,
+                    lq.num_comp,
+                    lq.capacity,
+                    lq.window,
+                    lq.power_iters,
+                )
+            else:
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
@@ -2565,6 +2747,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec], dim=1
                 )
+        elif attn_metadata.num_decodes > 0 and lq is not None:
+            core_attn_out_non_spec = self._lq_recurrent(
+                query_non_spec,
+                key_non_spec,
+                value_non_spec,
+                a,
+                b,
+                ssm_state,
+                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_decodes + 1
+                ],
+                state_indices=non_spec_state_indices_tensor,  # type: ignore[arg-type]
+                num_accepted=None,
+            )
+            last_recurrent_state = None
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(

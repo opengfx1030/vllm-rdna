@@ -564,6 +564,27 @@ void gdn_spec_verify_rdna2(
     torch::Tensor num_accepted_tokens,  // [N] int32 or undefined
     double scale);
 
+// LeapQuant INT8 GDN recurrent state (arXiv 2609.38166) for AMD RDNA2.
+// Blob layout and FP32 oracle: vllm/model_executor/layers/mamba/ops/
+// leapquant_gdn.py. blob is uint8 [blocks, HV, nbytes].
+void gdn_lq_normalize_rdna2(torch::Tensor blob, torch::Tensor state_indices,
+                            const std::optional<torch::Tensor>& num_accepted,
+                            int64_t head_v_dim, int64_t num_comp,
+                            int64_t capacity, int64_t window,
+                            int64_t power_iters);
+void gdn_lq_decode_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
+                         torch::Tensor a, torch::Tensor b, torch::Tensor A_log,
+                         torch::Tensor dt_bias, torch::Tensor out,
+                         torch::Tensor blob, torch::Tensor cu_seqlens,
+                         torch::Tensor state_indices, double scale,
+                         int64_t num_comp, int64_t capacity, int64_t window);
+void gdn_lq_materialize_rdna2(torch::Tensor blob, torch::Tensor state,
+                              torch::Tensor state_indices, int64_t num_comp,
+                              int64_t capacity, int64_t window);
+void gdn_lq_store_rdna2(torch::Tensor state, torch::Tensor blob,
+                        torch::Tensor state_indices, int64_t num_comp,
+                        int64_t capacity, int64_t window, int64_t power_iters);
+
 // GDN prefill kernels for AMD RDNA2 (gfx1030). Hand ports of the Triton/FLA
 // chain `chunk_gated_delta_rule_fwd` (chunk.py:23-86) decomposed into 5 HIP
 // kernels; varlen uses cu_seqlens/chunk_indices/chunk_offsets (pass empty

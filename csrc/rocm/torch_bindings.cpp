@@ -362,6 +362,30 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor num_accepted_tokens, float scale) -> ()");
   rocm_ops.impl("gdn_spec_verify_rdna2", torch::kCUDA, &gdn_spec_verify_rdna2);
 
+  // LeapQuant INT8 GDN recurrent state for AMD RDNA2 (gfx1030); opt-in via
+  // VLLM_RDNA_GDN_LEAPQUANT. blob = uint8 [blocks, HV, nbytes].
+  rocm_ops.def(
+      "gdn_lq_normalize_rdna2(Tensor! blob, Tensor state_indices, "
+      "Tensor? num_accepted, int head_v_dim, int num_comp, int capacity, "
+      "int window, int power_iters) -> ()");
+  rocm_ops.impl("gdn_lq_normalize_rdna2", torch::kCUDA,
+                &gdn_lq_normalize_rdna2);
+  rocm_ops.def(
+      "gdn_lq_decode_rdna2(Tensor q, Tensor k, Tensor v, Tensor a, Tensor b, "
+      "Tensor A_log, Tensor dt_bias, Tensor! out, Tensor! blob, "
+      "Tensor cu_seqlens, Tensor state_indices, float scale, int num_comp, "
+      "int capacity, int window) -> ()");
+  rocm_ops.impl("gdn_lq_decode_rdna2", torch::kCUDA, &gdn_lq_decode_rdna2);
+  rocm_ops.def(
+      "gdn_lq_materialize_rdna2(Tensor blob, Tensor! state, "
+      "Tensor state_indices, int num_comp, int capacity, int window) -> ()");
+  rocm_ops.impl("gdn_lq_materialize_rdna2", torch::kCUDA,
+                &gdn_lq_materialize_rdna2);
+  rocm_ops.def(
+      "gdn_lq_store_rdna2(Tensor state, Tensor! blob, Tensor state_indices, "
+      "int num_comp, int capacity, int window, int power_iters) -> ()");
+  rocm_ops.impl("gdn_lq_store_rdna2", torch::kCUDA, &gdn_lq_store_rdna2);
+
   // causal_conv1d_update single-token decode for AMD RDNA2 (gfx1030).
   // Replaces the Triton kernel that captured scratch buffer pointers and
   // page-faulted on cudagraph replay.
