@@ -269,6 +269,64 @@ def test_grouped_normalize_matches_per_layer():
     assert folded > 0, "no fold exercised"
 
 
+def test_normalize_groups_follow_kv_cache_groups():
+    """Hybrid models spread their GDN layers over several KV-cache groups with
+    separate block tables, so one request sits at different slots per group.
+    The shared normalize launch must cover only its own group's layers: the
+    layers normalized group by group in model order must end exactly as
+    normalizing every layer on its own at its group's slots."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+        share_leapquant_normalize_groups,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
+    L = _layout(3)
+    A_log, dt_bias = _params()
+    n, slots = 2, 5
+    names = [f"model.layers.{i}.linear_attn" for i in range(4)]
+    # group 0 = layers 0, 2; group 1 = layers 1, 3; request r at different slots
+    group_of = {name: i % 2 for i, name in enumerate(names)}
+    group_idx = [
+        torch.tensor([1, 3], dtype=torch.int32, device="cuda"),
+        torch.tensor([4, 2], dtype=torch.int32, device="cuda"),
+    ]
+    ctx = {}
+    for i, name in enumerate(names):
+        idx = group_idx[group_of[name]]
+        blob = torch.zeros(slots, HV, L.nbytes, dtype=torch.uint8, device="cuda")
+        _store(L, torch.randn(n, HV, V, K, device="cuda") * 0.5, blob, idx)
+        # 8 steps leave 14 committed + 3 pending records: the commit folds
+        for step in range(8):
+            q, k, v, a, b = _tokens(n, 3, seed=100 * i + step)
+            _normalize(L, blob, idx, torch.full((n,), 2, dtype=torch.int32).cuda())
+            _decode(L, blob, idx, q, k, v, a, b, A_log, dt_bias)
+        layer = QwenGatedDeltaNetAttention.__new__(QwenGatedDeltaNetAttention)
+        torch.nn.Module.__init__(layer)
+        layer._lq_layout = L
+        layer.kv_cache = (None, blob)
+        ctx[name] = layer
+    groups = [
+        KVCacheGroupSpec([n_ for n_ in names if group_of[n_] == g], None)
+        for g in range(2)
+    ]
+    share_leapquant_normalize_groups(names, ctx, groups)
+    assert ctx[names[0]]._lq_group is ctx[names[2]]._lq_group
+    assert ctx[names[0]]._lq_group is not ctx[names[1]]._lq_group
+
+    num_acc = torch.tensor([3, 2], dtype=torch.int32, device="cuda")
+    ref = []
+    for name in names:
+        blob = ctx[name].kv_cache[1].clone()
+        _normalize(L, blob, group_idx[group_of[name]], num_acc)
+        ref.append(blob)
+    for name in names:
+        layer = ctx[name]
+        layer._lq_normalize(layer.kv_cache[1], group_idx[group_of[name]], num_acc)
+    for name, want in zip(names, ref):
+        assert torch.equal(ctx[name].kv_cache[1], want), name
+
+
 def test_normalize_and_decode_replay_in_cuda_graph():
     L = _layout(3)
     A_log, dt_bias = _params()

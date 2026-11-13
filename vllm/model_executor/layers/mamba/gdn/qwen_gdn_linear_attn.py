@@ -5,7 +5,7 @@
 import functools
 import itertools
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any, Literal
 
@@ -96,7 +96,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     scatter_gdn_state_arenas,
     static_gdn_cache_slots,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
@@ -128,46 +128,66 @@ FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
 class _LqNormalizeGroup:
-    """The LeapQuant GDN layers of one model on this rank.
+    """The LeapQuant GDN layers of one KV-cache group on this rank.
 
-    Every layer normalizes its blobs with the same state indices and accepted
-    counts each step (they share one attention metadata), so the first layer
-    of the group normalizes all of them in one launch and the others skip:
-    one launch per step instead of one per layer (~3 us each in a graph).
-    ``offsets`` holds each layer's paged blob address relative to the
-    leader's; it is rebuilt on every ``bind_kv_cache``, which never runs under
+    A KV-cache group shares one block table, so its layers normalize the same
+    state indices with the same accepted counts each step: the first layer
+    normalizes all of them in one launch and the others skip (one launch per
+    group and step instead of one per layer, ~3 us each in a graph). Layers
+    of different groups hold different slots for the same request and never
+    share a launch. ``offsets`` holds each layer's paged blob address relative
+    to the leader's; it is built at KV-cache bind, which never runs under
     capture, so captured graphs only ever see a finished table."""
 
-    def __init__(self) -> None:
-        self.members: dict[int, QwenGatedDeltaNetAttention] = {}
-        self.leader: QwenGatedDeltaNetAttention | None = None
-        self.leader_ptr = 0
-        self.offsets: torch.Tensor | None = None
-
-    def rebuild(self) -> None:
-        layers = [self.members[i] for i in sorted(self.members)]
-        blobs = [layer.kv_cache[1] for layer in layers]
-        ref = blobs[0]
-        uniform = all(
-            b.device == ref.device
-            and b.dtype == ref.dtype
-            and b.shape == ref.shape
-            and b.stride() == ref.stride()
-            for b in blobs
-        )
-        if len(layers) < 2 or not uniform:
-            self.leader, self.leader_ptr, self.offsets = None, 0, None
-            return
+    def __init__(self, layers: list["QwenGatedDeltaNetAttention"]) -> None:
+        ref = layers[0].kv_cache[1]
         self.leader = layers[0]
         self.leader_ptr = ref.data_ptr()
         self.offsets = torch.tensor(
-            [b.data_ptr() - self.leader_ptr for b in blobs],
+            [layer.kv_cache[1].data_ptr() - self.leader_ptr for layer in layers],
             dtype=torch.int64,
             device=ref.device,
         )
 
 
-_LQ_NORMALIZE_GROUPS: dict[str, _LqNormalizeGroup] = {}
+def share_leapquant_normalize_groups(
+    ordered_layer_names: list[str],
+    forward_context: dict[str, Any],
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Give the LeapQuant GDN layers of each KV-cache group one normalize
+    launch per step (see ``_LqNormalizeGroup``). Hybrid models spread their
+    GDN layers over several KV-cache groups, each with its own block table;
+    without the group map every layer keeps its own launch."""
+    layer_to_group = {
+        name: group_idx
+        for group_idx, group in enumerate(kv_cache_groups or ())
+        for name in group.layer_names
+    }
+    by_group: dict[int, list[QwenGatedDeltaNetAttention]] = {}
+    for name in ordered_layer_names:
+        layer = forward_context[name]
+        if (
+            not isinstance(layer, QwenGatedDeltaNetAttention)
+            or layer._lq_layout is None
+        ):
+            continue
+        layer._lq_group = None
+        if name in layer_to_group:
+            by_group.setdefault(layer_to_group[name], []).append(layer)
+    for layers in by_group.values():
+        ref = layers[0].kv_cache[1]
+        if len(layers) < 2 or not all(
+            b.device == ref.device
+            and b.dtype == ref.dtype
+            and b.shape == ref.shape
+            and b.stride() == ref.stride()
+            for b in (layer.kv_cache[1] for layer in layers)
+        ):
+            continue
+        group = _LqNormalizeGroup(layers)
+        for layer in layers:
+            layer._lq_group = group
 
 
 # Scratch buffers reused across GDN prefill calls. The key MUST carry a role
@@ -1077,16 +1097,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             layout.nbytes,
         )
         return layout
-
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        super().bind_kv_cache(kv_cache)
-        if self._lq_layout is None:
-            return
-        root = self.prefix.rsplit(".layers.", 1)[0]
-        group = _LQ_NORMALIZE_GROUPS.setdefault(root, _LqNormalizeGroup())
-        group.members[self.layer_idx] = self
-        group.rebuild()
-        self._lq_group = group
 
     def _init_gdn_state_arenas(self) -> None:
         """Permanent arenas on the layer device, before first BeginCapture."""
@@ -2251,21 +2261,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ``None``) and fold full windows. Runs before every decode / verify
         launch, the MonoKernel one included, and before prefill reads.
 
-        On the paged blobs the group leader normalizes every layer of the
-        group in one launch and the other layers skip; decode arenas are
-        per-layer copies, so they are normalized per layer."""
+        On the paged blobs the leader of the layer's KV-cache group normalizes
+        every layer of that group in one launch and the others skip; decode
+        arenas are per-layer copies, so they are normalized per layer."""
         layout = self._lq_layout
         assert layout is not None
         group = self._lq_group
         offsets = None
-        if group is not None and group.leader is not None and blob is self.kv_cache[1]:
+        if group is not None and blob is self.kv_cache[1]:
             if group.leader is not self:
                 return
             assert blob.data_ptr() == group.leader_ptr, "stale LeapQuant group"
             offsets = group.offsets
-            assert offsets is not None
             logger.info_once(
-                "LeapQuant GDN: one normalize launch covers %d layers",
+                "LeapQuant GDN: one normalize launch per KV-cache group (%d layers)",
                 offsets.numel(),
             )
         torch.ops._rocm_C.gdn_lq_normalize_rdna2(
