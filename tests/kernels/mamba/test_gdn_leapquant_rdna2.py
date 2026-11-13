@@ -230,17 +230,31 @@ def test_trajectory_tracks_fp32_with_rejections(spec):
     )
 
 
-def test_grouped_normalize_matches_per_layer():
-    """One launch over a group of layers (layer_offsets) must leave every
-    layer's blobs exactly as normalizing each layer on its own does, folds
-    and NULL slots included."""
+@pytest.mark.parametrize("page_kib", [None, 512, 1024])
+def test_grouped_normalize_matches_per_layer(page_kib):
+    """Grouped normalization must match per-layer normalization even with
+    padded KV pages, without writing the conv state or unused page bytes."""
     L = _layout(3)
     A_log, dt_bias = _params()
     n, layers = 3, 3
     idx = torch.tensor([1, 0, 2], dtype=torch.int32, device="cuda")
     blobs = []
+    pages = []
     for layer in range(layers):
-        blob = torch.zeros(n, HV, L.nbytes, dtype=torch.uint8, device="cuda")
+        if page_kib is None:
+            blob = torch.zeros(n, HV, L.nbytes, dtype=torch.uint8, device="cuda")
+        else:
+            page = torch.full(
+                (n, page_kib * 1024), 165, dtype=torch.uint8, device="cuda"
+            )
+            # The recurrent state follows the conv window in a unified page.
+            blob = page.as_strided(
+                (n, HV, L.nbytes),
+                (page.stride(0), L.nbytes, 1),
+                storage_offset=25 * 1024,
+            )
+            blob.zero_()
+            pages.append(page)
         blob[0].fill_(7)
         _store(L, torch.randn(n, HV, V, K, device="cuda") * 0.5, blob, idx)
         # 8 steps commit 7 * 2 = 14 records; committing 3 (request 0) or 2
@@ -267,6 +281,10 @@ def test_grouped_normalize_matches_per_layer():
         cursor = L.views(got[1:])["header"][..., 0]
         folded += int((cursor < 8).sum())
     assert folded > 0, "no fold exercised"
+    for page in pages:
+        assert (page[:, : 25 * 1024] == 165).all(), "conv state overwritten"
+        end = 25 * 1024 + HV * L.nbytes
+        assert (page[:, end:] == 165).all(), "page padding overwritten"
 
 
 def test_normalize_groups_follow_kv_cache_groups():
