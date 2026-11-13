@@ -79,6 +79,13 @@ or uncomment `VLLM_RDNA_GDN_LEAPQUANT=1` in
 `tools/rdna/recipes/flashnext-mtp2.env`. The worker log prints
 `GDN recurrent state: LeapQuant INT8 (...)`.
 
+Experimental 512-token pages (MTP2 stays enabled; throughput trade-offs below):
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=flashnext-mtp2 \
+    VLLM_RDNA_GDN_LEAPQUANT=1 BLOCK_SIZE=512 EXTRA_ARGS=--monokernel
+```
+
 ## Results (flashnext-mtp2, 4x V620 TP4, 2026-11-13)
 
 Base = flag off, head = flag on, same build (`_rocm_C` md5 identical; the
@@ -114,7 +121,7 @@ long-context PPL +0.23 %, gsm8k / needle / humaneval (160 each, pooled 480)
 97.7 % -> 97.7 %, concurrency 0 FAIL, prefix cache 3.2x. The worker log shows
 `mono gdn_rdna2: verify N rows -> fused kernel` with the flag on.
 
-### Memory: no KV capacity gain on this recipe
+### Memory at block 1024: no KV capacity gain
 
 KV capacity is 266,945 tokens with the flag on and off. With
 `BLOCK_SIZE=1024` the attention page sets the unified page size: vLLM pads
@@ -152,11 +159,34 @@ Mamba groups to share speculative-block scheduling parameters. Neither is
 changed by the 512 experiment.
 
 The 512-token experiment is included in this PR (user decision 2026-11-13),
-with MTP2 and FULL_AND_PIECEWISE unchanged. The existing launcher accepts
-`BLOCK_SIZE=512`; runtime bring-up and ABBA validation are pending.
-Packing two LeapQuant layers into one page is reserved for a second PR.
-That could reduce cached-prefix state bytes without shortening the
-checkpoint interval, but needs allocator changes.
+with MTP2 and FULL_AND_PIECEWISE unchanged. Packing two LeapQuant layers
+into one page remains reserved for a second PR.
+
+### 512-token blocks: bring-up passes, speed not yet qualified
+
+Paired smoke run `~/w4a8_runs/leapquant/b512-20261113-230540`, one
+1024-token and one 512-token boot, LeapQuant + MonoKernel on in both.
+Runtime group sizes resolve to `(512, 512, 512, 512, 8, 512)`, not a fallback.
+Padding is 41.39 % of state contents. Capacity rises from 266,945 to
+275,523 reported tokens (+3.21 %); this is the max-context-equivalent
+capacity metric, not the concurrency gain for every context length.
+
+All c=8 cells complete 32 requests; the 512 concurrency probe passes
+(0 failing, 0 soft), after-load probe passes, no KFD eviction increments,
+no fault markers and no new amdgpu dmesg faults. Loop scan, 1024 -> 512:
+1k 3/32 -> 5/32, 16k 2/32 -> 1/32, 32k 5/32 -> 3/32.
+
+| cell | TTFT p50, 1024 -> 512 | ITL p50, 1024 -> 512 | output tok/s, 1024 -> 512 | acceptance length, 1024 -> 512 |
+|---|---:|---:|---:|---:|
+| 1k/512 c=8 | 0.539 -> 0.675 s | 46.31 -> 45.74 ms | 277.14 -> 260.55 | 2.123 -> 2.042 |
+| 16k/1k c=8 | 8.363 -> 7.007 s | 48.59 -> 47.14 ms | 115.75 -> 106.18 | 2.353 -> 2.103 |
+| 32k/2k c=8 | 85.272 -> 65.793 s | 43.91 -> 46.36 ms | 83.41 -> 64.66 | 2.288 -> 2.459 |
+
+The 32k TTFT improves 22.8 %, but output throughput falls 22.5 % despite
+higher acceptance. ITL p99 rises from 435.96 to 648.89 ms (+48.8 %).
+This is a capacity/latency trade-off, not a clean speed win. The full
+ABBA matrix is running at `speed512-20261114-000314-mono`; do not promote
+512 as the default from this single pair.
 
 ### Speed (first build): no gain
 
