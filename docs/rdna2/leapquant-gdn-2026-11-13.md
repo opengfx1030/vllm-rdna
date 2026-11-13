@@ -297,6 +297,34 @@ columns and rule as above:
   failing on both flag-on boots, stall PASS. Repetition loops (`loopscan.py`,
   out of 32 per c=8 cell): base 0-5, flag on 1-5.
 
+### Speed (efficiency build `d879da8c93`, MonoKernel off)
+
+Receipt `~/w4a8_runs/leapquant/speed-20261113-191345`, completed 23:05.
+Quality, overlap, stall hard gate and all boots pass; no invalid cells.
+Speed is mixed (5 winning cells, 4 with at least one regression):
+
+| cell | TTFT p50 | prefill aggregate | ITL p50 | ITL p99 | output aggregate |
+|---|---:|---:|---:|---:|---:|
+| 1k/512 c=1 | -1.0 % | +2.5 % | -1.3 % | -1.8 % | +5.9 % |
+| 1k/512 c=4 | -0.7 % | +0.1 % | -0.8 % | +267.9 % | +15.0 % |
+| 1k/512 c=8 | -0.5 % | +0.4 % | -3.5 % | -0.2 % | +2.8 % |
+| 16k/1k c=1 | -0.2 % | +0.1 % | -1.1 % | -1.1 % | +8.8 % |
+| 16k/1k c=4 | -0.3 % | +0.2 % | -2.5 % | -0.1 % | -2.0 % |
+| 16k/1k c=8 | +0.8 % | +0.1 % | -2.3 % | -0.1 % | -1.5 % |
+| 32k/2k c=1 | -0.2 % | +0.2 % | -0.9 % | -0.6 % | +5.2 % |
+| 32k/2k c=4 | -0.9 % | +0.0 % | -1.2 % | +0.0 % | +1.4 % |
+| 32k/2k c=8 | +3.3 % | -0.6 % | -2.0 % | -0.1 % | -7.2 % |
+
+* Both head boots pass KL against the floor (0.01186/0.01205 vs 0.01490),
+  PPL (+0.121/+0.350 %, limit 2 %) and concurrency (0 failing).
+* At 1k c=1, acceptance length is A1=1.814, B1=1.865, B2=1.909,
+  A2=1.787: the MonoKernel-on acceptance regression does not reproduce
+  in this MonoKernel-off receipt. This does not establish the cause.
+* Loop scan: c=8 base 2-5/32, head 1-4/32. At 16k c=1 and 32k c=1,
+  B1 flags 2/4 while the other boots flag 0/4; retain these as quality
+  concerns for the larger decode study rather than treating gate PASS
+  as complete decode-quality evidence.
+
 ### Triton census
 
 `VLLM_TRITON_LAUNCH_COUNT=1` over the quality boots: the flag-on and
