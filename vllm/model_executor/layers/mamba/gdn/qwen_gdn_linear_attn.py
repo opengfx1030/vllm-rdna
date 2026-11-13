@@ -2263,6 +2263,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 return
             assert blob.data_ptr() == group.leader_ptr, "stale LeapQuant group"
             offsets = group.offsets
+            assert offsets is not None
+            logger.info_once(
+                "LeapQuant GDN: one normalize launch covers %d layers",
+                offsets.numel(),
+            )
         torch.ops._rocm_C.gdn_lq_normalize_rdna2(
             blob,
             state_indices,
