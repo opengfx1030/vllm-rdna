@@ -13,6 +13,8 @@
 //   gdn_lq_normalize_rdna2  commit `num_accepted` pending records (one for a
 //                           slot-0 reader: num_accepted = None), fold full
 //                           windows into a new boundary (one WG per head).
+//                           With layer_offsets it covers every layer of a
+//                           group in one launch (grid.y = layer).
 //   gdn_lq_decode_rdna2     decode / MTP verify on normalized blobs: replay,
 //                           run T tokens, append T records, pending = T.
 //   gdn_lq_materialize_rdna2  normalized blob -> FP32 [N, HV, V, K].
@@ -346,6 +348,7 @@ __device__ void lq_load_full(float (&S)[RPT][16], uint8_t* blob,
   const __half* rk = lq_ptr<__half>(blob, L.rec_k);
   const __half* ru = lq_ptr<__half>(blob, L.rec_u);
   const float* rg = lq_ptr<float>(blob, L.rec_g);
+#pragma unroll 2
   for (int t = 0; t < c; ++t) {
     const float decay = lq_exp(rg[t]);
     float kk[16];
@@ -362,6 +365,7 @@ __device__ void lq_load_full(float (&S)[RPT][16], uint8_t* blob,
 template <int RPT>
 __global__ void __launch_bounds__(LQ_THREADS)
     gdn_lq_normalize_kernel(uint8_t* __restrict__ blobs,
+                            const int64_t* __restrict__ layer_offsets,
                             const int* __restrict__ state_indices,
                             long idx_stride,
                             const int* __restrict__ num_accepted,
@@ -372,6 +376,7 @@ __global__ void __launch_bounds__(LQ_THREADS)
   const int i_hv = blockIdx.x % HV;
   const long idx = state_indices[(long)i_n * idx_stride];
   if (idx <= 0 || idx >= num_blocks) return;
+  if (layer_offsets != nullptr) blobs += layer_offsets[blockIdx.y];
   uint8_t* blob = blobs + idx * stride_block + (long)i_hv * stride_head;
   int* hdr = lq_ptr<int>(blob, L.header);
   if (threadIdx.x == 0) {
@@ -546,6 +551,7 @@ __global__ void __launch_bounds__(LQ_THREADS)
   __half* rk = lq_ptr<__half>(blob, L.rec_k);
   __half* ru = lq_ptr<__half>(blob, L.rec_u);
   float* rg = lq_ptr<float>(blob, L.rec_g);
+#pragma unroll 2
   for (int t = 0; t < c; ++t) {
     const float decay = lq_exp(rg[t]);
     const float u = __half2float(ru[t * V + o_v]);
@@ -669,7 +675,8 @@ void gdn_lq_normalize_rdna2(torch::Tensor blob, torch::Tensor state_indices,
                             const std::optional<torch::Tensor>& num_accepted,
                             int64_t head_v_dim, int64_t num_comp,
                             int64_t capacity, int64_t window,
-                            int64_t power_iters) {
+                            int64_t power_iters,
+                            const std::optional<torch::Tensor>& layer_offsets) {
   const LqLayout L =
       make_layout((int)head_v_dim, num_comp, capacity, window, power_iters);
   const int64_t HV = blob.size(1);
@@ -684,14 +691,28 @@ void gdn_lq_normalize_rdna2(torch::Tensor blob, torch::Tensor state_indices,
                     num_accepted->numel() >= N,
                 "num_accepted must be unit-stride CUDA int32 [N]");
   }
+  // layer_offsets[l]: byte offset of layer l's blob tensor from `blob`; every
+  // layer's blob has blob's shape and strides (the caller guarantees it).
+  int64_t num_layers = 1;
+  if (layer_offsets.has_value()) {
+    TORCH_CHECK(
+        layer_offsets->is_cuda() && layer_offsets->scalar_type() == at::kLong &&
+            layer_offsets->dim() == 1 && layer_offsets->stride(0) == 1 &&
+            layer_offsets->numel() >= 1,
+        "layer_offsets must be unit-stride CUDA int64 [layers]");
+    num_layers = layer_offsets->numel();
+  }
   if (N == 0) return;
   const at::cuda::OptionalCUDAGuard guard(blob.device());
   auto stream = at::cuda::getCurrentCUDAStream();
+  const dim3 grid((unsigned)(N * HV), (unsigned)num_layers);
   LQ_DISPATCH_RPT(
       head_v_dim,
-      gdn_lq_normalize_kernel<RPT><<<N * HV, LQ_THREADS, 0, stream>>>(
-          blob.data_ptr<uint8_t>(), state_indices.data_ptr<int>(),
-          state_indices.stride(0),
+      gdn_lq_normalize_kernel<RPT><<<grid, LQ_THREADS, 0, stream>>>(
+          blob.data_ptr<uint8_t>(),
+          layer_offsets.has_value() ? layer_offsets->data_ptr<int64_t>()
+                                    : nullptr,
+          state_indices.data_ptr<int>(), state_indices.stride(0),
           has_acc ? num_accepted->data_ptr<int>() : nullptr, blob.stride(0),
           blob.stride(1), blob.size(0), (int)HV, L));
   C10_CUDA_KERNEL_LAUNCH_CHECK();

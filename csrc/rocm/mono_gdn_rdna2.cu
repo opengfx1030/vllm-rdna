@@ -306,6 +306,9 @@ __global__ void __launch_bounds__(kThreads) gdn_fused_k(const Args a) {
     const half* rk = lq_ptr<half>(blob, L.rec_k);
     const half* ru = lq_ptr<half>(blob, L.rec_u);
     const float* rg = lq_ptr<float>(blob, L.rec_g);
+    // Unrolled so the record loads of 2 steps issue together: the replay is
+    // a chain through hs. Unroll 4 measured slower at 8 requests.
+#pragma unroll 2
     for (int r = 0; r < lq_c; r++) {
       // exp2 form: the same replay as gdn_lq_decode_rdna2
       const float d = exp2f(rg[r] * 0x1.715476p+0f);

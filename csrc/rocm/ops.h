@@ -581,7 +581,8 @@ void gdn_lq_normalize_rdna2(torch::Tensor blob, torch::Tensor state_indices,
                             const std::optional<torch::Tensor>& num_accepted,
                             int64_t head_v_dim, int64_t num_comp,
                             int64_t capacity, int64_t window,
-                            int64_t power_iters);
+                            int64_t power_iters,
+                            const std::optional<torch::Tensor>& layer_offsets);
 void gdn_lq_decode_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
                          torch::Tensor a, torch::Tensor b, torch::Tensor A_log,
                          torch::Tensor dt_bias, torch::Tensor out,

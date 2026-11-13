@@ -230,6 +230,45 @@ def test_trajectory_tracks_fp32_with_rejections(spec):
     )
 
 
+def test_grouped_normalize_matches_per_layer():
+    """One launch over a group of layers (layer_offsets) must leave every
+    layer's blobs exactly as normalizing each layer on its own does, folds
+    and NULL slots included."""
+    L = _layout(3)
+    A_log, dt_bias = _params()
+    n, layers = 3, 3
+    idx = torch.tensor([1, 0, 2], dtype=torch.int32, device="cuda")
+    blobs = []
+    for layer in range(layers):
+        blob = torch.zeros(n, HV, L.nbytes, dtype=torch.uint8, device="cuda")
+        blob[0].fill_(7)
+        _store(L, torch.randn(n, HV, V, K, device="cuda") * 0.5, blob, idx)
+        # 8 steps commit 7 * 2 = 14 records; committing 3 (request 0) or 2
+        # (request 2) more below reaches the window and folds.
+        for step in range(8):
+            q, k, v, a, b = _tokens(n, 3, seed=100 * layer + step)
+            _normalize(L, blob, idx, torch.full((n,), 2, dtype=torch.int32).cuda())
+            _decode(L, blob, idx, q, k, v, a, b, A_log, dt_bias)
+        blobs.append(blob)
+    num_acc = torch.tensor([3, 1, 2], dtype=torch.int32, device="cuda")
+    ref = [blob.clone() for blob in blobs]
+    for blob in ref:
+        _normalize(L, blob, idx, num_acc)
+    base = blobs[0].data_ptr()
+    offsets = torch.tensor(
+        [blob.data_ptr() - base for blob in blobs], dtype=torch.int64, device="cuda"
+    )
+    _ops().gdn_lq_normalize_rdna2(
+        blobs[0], idx, num_acc, V, R, L.capacity, WINDOW, ITERS, offsets
+    )
+    folded = 0
+    for got, want in zip(blobs, ref):
+        assert torch.equal(got, want)
+        cursor = L.views(got[1:])["header"][..., 0]
+        folded += int((cursor < 8).sum())
+    assert folded > 0, "no fold exercised"
+
+
 def test_normalize_and_decode_replay_in_cuda_graph():
     L = _layout(3)
     A_log, dt_bias = _params()

@@ -127,6 +127,49 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
+class _LqNormalizeGroup:
+    """The LeapQuant GDN layers of one model on this rank.
+
+    Every layer normalizes its blobs with the same state indices and accepted
+    counts each step (they share one attention metadata), so the first layer
+    of the group normalizes all of them in one launch and the others skip:
+    one launch per step instead of one per layer (~3 us each in a graph).
+    ``offsets`` holds each layer's paged blob address relative to the
+    leader's; it is rebuilt on every ``bind_kv_cache``, which never runs under
+    capture, so captured graphs only ever see a finished table."""
+
+    def __init__(self) -> None:
+        self.members: dict[int, QwenGatedDeltaNetAttention] = {}
+        self.leader: QwenGatedDeltaNetAttention | None = None
+        self.leader_ptr = 0
+        self.offsets: torch.Tensor | None = None
+
+    def rebuild(self) -> None:
+        layers = [self.members[i] for i in sorted(self.members)]
+        blobs = [layer.kv_cache[1] for layer in layers]
+        ref = blobs[0]
+        uniform = all(
+            b.device == ref.device
+            and b.dtype == ref.dtype
+            and b.shape == ref.shape
+            and b.stride() == ref.stride()
+            for b in blobs
+        )
+        if len(layers) < 2 or not uniform:
+            self.leader, self.leader_ptr, self.offsets = None, 0, None
+            return
+        self.leader = layers[0]
+        self.leader_ptr = ref.data_ptr()
+        self.offsets = torch.tensor(
+            [b.data_ptr() - self.leader_ptr for b in blobs],
+            dtype=torch.int64,
+            device=ref.device,
+        )
+
+
+_LQ_NORMALIZE_GROUPS: dict[str, _LqNormalizeGroup] = {}
+
+
 # Scratch buffers reused across GDN prefill calls. The key MUST carry a role
 # name: w is [B, T, H, K] and u/v_new are [B, T, H, V], which are the same
 # shape and dtype, and so are the caller's q and k -- a shape-only key makes
@@ -993,6 +1036,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._mono_gdn: Any
         self._mono_gdn_op, self._mono_gdn = mono if mono else (None, None)
         self._lq_layout = self._init_leapquant(vllm_config)
+        self._lq_group: _LqNormalizeGroup | None = None
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -1033,6 +1077,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             layout.nbytes,
         )
         return layout
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        super().bind_kv_cache(kv_cache)
+        if self._lq_layout is None:
+            return
+        root = self.prefix.rsplit(".layers.", 1)[0]
+        group = _LQ_NORMALIZE_GROUPS.setdefault(root, _LqNormalizeGroup())
+        group.members[self.layer_idx] = self
+        group.rebuild()
+        self._lq_group = group
 
     def _init_gdn_state_arenas(self) -> None:
         """Permanent arenas on the layer device, before first BeginCapture."""
@@ -2195,9 +2249,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         """Commit the previous step's accepted records of the home blobs
         ``state_indices`` (``num_accepted``; one record for slot-0 readers,
         ``None``) and fold full windows. Runs before every decode / verify
-        launch, the MonoKernel one included."""
+        launch, the MonoKernel one included, and before prefill reads.
+
+        On the paged blobs the group leader normalizes every layer of the
+        group in one launch and the other layers skip; decode arenas are
+        per-layer copies, so they are normalized per layer."""
         layout = self._lq_layout
         assert layout is not None
+        group = self._lq_group
+        offsets = None
+        if group is not None and group.leader is not None and blob is self.kv_cache[1]:
+            if group.leader is not self:
+                return
+            assert blob.data_ptr() == group.leader_ptr, "stale LeapQuant group"
+            offsets = group.offsets
         torch.ops._rocm_C.gdn_lq_normalize_rdna2(
             blob,
             state_indices,
@@ -2207,6 +2272,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             layout.capacity,
             layout.window,
             layout.power_iters,
+            offsets,
         )
 
     def _lq_recurrent(
@@ -2641,16 +2707,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if lq is not None:
                 # Commit the slot-0 record a previous decode left pending, then
                 # expand the blobs into the FP32 initial state of the chunk.
-                torch.ops._rocm_C.gdn_lq_normalize_rdna2(
-                    ssm_state,
-                    prefill_state_indices,
-                    None,
-                    lq.head_v_dim,
-                    lq.num_comp,
-                    lq.capacity,
-                    lq.window,
-                    lq.power_iters,
-                )
+                self._lq_normalize(ssm_state, prefill_state_indices, None)
                 initial_state = torch.empty(
                     (
                         prefill_state_indices.shape[0],
