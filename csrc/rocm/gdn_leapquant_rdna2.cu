@@ -1,6 +1,14 @@
 // Algorithm: LeapQuant (Pan et al., arXiv 2609.38166). Record ring, cursor and
 // per-window flush follow ReplaySSM (Dao AI Lab and NVIDIA; vllm-project/vllm
 // #48018, #62004). These HIP kernels are original code written for this fork.
+// The fold safeguards (max-abs prescale, two Gram-Schmidt sweeps, dependence
+// test, per-column warm start, smoothing sum divided before it is added)
+// follow section 5 of the upstream LeapQuant RFC (vllm-project/vllm#64725,
+// lihaoyang-amd) and the reorthogonalization test of Daniel, Gragg, Kaufman
+// and Stewart (Math. Comp. 30, 1976); the code is ours.
+// NOT BUILT, NOT RUN: lq_orthonormalize, the warm start and the smoothing sum
+// in lq_fold are pending GPU validation; see docs/rdna2/
+// leapquant-gdn-numerics-and-isolation-2026-11-14.md. Delete this note then.
 // LeapQuant INT8 recurrent-state storage for GatedDeltaNet on AMD RDNA2
 // (gfx1030). arXiv 2609.38166; layout and FP32 oracle:
 // vllm/model_executor/layers/mamba/ops/leapquant_gdn.py.
@@ -43,7 +51,8 @@ constexpr int LQ_THREADS = 256;  // decode: 32 v-rows x 8 k-slices
 constexpr int LQ_R = 4;          // compensator tokens (paper: r = 4 at 8 bits)
 constexpr float LQ_INT8_MAX = 127.0f;
 constexpr float LQ_SMOOTH_FLOOR = 1e-6f;
-constexpr float LQ_ORTH_EPS = 1e-12f;
+constexpr float LQ_FP32_MAX = 0x1.fffffep+127f;
+constexpr float LQ_ORTH_DEPENDENT = 0.5f;
 constexpr float LQ_FP16_MAX = 65504.0f;
 constexpr float LQ_L2NORM_EPS = 1e-6f;
 constexpr float LQ_SOFTPLUS_THRESHOLD = 20.0f;
@@ -72,6 +81,13 @@ __device__ __forceinline__ float lq_wsum(float x) {
   return x;
 }
 
+__device__ __forceinline__ float lq_wmax(float x) {
+#pragma unroll
+  for (int m = 1; m < 32; m <<= 1)
+    x = fmaxf(x, __shfl_xor_sync(0xffffffffffffffffULL, x, m));
+  return x;
+}
+
 __device__ __forceinline__ float lq_f32(float x) { return x; }
 __device__ __forceinline__ float lq_f32(__half x) { return __half2float(x); }
 
@@ -89,6 +105,7 @@ struct LqFoldSmem {
   float vr[RPT * 32 * LQ_R];  // [v][r] (Y, then Q)
   float csm[LQ_K];
   int flag;
+  int alive[LQ_R];  // warm start: column c of comp_k holds a non-zero entry
 };
 
 // Sum over all v of part[j][c] (j < 16 local k, c < NCOL) into
@@ -120,38 +137,62 @@ __device__ void lq_reduce_over_v(LqFoldSmem<RPT>& sm,
   __syncthreads();
 }
 
-// Modified Gram-Schmidt over the LQ_R columns of vr ([V][r]) by wave 0.
+// Gram-Schmidt over the LQ_R columns of vr ([V][r]) by wave 0. Mirrors
+// _orthonormalize in leapquant_gdn.py, which holds the reasoning: scale a
+// column by its largest |entry|, sweep twice against the earlier columns, drop
+// it when the second sweep removed more than half of its largest entry (it was
+// rounding noise along them), scale again, normalize. A zero, non-finite or
+// dependent column becomes zero; the next fold restarts it from the fixed
+// block. Lane t owns rows v = t + 32 e, so only the shuffles cross lanes.
 template <int RPT>
 __device__ void lq_orthonormalize(LqFoldSmem<RPT>& sm) {
   const int tid = threadIdx.x;
   if (tid < 32) {
 #pragma unroll
     for (int c = 0; c < LQ_R; ++c) {
+      float y[RPT];
+      float m = 0.0f;
 #pragma unroll
-      for (int p = 0; p < c; ++p) {
-        float d = 0.0f;
-#pragma unroll
-        for (int e = 0; e < RPT; ++e) {
-          const int v = tid + 32 * e;
-          d += sm.vr[v * LQ_R + c] * sm.vr[v * LQ_R + p];
-        }
-        d = lq_wsum(d);
-#pragma unroll
-        for (int e = 0; e < RPT; ++e) {
-          const int v = tid + 32 * e;
-          sm.vr[v * LQ_R + c] -= d * sm.vr[v * LQ_R + p];
-        }
+      for (int e = 0; e < RPT; ++e) {
+        y[e] = sm.vr[(tid + 32 * e) * LQ_R + c];
+        m = fmaxf(m, fabsf(y[e]));
       }
+      m = lq_wmax(m);
+      bool live = m > 0.0f && m <= LQ_FP32_MAX;  // the same on every lane
+#pragma unroll
+      for (int e = 0; e < RPT; ++e) y[e] = live ? y[e] / m : 0.0f;
+      float m_sweep[2];
+#pragma unroll
+      for (int s = 0; s < 2; ++s) {
+#pragma unroll
+        for (int p = 0; p < c; ++p) {
+          float d = 0.0f;
+#pragma unroll
+          for (int e = 0; e < RPT; ++e)
+            d += y[e] * sm.vr[(tid + 32 * e) * LQ_R + p];
+          d = lq_wsum(d);
+#pragma unroll
+          for (int e = 0; e < RPT; ++e)
+            y[e] -= d * sm.vr[(tid + 32 * e) * LQ_R + p];
+        }
+        float ms = 0.0f;
+#pragma unroll
+        for (int e = 0; e < RPT; ++e) ms = fmaxf(ms, fabsf(y[e]));
+        m_sweep[s] = lq_wmax(ms);
+      }
+      live = live && m_sweep[1] > LQ_ORTH_DEPENDENT * m_sweep[0];
       float n2 = 0.0f;
 #pragma unroll
       for (int e = 0; e < RPT; ++e) {
-        const float y = sm.vr[(tid + 32 * e) * LQ_R + c];
-        n2 += y * y;
+        y[e] = live ? y[e] / m_sweep[1] : 0.0f;
+        n2 += y[e] * y[e];
       }
       const float n = sqrtf(lq_wsum(n2));
-      const float inv = n > LQ_ORTH_EPS ? 1.0f / n : 0.0f;
+      live = live && n >= 1.0f;  // n >= 1 for a live column; a NaN entry fails
+      const float inv = live ? 1.0f / n : 0.0f;
 #pragma unroll
-      for (int e = 0; e < RPT; ++e) sm.vr[(tid + 32 * e) * LQ_R + c] *= inv;
+      for (int e = 0; e < RPT; ++e)
+        sm.vr[(tid + 32 * e) * LQ_R + c] = live ? y[e] * inv : 0.0f;
     }
   }
   __syncthreads();
@@ -210,23 +251,26 @@ __device__ void lq_fold(LqFoldSmem<RPT>& sm, float (&S)[RPT][16], uint8_t* blob,
   const int k0 = ks * 16;
   const int V = L.V;
 
+  // Warm start from the previous boundary's comp_k, column by column. A column
+  // that is all zero (a fresh block, a zero state, a direction the last fold
+  // found dependent) restarts from the fixed integer column, as in the oracle.
   const __half* pck = lq_ptr<__half>(blob, L.comp_k);
-  int nz = 0;
+  if (tid < LQ_R) sm.alive[tid] = 0;
+  __syncthreads();
   if (warm) {
     for (int e = tid; e < LQ_R * LQ_K; e += LQ_THREADS) {
       const float x = __half2float(pck[e]);
       sm.kr[(e % LQ_K) * LQ_R + e / LQ_K] = x;
-      nz |= (x != 0.0f);
+      if (x != 0.0f) atomicOr(&sm.alive[e / LQ_K], 1);
     }
   }
-  nz = __syncthreads_or(nz);
-  if (!nz) {
-    for (int e = tid; e < LQ_R * LQ_K; e += LQ_THREADS) {
-      const int k = e % LQ_K, c = e / LQ_K;
+  __syncthreads();
+  for (int e = tid; e < LQ_R * LQ_K; e += LQ_THREADS) {
+    const int k = e % LQ_K, c = e / LQ_K;
+    if (!sm.alive[c])
       sm.kr[k * LQ_R + c] = (float)(((k * (2 * c + 3) + 7 * c + 1) % 17) - 8);
-    }
-    __syncthreads();
   }
+  __syncthreads();
 
   lq_apply_s<RPT>(sm, S);
   lq_orthonormalize<RPT>(sm);
@@ -256,7 +300,11 @@ __device__ void lq_fold(LqFoldSmem<RPT>& sm, float (&S)[RPT][16], uint8_t* blob,
   }
   __syncthreads();
 
-  // Residual R = S - U~ K~^T (in place) and per-key smoothing.
+  // Residual R = S - U~ K~^T (in place) and per-key smoothing. part holds
+  // |R| / V: the sum of |R| over V overflows for |R| of about 1e37 and more,
+  // and an inf factor makes z * bscale * csmooth 0 * inf = NaN. For V a power
+  // of two the factor is the same bit for bit.
+  const float inv_v = 1.0f / (float)V;
   float part[16][1];
 #pragma unroll
   for (int j = 0; j < 16; ++j) part[j][0] = 0.0f;
@@ -270,13 +318,13 @@ __device__ void lq_fold(LqFoldSmem<RPT>& sm, float (&S)[RPT][16], uint8_t* blob,
       for (int c = 0; c < LQ_R; ++c)
         c_sum += sm.vr[v * LQ_R + c] * sm.kr[(k0 + j) * LQ_R + c];
       S[i][j] -= c_sum;
-      part[j][0] += fabsf(S[i][j]);
+      part[j][0] += fabsf(S[i][j]) * inv_v;
     }
   }
   lq_reduce_over_v<RPT, 1>(sm, part, sm.csm);
   float* csm_out = lq_ptr<float>(blob, L.csmooth);
   for (int k = tid; k < LQ_K; k += LQ_THREADS) {
-    const float c = fmaxf(sqrtf(sm.csm[k] / (float)V), LQ_SMOOTH_FLOOR);
+    const float c = fmaxf(sqrtf(sm.csm[k]), LQ_SMOOTH_FLOOR);
     sm.csm[k] = c;
     csm_out[k] = c;
   }
