@@ -488,8 +488,8 @@ Nothing below was done. Each step needs a GPU or a build.
       `-Werror=unused-variable`.
 - [ ] Run `test_gdn_leapquant_rdna2.py`. The fold changed for every blob, so the
       first PR tests must pass again.
-- [ ] Run `test_gdn_leapquant_safety_rdna2.py` (46 tests). Fix a kernel, not a
-      test, when one fails.
+- [ ] Run `test_gdn_leapquant_safety_rdna2.py` (46 tests). The tests never ran
+      on a GPU. A failure is a kernel bug or a test bug. Find out which one.
 - [ ] Run the determinism tests (200 repeats) on a GPU that has other work. Run
       them more than once.
 - [ ] Run the grouped-flush and batched-decode tests on the target GPU.
