@@ -1037,7 +1037,7 @@ def _get_packed_kv_cache_groups(
                 # whose states fit one block, not the attention repeat pattern.
                 num_groups = fit_groups
                 logger.info_once(
-                    "LeapQuant page packing: %d Mamba layers of %d bytes use %d "
+                    "LeapQuant page packing: %d Mamba layer(s) of %d bytes use %d "
                     "KV-cache group(s); one block holds %d of them.",
                     len(spec.kv_cache_specs),
                     spec.first_spec.page_size_bytes,
