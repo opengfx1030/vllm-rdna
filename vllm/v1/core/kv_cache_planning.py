@@ -927,7 +927,8 @@ def _get_packed_kv_cache_groups(
     per page size) and split into groups covering the same number of pattern
     repeats (picked by ``_approximate_gcd`` to minimize padding), so all
     groups pack into the same per-block layout. Mamba buckets are additionally
-    split to fit the block the attention buckets already need.
+    split to fit the block the attention buckets already need; with
+    ``VLLM_RDNA_GDN_LEAPQUANT_PACK=1`` they use the fewest groups that fit it.
     Returns None when the layout is not block-outermost or all layers already
     share one page size.
     """
@@ -1017,6 +1018,11 @@ def _get_packed_kv_cache_groups(
         default=0,
     )
 
+    from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
+        leapquant_gdn_pack_enabled,
+    )
+
+    pack_mamba = leapquant_gdn_pack_enabled()
     groups = []
     for spec, page_size_layers, balanced in bucketed:
         num_groups = num_groups_for(spec, balanced)
@@ -1024,9 +1030,22 @@ def _get_packed_kv_cache_groups(
         # it widen the block.
         if anchor_bytes and is_state_bucket(spec):
             states_per_block = max(anchor_bytes // spec.first_spec.page_size_bytes, 1)
-            num_groups = max(
-                num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
-            )
+            fit_groups = cdiv(len(spec.kv_cache_specs), states_per_block)
+            if pack_mamba and isinstance(spec.first_spec, MambaSpec):
+                # Each group holds one state block per resident state of every
+                # request, so a packed (unpadded) bucket uses the fewest groups
+                # whose states fit one block, not the attention repeat pattern.
+                num_groups = fit_groups
+                logger.info_once(
+                    "LeapQuant page packing: %d Mamba layers of %d bytes use %d "
+                    "KV-cache group(s); one block holds %d of them.",
+                    len(spec.kv_cache_specs),
+                    spec.first_spec.page_size_bytes,
+                    fit_groups,
+                    states_per_block,
+                )
+            else:
+                num_groups = max(num_groups, fit_groups)
         if num_groups == 1:
             groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
             continue

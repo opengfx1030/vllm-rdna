@@ -299,6 +299,104 @@ def test_grouped_normalize_matches_per_layer(page_kib, window):
         assert (page[:, end:] == 165).all(), "page padding overwritten"
 
 
+def _packed_block(L, layers, n, conv=1024, slack=4096):
+    """``n`` blocks that each hold ``layers`` unpadded pages (conv state, then
+    ``HV`` blobs) one after another and then slack, like a KV-cache group with
+    VLLM_RDNA_GDN_LEAPQUANT_PACK=1. Returns the raw bytes, the blob view of each
+    layer, a mask of the bytes that are not blobs and the page size."""
+    page = conv + HV * L.nbytes
+    raw = torch.full((n, layers * page + slack), 165, dtype=torch.uint8, device="cuda")
+    blobs = [
+        raw.as_strided(
+            (n, HV, L.nbytes),
+            (raw.stride(0), L.nbytes, 1),
+            storage_offset=layer * page + conv,
+        )
+        for layer in range(layers)
+    ]
+    outside = torch.ones_like(raw, dtype=torch.bool)
+    for layer, blob in enumerate(blobs):
+        blob.zero_()
+        start = layer * page + conv
+        outside[:, start : start + HV * L.nbytes] = False
+    return raw, blobs, outside, page
+
+
+@pytest.mark.parametrize("window", [16, 32])
+def test_packed_pages_match_isolated_blobs(window):
+    """A blob that sits behind other layers in a packed block (offset base,
+    block stride larger than its own pages) must behave like a blob of its
+    own, and no kernel may write the conv state of a neighbor or the slack."""
+    L = _layout(3, window=window)
+    A_log, dt_bias = _params()
+    n, layers = 3, 4
+    idx = torch.tensor([1, 0, 2], dtype=torch.int32, device="cuda")
+    raw, blobs, outside, _ = _packed_block(L, layers, n)
+    accepted = torch.full((n,), 2, dtype=torch.int32, device="cuda")
+    for layer, packed in enumerate(blobs):
+        solo = torch.zeros(n, HV, L.nbytes, dtype=torch.uint8, device="cuda")
+        state = torch.randn(n, HV, V, K, device="cuda") * 0.5
+        for blob in (packed, solo):
+            _store(L, state, blob, idx)
+        for step in range(window // 2 + 2):
+            q, k, v, a, b = _tokens(n, 3, seed=100 * layer + step)
+            outs = []
+            for blob in (packed, solo):
+                _normalize(L, blob, idx, accepted)
+                outs.append(_decode(L, blob, idx, q, k, v, a, b, A_log, dt_bias))
+            assert torch.equal(*outs), f"layer {layer} step {step}"
+        assert torch.equal(packed, solo), f"layer {layer}"
+    assert (raw[outside] == 165).all(), "conv state or slack overwritten"
+
+
+@pytest.mark.parametrize("window", [16, 32])
+def test_grouped_normalize_on_packed_pages(window):
+    """The grouped launch of a packed group (layers at multiples of the
+    unpadded page size from the leader) matches per-layer normalization and
+    leaves conv states and slack unchanged."""
+    L = _layout(3, window=window)
+    A_log, dt_bias = _params()
+    n, layers = 3, 4
+    idx = torch.tensor([1, 0, 2], dtype=torch.int32, device="cuda")
+    raw, blobs, outside, page = _packed_block(L, layers, n)
+    for layer, blob in enumerate(blobs):
+        blob[0].fill_(7)
+        _store(L, torch.randn(n, HV, V, K, device="cuda") * 0.5, blob, idx)
+        # Leave window - 2 committed plus 3 pending records. Accepting 3
+        # (request 0) or 2 (request 2) below reaches the window and folds.
+        for step in range(window // 2):
+            q, k, v, a, b = _tokens(n, 3, seed=100 * layer + step)
+            _normalize(L, blob, idx, torch.full((n,), 2, dtype=torch.int32).cuda())
+            _decode(L, blob, idx, q, k, v, a, b, A_log, dt_bias)
+    num_acc = torch.tensor([3, 1, 2], dtype=torch.int32, device="cuda")
+    ref = [blob.clone() for blob in blobs]
+    for blob in ref:
+        _normalize(L, blob, idx, num_acc)
+    base = blobs[0].data_ptr()
+    offsets = torch.tensor(
+        [blob.data_ptr() - base for blob in blobs], dtype=torch.int64, device="cuda"
+    )
+    assert offsets.tolist() == [i * page for i in range(layers)]
+    _ops().gdn_lq_normalize_rdna2(
+        blobs[0],
+        idx,
+        num_acc,
+        V,
+        L.num_comp,
+        L.capacity,
+        L.window,
+        L.power_iters,
+        offsets,
+    )
+    folded = 0
+    for got, want in zip(blobs, ref):
+        assert torch.equal(got, want)
+        cursor = L.views(got[1:])["header"][..., 0]
+        folded += int((cursor < 8).sum())
+    assert folded > 0, "no fold exercised"
+    assert (raw[outside] == 165).all(), "conv state or slack overwritten"
+
+
 def test_normalize_groups_follow_kv_cache_groups():
     """Hybrid models spread their GDN layers over several KV-cache groups with
     separate block tables, so one request sits at different slots per group.

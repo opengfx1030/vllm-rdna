@@ -74,6 +74,24 @@ def leapquant_gdn_enabled() -> bool:
     return True
 
 
+@functools.cache
+def leapquant_gdn_pack_enabled() -> bool:
+    """Opt-in KV-cache packing of LeapQuant GDN layers
+    (``VLLM_RDNA_GDN_LEAPQUANT_PACK=1``, on top of ``VLLM_RDNA_GDN_LEAPQUANT=1``).
+
+    A LeapQuant page is smaller than the attention page it is padded to. With
+    the flag, GDN pages keep their natural size and the KV-cache planner puts
+    as many GDN layers into one KV-cache group as one block holds, so fewer
+    groups (block tables) are resident per request."""
+    if os.environ.get("VLLM_RDNA_GDN_LEAPQUANT_PACK", "0") != "1":
+        return False
+    if not leapquant_gdn_enabled():
+        raise ValueError(
+            "VLLM_RDNA_GDN_LEAPQUANT_PACK=1 needs VLLM_RDNA_GDN_LEAPQUANT=1"
+        )
+    return True
+
+
 def leapquant_gdn_layout(
     head_k_dim: int, head_v_dim: int, num_spec: int
 ) -> LeapQuantLayout:
