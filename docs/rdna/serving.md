@@ -95,6 +95,7 @@ These are shell variables in the `.env` files. They become flags. They are not e
 | `MAXBAT` | `--max-num-batched-tokens`. Empty: the launcher derives it from the KV and SSM dtypes (2048 for an FP16 KV cache, 4096 for `int4_fp16_block` with an FP16 SSM state, 6144 with the model's FP32 SSM state). A prefill chunk ends on a mamba block, so the budget covers two blocks. | Leave `27b-awq` empty. Pinning it puts a packed KV cache back on a one-block budget (see that recipe). |
 | `LPTH` | `--long-prefill-token-threshold`. `0` disables the long-prefill split. | The recipes that set it use 0. |
 | `PREFILL_INTERVAL` | `--prefill-schedule-interval`. | The tuning guide: admit prefills every Nth step so decodes get a pure-decode step. |
+| `DECODE_GROWTH_ADMISSION` | `1` adds `--decode-growth-admission`. Default `0`; no recipe sets it. | Hybrid (Mamba) models: bounded-output admission and decoder-first ordering. Always on with LeapQuant. See [the note](../rdna2/decode-growth-admission-2026-11-14.md). |
 | `KV` / `KVCAP` | `--kv-cache-memory-bytes`. `KV=auto` drops the flag and needs `GMEM`, so vLLM sizes the cache after profiling. | Shrink it if the load fails to reserve memory. |
 | `GMEM` | `--gpu-memory-utilization`. | `flashnext-pp3-mtp2` uses 0.975 so one 262144-token request fits a 30 GB card (recipe comment). |
 | `DIST_TIMEOUT` | `--distributed-timeout-seconds`. | The recipes that set it use 1800. |
