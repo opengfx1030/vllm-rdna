@@ -325,11 +325,10 @@ def _assert_orthonormal_or_zero(rows):
 
 
 def test_fold_of_degenerate_states_is_finite_accurate_and_orthonormal():
-    """The RFC prototype produced NaN when the state had rank below num_comp
-    (a Gram-Schmidt column cancelled to zero). The HIP fold mirrors the oracle
-    guard: scale by the max |entry|, two sweeps, drop dependent columns. States
-    near the float limit also cover the smoothing sum, which overflowed to inf
-    and made 0 * inf = NaN in every later read."""
+    """The RFC prototype produced NaN for exactly low-rank states. The HIP fold
+    mirrors the oracle guard: scale by the max |entry|, two sweeps, drop
+    dependent columns. States near the float limit also cover the smoothing sum,
+    which overflowed to inf and made 0 * inf = NaN in every later read."""
     L = _layout(1)
     cases = _fold_cases()
     names = list(cases)
