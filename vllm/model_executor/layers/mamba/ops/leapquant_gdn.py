@@ -42,7 +42,7 @@ import torch
 LEAPQUANT_ALIGN = 16
 # The int32 header [cursor, pending, 0, 0] is the last section of every blob.
 LEAPQUANT_HEADER_BYTES = 16
-LEAPQUANT_WINDOW = 16
+LEAPQUANT_WINDOW = 32
 LEAPQUANT_NUM_COMP = 4
 LEAPQUANT_POWER_ITERS = 2
 INT8_MAX = 127.0
@@ -72,7 +72,7 @@ def leapquant_gdn_enabled() -> bool:
 def leapquant_gdn_layout(
     head_k_dim: int, head_v_dim: int, num_spec: int
 ) -> LeapQuantLayout:
-    """Serving layout: window 16, r = 4 (paper, 8-bit), ring sized for one
+    """Serving layout: window 32, r = 4, ring sized for one
     verify step of ``num_spec + 1`` tokens."""
     if head_k_dim != 128 or head_v_dim != 128:
         raise ValueError(

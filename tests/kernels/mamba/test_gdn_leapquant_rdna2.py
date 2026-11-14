@@ -26,11 +26,11 @@ H, HV = 2, 6
 WINDOW, R, ITERS = 16, 4, 2
 
 
-def _layout(max_query_len: int) -> lq.LeapQuantLayout:
+def _layout(max_query_len: int, *, window: int = WINDOW) -> lq.LeapQuantLayout:
     return lq.LeapQuantLayout(
         K,
         V,
-        window=WINDOW,
+        window=window,
         num_comp=R,
         max_query_len=max_query_len,
         power_iters=ITERS,
@@ -47,20 +47,22 @@ def _normalize(L, blob, idx, num_acc):
         idx,
         num_acc,
         V,
-        R,
+        L.num_comp,
         L.capacity,
-        WINDOW,
-        ITERS,
+        L.window,
+        L.power_iters,
     )
 
 
 def _store(L, state, blob, idx):
-    _ops().gdn_lq_store_rdna2(state, blob, idx, R, L.capacity, WINDOW, ITERS)
+    _ops().gdn_lq_store_rdna2(
+        state, blob, idx, L.num_comp, L.capacity, L.window, L.power_iters
+    )
 
 
 def _materialize(L, blob, idx, n):
     out = torch.empty(n, HV, V, K, dtype=torch.float32, device=blob.device)
-    _ops().gdn_lq_materialize_rdna2(blob, out, idx, R, L.capacity, WINDOW)
+    _ops().gdn_lq_materialize_rdna2(blob, out, idx, L.num_comp, L.capacity, L.window)
     return out
 
 
@@ -100,9 +102,9 @@ def _decode(L, blob, idx, q, k, v, a, b, A_log, dt_bias):
         cu,
         idx,
         K**-0.5,
-        R,
+        L.num_comp,
         L.capacity,
-        WINDOW,
+        L.window,
     )
     return out.view(n, t, HV, V)
 
@@ -186,12 +188,13 @@ def test_decode_matches_reference_on_same_blob():
     assert _rel(gv["rec_k"][..., c : c + 3, :], rv["rec_k"][..., c : c + 3, :]) < 2e-3
 
 
+@pytest.mark.parametrize("window", [16, 32])
 @pytest.mark.parametrize("spec", [False, True])
-def test_trajectory_tracks_fp32_with_rejections(spec):
+def test_trajectory_tracks_fp32_with_rejections(spec, window):
     """Long decode with folds every window; with MTP-style rejections the
     committed state must follow only the accepted prefix."""
     T = 3 if spec else 1
-    L = _layout(T)
+    L = _layout(T, window=window)
     A_log, dt_bias = _params(seed=3)
     n = 2
     blob = torch.zeros(n + 1, HV, L.nbytes, dtype=torch.uint8, device="cuda")
@@ -230,11 +233,12 @@ def test_trajectory_tracks_fp32_with_rejections(spec):
     )
 
 
+@pytest.mark.parametrize("window", [16, 32])
 @pytest.mark.parametrize("page_kib", [None, 512, 1024])
-def test_grouped_normalize_matches_per_layer(page_kib):
+def test_grouped_normalize_matches_per_layer(page_kib, window):
     """Grouped normalization must match per-layer normalization even with
     padded KV pages, without writing the conv state or unused page bytes."""
-    L = _layout(3)
+    L = _layout(3, window=window)
     A_log, dt_bias = _params()
     n, layers = 3, 3
     idx = torch.tensor([1, 0, 2], dtype=torch.int32, device="cuda")
@@ -257,9 +261,9 @@ def test_grouped_normalize_matches_per_layer(page_kib):
             pages.append(page)
         blob[0].fill_(7)
         _store(L, torch.randn(n, HV, V, K, device="cuda") * 0.5, blob, idx)
-        # 8 steps commit 7 * 2 = 14 records; committing 3 (request 0) or 2
-        # (request 2) more below reaches the window and folds.
-        for step in range(8):
+        # Leave window - 2 committed plus 3 pending records. Accepting 3
+        # (request 0) or 2 (request 2) below reaches the window and folds.
+        for step in range(window // 2):
             q, k, v, a, b = _tokens(n, 3, seed=100 * layer + step)
             _normalize(L, blob, idx, torch.full((n,), 2, dtype=torch.int32).cuda())
             _decode(L, blob, idx, q, k, v, a, b, A_log, dt_bias)
@@ -273,7 +277,15 @@ def test_grouped_normalize_matches_per_layer(page_kib):
         [blob.data_ptr() - base for blob in blobs], dtype=torch.int64, device="cuda"
     )
     _ops().gdn_lq_normalize_rdna2(
-        blobs[0], idx, num_acc, V, R, L.capacity, WINDOW, ITERS, offsets
+        blobs[0],
+        idx,
+        num_acc,
+        V,
+        L.num_comp,
+        L.capacity,
+        L.window,
+        L.power_iters,
+        offsets,
     )
     folded = 0
     for got, want in zip(blobs, ref):
@@ -345,8 +357,9 @@ def test_normalize_groups_follow_kv_cache_groups():
         assert torch.equal(ctx[name].kv_cache[1], want), name
 
 
-def test_normalize_and_decode_replay_in_cuda_graph():
-    L = _layout(3)
+@pytest.mark.parametrize("window", [16, 32])
+def test_normalize_and_decode_replay_in_cuda_graph(window):
+    L = _layout(3, window=window)
     A_log, dt_bias = _params()
     n = 2
     blob = torch.zeros(n + 1, HV, L.nbytes, dtype=torch.uint8, device="cuda")
@@ -366,7 +379,7 @@ def test_normalize_and_decode_replay_in_cuda_graph():
         out = step(blob)
     blob.zero_()
     eager = []
-    for _ in range(8):  # crosses a window boundary: folds inside the graph
+    for _ in range((window + 2) // 3 + 2):  # folds inside the graph
         graph.replay()
         eager.append(step(eager_blob))
         torch.accelerator.synchronize()
@@ -400,10 +413,11 @@ def _precopy_lq(blob, block_table, dst_col, src_col, token_bias, tiles=4):
     )
 
 
-def test_align_precopy_commits_accepted_records():
+@pytest.mark.parametrize("window", [16, 32])
+def test_align_precopy_commits_accepted_records(window):
     """Migrating a running home blob to the next block column must produce
     exactly the state a verify with num_accepted = token_bias + 1 reads."""
-    L = _layout(3)
+    L = _layout(3, window=window)
     A_log, dt_bias = _params(seed=11)
     n = 2
     blob = torch.zeros(2 * n + 1, HV, L.nbytes, dtype=torch.uint8, device="cuda")
@@ -454,15 +468,16 @@ def _mono_inputs(m, conv_len, seed):
 SLOTS_MONO = 24
 
 
+@pytest.mark.parametrize("window", [16, 32])
 @pytest.mark.parametrize("spec", [False, True])
-def test_mono_gdn_leapquant_matches_fp32_mono(spec):
+def test_mono_gdn_leapquant_matches_fp32_mono(spec, window):
     """The MonoKernel GDN on LeapQuant blobs (mono_gdn_lq_rdna2) is the FP32
     MonoKernel (mono_gdn_rdna2) run on the materialized state: same outputs
     and conv state, and every per-token state the FP32 kernel stores is the
     blob with that many records committed. Two steps, so the second replays
     the first one's records."""
     t = 3 if spec else 1
-    L = _layout(t)
+    L = _layout(t, window=window)
     n = 4
     cd = 2 * H * K + HV * V
     A_log, dt_bias = _params(5)
@@ -510,7 +525,7 @@ def test_mono_gdn_leapquant_matches_fp32_mono(spec):
         )  # fmt: skip
         _ops().mono_gdn_lq_rdna2(
             qkvz, ba, conv_w, conv_b, conv, blob, *common, *tail, y,
-            scratch, H, K**-0.5, 1e-6, 0, R, L.capacity, WINDOW,
+            scratch, H, K**-0.5, 1e-6, 0, L.num_comp, L.capacity, L.window,
         )  # fmt: skip
         torch.accelerator.synchronize()
         assert torch.equal(conv, conv_ref)

@@ -1,0 +1,237 @@
+{
+  "protocol": "One boot per arm; dataset seed 12345, thinking sampling values T=1, top_p=.95, top_k=20, min_p=0, presence_penalty=0, repetition_penalty=1. Random/completions throughput corpus; not a model-quality corpus or an ABBA result. Effective-wave prefill is c*mean_input/p99_TTFT, not a separately timed GPU prefill rate.",
+  "rows": [
+    {
+      "arm": "baseline-1024",
+      "cell": "1024x512-c1",
+      "completed": 16,
+      "prefill_per_request_tps": 2535.8593068582327,
+      "prefill_effective_wave_tps": 2487.7841698674456,
+      "decode_per_request_tps": 87.38243295241118,
+      "output_aggregate_tps": 81.89322790163844,
+      "ttft_mean_s": 0.40380789156188257,
+      "ttft_p99_s": 0.4116112693387549,
+      "itl_mean_ms": 23.699523071684613,
+      "itl_median_ms": 23.70007403078489,
+      "itl_p99_ms": 24.211331792757846,
+      "maximum_stream_gap_ms": 25.831288017798215,
+      "acceptance_length": 2.0729483282674774,
+      "acceptance_rate_percent": 53.64741641337386,
+      "acceptance_per_position": [
+        0.6332320162107397,
+        0.4397163120567376
+      ],
+      "accepted_tokens": 4236,
+      "draft_steps": 3948,
+      "generated_tokens": 8192,
+      "corruption_flags": [
+        {
+          "request": 3,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": " issue\n- **Get help with a text** \u2192 resend the clean version\n- **Test the model** \u2192 no problem! Just let me know what you're curious about\n\nI'll be glad to assist once the request is legible. \ud83d\ude42\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        },
+        {
+          "request": 10,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": "question, ask for help with a task, or just chat in English, Hindi, or any other language you prefer. \ud83d\ude0a\n\n\n\n\nuser\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        },
+        {
+          "request": 13,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": "ems and doesn't form a coherent sentence in any language I can identify.\n\nIf you have a question or need help with something, please feel free to ask again in any language. I'm happy to help! \ud83d\ude0a\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        }
+      ]
+    },
+    {
+      "arm": "baseline-1024",
+      "cell": "16384x1024-c1",
+      "completed": 4,
+      "prefill_per_request_tps": 2772.2956324236716,
+      "prefill_effective_wave_tps": 2759.7367047187445,
+      "decode_per_request_tps": 64.51790209865202,
+      "output_aggregate_tps": 47.04496041517348,
+      "ttft_mean_s": 5.9099036222469294,
+      "ttft_p99_s": 5.936798235855531,
+      "itl_mean_ms": 24.07906489787873,
+      "itl_median_ms": 24.114163010381162,
+      "itl_p99_ms": 24.594302339828573,
+      "maximum_stream_gap_ms": 25.78802895732224,
+      "acceptance_length": 1.554290053151101,
+      "acceptance_rate_percent": 27.71450265755505,
+      "acceptance_per_position": [
+        0.3337129840546697,
+        0.2205770690964313
+      ],
+      "accepted_tokens": 1460,
+      "draft_steps": 2634,
+      "generated_tokens": 4096,
+      "corruption_flags": [
+        {
+          "request": 3,
+          "flags": [
+            "empty"
+          ],
+          "tail": "\n\n"
+        }
+      ]
+    },
+    {
+      "arm": "window16-512",
+      "cell": "1024x512-c1",
+      "completed": 16,
+      "prefill_per_request_tps": 2069.6267232318633,
+      "prefill_effective_wave_tps": 2017.7462693445857,
+      "decode_per_request_tps": 89.18041394368278,
+      "output_aggregate_tps": 82.24750192335168,
+      "ttft_mean_s": 0.4947752116386255,
+      "ttft_p99_s": 0.5074969115579734,
+      "itl_mean_ms": 23.567949428766543,
+      "itl_median_ms": 23.569382989080623,
+      "itl_p99_ms": 24.194220601348206,
+      "maximum_stream_gap_ms": 24.613327987026423,
+      "acceptance_length": 2.104884318766067,
+      "acceptance_rate_percent": 55.24421593830334,
+      "acceptance_per_position": [
+        0.6419023136246786,
+        0.46298200514138815
+      ],
+      "accepted_tokens": 4298,
+      "draft_steps": 3890,
+      "generated_tokens": 8192,
+      "corruption_flags": [
+        {
+          "request": 0,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": "rm a coherent message. This might be a copy-paste glitch, encoding error, or accidental paste.\n\nCould you re-send what you meant to ask? I'm happy to help once I can see the actual question. \ud83d\ude42\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        },
+        {
+          "request": 11,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": "packskeletonSuggests\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        }
+      ]
+    },
+    {
+      "arm": "window16-512",
+      "cell": "16384x1024-c1",
+      "completed": 4,
+      "prefill_per_request_tps": 2735.7049546287926,
+      "prefill_effective_wave_tps": 2725.457958331893,
+      "decode_per_request_tps": 89.65990646335841,
+      "output_aggregate_tps": 58.85331327987859,
+      "ttft_mean_s": 5.9889499312703265,
+      "ttft_p99_s": 6.011466788512771,
+      "itl_mean_ms": 23.95754781364661,
+      "itl_median_ms": 24.006497056689113,
+      "itl_p99_ms": 24.669888496864587,
+      "maximum_stream_gap_ms": 25.03556798910722,
+      "acceptance_length": 2.150656167979003,
+      "acceptance_rate_percent": 57.53280839895013,
+      "acceptance_per_position": [
+        0.6493438320209973,
+        0.5013123359580053
+      ],
+      "accepted_tokens": 2192,
+      "draft_steps": 1905,
+      "generated_tokens": 4096,
+      "corruption_flags": []
+    },
+    {
+      "arm": "window32-512",
+      "cell": "1024x512-c1",
+      "completed": 16,
+      "prefill_per_request_tps": 2067.5232733332214,
+      "prefill_effective_wave_tps": 2026.0172195081932,
+      "decode_per_request_tps": 91.00534860707369,
+      "output_aggregate_tps": 83.78733369776965,
+      "ttft_mean_s": 0.49527858438523253,
+      "ttft_p99_s": 0.5054251218301943,
+      "itl_mean_ms": 23.561729181167948,
+      "itl_median_ms": 23.567059019114822,
+      "itl_p99_ms": 24.281382472254336,
+      "maximum_stream_gap_ms": 24.73050798289478,
+      "acceptance_length": 2.148701809598741,
+      "acceptance_rate_percent": 57.43509047993706,
+      "acceptance_per_position": [
+        0.6637817991083137,
+        0.4849200104904275
+      ],
+      "accepted_tokens": 4380,
+      "draft_steps": 3813,
+      "generated_tokens": 8192,
+      "corruption_flags": [
+        {
+          "request": 1,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": "rbled structure and responding to the implicit intent of a new interaction.\n\nPlease provide a clear question or context, and I will be happy to assist you!\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        },
+        {
+          "request": 6,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": "lease provide more context so I can help you better.\nuser\nassistant\nuser\nassistant\nuser\nassistant\nuser\nassistant\nuser\nassistant\nuser\nassistant\nuser\nassistant\nuser\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        },
+        {
+          "request": 10,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": "ake main behtar tareeqay se aapki madad kar sakoon. \ud83d\ude0a\n\nKya aap kisi sawal ka jawab dhoond rahe hain? Ya kisi baat ko samajhna chahte hain?\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        },
+        {
+          "request": 11,
+          "flags": [
+            "repeat30:'\\n'"
+          ],
+          "tail": "c question \u2014 whether about programming, science, writing, or anything else \u2014 I'd be happy to help. Just send it in a clear format and I'll do my best to give you a solid answer! \ud83d\ude42\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+        }
+      ]
+    },
+    {
+      "arm": "window32-512",
+      "cell": "16384x1024-c1",
+      "completed": 4,
+      "prefill_per_request_tps": 2726.4142041299306,
+      "prefill_effective_wave_tps": 2719.300602188987,
+      "decode_per_request_tps": 71.14016899969934,
+      "output_aggregate_tps": 50.220932468641415,
+      "ttft_mean_s": 6.009358363517094,
+      "ttft_p99_s": 6.025078649565694,
+      "itl_mean_ms": 24.056982726879404,
+      "itl_median_ms": 24.09440401243046,
+      "itl_p99_ms": 24.595086637418717,
+      "maximum_stream_gap_ms": 27.68424100941047,
+      "acceptance_length": 1.71267252195734,
+      "acceptance_rate_percent": 35.633626097867,
+      "acceptance_per_position": [
+        0.41614387285654536,
+        0.29652864910079463
+      ],
+      "accepted_tokens": 1704,
+      "draft_steps": 2391,
+      "generated_tokens": 4096,
+      "corruption_flags": [
+        {
+          "request": 3,
+          "flags": [
+            "empty"
+          ],
+          "tail": "\n\n"
+        }
+      ]
+    }
+  ]
+}

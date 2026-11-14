@@ -8,7 +8,7 @@ to the RDNA2 Gated DeltaNet path. Opt-in with `VLLM_RDNA_GDN_LEAPQUANT=1`
 ## What it stores
 
 The FP32 state of one value head (`[V, K] = [128, 128]`, 64 KiB) becomes one
-28,768-byte blob (2.28x smaller):
+37,024-byte blob (1.77x smaller, MTP2):
 
 | section | dtype | shape | bytes | offset |
 |---|---|---|---:|---:|
@@ -17,18 +17,19 @@ The FP32 state of one value head (`[V, K] = [128, 128]`, 64 KiB) becomes one
 | `csmooth` per-column smoothing | fp32 | `[K]` | 512 | 16896 |
 | `comp_k` compensator keys | fp16 | `[r, K]` | 1024 | 17408 |
 | `comp_u` compensator values | fp16 | `[r, V]` | 1024 | 18432 |
-| `rec_k` token records | fp16 | `[cap, K]` | 4608 | 19456 |
-| `rec_u` token records | fp16 | `[cap, V]` | 4608 | 24064 |
-| `rec_g` decays | fp32 | `[cap]` | 72 | 28672 |
-| header `[cursor, pending, 0, 0]` | int32 | `[4]` | 16 | 28752 |
+| `rec_k` token records | fp16 | `[cap, K]` | 8704 | 19456 |
+| `rec_u` token records | fp16 | `[cap, V]` | 8704 | 28160 |
+| `rec_g` decays | fp32 | `[cap]` | 136 | 36864 |
+| alignment padding | uint8 | `[8]` | 8 | 37000 |
+| header `[cursor, pending, 0, 0]` | int32 | `[4]` | 16 | 37008 |
 
-`r = 4` compensator tokens, window 16, `cap = window + num_spec = 18` for MTP2.
+`r = 4` compensator tokens, window 32, `cap = window + num_spec = 34` for MTP2.
 The state is `replay(cursor records, Z*B*C + comp_u^T comp_k)`: the boundary
 state (INT8 + rank-4 FP16 compensator of its top subspace, found by 2 power
 iterations) plus the exact FP16 records `S_j = exp(g_j) S_{j-1} + u_j k_j^T`
-since the boundary. Every 16 committed tokens the records are folded into a
-new boundary state, so quantization error enters once per window instead of
-once per token. The FP32 oracle is
+since the boundary. Once at least 32 records are committed, they are folded
+into a new boundary state, so quantization error enters once per window
+instead of once per token. The FP32 oracle is
 `vllm/model_executor/layers/mamba/ops/leapquant_gdn.py`; the kernels are
 `csrc/rocm/gdn_leapquant_rdna2.cu`.
 
@@ -79,14 +80,19 @@ or uncomment `VLLM_RDNA_GDN_LEAPQUANT=1` in
 `tools/rdna/recipes/flashnext-mtp2.env`. The worker log prints
 `GDN recurrent state: LeapQuant INT8 (...)`.
 
-Experimental 512-token pages (MTP2 stays enabled; throughput trade-offs below):
+Measured 512-token profile (MTP2 stays enabled; trade-offs and scope below):
 
 ```bash
 bash tools/rdna/serve_rdna.sh RECIPE=flashnext-mtp2 \
-    VLLM_RDNA_GDN_LEAPQUANT=1 BLOCK_SIZE=512 EXTRA_ARGS=--monokernel
+    VLLM_RDNA_GDN_LEAPQUANT=1 BLOCK_SIZE=512 EXTRA_ARGS=--monokernel \
+    VLLM_RDNA_DECODE_STALL_MS=450 VLLM_RDNA_DECODE_SHARE=0 \
+    VLLM_DECODE_STALL_MAX_OVERHEAD=1.0
 ```
 
 ## Results (flashnext-mtp2, 4x V620 TP4, 2026-11-13)
+
+These original receipts used window 16; the 2026-11-14 investigation below
+records the window-32 change and its separate controls.
 
 Base = flag off, head = flag on, same build (`_rocm_C` md5 identical; the
 trees differ only in the recipe line). Receipts:
@@ -551,6 +557,127 @@ Speed is mixed (5 winning cells, 4 with at least one regression):
   B1 flags 2/4 while the other boots flag 0/4; retain these as quality
   concerns for the larger decode study rather than treating gate PASS
   as complete decode-quality evidence.
+
+### Recommended-temperature reproduction and window-32 candidate (2026-11-14)
+
+The [model's thinking sampling settings](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices)
+are temperature 1, top-p 0.95, top-k 20, min-p 0, presence penalty 0 and
+repetition penalty 1. These pilots pin those values, not a thinking chat
+template: they use the random/completions throughput corpus (dataset seed
+12345), MTP2, MonoKernel and FULL_AND_PIECEWISE on b4 (d9/dc/df/e2).
+
+| cell | state / block | output aggregate tok/s | mean TTFT s | ITL p50 ms | acceptance length |
+|---|---|---:|---:|---:|---:|
+| 1k/512 c=1, n=16 | FP32 / 1024 | 81.89 | 0.404 | 23.70 | 2.073 |
+| 1k/512 c=1, n=16 | LQ window 16 / 512 | 82.25 | 0.495 | 23.57 | 2.105 |
+| 1k/512 c=1, n=16 | LQ window 32 / 512 | 83.79 | 0.495 | 23.57 | 2.149 |
+| 16k/1k c=1, n=4 | FP32 / 1024 | 47.04 | 5.910 | 24.11 | 1.554 |
+| 16k/1k c=1, n=4 | LQ window 16 / 512 | 58.85 | 5.989 | 24.01 | 2.151 |
+| 16k/1k c=1, n=4 | LQ window 32 / 512 | 50.22 | 6.009 | 24.09 | 1.713 |
+
+One boot per arm, not ABBA. The short c=1 loss does not reproduce here, but
+this does not establish temperature as the cause or acceptance parity.
+The 512-token mode also adds about 91 ms of short-prompt TTFT in these pilots.
+All prefill/decode metrics and counter totals are retained in
+`bench_results/2026-11-14_leapquant-acceptance/pilot-metrics.json`.
+
+The candidate uses unused page space for a 32-token exact-record window
+instead of folding every 16 committed records. At MTP2 the blob is
+37,024 bytes/head (capacity 34); 12 heads plus the 25 KiB convolution state
+occupy 458.875 KiB of a 512 KiB page, leaving 53.125 KiB. Padded page size
+and startup capacity (273,456 tokens) are unchanged from the window-16
+512-token build. MTP2 and the rank-4 compensator are unchanged.
+
+An isolated CPU reference experiment (three seeds, 96 steps with accepted
+prefix lengths 1/2/3) reduces mean accepted-output relative error from
+0.002738 to 0.001978 (27.8 %). This is synthetic numerical evidence, not
+model acceptance evidence. The candidate passes 22 GPU tests covering both
+windows, rejected drafts, grouped folds, prefix precopy, graph replay and
+MonoKernel. The pilot table is exploratory; the completed controls follow.
+
+### Completed 512/window-32 controls (2026-11-14)
+
+The accepted order is A1, C1, C2, A2, with a rejected diagnostic B1 between
+A1 and C1; this is a bracketed comparison, not an uninterrupted ABBA.
+All boots use MTP2, greedy/one-hot drafting, MonoKernel, FULL_AND_PIECEWISE
+and TP4 on b4. A1/A2 use FP32 state, block 1024 and no adaptive cap.
+C1/C2 use window 32, block 512 and the measured profile in **Use** above.
+No speculative state slots or checkpoint reservations were removed.
+
+Receipts under `~/w4a8_runs/leapquant/`:
+`qualification-A1-20261114-144603`, `qualification-C1-20261114-163330`,
+`qualification-C2-20261114-170939`, `qualification-A2-20261114-174500`.
+Each boot completes 96 throughput requests and 128 x 512-token decode probes.
+The coding corpus is 32 real agent prompts, chat-templated with thinking
+enabled, 968-1036 input tokens, at most 1024 output tokens and EOS allowed.
+It is a throughput/corruption corpus, not an executed coding-task score.
+
+All cells use the thinking sampling values above except the explicit T0
+cell. Random cells fix the dataset seed, not the API sampling seed; coding
+cells set API seed 12345. Both standard cells and T0 c1 use 16 requests;
+coding c1 uses 16 and coding c8 uses 32.
+
+| cell / mode | PP/req | PP wave | TG/req | TG aggregate | TTFT mean s | ITL p50 / p99 ms | MTP length |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1k/512 c1 T1 / FP32 1024 | 2517.9 | 2466.7 | 88.01 | 82.38 | 0.407 | 23.68 / 24.21 | 2.077 |
+| 1k/512 c1 T1 / LQ 512 | 2054.1 | 2013.7 | 91.32 | 84.01 | 0.499 | 23.60 / 24.23 | 2.158 |
+| 32k/2k c8 T1 / FP32 1024 | 407.2 | 1799.3 | 20.21 | 82.32 | 80.564 | 44.58 / 434.91 | 2.281 |
+| 32k/2k c8 T1 / LQ 512 | 536.4 | 1909.9 | 23.41 | 100.46 | 61.119 | 45.69 / 436.19 | 2.277 |
+| 1k/512 c1 T0 / FP32 1024 | 2532.1 | 2466.0 | 85.94 | 80.62 | 0.404 | 23.48 / 24.05 | 2.021 |
+| 1k/512 c1 T0 / LQ 512 | 2053.2 | 2015.4 | 88.93 | 81.98 | 0.499 | 23.42 / 24.07 | 2.084 |
+| coding c1 T1 / FP32 1024 | 2347.1 | 2216.4 | 82.20 | 79.55 | 0.425 | 23.89 / 24.38 | 1.965 |
+| coding c1 T1 / LQ 512 | 1926.1 | 1865.5 | 81.86 | 78.62 | 0.518 | 23.81 / 24.38 | 1.950 |
+| coding c8 T1 / FP32 1024 | 990.2 | 2795.3 | 39.13 | 288.97 | 1.008 | 47.46 / 368.37 | 1.993 |
+| coding c8 T1 / LQ 512 | 867.5 | 2469.0 | 39.22 | 288.86 | 1.151 | 46.39 / 273.60 | 1.995 |
+
+Rates are tok/s. Rate/latency columns are means of two boot summaries,
+including the per-boot percentile summaries. MTP length pools counters as
+`1 + accepted / draft_steps`. PP/req is input/mean TTFT; PP wave is the
+effective concurrency-sized wave/p99 TTFT estimate, not separately timed
+GPU prefill throughput. TG/req is 1/mean TPOT; TG aggregate includes prefill.
+
+This is not a universal c1 speedup or exact acceptance parity: coding c1
+output is 1.17 % lower, decode/req 0.40 % lower and MTP length 0.76 % lower.
+Short cold TTFT adds about 93 ms. At 32k c8, output rises 22.0 % and mean
+ITL falls 14.2 %, but ITL p50 rises 2.48 % and p99 is effectively unchanged.
+Coding c8 output is flat while ITL p99 falls 25.7 %. The earlier 19.3 %
+small-sample c1 regression is not reproduced by these new-mode controls;
+the controls do not establish the cause of that historical result.
+
+The adaptive-fitter repair is `db40b66ae6`: include minimum-chunk feedback,
+expire unvisited cold buckets, and refit the slope when constraining a
+negative intercept. B1 had frozen at 64-token chunks; its overlong quiet
+window also makes it unqualified. C1 recovers 64 -> 2048 in the live log.
+Decode share stays zero: no artificial decode-only cadence or waits.
+
+Actual preemption counters are A1=14, A2=10, C1=0, C2=0. A1's original
+wrapper exited 1 only because it incorrectly required a preemption-free
+reference; its measurements are retained, not relabeled as a zero-preemption
+pass. All accepted measured windows have zero worker KFD eviction deltas,
+no new GPU faults and no thermal/build-overlap/quiet-duration invalidation.
+All 192 real-coding responses have zero existing corruption-detector flags.
+Prefix, PPL, concurrency and after-load probes pass on both candidate boots.
+
+The corrected decode metric includes the first divergent prediction.
+Pairwise KL is C1=0.01085, C2=0.01120, versus A1/A2 floor=0.01111.
+The fair common-context/common-vocabulary comparison uses 2963 positions
+over 128 passages (median 7 predictions, 97.8 % reference probability mass):
+candidate KL 0.01398, floor 0.01262, ratio 1.107 with a 95 % passage-bootstrap
+interval [0.836, 1.317], below the 1.5x threshold. This interval is conditional
+on these four boots and their shared prefixes, not a full-trajectory,
+universal accuracy or losslessness guarantee.
+
+Changed-path gates: 22 GPU lifecycle cases, 40 CPU controller/scheduler cases
+with one skip, and three decode-metric boundary regressions pass. The
+historical broad matrix and task-accuracy studies were not silently rerun.
+KV capacity is 273,456 versus 266,945 tokens (+2.44 %), not a 2x engine gain.
+This study's b4 lease is released; a2 was never used by this study.
+
+Machine-readable evidence is under
+`bench_results/2026-11-14_leapquant-acceptance/`:
+`qualified-comparison.json`, `decode-quality-comparison.json`,
+`controller-cpu-gate.txt`, `controller-recovery-replay.json` and the pilot
+and numerical summaries. Raw traces/logs remain in the persistent receipts.
 
 ### Triton census
 
