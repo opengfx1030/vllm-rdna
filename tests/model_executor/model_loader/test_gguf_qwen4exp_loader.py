@@ -137,6 +137,13 @@ def _make_toy_artifact(
             "num_attention_heads": 4,
             "num_key_value_heads": 2,
             "head_dim": 64,
+            "rope_parameters": {
+                "mrope_interleaved": True,
+                "mrope_section": [3, 3, 2],
+                "partial_rotary_factor": 0.25,
+                "rope_theta": 10000000,
+                "rope_type": "default",
+            },
             "linear_num_key_heads": 2,
             "linear_num_value_heads": 6,
             "linear_key_head_dim": 64,
@@ -956,6 +963,187 @@ def test_loader_fails_closed_on_invalid_contracts(
             initialize_model_parallel(1, 1)
         with pytest.raises(ValueError, match=expected_match):
             get_model_loader(lc).load_model(vllm_config=vc, model_config=mc)
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+def test_explicit_mtp_sidecar_loads_all_31_unquantized_mtp_keys(tmp_path, monkeypatch):
+    import safetensors.torch
+
+    monkeypatch.delenv("VLLM_PLE_QUANT_DIR", raising=False)
+    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    _patch_cpu_qsa_noop(monkeypatch)
+    # Dev VM has no compiled x86 _C_AVX2 prepack op; ROCm uses GPU MoE experts.
+    import vllm.model_executor.layers.fused_moe.experts.cpu_moe as cpu_moe_mod
+
+    monkeypatch.setattr(cpu_moe_mod, "cpu_prepack_moe_weight", lambda w, _isa: w)
+    hf_dir, gguf_dir, _, _ = _make_toy_artifact(tmp_path)
+
+    mtp_dir = tmp_path / "mtp-sidecar"
+    mtp_dir.mkdir()
+    mtp_tensors = {
+        "mtp.fc_embedding.weight": torch.ones((256, 256), dtype=torch.bfloat16) * 0.1,
+        "mtp.fc_hidden.weight": torch.ones((256, 256), dtype=torch.bfloat16) * 0.2,
+        "mtp.pre_fc_norm_embedding.weight": torch.ones((256,), dtype=torch.bfloat16),
+        "mtp.pre_fc_norm_hidden.weight": torch.ones((1024,), dtype=torch.bfloat16),
+        "mtp.hyper_connection_mixer.hc_norm.weight": torch.ones(
+            (1024,), dtype=torch.bfloat16
+        ),
+        "mtp.hyper_connection_mixer.input_mix_weight_down.weight": torch.ones(
+            (64, 1024), dtype=torch.bfloat16
+        ),
+        "mtp.hyper_connection_mixer.input_mix_weight_up.weight": torch.ones(
+            (1024, 64), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.attn_hyper_connection.block_inject_weight.weight": torch.ones(
+            (4, 1024), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.attn_hyper_connection.hc_norm.weight": torch.ones(
+            (1024,), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.attn_hyper_connection.input_mix_weight_down.weight": torch.ones(
+            (64, 1024), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.attn_hyper_connection.input_mix_weight_up.weight": torch.ones(
+            (1024, 64), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.mlp.experts.down_proj": torch.ones(
+            (4, 256, 256), dtype=torch.bfloat16
+        )
+        * 0.5,
+        "mtp.layers.0.mlp.experts.gate_up_proj": torch.ones(
+            (4, 512, 256), dtype=torch.bfloat16
+        )
+        * 0.25,
+        "mtp.layers.0.mlp.gate.weight": torch.ones((4, 256), dtype=torch.bfloat16),
+        "mtp.layers.0.mlp.shared_expert.down_proj.weight": torch.ones(
+            (256, 128), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.mlp.shared_expert.gate_proj.weight": torch.ones(
+            (128, 256), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.mlp.shared_expert.up_proj.weight": torch.ones(
+            (128, 256), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.mlp.shared_expert_gate.weight": torch.ones(
+            (1, 256), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.mlp_hyper_connection.block_inject_weight.weight": torch.ones(
+            (4, 1024), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.mlp_hyper_connection.hc_norm.weight": torch.ones(
+            (1024,), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.mlp_hyper_connection.input_mix_weight_down.weight": torch.ones(
+            (64, 1024), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.mlp_hyper_connection.input_mix_weight_up.weight": torch.ones(
+            (1024, 64), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.self_attn.indexer.index_qk_proj.weight": torch.ones(
+            (320, 256), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.self_attn.indexer.k_layernorm.weight": torch.ones(
+            (64,), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.self_attn.indexer.q_layernorm.weight": torch.ones(
+            (64,), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.self_attn.k_norm.weight": torch.ones((64,), dtype=torch.bfloat16),
+        "mtp.layers.0.self_attn.k_proj.weight": torch.ones(
+            (128, 256), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.self_attn.o_proj.weight": torch.ones(
+            (256, 256), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.self_attn.q_norm.weight": torch.ones((64,), dtype=torch.bfloat16),
+        "mtp.layers.0.self_attn.q_proj.weight": torch.ones(
+            (512, 256), dtype=torch.bfloat16
+        ),
+        "mtp.layers.0.self_attn.v_proj.weight": torch.ones(
+            (128, 256), dtype=torch.bfloat16
+        ),
+    }
+    safetensors.torch.save_file(mtp_tensors, str(mtp_dir / "model-mtp.safetensors"))
+    (mtp_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {k: "model-mtp.safetensors" for k in mtp_tensors}})
+    )
+
+    from vllm.config import (
+        CompilationConfig,
+        DeviceConfig,
+        EngramConfig,
+        LoadConfig,
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        SpeculativeConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.model_executor.model_loader import get_model_loader
+
+    mc = ModelConfig(
+        model=str(hf_dir),
+        skip_tokenizer_init=True,
+        dtype="float16",
+        max_model_len=512,
+    )
+    lc = LoadConfig(
+        load_format="qwen4exp_gguf",
+        model_loader_extra_config={
+            "gguf_dir": str(gguf_dir),
+            "mtp_safetensors_dir": str(mtp_dir),
+        },
+    )
+    pc = ParallelConfig(tensor_parallel_size=1, pipeline_parallel_size=1)
+    sc = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=2,
+        target_model_config=mc,
+        target_parallel_config=pc,
+    )
+    vc = VllmConfig(
+        model_config=mc,
+        load_config=lc,
+        speculative_config=sc,
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=pc,
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=512,
+            max_num_batched_tokens=16,
+            max_num_seqs=1,
+        ),
+        compilation_config=CompilationConfig(mode=0),
+        engram_config=EngramConfig(cpu_offload=False, dp_shared_memory=False),
+    )
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{tmp_path / 'gloo-mtp-ok'}",
+        local_rank=0,
+        backend="gloo",
+    )
+    try:
+        with set_current_vllm_config(vc):
+            initialize_model_parallel(1, 1)
+        loader = get_model_loader(lc)
+        # First load GGUF target (installs Qwen4ExpGGUFQuantConfig onto vc)
+        _target = loader.load_model(vllm_config=vc, model_config=mc)
+        # Now load MTP draft model exactly as EagleProposer._get_model does
+        draft = loader.load_model(vllm_config=vc, model_config=sc.draft_model_config)
+        routed = draft.model.layers[0].mlp.experts.routed_experts
+        assert routed.w13_weight.dtype == torch.float16
+        assert torch.all(routed.w13_weight == 0.25)
+        assert torch.all(routed.w2_weight == 0.5)
     finally:
         destroy_model_parallel()
         destroy_distributed_environment()

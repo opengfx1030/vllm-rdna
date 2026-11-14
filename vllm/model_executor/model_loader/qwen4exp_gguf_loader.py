@@ -28,7 +28,7 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -648,9 +648,10 @@ class Qwen4ExpGGUFModelLoader(BaseModelLoader):
                     prefix=prefix,
                 )
             _zero_hc_alignment_padding(draft_model)
-            loaded = draft_model.load_weights(
-                _iter_filtered_safetensors(self.mtp_safetensors_dir, "mtp.")
-            )
+            with set_current_vllm_config(vllm_config):
+                loaded = draft_model.load_weights(
+                    _iter_filtered_safetensors(self.mtp_safetensors_dir, "mtp.")
+                )
             # embed_tokens and lm_head are shared from target_model by EagleProposer
             required = {
                 name
@@ -723,6 +724,7 @@ class Qwen4ExpGGUFModelLoader(BaseModelLoader):
                     model_config=model_config,
                     prefix=prefix,
                 )
-            self.load_weights(model, model_config)
-            process_weights_after_loading(model, model_config, target_device)
+            with set_current_vllm_config(vllm_config):
+                self.load_weights(model, model_config)
+                process_weights_after_loading(model, model_config, target_device)
         return model
