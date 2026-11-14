@@ -80,13 +80,13 @@ or uncomment `VLLM_RDNA_GDN_LEAPQUANT=1` in
 `tools/rdna/recipes/flashnext-mtp2.env`. The worker log prints
 `GDN recurrent state: LeapQuant INT8 (...)`.
 
-Measured 512-token profile (MTP2 stays enabled; trade-offs and scope below):
+Dedicated 512-token recipe (MTP2, MonoKernel and FULL_AND_PIECEWISE stay
+enabled; window 32/rank 4, adaptive 450 ms mixed-step budget, decode share
+zero). The existing `flashnext-mtp2` recipe remains unchanged and opt-in
+LeapQuant is lossy; cold-TTFT/c1 trade-offs are recorded below.
 
 ```bash
-bash tools/rdna/serve_rdna.sh RECIPE=flashnext-mtp2 \
-    VLLM_RDNA_GDN_LEAPQUANT=1 BLOCK_SIZE=512 EXTRA_ARGS=--monokernel \
-    VLLM_RDNA_DECODE_STALL_MS=450 VLLM_RDNA_DECODE_SHARE=0 \
-    VLLM_DECODE_STALL_MAX_OVERHEAD=1.0
+bash tools/rdna/serve_rdna.sh RECIPE=flashnext-leapquant-mtp2
 ```
 
 ## Results (flashnext-mtp2, 4x V620 TP4, 2026-11-13)

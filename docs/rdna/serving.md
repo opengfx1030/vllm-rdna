@@ -19,7 +19,7 @@ Nothing in the launcher or the recipes bakes in a home directory, a host, or an 
 
 ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags belong to the process that runs `serve_rdna.sh`. An API client or a gateway (OpenAI SDK, OpenCode, LiteLLM, and others) receives the base URL and the served model name. It does not receive those variables or flags.
 
-`GPU_MAX_HW_QUEUES` is one of those launch-environment variables. [`rdna_launcher_common.sh`](../../tools/rdna/rdna_launcher_common.sh) defaults it to **2**. Recipes that omit the key keep that default (`27b-awq`, `27b-exl3`, `dsv4-flash`, `full`, and both `flashnext-pp3*` recipes). The five Flash-Next TP=4 recipes — `flashnext`, `flashnext-exl3`, `flashnext-mtp0`, `flashnext-mtp2`, `flashnext-dflash2` — override it to **4**; leave that recipe value. Do not change those recipes to 2. A value of 2 as a host-specific fix is only an unverified workaround reported in [ROCm/TheRock#9306](https://github.com/ROCm/TheRock/issues/9306).
+`GPU_MAX_HW_QUEUES` is one of those launch-environment variables. [`rdna_launcher_common.sh`](../../tools/rdna/rdna_launcher_common.sh) defaults it to **2**. Recipes that omit the key keep that default (`27b-awq`, `27b-exl3`, `dsv4-flash`, `full`, and both `flashnext-pp3*` recipes). The Flash-Next TP=4 recipes — `flashnext`, `flashnext-exl3`, `flashnext-mtp0`, `flashnext-mtp2`, `flashnext-leapquant-mtp2`, `flashnext-dflash2` — override it to **4**; leave that recipe value. Do not change those recipes to 2. A value of 2 as a host-specific fix is only an unverified workaround reported in [ROCm/TheRock#9306](https://github.com/ROCm/TheRock/issues/9306).
 
 ## Pick a recipe
 
@@ -29,6 +29,7 @@ ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags bel
 | Flash-Next AWQ-W4A16, same parsers, no MTP | [`flashnext`](../../tools/rdna/recipes/flashnext.env) | TP=4 | `0.0.0.0:18094`, name `flash-next` |
 | Flash-Next AWQ, plain decode, 262144 context | [`flashnext-mtp0`](../../tools/rdna/recipes/flashnext-mtp0.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
 | Flash-Next AWQ, MTP=2 | [`flashnext-mtp2`](../../tools/rdna/recipes/flashnext-mtp2.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
+| Flash-Next AWQ, lossy LeapQuant GDN, 512-token blocks, MTP=2 + MonoKernel | [`flashnext-leapquant-mtp2`](../../tools/rdna/recipes/flashnext-leapquant-mtp2.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
 | Flash-Next AWQ + Inco DFlash2 | [`flashnext-dflash2`](../../tools/rdna/recipes/flashnext-dflash2.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
 | Flash-Next AWQ on 3 cards, no MTP | [`flashnext-pp3`](../../tools/rdna/recipes/flashnext-pp3.env) | TP=1, PP=3 | `127.0.0.1:18096`, name `flash-next` |
 | 3 cards, MTP=2 | [`flashnext-pp3-mtp2`](../../tools/rdna/recipes/flashnext-pp3-mtp2.env) | TP=1, PP=3 | `127.0.0.1:18097`, name `flash-next` |
@@ -89,7 +90,7 @@ These are shell variables in the `.env` files. They become flags. They are not e
 | `ATTN` | `fa` → `RDNA_ATTN` and `VLLM_FA_RDNA2_GQA_DECODE=1`. `triton` → Triton AMD FA. `none` → the launcher does not pass `--attention-backend`. | Leave `fa` on the Flash-Next and 27B recipes. Only the 27B recipes run the GQA decode kernel; the Flash-Next full-attention layers use QSA ([validation](../rdna2/fa-gqa-decode-validation-2026-11-11.md)). |
 | `MAXLEN` | `--max-model-len`. Empty uses the model's own context. | Lower it when KV memory is tight. |
 | `MIN_MAXLEN` | Refuse to start when `MAXLEN` is set below this. | `full` sets 32768. |
-| `BLOCK_SIZE` | `--block-size`. | 1024 on the current Flash-Next and 27B recipes; 16 on `full`. |
+| `BLOCK_SIZE` | `--block-size`. | 1024 on Flash-Next and 27B recipes, except 512 on `flashnext-leapquant-mtp2`; 16 on `full`. |
 | `SEQS` | `--max-num-seqs`. | Lower it when a long context does not fit. |
 | `MAXBAT` | `--max-num-batched-tokens`. Empty: the launcher derives it from the KV and SSM dtypes (2048 for an FP16 KV cache, 4096 for `int4_fp16_block` with an FP16 SSM state, 6144 with the model's FP32 SSM state). A prefill chunk ends on a mamba block, so the budget covers two blocks. | Leave `27b-awq` empty. Pinning it puts a packed KV cache back on a one-block budget (see that recipe). |
 | `LPTH` | `--long-prefill-token-threshold`. `0` disables the long-prefill split. | The recipes that set it use 0. |
