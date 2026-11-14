@@ -1,0 +1,77 @@
+{
+  "provenance": {
+    "converter": "ggml-org/llama.cpp conversion/qwen.py::_LinearAttentionVReorderBase._reorder_v_heads",
+    "source_sha256": "3e3ea6be268c65915f8f5b8419edc15c291f0adf374b97216f436191d23456b4",
+    "license": "MIT; see LICENSE.llama-cpp",
+    "generator": "execute pinned converter AST on distinct torch.arange head IDs",
+    "torch": "2.15.0+cpu"
+  },
+  "cases": [
+    {
+      "k_heads": 2,
+      "v_per_k": 3,
+      "forward_head_order": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5
+      ]
+    },
+    {
+      "k_heads": 16,
+      "v_per_k": 3,
+      "forward_head_order": [
+        0,
+        3,
+        6,
+        9,
+        12,
+        15,
+        18,
+        21,
+        24,
+        27,
+        30,
+        33,
+        36,
+        39,
+        42,
+        45,
+        1,
+        4,
+        7,
+        10,
+        13,
+        16,
+        19,
+        22,
+        25,
+        28,
+        31,
+        34,
+        37,
+        40,
+        43,
+        46,
+        2,
+        5,
+        8,
+        11,
+        14,
+        17,
+        20,
+        23,
+        26,
+        29,
+        32,
+        35,
+        38,
+        41,
+        44,
+        47
+      ]
+    }
+  ]
+}

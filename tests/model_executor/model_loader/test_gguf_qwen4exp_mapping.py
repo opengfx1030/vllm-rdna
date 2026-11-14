@@ -44,11 +44,67 @@ def test_native_head_and_embedding_destinations_have_exact_shapes():
 
 def test_inventory_planning_accounts_for_every_tensor_without_silent_drops():
     tensors = CONTRACT["tensors"]
-    plan = qmap.plan_tensors(tensors)
+    plan = qmap.plan_tensors(tensors, native_parameters=CONTRACT["native_parameters"])
     assert len(plan.entries) == 1224
     assert set(plan.by_source) == {t["name"] for t in tensors}
-    assert len(plan.unsupported) > 0
-    assert all(item.reason for item in plan.unsupported)
+    assert len(plan.unsupported) == 0
+
+
+def test_gdn_linear_attention_destinations_slices_and_transforms():
+    names = {
+        "blk.0.attn_qkv.weight",
+        "blk.0.attn_gate.weight",
+        "blk.0.ssm_beta.weight",
+        "blk.0.ssm_alpha.weight",
+        "blk.0.ssm_conv1d.weight",
+        "blk.0.ssm_dt.bias",
+        "blk.0.ssm_a",
+        "blk.0.ssm_norm.weight",
+        "blk.0.ssm_out.weight",
+    }
+    plan = qmap.plan_tensors(
+        [t for t in CONTRACT["tensors"] if t["name"] in names],
+        native_parameters=CONTRACT["native_parameters"],
+    )
+    assert not plan.unsupported
+    assert (
+        plan.by_source["blk.0.attn_qkv.weight"].destination
+        == "model.layers.0.linear_attn.in_proj_qkvz.weight"
+    )
+    assert plan.by_source["blk.0.attn_qkv.weight"].slice_start == 0
+    assert plan.by_source["blk.0.attn_qkv.weight"].slice_size == 10240
+    assert plan.by_source["blk.0.attn_qkv.weight"].transform == "gdn_inverse"
+    assert (
+        plan.by_source["blk.0.attn_gate.weight"].destination
+        == "model.layers.0.linear_attn.in_proj_qkvz.weight"
+    )
+    assert plan.by_source["blk.0.attn_gate.weight"].slice_start == 10240
+    assert plan.by_source["blk.0.attn_gate.weight"].slice_size == 6144
+    assert plan.by_source["blk.0.attn_gate.weight"].transform == "gdn_inverse"
+    assert (
+        plan.by_source["blk.0.ssm_beta.weight"].destination
+        == "model.layers.0.linear_attn.in_proj_ba.weight"
+    )
+    assert plan.by_source["blk.0.ssm_beta.weight"].slice_start == 0
+    assert plan.by_source["blk.0.ssm_beta.weight"].slice_size == 48
+    assert plan.by_source["blk.0.ssm_alpha.weight"].slice_start == 48
+    assert plan.by_source["blk.0.ssm_alpha.weight"].slice_size == 48
+    assert plan.by_source["blk.0.ssm_conv1d.weight"].destination_shape == (10240, 1, 4)
+    assert plan.by_source["blk.0.ssm_conv1d.weight"].transform == "gdn_conv_inverse"
+    assert (
+        plan.by_source["blk.0.ssm_a"].destination == "model.layers.0.linear_attn.A_log"
+    )
+    assert plan.by_source["blk.0.ssm_a"].transform == "gdn_inverse"
+    assert (
+        plan.by_source["blk.0.ssm_norm.weight"].destination
+        == "model.layers.0.linear_attn.norm.weight"
+    )
+    assert plan.by_source["blk.0.ssm_norm.weight"].transform == "identity"
+    assert (
+        plan.by_source["blk.0.ssm_out.weight"].destination
+        == "model.layers.0.linear_attn.out_proj.weight"
+    )
+    assert plan.by_source["blk.0.ssm_out.weight"].transform == "gdn_inverse"
 
 
 def test_direct_layer_destinations_and_reshape_contracts():

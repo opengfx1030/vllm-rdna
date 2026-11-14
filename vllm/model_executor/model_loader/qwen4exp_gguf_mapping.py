@@ -77,6 +77,11 @@ _DIRECT_LAYER = {
     "ple_norm_query.weight": ("ple.norm_query.weight", "subtract_one"),
     "ple_norm_conv.weight": ("ple.norm_conv.weight", "subtract_one"),
     "ple_conv1d.weight": ("ple.conv1d.weight", "unsqueeze_conv"),
+    "ssm_conv1d.weight": ("linear_attn.conv1d.weight", "gdn_conv_inverse"),
+    "ssm_dt.bias": ("linear_attn.dt_bias", "gdn_inverse"),
+    "ssm_a": ("linear_attn.A_log", "gdn_inverse"),
+    "ssm_norm.weight": ("linear_attn.norm.weight", "identity"),
+    "ssm_out.weight": ("linear_attn.out_proj.weight", "gdn_inverse"),
 }
 
 
@@ -118,6 +123,10 @@ _MERGED_LAYER = {
     "indexer.k_proj.weight": ("self_attn.indexer.index_qk_proj.weight", 0, 512, 128),
     "ple_key.weight": ("ple.kv_proj.weight", 0, 0, 10240),
     "ple_value.weight": ("ple.kv_proj.weight", 0, 10240, 2560),
+    "attn_qkv.weight": ("linear_attn.in_proj_qkvz.weight", 0, 0, 10240),
+    "attn_gate.weight": ("linear_attn.in_proj_qkvz.weight", 0, 10240, 6144),
+    "ssm_beta.weight": ("linear_attn.in_proj_ba.weight", 0, 0, 48),
+    "ssm_alpha.weight": ("linear_attn.in_proj_ba.weight", 0, 48, 48),
 }
 
 
@@ -162,6 +171,13 @@ def plan_tensors(tensors, *, native_parameters=None):
         if match and match[2] in _MERGED_LAYER:
             suffix, axis, start, count = _MERGED_LAYER[match[2]]
             destination = f"model.layers.{match[1]}.{suffix}"
+            if match[2] in (
+                "attn_qkv.weight",
+                "attn_gate.weight",
+                "ssm_beta.weight",
+                "ssm_alpha.weight",
+            ):
+                transform = "gdn_inverse"
         if match and match[2] in (
             "ffn_gate_exps.weight",
             "ffn_up_exps.weight",
@@ -179,7 +195,7 @@ def plan_tensors(tensors, *, native_parameters=None):
             logical = tuple(reversed(dims))
             if transform == "reshape":
                 logical = (1,) + logical
-            elif transform == "unsqueeze_conv":
+            elif transform in ("unsqueeze_conv", "gdn_conv_inverse"):
                 logical = (logical[0], 1, logical[1])
             expected = list(shape)
             if axis is not None:
