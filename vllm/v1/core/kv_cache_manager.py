@@ -391,6 +391,8 @@ class KVCacheManager:
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        num_admission_tokens: int | None = None,
+        num_admission_batches: int = 1,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -425,6 +427,12 @@ class KVCacheManager:
                 this step, controls whether watermark is applied.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
                 written by an async load and must not be zeroed concurrently.
+            num_admission_tokens: Optional bounded sequence length, including future
+                output, for full_sequence_must_fit. This gate also leaves
+                reserved_blocks available and accounts for speculative lookahead.
+                None retains the existing input-sequence admission policy.
+            num_admission_batches: Maximum unresolved batches per request for the
+                bounded-output admission gate's recurrent-state peak accounting.
 
         Blocks layout:
         ```
@@ -530,11 +538,21 @@ class KVCacheManager:
 
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
-            full_num_tokens = min(request.num_tokens, self.max_model_len)
+            full_num_tokens = min(
+                request.num_tokens
+                if num_admission_tokens is None
+                else num_admission_tokens,
+                self.max_model_len,
+            )
+            full_num_tokens_with_lookahead = (
+                full_num_tokens
+                if num_admission_tokens is None
+                else min(full_num_tokens + num_lookahead_tokens, self.max_model_len)
+            )
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
                 request_id=request.request_id,
-                num_tokens=full_num_tokens,
+                num_tokens=full_num_tokens_with_lookahead,
                 new_computed_blocks=new_computed_block_list,
                 num_encoder_tokens=num_encoder_tokens,
                 total_computed_tokens=total_computed_tokens,
@@ -542,9 +560,15 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
                 prefill_end=prefill_end,
+                num_admission_batches=(
+                    num_admission_batches if num_admission_tokens is not None else 0
+                ),
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
+            available_blocks = self.block_pool.get_num_free_blocks()
+            if num_admission_tokens is not None:
+                available_blocks -= reserved_blocks
+            if required_blocks > available_blocks:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens

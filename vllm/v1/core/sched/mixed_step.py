@@ -53,10 +53,10 @@ class MixedStepController:
         self.granularity = max(1, granularity)
         self.initial_cap = initial_cap
         self.max_overhead = max_overhead
-        # Recent durations per prefill-token bucket (bucket -> last 8 samples).
-        # The fit uses each bucket's median, so a one-off step (a JIT compile,
-        # a TunableOp miss, a slow first request) cannot move the cap.
-        self._buckets: dict[int, deque[float]] = {}
+        # Bound history across buckets as well as within each bucket. Otherwise
+        # a cold bucket that the policy stops selecting can bias the fit forever.
+        # Per-bucket medians still limit the influence of isolated slow steps.
+        self._history: deque[tuple[int, float]] = deque(maxlen=64)
         self._decode_s = 0.035
         self._debt_s = 0.0
         # Which steps feed the fit; see fit_all_steps_default().
@@ -83,12 +83,12 @@ class MixedStepController:
             # prefix-cache tails) dragged Flash-Next's fitted fixed cost to
             # 330-800 ms, above the budget, which pinned the cap at 2048.
             return
-        if num_prefill_tokens < 2 * self.granularity:
-            # Tiny prefills (a short prompt, the tail of a long one) are
-            # dominated by per-step overheads; they would distort the slope.
+        if num_prefill_tokens < self.granularity:
             return
+        # Include the smallest selectable chunk: ignoring it leaves no feedback
+        # when a cold fit selects that chunk, so the controller cannot recover.
         b = round(num_prefill_tokens / self.granularity)
-        self._buckets.setdefault(b, deque(maxlen=8)).append(elapsed_s)
+        self._history.append((b, elapsed_s))
 
     @staticmethod
     def fit_all_steps_default(is_moe: bool) -> bool:
@@ -108,9 +108,15 @@ class MixedStepController:
 
     # ---------------------------------------------------------------- policy
     def _points(self) -> list[tuple[float, float, int]]:
+        buckets: dict[int, deque[float]] = {}
+        for b, elapsed_s in self._history:
+            samples = buckets.get(b)
+            if samples is None:
+                samples = buckets[b] = deque(maxlen=8)
+            samples.append(elapsed_s)
         return [
             (b * self.granularity, statistics.median(v), len(v))
-            for b, v in self._buckets.items()
+            for b, v in buckets.items()
         ]
 
     def _fit(self) -> tuple[float, float] | None:
@@ -126,7 +132,15 @@ class MixedStepController:
         slope = sum(n * (x - mx) * (y - my) for x, y, n in pts) / sxx
         if slope <= 0.0:
             return None
-        return max(0.0, my - slope * mx), slope
+        intercept = my - slope * mx
+        if intercept < 0.0:
+            # Constrained least squares at a=0 needs a new slope. Clamping
+            # only the intercept overpredicts cost and underschedules work.
+            slope = sum(n * x * y for x, y, n in pts) / sum(
+                n * x * x for x, _, n in pts
+            )
+            intercept = 0.0
+        return intercept, slope
 
     def prefill_cap(self, block_size: int | None = None) -> int:
         """Max prefill tokens for a step that carries decodes."""

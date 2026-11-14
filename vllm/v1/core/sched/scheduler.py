@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.leapquant_gdn import leapquant_gdn_enabled
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
@@ -434,6 +435,19 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
+        self._lq_decode_growth_admission = (
+            kv_cache_config.has_mamba_layers and leapquant_gdn_enabled()
+        )
+        # Final verifies can extend beyond the output limit. Each additional
+        # concurrent batch can still hold a full, unresolved target query.
+        self._lq_admission_tail_tokens = self.num_spec_tokens + (
+            vllm_config.max_concurrent_batches - 1
+        ) * (1 + self.num_spec_tokens)
+        if self._lq_decode_growth_admission:
+            logger.info(
+                "LeapQuant scheduling: bounded output admission=%s, decoder-first FCFS",
+                self.scheduler_reserve_full_isl,
+            )
         # Adaptive prefill scheduling. Off unless VLLM_RDNA_DYNAMIC_PREFILL=1; when it
         # is off every hook below is skipped and the static config is used unchanged.
         self._dyn_prefill = maybe_create(
@@ -956,7 +970,15 @@ class Scheduler(SchedulerInterface):
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
             )
 
-        if self._mixed_step is not None and len(self.running) > 1:
+        if (
+            self._lq_decode_growth_admission
+            and self.policy == SchedulingPolicy.FCFS
+            and len(self.running) > 1
+        ):
+            # Reserve the ready decoders' target and draft rows before prefills
+            # consume the shared input budget. Do not override explicit priority.
+            self.running.sort(key=lambda r: r.is_prefill_chunk)
+        elif self._mixed_step is not None and len(self.running) > 1:
             # Decodes and nearly finished prompts first (stable): FCFS order
             # lets a long running prefill take the whole token budget, and the
             # requests behind it (just-admitted short prompts, decoders) then
@@ -1644,7 +1666,32 @@ class Scheduler(SchedulerInterface):
                     )
 
                 reserved_blocks = 0
-                if load_kv_async:
+                num_admission_tokens = None
+                if self._lq_decode_growth_admission and self.scheduler_reserve_full_isl:
+                    num_admission_tokens = min(
+                        request.num_prompt_tokens
+                        + request.max_tokens
+                        + self._lq_admission_tail_tokens,
+                        self.max_model_len,
+                    )
+                    # Promise future growth, not just the prompt's current chunk.
+                    # Query live group accounting: allocated pages cease to be
+                    # reservations, and finishing/aborting releases the promise.
+                    reserved_blocks = sum(
+                        self._request_remaining_blocks(other, reserve_output=True)
+                        for other in itertools.chain(
+                            self.running,
+                            (
+                                req
+                                for req in self._inflight_prefills
+                                if req.status != RequestStatus.RUNNING
+                            ),
+                        )
+                        if other is not request
+                    )
+                    if load_kv_async:
+                        reserved_blocks += self._spec_decode_step_blocks
+                elif load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations)
@@ -1675,6 +1722,8 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    num_admission_tokens=num_admission_tokens,
+                    num_admission_batches=self.vllm_config.max_concurrent_batches,
                 )
 
                 if new_blocks is None:
@@ -3672,11 +3721,24 @@ class Scheduler(SchedulerInterface):
             )
         return delay_free or partial_tail_delay, kv_xfer_params
 
-    def _request_remaining_blocks(self, request: Request) -> int:
-        """Blocks `request` still needs to hold its full sequence and be promoted."""
-        full_num_tokens = min(request.num_tokens, self.max_model_len)
+    def _request_remaining_blocks(
+        self, request: Request, *, reserve_output: bool = False
+    ) -> int:
+        """Physical growth still needed, using each group's recycling rules."""
+        full_num_tokens = min(
+            request.num_prompt_tokens
+            + request.max_tokens
+            + self._lq_admission_tail_tokens
+            if reserve_output
+            else request.num_tokens,
+            self.max_model_len,
+        )
         num_tokens = full_num_tokens
-        if self.num_spec_tokens:
+        if reserve_output:
+            num_tokens = min(
+                full_num_tokens + self.num_lookahead_tokens, self.max_model_len
+            )
+        elif self.num_spec_tokens:
             num_tokens += 1 + self.num_spec_tokens + self.num_lookahead_tokens
         return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
@@ -3687,6 +3749,9 @@ class Scheduler(SchedulerInterface):
             num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
+            num_admission_batches=(
+                self.vllm_config.max_concurrent_batches if reserve_output else 0
+            ),
             prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
         )
 

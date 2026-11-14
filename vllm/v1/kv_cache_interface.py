@@ -1138,8 +1138,20 @@ class MambaSpec(KVCacheSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "align":
+            from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
+                leapquant_gdn_enabled,
+            )
+
+            # LeapQuant admission accounts for retained inputs of unresolved
+            # batches. Startup capacity checks must use the same physical peak.
+            concurrent_batches = (
+                vllm_config.max_concurrent_batches if leapquant_gdn_enabled() else 1
+            )
             return self.page_size_bytes * (
-                2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
+                1
+                + concurrent_batches
+                + self.num_speculative_blocks
+                + self.num_prefill_checkpoint_blocks
             )
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
@@ -1148,11 +1160,10 @@ class MambaSpec(KVCacheSpec):
         # Mamba state is replicated across DCP/PCP ranks, never sharded, so
         # no CP scaling applies.
         if vllm_config.cache_config.mamba_cache_mode == "align":
-            # Block table rows are position-indexed over the full sequence
-            # even though only 2 + num_speculative_blocks state blocks are
-            # resident at a time (earlier states are nulled out by
-            # remove_skipped_blocks), so the row length must cover max_len
-            # rather than max_memory_usage_bytes.
+            # Block table rows span the full sequence even though only a bounded
+            # set of states is resident (see max_memory_usage_bytes). Earlier
+            # states are nulled by remove_skipped_blocks, so the row length must
+            # cover max_len rather than just the resident-state memory budget.
             return cdiv(max_len, self.block_size) + self.num_speculative_blocks
         return cdiv(self.max_memory_usage_bytes(vllm_config), self.page_size_bytes)
 

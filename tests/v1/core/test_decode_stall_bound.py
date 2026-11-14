@@ -128,9 +128,52 @@ def test_fit_mode_default_dense_vs_moe(monkeypatch):
 def test_outlier_step_is_ignored():
     c = _trained()
     cap = c.prefill_cap()
-    c.observe(512, 6, 25.0)  # a JIT compile, clipped to 1.5x the bucket mean
+    c.observe(512, 6, 25.0)  # One cold sample against four warm observations.
     c.observe(512, 6, 40.0)  # above the 30 s sanity bound: dropped
     assert abs(c.prefill_cap() - cap) <= 64
+
+
+def test_controller_recovers_after_cold_fit_selects_smallest_chunk():
+    c = MixedStepController(
+        0.45, 0.0, 2048, granularity=64, initial_cap=512, max_overhead=1.0
+    )
+    c.observe(512, 8, 2.6)
+    c.observe(128, 8, 0.14)
+    assert c.prefill_cap(block_size=512) == 64
+
+    for _ in range(96):
+        cap = c.prefill_cap(block_size=512)
+        c.observe(cap, 8, 0.11 + 0.00015 * cap)
+
+    cap = c.prefill_cap(block_size=512)
+    assert cap >= 512
+    assert 0.11 + 0.00015 * cap <= 0.45
+    assert not c.defer_prefill()
+
+
+def test_controller_refits_cost_with_nonnegative_intercept():
+    c = MixedStepController(0.45, 0.0, 1024, granularity=64, max_overhead=0.0)
+    for tokens, duration in ((128, 0.1), (256, 1.0)):
+        for _ in range(4):
+            c.observe(tokens, 8, duration)
+
+    # Constrained least squares: refit the slope through the origin, rather
+    # than keeping a slope fitted against an impossible negative fixed cost.
+    slope = (128 * 0.1 + 256 * 1.0) / (128**2 + 256**2)
+    cap = c.prefill_cap()
+    assert slope * cap <= 0.45
+    assert slope * (cap + 64) > 0.45
+
+
+def test_controller_tracks_sustained_cost_change():
+    c = _trained(budget_s=0.25, share=0.0, max_overhead=0.0)
+    for _ in range(96):
+        cap = c.prefill_cap()
+        c.observe(cap, 8, 0.03 + 0.0001 * cap)
+
+    cap = c.prefill_cap()
+    assert cap >= 1024
+    assert 0.03 + 0.0001 * cap <= 0.25
 
 
 @pytest.fixture(autouse=True)

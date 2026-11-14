@@ -110,10 +110,13 @@ struct MambaCopyMeta {
   const int64_t* block_strides;     // int64: bytes per block
   const int32_t* elem_sizes;        // int32: element size in bytes
   const int64_t* inner_sizes;       // int64: elements in inner dimensions
-  const int32_t* conv_widths;       // int32: conv width (0 = temporal state)
+  const int32_t* conv_widths;       // int32: conv width (0 = temporal state,
+                                    //   -1 = LeapQuant GDN blob)
   const int32_t* group_indices;     // int32: state_idx -> block-table group
   const int32_t* dim_row_count;     // int32: per-block dim row count
+                                    //   (LeapQuant: heads per block)
   const int64_t* dim_row_stride;    // int64: bytes between dim rows
+                                    //   (LeapQuant: header byte offset)
   const int64_t* block_table_ptrs;  // int64: per-group block-table base addrs
   int64_t block_table_stride_req;
 };
@@ -123,6 +126,12 @@ struct MambaCopyMeta {
 //   conv state (conv_width > 0): shift the window by `token_bias` tokens,
 //     state[bt[src_col], token_bias:] -> state[bt[dst_col], :conv_width - bias]
 //   temporal state: state[bt[src_col + token_bias]] -> state[bt[dst_col]]
+//   LeapQuant GDN blob (conv_width < 0): the running state lives in the home
+//     block bt[src_col] as cursor + pending records, and "slot src_col + t" of
+//     the per-token layout is "commit t + 1 pending records". Copy the home
+//     blob and commit min(token_bias + 1, pending) records in the copy's
+//     header (cursor += that, pending = 0); a blob without pending records is
+//     copied as is.
 // ---------------------------------------------------------------------------
 template <bool kConvDimFirst>
 __device__ __forceinline__ void copy_mamba_state_block(
@@ -206,6 +215,44 @@ __device__ __forceinline__ void copy_mamba_state_block(
           dst_addr + (uint64_t)((int64_t)t * token_bytes), token_bytes,
           tile_idx, 1);
       __syncthreads();
+    }
+    return;
+  }
+
+  if (conv_width < 0) {
+    // One CTA: the header patch must follow the whole-blob copy.
+    if (tile_idx > 0) {
+      return;
+    }
+    const int64_t src_block_id = (int64_t)block_table[src_col];
+    const uint64_t src_addr = base + (uint64_t)(src_block_id * block_stride);
+    const int32_t num_heads = m.dim_row_count[state_idx];
+    const int64_t header_off = m.dim_row_stride[state_idx];
+    const int64_t blob_bytes = inner_size * (int64_t)elem_size;
+    const int64_t head_bytes = blob_bytes / num_heads;
+    int32_t cursor = 0;
+    int32_t pending = 0;
+    if ((int32_t)threadIdx.x < num_heads) {
+      const int32_t* hdr =
+          (const int32_t*)(uintptr_t)(src_addr +
+                                      (uint64_t)((int64_t)threadIdx.x *
+                                                     head_bytes +
+                                                 header_off));
+      cursor = hdr[0];
+      pending = hdr[1];
+    }
+    __syncthreads();
+    memcpy_u64_tiled(src_addr, dst_addr, blob_bytes, 0, 1);
+    __syncthreads();
+    if ((int32_t)threadIdx.x < num_heads) {
+      const int32_t bias = token_bias > 0 ? token_bias : 0;
+      const int32_t commit = pending > 0 ? min(bias + 1, pending) : 0;
+      int32_t* hdr =
+          (int32_t*)(uintptr_t)(dst_addr +
+                                (uint64_t)((int64_t)threadIdx.x * head_bytes +
+                                           header_off));
+      hdr[0] = cursor + commit;
+      hdr[1] = 0;
     }
     return;
   }
