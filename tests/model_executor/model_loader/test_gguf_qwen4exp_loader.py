@@ -15,7 +15,7 @@ import torch
 import torch.multiprocessing as mp
 from gguf import quants
 
-HF_TEMPLATE_CONFIG = Path("/home/shahlite/qwen38-gguf-evidence/hf-config/config.json")
+HF_TEMPLATE_CONFIG = Path(__file__).parent / "fixtures/qwen4exp_hf_config.json"
 GEOMETRY = {
     0: (1, 4),
     7: (32, 24),
