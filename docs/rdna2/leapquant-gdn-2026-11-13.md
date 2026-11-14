@@ -91,6 +91,12 @@ instead of once per token. The FP32 oracle is
 - **Refused combinations** (raise at init): fused CUDA spec decode,
   AITER/FlashInfer GDN, align mode on the V1 runner, head dims other than 128.
 
+## Related notes (second PR)
+
+- [Page packing](leapquant-page-packing-2026-11-14.md): KV-cache capacity.
+- [Numerics and isolation](leapquant-gdn-numerics-and-isolation-2026-11-14.md):
+  fold guard, determinism, stale-state and flush-race tests.
+
 ## Use
 
 ```bash
