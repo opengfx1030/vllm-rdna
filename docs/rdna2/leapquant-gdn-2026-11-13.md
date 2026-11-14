@@ -709,3 +709,22 @@ baseline ones are the recipe's (`_causal_conv1d_update/_fwd` because the
 recipe sets `VLLM_CAUSAL_CONV1D_RDNA2_*=0`, `_mamba_align_block_table_kernel`,
 `_qsa_mqa_paged_kernel`, the PLE kernels, and under the MonoKernel
 `_fused_qk_rmsnorm_rope_gate_kernel` and `_num_nans_kernel`).
+
+## Four-boot matrix versus FP32 (2026-11-14)
+
+Receipts: `bench_results/2026-11-14_leapquant-matrix/`. FP32 (flashnext-mtp2,
+block 1024) against `flashnext-leapquant-mtp2` (block 512), two boots each,
+TP4 V620, MTP2, MonoKernel, FULL_AND_PIECEWISE, 16 requests per cell.
+
+- Aggregate output tok/s, LeapQuant versus FP32: 1k/512 c=1 -6.6%, c=8 +1.8%;
+  16k/1k c=1 -0.3%, c=8 -4.0%; 32k/2k c=1 +2.6%, c=8 +20.0%.
+- 32k/2k c=8: the FP32 boots preempted (10 and 6 times), LeapQuant never did.
+  The run changes block size and admission together; no FP32 + new-scheduler
+  control exists, so the gain is not attributed to LeapQuant alone.
+- 1k/512 c=1: -6.6% (76.08 and 80.11 versus 83.15 and 84.07). ITL p50 is equal;
+  MTP length is lower (1.937 and 2.050 versus 2.135 and 2.105) and 1k TTFT is
+  +21% to +23%. Cause not established ([INFERENCE]: the lossy state lowers
+  draft agreement). **Accepted by the owner (2026-11-14) as the cost of the
+  recipe.**
+- No candidate preemption, KFD eviction, fault or thermal abort. PPL 4.81 and
+  4.85 versus 4.83 and 4.81.
