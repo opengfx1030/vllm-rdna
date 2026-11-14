@@ -102,10 +102,13 @@ class _StateLayer:
     """A Mamba layer reduced to what ``MambaBase.get_kv_cache_spec`` and
     ``bind_kv_cache`` read, so both run unchanged."""
 
-    def __init__(self, shapes, dtypes, mamba_type, tp_replicated=False):
+    def __init__(
+        self, shapes, dtypes, mamba_type, tp_replicated=False, state_format=None
+    ):
         self._shapes, self._dtypes = shapes, dtypes
         self.mamba_type = mamba_type
         self.is_kv_cache_tp_replicated = tp_replicated
+        self._state_format = state_format
 
     def get_state_shape(self):
         return self._shapes
@@ -114,7 +117,10 @@ class _StateLayer:
         return self._dtypes
 
     def spec(self, vllm_config) -> MambaSpec:
-        return MambaBase.get_kv_cache_spec(self, vllm_config)
+        spec = MambaBase.get_kv_cache_spec(self, vllm_config)
+        if self._state_format is not None:
+            spec = replace(spec, state_format=self._state_format)
+        return spec
 
     def bind(self, kv_cache: torch.Tensor) -> None:
         MambaBase.bind_kv_cache(self, kv_cache)
@@ -126,6 +132,7 @@ class _FlashNextModel:
     @staticmethod
     def gdn_layer(vllm_config) -> _StateLayer:
         cache = vllm_config.cache_config
+        state_dtype = cache.replayssm_state_dtype
         return _StateLayer(
             MambaStateShapeCalculator.gated_delta_net_state_shape(
                 tp_world_size=4,
@@ -135,11 +142,19 @@ class _FlashNextModel:
                 head_v_dim=128,
                 conv_kernel_size=4,
                 num_spec=NUM_SPEC,
+                replayssm_state_dtype=state_dtype,
             ),
             MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-                torch.float16, cache.mamba_cache_dtype, "float32"
+                torch.float16, cache.mamba_cache_dtype, "float32", state_dtype
             ),
             MambaAttentionBackendEnum.GDN_ATTN,
+            # The layer stamps the format identity on its spec
+            # (QwenGatedDeltaNetAttention.get_kv_cache_spec).
+            state_format=(
+                leapquant_gdn.leapquant_gdn_layout(128, 128, NUM_SPEC).state_format
+                if state_dtype == "leapquant"
+                else None
+            ),
         )
 
     @staticmethod
@@ -167,29 +182,27 @@ class _FlashNextModel:
 
 
 @contextlib.contextmanager
-def flags(*, leapquant: bool, pack: bool):
-    """Set the two opt-in flags as on gfx10x; only the HIP probe is faked."""
-    env = {
-        "VLLM_RDNA_GDN_LEAPQUANT": "1" if leapquant else "0",
-        "VLLM_RDNA_GDN_LEAPQUANT_PACK": "1" if pack else "0",
-    }
+def flags(*, pack: bool):
+    """Set the packing switch as on gfx10x; only the HIP probe is faked. The
+    LeapQuant format is not an environment switch: it is the
+    ``--replayssm-state-dtype leapquant`` field of the CacheConfig."""
     with (
-        mock.patch.dict(os.environ, env),
+        mock.patch.dict(
+            os.environ, {"VLLM_RDNA_GDN_LEAPQUANT_PACK": "1" if pack else "0"}
+        ),
         mock.patch("vllm.platforms.rdna.on_rdna2_hip", lambda: True),
     ):
-        leapquant_gdn.leapquant_gdn_enabled.cache_clear()
-        leapquant_gdn.leapquant_gdn_pack_enabled.cache_clear()
+        leapquant_gdn.leapquant_gdn_pack_requested.cache_clear()
         try:
             yield
         finally:
-            leapquant_gdn.leapquant_gdn_enabled.cache_clear()
-            leapquant_gdn.leapquant_gdn_pack_enabled.cache_clear()
+            leapquant_gdn.leapquant_gdn_pack_requested.cache_clear()
 
 
 @contextlib.contextmanager
-def serving_env(*, leapquant: bool, pack: bool):
+def serving_env(*, pack: bool):
     """CPU stand-in for one serve: async scheduling (two concurrent batches),
-    MTP2, the opt-in flags."""
+    MTP2, the packing switch."""
     with (
         mock.patch("vllm.platforms.current_platform", CpuPlatform()),
         mock.patch.object(
@@ -198,7 +211,7 @@ def serving_env(*, leapquant: bool, pack: bool):
         mock.patch.object(
             VllmConfig, "num_speculative_tokens", property(lambda self: NUM_SPEC)
         ),
-        flags(leapquant=leapquant, pack=pack),
+        flags(pack=pack),
     ):
         yield
 
@@ -233,7 +246,7 @@ class Plan:
     def blocks_per_request(self, length: int = MAX_MODEL_LEN) -> list[int]:
         """Blocks each group takes for one request of ``length`` tokens."""
         with (
-            serving_env(leapquant=self.leapquant, pack=self.pack),
+            serving_env(pack=self.pack),
             max_model_len(self.vllm_config, length),
         ):
             return [
@@ -256,7 +269,7 @@ class Plan:
     def capacity(self, length: int = MAX_MODEL_LEN) -> tuple[int, float]:
         """The tokens and concurrency of ``GPU KV cache size`` in the log."""
         with (
-            serving_env(leapquant=self.leapquant, pack=self.pack),
+            serving_env(pack=self.pack),
             max_model_len(self.vllm_config, length),
         ):
             return kv_cache_utils.get_kv_cache_capacity(
@@ -324,7 +337,9 @@ def _natural_page_bytes(spec: KVCacheSpec) -> int:
     return spec.page_size_bytes
 
 
-def make_vllm_config(model_dir, block_size: int, layout: str = "BLNHC") -> VllmConfig:
+def make_vllm_config(
+    model_dir, block_size: int, layout: str = "BLNHC", *, leapquant: bool = True
+) -> VllmConfig:
     model_config = ModelConfig(
         model=str(model_dir),
         dtype="float16",
@@ -353,6 +368,12 @@ def make_vllm_config(model_dir, block_size: int, layout: str = "BLNHC") -> VllmC
     cache.kv_cache_layout = layout
     cache.mamba_cache_mode = "align"
     cache.mamba_block_size = block_size
+    # The CacheConfig field behind ``--replayssm-state-dtype leapquant``. Set
+    # after the VllmConfig is built: the start-up validator needs a GDN model
+    # config and the V2 runner, which the planner tests do not model
+    # (tests/config/test_leapquant_config.py covers it).
+    if leapquant:
+        cache.replayssm_state_dtype = "leapquant"
     register_all_kvcache_specs(config)
     return config
 
@@ -419,8 +440,10 @@ def plan(
 ) -> Plan:
     """Plan the KV cache as one serve would: platform alignment, specs, groups,
     config. Flags are read exactly where production reads them."""
-    with serving_env(leapquant=leapquant, pack=pack):
-        vllm_config = make_vllm_config(model_dir, block_size, layout)
+    with serving_env(pack=pack):
+        vllm_config = make_vllm_config(
+            model_dir, block_size, layout, leapquant=leapquant
+        )
         with mock.patch.object(
             ModelRegistry,
             "resolve_model_cls",
@@ -571,28 +594,41 @@ BASE_LAYOUTS = {
 
 
 def test_pack_flag_needs_leapquant():
-    with flags(leapquant=False, pack=False):
-        assert leapquant_gdn.leapquant_gdn_pack_enabled() is False
-    with flags(leapquant=True, pack=False):
-        assert leapquant_gdn.leapquant_gdn_pack_enabled() is False
-    with flags(leapquant=True, pack=True):
-        assert leapquant_gdn.leapquant_gdn_pack_enabled() is True
+    def cache(state_dtype: str) -> CacheConfig:
+        return CacheConfig(replayssm_state_dtype=state_dtype)
+
+    with flags(pack=False):
+        assert leapquant_gdn.leapquant_gdn_pack_enabled(cache("auto")) is False
+        assert leapquant_gdn.leapquant_gdn_pack_enabled(cache("leapquant")) is False
+    with flags(pack=True):
+        assert leapquant_gdn.leapquant_gdn_pack_enabled(cache("leapquant")) is True
     with (
-        flags(leapquant=False, pack=True),
-        pytest.raises(ValueError, match="needs VLLM_RDNA_GDN_LEAPQUANT=1"),
+        flags(pack=True),
+        pytest.raises(
+            ValueError,
+            match="VLLM_RDNA_GDN_LEAPQUANT_PACK=1 needs --replayssm-state-dtype "
+            "leapquant",
+        ),
     ):
-        leapquant_gdn.leapquant_gdn_pack_enabled()
+        leapquant_gdn.leapquant_gdn_pack_enabled(cache("auto"))
+
+
+def test_pack_switch_without_the_state_dtype_stops_the_platform(model_dir):
+    """The refusal is on the serving path: the platform's block alignment reads
+    the switch against the config."""
+    with pytest.raises(ValueError, match="needs --replayssm-state-dtype leapquant"):
+        plan(model_dir, 640, leapquant=False, pack=True)
 
 
 def test_state_page_sizes(model_dir):
     for leapquant, page in ((True, LQ_PAGE), (False, FP32_PAGE)):
-        with serving_env(leapquant=leapquant, pack=False):
-            vllm_config = make_vllm_config(model_dir, 1024)
+        with serving_env(pack=False):
+            vllm_config = make_vllm_config(model_dir, 1024, leapquant=leapquant)
             gdn = _FlashNextModel.gdn_layer(vllm_config)
             assert gdn.spec(vllm_config).page_size_bytes == page
     assert LQ_PAGE == 469_888
     assert FP32_PAGE == 812_032
-    with serving_env(leapquant=True, pack=False):
+    with serving_env(pack=False):
         vllm_config = make_vllm_config(model_dir, 512)
         ple = _FlashNextModel.ple_layer(vllm_config).spec(vllm_config)
         assert ple.page_size_bytes == 225_280
@@ -675,7 +711,7 @@ def test_unpadded_pages_alone_free_no_capacity(model_dir):
     repeat-pattern split still makes 3 groups of unpadded pages."""
     padded = plan(model_dir, 1024)
     unpadded = plan(model_dir, 1024, pack=True)
-    with serving_env(leapquant=True, pack=False):
+    with serving_env(pack=False):
         groups = kv_cache_planning.get_global_kv_cache_groups(
             unpadded.vllm_config, [unpadded.specs]
         )
@@ -691,6 +727,33 @@ def test_unpadded_pages_alone_free_no_capacity(model_dir):
         13,
     ]
     assert config.num_blocks == padded.config.num_blocks
+
+
+def test_packing_leaves_buckets_without_the_leapquant_format_alone(model_dir):
+    """The switch packs LeapQuant buckets only: the same unpadded specs without
+    ``state_format`` keep the repeat-pattern split (3 groups of 12), the stamped
+    ones pack to 2 groups of 18."""
+    packed = plan(model_dir, 640, pack=True)
+    plain_specs = {
+        name: replace(spec, state_format=None) if isinstance(spec, MambaSpec) else spec
+        for name, spec in packed.specs.items()
+    }
+    assert any(
+        isinstance(s, MambaSpec) and s.state_format for s in packed.specs.values()
+    )
+    with serving_env(pack=True):
+        stamped = kv_cache_planning.get_global_kv_cache_groups(
+            packed.vllm_config, [packed.specs]
+        )
+        plain = kv_cache_planning.get_global_kv_cache_groups(
+            packed.vllm_config, [plain_specs]
+        )
+
+    def gdn_sizes(groups):
+        return sorted(len(g.layer_names) for g in groups if _gdn_group(g))
+
+    assert gdn_sizes(stamped) == [18, 18]
+    assert gdn_sizes(plain) == [12, 12, 12]
 
 
 # block size: (tokens padded, tokens packed), at 262,144 tokens per request.
@@ -778,7 +841,7 @@ def test_capacity_log_math(model_dir, block_size, pack):
     assert tokens == int(concurrency * MAX_MODEL_LEN)
 
     with (
-        serving_env(leapquant=True, pack=pack),
+        serving_env(pack=pack),
         mock.patch.object(kv_cache_utils.logger, "info_once") as log,
     ):
         kv_cache_utils.update_kv_cache_capacity(p.vllm_config, p.scheduler_config)
@@ -791,7 +854,7 @@ def test_capacity_log_math(model_dir, block_size, pack):
 def _bind_group(p: Plan, config: KVCacheConfig, kv_caches, group):
     """Bind every GDN layer of ``group`` like ``bind_kv_cache_to_layers``."""
     layers = []
-    with serving_env(leapquant=True, pack=p.pack):
+    with serving_env(pack=p.pack):
         for name in group.layer_names:
             layer = _FlashNextModel.gdn_layer(p.vllm_config)
             layer.bind(kv_caches[name])
@@ -804,7 +867,7 @@ def test_packed_views_are_aligned_disjoint_and_inside_one_block(model_dir, block
     p = plan(model_dir, block_size, pack=True)
     block = attention_block_bytes(block_size)
     num_blocks = 4
-    with serving_env(leapquant=True, pack=True):
+    with serving_env(pack=True):
         config = kv_cache_planning.get_kv_cache_config_from_groups(
             p.vllm_config, p.groups, num_blocks * block
         )
@@ -869,7 +932,7 @@ def test_normalize_group_offsets_follow_the_packed_stride(model_dir):
 
     p = plan(model_dir, 640, pack=True)
     block = attention_block_bytes(640)
-    with serving_env(leapquant=True, pack=True):
+    with serving_env(pack=True):
         config = kv_cache_planning.get_kv_cache_config_from_groups(
             p.vllm_config, p.groups, 2 * block
         )

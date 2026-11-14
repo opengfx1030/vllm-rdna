@@ -33,7 +33,7 @@ from vllm.v1.worker.mamba_utils import (
     get_mamba_group_ids,
     get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
-    validate_mamba_state_copy_funcs,
+    select_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -260,8 +260,9 @@ class MambaHybridModelState(DefaultModelState):
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
             copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
-            validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
-            self._mamba_state_copy_funcs = copy_funcs
+            self._mamba_state_copy_funcs = select_state_copy_funcs(
+                mamba_groups, copy_funcs
+            )
         # Both SD and DS conv layouts support a >0 spec-decode shift: the
         # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
         # ``token_bias = num_accepted - 1`` window shift per conv layout

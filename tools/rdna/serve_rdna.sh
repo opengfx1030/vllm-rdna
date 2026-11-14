@@ -155,6 +155,10 @@ TP=${TP:-4}
 PP=${PP:-1}                      # pipeline-parallel stages (3x V620: PP=3 TP=1)
 PP_PARTITION=${PP_PARTITION:-}  # layers per stage, e.g. 16,16,16 -> VLLM_PP_LAYER_PARTITION
 BLOCK_SIZE=${BLOCK_SIZE:-}
+# --replayssm-state-dtype: auto (the model's own GDN state) or leapquant
+# (lossy INT8 GDN state, docs/rdna2/leapquant-gdn-2026-11-13.md).
+REPLAYSSM_STATE_DTYPE=${REPLAYSSM_STATE_DTYPE:-}
+[[ ${VLLM_RDNA_GDN_LEAPQUANT:-} != 1 ]] || rdna_die "VLLM_RDNA_GDN_LEAPQUANT=1 was replaced by REPLAYSSM_STATE_DTYPE=leapquant (--replayssm-state-dtype leapquant). Unset it: the engine ignores it and would serve FP32 state."
 LPTH=${LPTH:-}
 PREFILL_INTERVAL=${PREFILL_INTERVAL:-}
 DIST_TIMEOUT=${DIST_TIMEOUT:-}
@@ -381,6 +385,7 @@ cmd+=(--tensor-parallel-size "$TP" --dtype float16)
 (( PP > 1 )) && cmd+=(--pipeline-parallel-size "$PP")
 [[ -n $PP_PARTITION ]] && export VLLM_PP_LAYER_PARTITION=$PP_PARTITION
 [[ -n $BLOCK_SIZE ]] && cmd+=(--block-size "$BLOCK_SIZE")
+[[ -n $REPLAYSSM_STATE_DTYPE ]] && cmd+=(--replayssm-state-dtype "$REPLAYSSM_STATE_DTYPE")
 [[ -n $MAXLEN ]] && cmd+=(--max-model-len "$MAXLEN")
 cmd+=(--max-num-seqs "$SEQS" --max-num-batched-tokens "$MAXBAT")
 [[ -n $LPTH ]] && cmd+=(--long-prefill-token-threshold "$LPTH")
@@ -449,7 +454,7 @@ RDSE_ENV_KEYS=(
     RDNA_DFLASH2_DRAFT_BF16
     VLLM_USE_BREAKABLE_CUDAGRAPH VLLM_RDNA_FUSED_HC VLLM_RDNA_HC_PREFILL_FUSED
     VLLM_GDN_HIP_PREFILL VLLM_RDNA_FUSED_SE
-    VLLM_RDNA_GDN_LEAPQUANT VLLM_RDNA_GDN_LEAPQUANT_PACK
+    VLLM_RDNA_GDN_LEAPQUANT_PACK
     VLLM_RDNA_DENSE_INT8 VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_DENSE_GEMV
     VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA2_W4A8_DEBUG
     VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA_W4A8_KBLOCK

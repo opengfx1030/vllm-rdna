@@ -407,6 +407,7 @@ class Qwen3_5ForCausalLMBase(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
+            replayssm_state_dtype=vllm_config.cache_config.replayssm_state_dtype,
         )
 
     @classmethod
@@ -429,6 +430,7 @@ class Qwen3_5ForCausalLMBase(
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            replayssm_state_dtype=vllm_config.cache_config.replayssm_state_dtype,
         )
 
     @classmethod
@@ -644,6 +646,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
+            replayssm_state_dtype=vllm_config.cache_config.replayssm_state_dtype,
         )
 
     @classmethod
@@ -666,6 +669,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            replayssm_state_dtype=vllm_config.cache_config.replayssm_state_dtype,
         )
 
     @classmethod

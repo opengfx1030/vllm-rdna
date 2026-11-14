@@ -19,14 +19,18 @@ Examples:
 RDNA2 (gfx1030) LeapQuant arm
 -----------------------------
 The ``leapquant`` arm runs the same decode with the opt-in LeapQuant INT8 state
-storage of Gated DeltaNet models (VLLM_RDNA_GDN_LEAPQUANT=1, HIP kernels,
-docs/rdna2/leapquant-gdn-2026-11-13.md). The arm sets the flag in its own worker
-process; every other arm refuses to start if the flag is set in the environment,
-so a baseline never runs LeapQuant by accident. ``--modes standard,leapquant``
+storage of Gated DeltaNet models (``--replayssm-state-dtype leapquant``, HIP
+kernels, docs/rdna2/leapquant-gdn-2026-11-13.md). The arm passes
+``replayssm_state_dtype="leapquant"`` to ``LLM(...)``, the CacheConfig field the
+flag sets; no other arm does, so a baseline never runs LeapQuant by accident
+(``--llm-kwarg replayssm_state_dtype=...`` is refused). The retired environment
+variable VLLM_RDNA_GDN_LEAPQUANT=1 is refused in every arm: the engine ignores
+it, so it would mislabel a run. ``--modes standard,leapquant``
 with ``--mamba-ssm-cache-dtype float32`` is the FP32-state baseline against
 LeapQuant. ``--num-speculative-tokens N`` adds MTP-N to every arm and
 ``--monokernel`` the MonoKernel, as in tools/rdna/recipes/flashnext-leapquant-mtp2.env.
-The LeapQuant module is imported only by that arm, and it fails loudly off gfx10x.
+The engine's start-up validator fails loudly off gfx10x, and the worker checks that
+the engine config holds the format.
 
     python e2e_decode_speedup.py --model-id <Gated DeltaNet model> --dtype float16 \
         --modes standard,leapquant --mamba-ssm-cache-dtype float32 \
@@ -63,9 +67,11 @@ MODE_LABEL = {
     "leapquant": "LeapQuant",
 }
 DEFAULT_MODES = "standard,replayssm"
-# Opt-in switch of vllm.model_executor.layers.mamba.ops.leapquant_gdn: only the
-# value "1" enables it. Read here without importing vllm (--dry-run is CPU only).
-LEAPQUANT_FLAG = "VLLM_RDNA_GDN_LEAPQUANT"
+# CacheConfig field behind ``--replayssm-state-dtype``: the only switch of the
+# LeapQuant state format. ``VLLM_RDNA_GDN_LEAPQUANT`` was removed and is ignored
+# by the engine. Read here without importing vllm (--dry-run is CPU only).
+STATE_DTYPE_KEY = "replayssm_state_dtype"
+RETIRED_ENV = "VLLM_RDNA_GDN_LEAPQUANT"
 
 
 def parse_modes(text: str) -> list[str]:
@@ -87,6 +93,11 @@ def parse_key_value(text: str) -> tuple[str, str]:
 
 def parse_llm_kwarg(text: str) -> tuple[str, object]:
     key, value = parse_key_value(text)
+    if key == STATE_DTYPE_KEY:
+        raise argparse.ArgumentTypeError(
+            f"{STATE_DTYPE_KEY} is set by the arm (leapquant: 'leapquant'), "
+            "not by --llm-kwarg"
+        )
     try:
         return key, json.loads(value)
     except json.JSONDecodeError as e:
@@ -97,9 +108,10 @@ def parse_llm_kwarg(text: str) -> tuple[str, object]:
 
 def parse_env(text: str) -> tuple[str, str]:
     key, value = parse_key_value(text)
-    if key == LEAPQUANT_FLAG:
+    if key == RETIRED_ENV:
         raise argparse.ArgumentTypeError(
-            f"{LEAPQUANT_FLAG} is set by the arm (leapquant: 1), not by --env"
+            f"{RETIRED_ENV} was replaced by --replayssm-state-dtype leapquant, "
+            "which the leapquant arm sets; the engine ignores the variable"
         )
     return key, value
 
@@ -157,7 +169,7 @@ def parse_args(argv=None):
         help=f"Arms to run, in this order, from {sorted(MODE_LABEL)} (default: "
         f"{DEFAULT_MODES}). The first arm is the baseline of the speedup lines. "
         "'leapquant' = LeapQuant INT8 Gated DeltaNet state on RDNA2 "
-        f"({LEAPQUANT_FLAG}=1, HIP); 'standard' with "
+        "(--replayssm-state-dtype leapquant, HIP); 'standard' with "
         "--mamba-ssm-cache-dtype float32 is its FP32 baseline.",
     )
     p.add_argument(
@@ -246,6 +258,8 @@ def build_llm_kwargs(args, mode) -> dict:
         llm_kwargs["enable_flashinfer_autotune"] = False
     if mode == "replayssm":
         llm_kwargs.update(use_replayssm=True, replayssm_buffer_len=args.buffer_len)
+    if mode == "leapquant":
+        llm_kwargs[STATE_DTYPE_KEY] = "leapquant"
     if args.num_speculative_tokens > 0:
         llm_kwargs["speculative_config"] = {
             "method": "mtp",
@@ -259,17 +273,18 @@ def build_llm_kwargs(args, mode) -> dict:
 
 
 def arm_env(args, mode, environ) -> dict:
-    """Environment of one arm's worker. Only the leapquant arm runs LeapQuant;
-    a baseline refuses to start with the flag set instead of mislabeling a
-    LeapQuant run."""
+    """Environment of one arm's worker: the caller's plus ``--env``. The format
+    is an ``LLM(...)`` argument (build_llm_kwargs), not an environment variable.
+    The retired variable stops every arm, as the launcher does: the engine
+    ignores it, so a run under it would be mislabeled."""
     env = dict(environ)
     env.update(args.extra_env)
-    if mode == "leapquant":
-        env[LEAPQUANT_FLAG] = "1"
-    elif env.get(LEAPQUANT_FLAG, "0") == "1":
+    if env.get(RETIRED_ENV, "0") == "1":
         raise SystemExit(
-            f"{LEAPQUANT_FLAG}=1 is set in the environment, so the '{mode}' arm "
-            "would run LeapQuant. Unset it: the 'leapquant' arm sets it itself."
+            f"{RETIRED_ENV}=1 is set in the environment. It was replaced by "
+            "--replayssm-state-dtype leapquant, which the 'leapquant' arm "
+            f"passes itself; the engine ignores {RETIRED_ENV} and the "
+            f"'{mode}' arm would not run what the variable says. Unset it."
         )
     return env
 
@@ -282,15 +297,7 @@ def run_worker(args):
 
     mode = args.worker
     if mode == "leapquant":
-        # Flag-gated import: only this arm needs the module, and it raises off
-        # gfx10x instead of serving FP32 state under the LeapQuant label.
-        from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
-            leapquant_gdn_enabled,
-        )
-
-        if not leapquant_gdn_enabled():
-            raise RuntimeError(f"{LEAPQUANT_FLAG}=1 is not set in the worker")
-        print(f"[{mode}] LeapQuant INT8 Gated DeltaNet state is on", flush=True)
+        print(f"[{mode}] LeapQuant INT8 Gated DeltaNet state requested", flush=True)
 
     import torch
 
@@ -311,6 +318,11 @@ def run_worker(args):
         )
 
     llm = LLM(**llm_kwargs)
+    if mode == "leapquant":
+        # The validator already refused hosts and models that cannot run it.
+        state_dtype = llm.llm_engine.vllm_config.cache_config.replayssm_state_dtype
+        if state_dtype != "leapquant":
+            raise RuntimeError(f"the engine config has {STATE_DTYPE_KEY}={state_dtype}")
     prompts = [args.prompt] * args.batch_size
 
     def timed_generate(n_tokens):
@@ -438,7 +450,7 @@ def dry_run(args) -> None:
         print(f"  cmd {shlex.join(worker_command(args, mode))}")
         print(f"  LLM {json.dumps(build_llm_kwargs(args, mode))}")
         if mode == "leapquant":
-            print("  worker imports leapquant_gdn and needs gfx10x (HIP)")
+            print("  engine validates replayssm_state_dtype=leapquant: gfx10x (HIP)")
 
 
 def main(argv=None):

@@ -1019,10 +1019,11 @@ def _get_packed_kv_cache_groups(
     )
 
     from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
-        leapquant_gdn_pack_enabled,
+        is_leapquant_state_format,
+        leapquant_gdn_pack_requested,
     )
 
-    pack_mamba = leapquant_gdn_pack_enabled()
+    pack_requested = leapquant_gdn_pack_requested()
     groups = []
     for spec, page_size_layers, balanced in bucketed:
         num_groups = num_groups_for(spec, balanced)
@@ -1031,7 +1032,11 @@ def _get_packed_kv_cache_groups(
         if anchor_bytes and is_state_bucket(spec):
             states_per_block = max(anchor_bytes // spec.first_spec.page_size_bytes, 1)
             fit_groups = cdiv(len(spec.kv_cache_specs), states_per_block)
-            if pack_mamba and isinstance(spec.first_spec, MambaSpec):
+            if (
+                pack_requested
+                and isinstance(spec.first_spec, MambaSpec)
+                and is_leapquant_state_format(spec.first_spec.state_format)
+            ):
                 # Each group holds one state block per resident state of every
                 # request, so a packed (unpadded) bucket uses the fewest groups
                 # whose states fit one block, not the attention repeat pattern.

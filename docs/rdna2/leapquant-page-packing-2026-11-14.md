@@ -32,8 +32,12 @@ for this change.
 ## Summary
 
 - The flag is `VLLM_RDNA_GDN_LEAPQUANT_PACK=1`. It needs
-  `VLLM_RDNA_GDN_LEAPQUANT=1`. It is off by default. With the flag off, the KV
-  cache plan is byte-identical to the base branch.
+  `--replayssm-state-dtype leapquant` (`REPLAYSSM_STATE_DTYPE=leapquant` in the
+  launcher), the single switch of the LeapQuant state format. It is off by
+  default. With the flag off, the KV cache plan is byte-identical to the base
+  branch. (The environment variable `VLLM_RDNA_GDN_LEAPQUANT` that an earlier
+  draft of this note named was removed by the config-guards change; see
+  `leapquant-config-guards-2026-11-14.md`.)
 - "Two layers per page" does not match how this allocator counts memory. A page
   is one layer's slice of a block. Layers of a group already sit side by side in
   one block. The unit of capacity is the KV-cache group, because every group
@@ -143,8 +147,11 @@ this rule. This change does not touch it.
 
 The change has three parts. All three are behind the flag.
 
-1. `leapquant_gdn_pack_enabled()` reads the flag. It raises if
-   `VLLM_RDNA_GDN_LEAPQUANT` is off.
+1. `leapquant_gdn_pack_enabled(cache_config)` reads the flag. It raises if
+   `CacheConfig.replayssm_state_dtype` is not `leapquant`. The planner reads
+   `leapquant_gdn_pack_requested()` and packs only the Mamba buckets whose
+   `MambaSpec.state_format` is the LeapQuant identity, so a bucket of another
+   format keeps the old split.
 2. `Platform._align_hybrid_block_size` stops after it sets the block size. It
    does not set `mamba_page_size_padded`. GDN and PLE pages keep their natural
    size.
@@ -240,14 +247,13 @@ bash tools/rdna/serve_rdna.sh RECIPE=flashnext-leapquant-mtp2 \
   planner says so in the boot log (captured from the CPU planner):
   `LeapQuant page packing: 36 Mamba layer(s) of 469888 bytes use 3 KV-cache
   group(s); one block holds 15 of them.` At block 640 the same line ends with
-  `use 2 KV-cache group(s); one block holds 19 of them.` A second line reports
-  the one-layer PLE bucket (`1 Mamba layer(s) of 225280 bytes use 1 KV-cache
-  group(s)`).
+  `use 2 KV-cache group(s); one block holds 19 of them.` The one-layer PLE
+  bucket has no LeapQuant state format, so the planner does not log it.
 - Set `MAXBAT` to a multiple of the block size (2,560 for block 640). A prefill
   chunk ends on a state block boundary, so 2,048 tokens schedule 1,920 per step
   at block 640 [INFERENCE, not measured].
-- The flag raises at start-up if `VLLM_RDNA_GDN_LEAPQUANT` is off or the GPU is
-  not gfx10x.
+- The flag raises at start-up if `--replayssm-state-dtype leapquant` is not set.
+  That flag itself is refused when the GPU is not gfx10x.
 - No recipe sets the flag. No recipe changed.
 
 ## Results (CPU, real planner)
@@ -310,18 +316,19 @@ it into the GDN bucket. It is a planner experiment, not a layout that serves.
 
 ## Tests
 
-`tests/v1/core/test_leapquant_page_packing.py` has 29 CPU tests. They need no
+`tests/v1/core/test_leapquant_page_packing.py` has 31 CPU tests. They need no
 GPU and no network. The model is a stub config, and the planner is the real
 one.
 
 | test group | what it proves |
 |---|---|
-| page sizes and guard | The natural page sizes (469,888, 812,032 and 225,280 bytes). The flag raises when LeapQuant is off. |
+| page sizes and guard | The natural page sizes (469,888, 812,032 and 225,280 bytes). The flag raises when `--replayssm-state-dtype leapquant` is not set (config level and on the platform path). |
 | flag-off identity | The flag-off plan reproduces the real boot logs. It is identical to the base branch for three layouts (goldens recorded from `7b4aff7fe3`). |
 | group count | 512 and 576 keep 3 groups. 608, 640 and 1024 give 2 groups of 18. The planner logs the split (`LeapQuant page packing: ...`) with the flag on and logs nothing with it off. |
 | capacity | Packed plans allocate 10 GDN block ids per request instead of 15, and the pinned token counts of the table hold. |
 | speculative slots | Slots, checkpoints and the `align` mode are unchanged under the flag. |
 | layout fallback | A layout that is not block-outermost pads the pages again, so the flag has no effect there. |
+| LeapQuant buckets only | The same unpadded specs without `state_format` keep 3 groups of 12; with it they pack to 2 groups of 18. |
 | capacity log | The concurrency and token math of `get_kv_cache_capacity` and of the `GPU KV cache size` log line. |
 | views | Per-layer views are aligned to 16 bytes, disjoint and inside one block. The grouped normalize offsets are `k x 469,888`. |
 | fixed cost | The block ids and bytes of the PLE and ring owners. |
@@ -345,11 +352,13 @@ python tests/v1/core/test_leapquant_page_packing.py   # prints the tables
   a GPU run can rule this out.
 - **Process-wide flag.** The platform and the planner read the same variable in
   different processes. Every process of one serve must see the same value. The
+  LeapQuant format itself travels in the config, not in the environment. The
   serve script exports `VLLM_*` recipe variables, and child processes inherit
   them.
-- **Other Mamba layers.** With the flag on, every Mamba bucket gets natural
-  pages and the byte-fit split. For Flash-Next that is the GDN bucket and the
-  one-layer PLE bucket.
+- **Other Mamba layers.** With the flag on, the platform keeps every Mamba page
+  at its natural size. The byte-fit split applies to the LeapQuant buckets
+  only (`state_format`). For Flash-Next that is the GDN bucket; the one-layer
+  PLE bucket has no state format and keeps the repeat-pattern split.
 - **Other layouts.** A layout that is not block-outermost pads Mamba pages
   again in `unify_kv_cache_spec_page_size`. The result equals the first change.
   A test pins this.
@@ -360,7 +369,7 @@ python tests/v1/core/test_leapquant_page_packing.py   # prints the tables
 
 Nothing below ran. No GPU was used for this change.
 
-- [ ] Boot with `VLLM_RDNA_GDN_LEAPQUANT=1 VLLM_RDNA_GDN_LEAPQUANT_PACK=1` at
+- [ ] Boot with `REPLAYSSM_STATE_DTYPE=leapquant VLLM_RDNA_GDN_LEAPQUANT_PACK=1` at
   block 640. The log shows 5 KV-cache groups instead of 6 and the line
   `use 2 KV-cache group(s); one block holds 19 of them`. It prints
   `GPU KV cache size: 273,220 tokens` and a concurrency of 1.04x. These are the

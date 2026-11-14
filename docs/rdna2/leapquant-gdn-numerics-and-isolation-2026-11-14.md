@@ -421,10 +421,13 @@ FP32, ReplaySSM FP32 and ReplaySSM FP16 or BF16.
 
 Added:
 
-- Arm `leapquant`. It sets `VLLM_RDNA_GDN_LEAPQUANT=1` in its own worker
-  process, imports the LeapQuant module only in that process, and fails off
-  gfx10x. Every other arm refuses to start when the flag is set in the
-  environment.
+- Arm `leapquant`. It passes `replayssm_state_dtype="leapquant"` to `LLM(...)`,
+  the CacheConfig field behind `--replayssm-state-dtype leapquant`, and checks
+  the engine config after start-up. The engine's validator fails off gfx10x.
+  `--llm-kwarg replayssm_state_dtype=...` is refused. This replaced the
+  environment variable `VLLM_RDNA_GDN_LEAPQUANT=1` that the first version of the
+  arm set; the config-guards change removed that variable, so every arm now
+  refuses to start when it is set in the environment.
 - `--modes` (default `standard,replayssm`, unchanged). The first mode is the
   baseline for the speedup lines.
 - `--num-speculative-tokens N` for MTP, `--monokernel`, `--tensor-parallel-size`,
@@ -452,7 +455,7 @@ decode kernel
 not have it, and `use_replayssm` is for Mamba2 only. A new kernel is outside this
 work. The script states this in its docstring.
 
-CPU-verified: `tests/benchmarks/test_replayssm_e2e_decode_speedup.py` (17
+CPU-verified: `tests/benchmarks/test_replayssm_e2e_decode_speedup.py` (18
 tests): the arguments, the arm and environment rules, the default arms, the
 worker commands, `--help` and `--dry-run` without `torch`. No benchmark ran.
 

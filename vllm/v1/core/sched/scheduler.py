@@ -27,7 +27,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.ops.leapquant_gdn import leapquant_gdn_enabled
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
@@ -436,7 +435,8 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.scheduler_reserve_full_isl
         )
         self._lq_decode_growth_admission = (
-            kv_cache_config.has_mamba_layers and leapquant_gdn_enabled()
+            kv_cache_config.has_mamba_layers
+            and vllm_config.cache_config.replayssm_state_dtype == "leapquant"
         )
         # Final verifies can extend beyond the output limit. Each additional
         # concurrent batch can still hold a full, unresolved target query.

@@ -24,7 +24,8 @@ SCRIPT = (
     / "replayssm"
     / "e2e_decode_speedup.py"
 )
-FLAG = "VLLM_RDNA_GDN_LEAPQUANT"
+RETIRED_ENV = "VLLM_RDNA_GDN_LEAPQUANT"
+STATE_DTYPE = "replayssm_state_dtype"
 
 
 @pytest.fixture(scope="module")
@@ -106,14 +107,18 @@ def test_default_report_is_unchanged(bench, monkeypatch, capsys):
     )
 
 
-def test_leapquant_arm_differs_from_the_baseline_by_the_flag_only(bench):
+def test_leapquant_arm_differs_from_the_baseline_by_the_state_dtype_only(bench):
     args = bench.parse_args(["--modes", "standard,leapquant"])
-    assert bench.build_llm_kwargs(args, "leapquant") == bench.build_llm_kwargs(
-        args, "standard"
-    )
+    standard = bench.build_llm_kwargs(args, "standard")
+    assert STATE_DTYPE not in standard
+    assert bench.build_llm_kwargs(args, "leapquant") == {
+        **standard,
+        STATE_DTYPE: "leapquant",
+    }
+    # No environment switch any more: both arms run in the caller's environment.
     environ = {"PATH": "/bin"}
     assert bench.arm_env(args, "standard", environ) == environ
-    assert bench.arm_env(args, "leapquant", environ) == {**environ, FLAG: "1"}
+    assert bench.arm_env(args, "leapquant", environ) == environ
 
 
 def test_report_has_one_speedup_line_per_arm_after_the_baseline(
@@ -130,17 +135,16 @@ def test_report_has_one_speedup_line_per_arm_after_the_baseline(
     assert "speedup (standard / ReplaySSM, per step): 0.500x\n" in out
 
 
-def test_a_baseline_refuses_to_run_with_the_flag_set(bench):
+def test_the_retired_environment_variable_stops_every_arm(bench):
     args = bench.parse_args(["--modes", "standard,leapquant"])
-    for mode in ("standard", "replayssm"):
-        with pytest.raises(SystemExit, match=FLAG):
-            bench.arm_env(args, mode, {FLAG: "1"})
-    # Only "1" enables the flag, as in leapquant_gdn_enabled().
-    assert bench.arm_env(args, "standard", {FLAG: "0"}) == {FLAG: "0"}
-    assert bench.arm_env(args, "leapquant", {FLAG: "0"})[FLAG] == "1"
+    for mode in ("standard", "replayssm", "leapquant"):
+        with pytest.raises(SystemExit, match=RETIRED_ENV):
+            bench.arm_env(args, mode, {RETIRED_ENV: "1"})
+    # The engine ignores the variable, so only "1" (the launcher's test) stops.
+    assert bench.arm_env(args, "standard", {RETIRED_ENV: "0"}) == {RETIRED_ENV: "0"}
 
 
-def test_env_option_reaches_every_arm_but_cannot_set_the_flag(bench):
+def test_env_option_reaches_every_arm_but_cannot_set_the_retired_variable(bench):
     args = bench.parse_args(
         ["--modes", "standard,leapquant", "--env", "A=1", "--env", "B=x=y"]
     )
@@ -148,7 +152,14 @@ def test_env_option_reaches_every_arm_but_cannot_set_the_flag(bench):
         env = bench.arm_env(args, mode, {})
         assert env["A"] == "1" and env["B"] == "x=y"
     with pytest.raises(SystemExit):
-        bench.parse_args(["--env", f"{FLAG}=1"])
+        bench.parse_args(["--env", f"{RETIRED_ENV}=1"])
+
+
+def test_llm_kwarg_cannot_set_the_state_dtype(bench):
+    """A baseline must not run LeapQuant by a stray --llm-kwarg, and the
+    leapquant arm must not be overridden."""
+    with pytest.raises(SystemExit):
+        bench.parse_args(["--llm-kwarg", f'{STATE_DTYPE}="leapquant"'])
 
 
 def test_rdna_options_reach_the_llm_kwargs_and_survive_the_worker_command(bench):
@@ -200,7 +211,7 @@ def test_bad_arguments_are_rejected(bench, argv):
 
 
 def _clean_env():
-    return {k: v for k, v in os.environ.items() if k != FLAG}
+    return {k: v for k, v in os.environ.items() if k != RETIRED_ENV}
 
 
 def test_help_lists_the_leapquant_arm():
@@ -234,9 +245,11 @@ def test_dry_run_prints_every_arm_and_imports_neither_torch_nor_vllm():
     lines = out.splitlines()
     assert lines[0] == "arm standard (standard)"
     assert "arm leapquant (LeapQuant)" in lines
-    assert f"  env +{json.dumps({FLAG: '1'})}" in lines
-    assert lines.count("  env +{}") == 1  # the baseline adds nothing
+    assert lines.count("  env +{}") == 2  # no arm adds an environment variable
     llm_lines = [line for line in lines if line.startswith("  LLM ")]
+    kwargs_by_arm = [json.loads(line[len("  LLM ") :]) for line in llm_lines]
+    assert [STATE_DTYPE in kwargs for kwargs in kwargs_by_arm] == [False, True]
+    assert kwargs_by_arm[1][STATE_DTYPE] == "leapquant"
     assert len(llm_lines) == 2
     for line in llm_lines:
         kwargs = json.loads(line[len("  LLM ") :])

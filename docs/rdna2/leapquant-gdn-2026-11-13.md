@@ -2,8 +2,12 @@
 
 Port of LeapQuant ([arXiv 2609.38166](https://arxiv.org/abs/2609.38166),
 requested in [vllm#64725](https://github.com/vllm-project/vllm/issues/64725))
-to the RDNA2 Gated DeltaNet path. Opt-in with `VLLM_RDNA_GDN_LEAPQUANT=1`
-(gfx10x only; the flag raises elsewhere). Default off: the change is lossy.
+to the RDNA2 Gated DeltaNet path. Opt-in with `--replayssm-state-dtype
+leapquant` (gfx10x only; the flag raises elsewhere). Default `auto`: the
+change is lossy. The flag replaced the environment variable
+`VLLM_RDNA_GDN_LEAPQUANT=1` on 2026-11-14; see
+[leapquant-config-guards-2026-11-14.md](leapquant-config-guards-2026-11-14.md)
+for the validator, the rejected setups and the state format identity.
 
 ## Credits
 
@@ -22,6 +26,11 @@ to the RDNA2 Gated DeltaNet path. Opt-in with `VLLM_RDNA_GDN_LEAPQUANT=1`
   lihaoyang-amd. It reports a prototype with one fold launch across layers and
   the per-window FP16 checkpoint baseline that LeapQuant must beat on memory.
   The RFC has no source code, and none of it is used here.
+- **Flag name and rejected setups:** the flag `--replayssm-state-dtype` is the
+  name draft [vllm#52962](https://github.com/vllm-project/vllm/pull/52962)
+  (askliar) proposes. The list of rejected setups and the state format
+  identity answer the safety section of the RFC. No code comes from either;
+  see the [config guards document](leapquant-config-guards-2026-11-14.md).
 - **Code:** the HIP kernels, layout header, FP32 oracle, scheduler changes and
   tests in this PR are original work for this fork. Existing files keep their
   upstream authors in git history.
@@ -72,9 +81,11 @@ instead of once per token. The FP32 oracle is
 - **Prefix caching (`mamba-align`, V2 runner):** the align precopy/postprocess
   HIP kernels (`v1_mamba_rdna2.cu`, `copy_mamba_state_block`) copy the whole
   blob from the home block and write `cursor + min(bias + 1, pending)` into
-  the copy's header, which is exactly the FP32 "copy slot `bias`" rule. The V1
-  runner's memcpy specs and the Triton precopy fallback raise instead of
-  silently copying wrong bytes.
+  the copy's header, which is exactly the FP32 "copy slot `bias`" rule. The
+  copy marker comes from the spec's `state_format`
+  (`select_state_copy_funcs`). The V1 runner with align mode is rejected at
+  start-up; its memcpy specs and the Triton precopy fallback also raise
+  instead of silently copying wrong bytes.
 - **MonoKernel (`EXTRA_ARGS=--monokernel`):** pure decode and pure verify
   batches run `gdn_lq_normalize_rdna2` and then `mono_gdn_lq_rdna2`, the
   `mono_gdn_rdna2` fused conv + delta rule + gated norm launch with the
@@ -88,8 +99,11 @@ instead of once per token. The FP32 oracle is
 - **Cudagraphs:** every op is a fixed-shape launch on the current stream that
   reads its metadata from device tensors, so FULL_AND_PIECEWISE captures it
   like the FP32 kernels.
-- **Refused combinations** (raise at init): fused CUDA spec decode,
-  AITER/FlashInfer GDN, align mode on the V1 runner, head dims other than 128.
+- **Rejected combinations** (one validator, raised at start-up): not gfx10x,
+  `--use-replayssm`, stochastic rounding, KV connectors and offloading, fused
+  CUDA spec decode, AITER/FlashInfer GDN, align mode on the V1 runner, head
+  dims other than 128, and models without GDN layers. See the
+  [config guards document](leapquant-config-guards-2026-11-14.md).
 
 ## Related notes (second PR)
 
@@ -100,12 +114,17 @@ instead of once per token. The FP32 oracle is
 ## Use
 
 ```bash
-bash tools/rdna/serve_rdna.sh RECIPE=flashnext-mtp2 VLLM_RDNA_GDN_LEAPQUANT=1
+bash tools/rdna/serve_rdna.sh RECIPE=flashnext-mtp2 REPLAYSSM_STATE_DTYPE=leapquant
 ```
 
-or uncomment `VLLM_RDNA_GDN_LEAPQUANT=1` in
-`tools/rdna/recipes/flashnext-mtp2.env`. The worker log prints
+or uncomment `REPLAYSSM_STATE_DTYPE=leapquant` in
+`tools/rdna/recipes/flashnext-mtp2.env`. Outside the launcher, pass
+`--replayssm-state-dtype leapquant`. The worker log prints
 `GDN recurrent state: LeapQuant INT8 (...)`.
+
+All receipts below were measured with the environment variable the flag
+replaced. The state and the kernels did not change. That the flag path serves
+the same is pending GPU validation (see the config guards document).
 
 Dedicated 512-token recipe (MTP2, MonoKernel and FULL_AND_PIECEWISE stay
 enabled; window 32/rank 4, adaptive 450 ms mixed-step budget, decode share
@@ -318,7 +337,7 @@ scheduler now changes admission and work ordering instead:
   Allocated pages stop being promises; early EOS and cancellation release
   the request's remaining promise. Shared cached prefixes are not charged twice.
 
-Enabled only with the existing RDNA LeapQuant flag. Flag-off admission stays
+Enabled only with `--replayssm-state-dtype leapquant`. Flag-off admission stays
 unchanged; explicitly disabling `scheduler_reserve_full_isl` also disables
 the new growth-admission gate. MTP2, speculative state blocks,
 FULL_AND_PIECEWISE and prefix checkpoints are unchanged.

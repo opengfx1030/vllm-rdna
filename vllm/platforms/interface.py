@@ -1123,7 +1123,7 @@ class Platform:
 
         # Packed LeapQuant GDN pages keep their natural size; the KV-cache
         # planner fits them into the attention block by bytes.
-        if leapquant_gdn_pack_enabled():
+        if leapquant_gdn_pack_enabled(cache_config):
             return
 
         if attn_page_size == mamba_page_size:

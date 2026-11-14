@@ -29,13 +29,13 @@
 // Output y [M, HV * V] fp16 is today's out_proj input. Null / padded slots
 // (index <= 0) write y = 0 and leave both states untouched.
 //
-// LeapQuant (mono_gdn_lq_rdna2, VLLM_RDNA_GDN_LEAPQUANT=1): the recurrent
-// state is a LeapQuant blob per (block, head) (gdn_leapquant_layout.cuh),
-// normalized beforehand by gdn_lq_normalize_rdna2. Each tile rebuilds its 32
-// rows from the home blob srow[0] (INT8 residual + compensator + replay of
-// `cursor` records), runs the same math, and appends one record per token
-// (u rows per tile, k and g by tile 0) instead of storing per-token states;
-// tile 0 sets pending = T.
+// LeapQuant (mono_gdn_lq_rdna2, --replayssm-state-dtype leapquant): the
+// recurrent state is a LeapQuant blob per (block, head)
+// (gdn_leapquant_layout.cuh), normalized beforehand by gdn_lq_normalize_rdna2.
+// Each tile rebuilds its 32 rows from the home blob srow[0] (INT8 residual +
+// compensator + replay of `cursor` records), runs the same math, and appends
+// one record per token (u rows per tile, k and g by tile 0) instead of storing
+// per-token states; tile 0 sets pending = T.
 
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -666,7 +666,8 @@ void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
                 gate_sigmoid, nullptr);
 }
 
-// The same fused decode core on LeapQuant blobs (VLLM_RDNA_GDN_LEAPQUANT=1).
+// The same fused decode core on LeapQuant blobs
+// (--replayssm-state-dtype leapquant).
 // blob: uint8 [slots, HV, nbytes], normalized by gdn_lq_normalize_rdna2 with
 // the batch's num_accepted (spec) or None (non-spec) right before this call.
 void mono_gdn_lq_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,

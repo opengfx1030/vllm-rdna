@@ -53,8 +53,8 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
     LeapQuantLayout,
-    leapquant_gdn_enabled,
     leapquant_gdn_layout,
+    verify_leapquant_gdn,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -850,6 +850,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.head_v_dim,
             self.conv_kernel_size,
             self.num_spec,
+            replayssm_state_dtype=self.cache_config.replayssm_state_dtype,
         )
 
     def __init__(
@@ -1064,31 +1065,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         compilation_config.static_forward_context[prefix] = self
 
     def _init_leapquant(self, vllm_config: VllmConfig) -> LeapQuantLayout | None:
-        """LeapQuant GDN state (VLLM_RDNA_GDN_LEAPQUANT=1): the recurrent
-        state is a uint8 blob per (block, head) read by the gdn_lq_* kernels
-        on every path that reads or writes it here (spec verify, non-spec
+        """LeapQuant GDN state (``--replayssm-state-dtype leapquant``): the
+        recurrent state is a uint8 blob per (block, head) read by the gdn_lq_*
+        kernels on every path that reads or writes it here (spec verify, non-spec
         decode, prefill)."""
-        if not leapquant_gdn_enabled():
+        if vllm_config.cache_config.replayssm_state_dtype != "leapquant":
             return None
-        if self.enable_fused_gdn_spec_decode:
-            raise ValueError(
-                "VLLM_RDNA_GDN_LEAPQUANT=1 does not cover the fused CUDA "
-                "spec-decode path"
-            )
-        if GDN_AITER_TRITON_AVAILABLE or self._checkpoint_alignment is not None:
-            raise ValueError(
-                "VLLM_RDNA_GDN_LEAPQUANT=1 does not cover the AITER GDN path "
-                "or FlashInfer prefill checkpoints"
-            )
-        if (
-            vllm_config.cache_config.mamba_cache_mode == "align"
-            and not vllm_config.use_v2_model_runner
-        ):
-            raise ValueError(
-                "VLLM_RDNA_GDN_LEAPQUANT=1 with mamba align prefix caching "
-                "needs the V2 model runner (its fused align copies commit "
-                "LeapQuant records)"
-            )
+        verify_leapquant_gdn(
+            vllm_config,
+            head_dims=(self.head_k_dim, self.head_v_dim),
+            fused_cuda_spec_decode=self.enable_fused_gdn_spec_decode,
+            flashinfer_checkpoints=self._checkpoint_alignment is not None,
+        )
         layout = leapquant_gdn_layout(self.head_k_dim, self.head_v_dim, self.num_spec)
         logger.info_once(
             "GDN recurrent state: LeapQuant INT8 (window %d, r %d, %d B/head)",
@@ -1188,6 +1176,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
+        if self._lq_layout is not None and isinstance(spec, MambaSpec):
+            spec = replace(spec, state_format=self._lq_layout.state_format)
         if not self._exports_checkpoints or not isinstance(spec, MambaSpec):
             return spec
         # FlashInfer emits states at one stride for the whole batch, the gcd of
