@@ -179,6 +179,22 @@ def test_zero_centered_norm_inverse_is_subtract_one():
     )
 
 
+def test_names_only_admission_maps_full_inventory_without_native_shapes():
+    plan = qmap.plan_tensors(CONTRACT["tensors"], names_only=True)
+    assert len(plan.entries) == 1224
+    assert not plan.unsupported
+    assert all(e.destination for e in plan.entries)
+    # shape catalogue is not materialized in this mode
+    assert all(e.destination_shape is None for e in plan.entries)
+
+
+def test_names_only_still_rejects_unknown_tensor():
+    entry = qmap.plan_tensors(
+        [{"name": "mystery.weight", "dims": [2, 3], "type": 0}], names_only=True
+    ).entries[0]
+    assert entry.destination is None
+
+
 def test_unknown_tensor_is_explicitly_unsupported_with_contract():
     entry = qmap.plan_tensors(
         [{"name": "mystery.weight", "dims": [2, 3], "type": 0}]

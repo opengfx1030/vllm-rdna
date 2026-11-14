@@ -130,7 +130,7 @@ _MERGED_LAYER = {
 }
 
 
-def plan_tensors(tensors, *, native_parameters=None):
+def plan_tensors(tensors, *, native_parameters=None, names_only=False):
     """Plan every header tensor or raise; unknowns are never discarded."""
     entries = []
     seen = set()
@@ -188,7 +188,23 @@ def plan_tensors(tensors, *, native_parameters=None):
                 destination = (
                     f"model.layers.{match[1]}.mlp.experts.routed_experts.w2_weight"
                 )
-        if native_parameters is not None and destination is not None:
+        if names_only and destination is not None:
+            entries.append(
+                Entry(
+                    name,
+                    dims,
+                    typ,
+                    destination,
+                    transform,
+                    "",
+                    None,
+                    axis,
+                    start,
+                    count,
+                    delivery,
+                )
+            )
+        elif native_parameters is not None and destination is not None:
             if destination not in native_parameters:
                 raise MappingError(f"native parameter missing: {destination}")
             shape = tuple(native_parameters[destination]["shape"])

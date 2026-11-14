@@ -551,11 +551,14 @@ class Qwen4ExpGGUFModelLoader(BaseModelLoader):
             and int(text_config.hidden_size) == 2560
             and int(text_config.num_experts) == 512
         ):
+            # Name-only admission: real parameter shapes are rank-local under TP,
+            # so full shape equality is enforced separately on TP1.
             plan = plan_tensors(
                 [
                     {"name": t.name, "dims": t.dims, "type": t.type}
                     for t in manifest.tensors
-                ]
+                ],
+                names_only=True,
             )
             if len(plan.entries) != 1224 or plan.unsupported:
                 raise ValueError(
