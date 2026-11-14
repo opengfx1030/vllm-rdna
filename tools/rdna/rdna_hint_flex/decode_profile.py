@@ -90,6 +90,20 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--window-s", type=float, default=2.5)
     ap.add_argument("--paused-s", type=float, default=3.0)
     ap.add_argument("--settle-s", type=float, default=2.0)
+    ap.add_argument(
+        "--window-attempts",
+        type=int,
+        default=2,
+        help="windows tried per cell until one is recorded (the first window after "
+        "boot is lost)",
+    )
+    ap.add_argument(
+        "--min-overhead-ms",
+        type=float,
+        default=1.5,
+        help="engine ITL rise that proves a window was recorded (tracing adds "
+        "~2 us per launch, several ms per step)",
+    )
     ap.add_argument("--state-timeout-s", type=float, default=600)
     ap.add_argument(
         "--warm", default="1024:64:4:4", help="in:out:num:conc bench first ('' skips)"
@@ -251,9 +265,12 @@ def main() -> int:
         while time.time() - t0 < a.state_timeout_s:
             run = metric(a.port, "vllm:num_requests_running")
             p0 = metric(a.port, "vllm:prompt_tokens_total")
+            g0 = metric(a.port, "vllm:generation_tokens_total")
             time.sleep(2)
             p1 = metric(a.port, "vllm:prompt_tokens_total")
-            if run >= conc and p1 == p0:
+            g1 = metric(a.port, "vllm:generation_tokens_total")
+            # decoding: nothing prefilling and every sequence emitting tokens
+            if run >= conc and p1 == p0 and g1 - g0 >= conc:
                 return True
         return False
 
@@ -281,43 +298,51 @@ def main() -> int:
         ok = wait_decode(conc)
         log(a.label, f"cell {cell}: decode state {'reached' if ok else 'NOT reached'}")
         time.sleep(a.settle_s)
-        # tool loaded but paused: engine step time without recording
-        g0, t0 = metric(a.port, gen), time.time()
-        time.sleep(a.paused_s)
-        g1, t1 = metric(a.port, gen), time.time()
-        wp = workers()
-        for pid in wp:
-            os.kill(pid, signal.SIGUSR1)
-        g2, t2 = metric(a.port, gen), time.time()
-        time.sleep(a.window_s)
-        g3, t3 = metric(a.port, gen), time.time()
-        for pid in wp:
-            os.kill(pid, signal.SIGUSR2)
         nan = float("nan")
-        paused_itl = (t1 - t0) / ((g1 - g0) / conc) * 1e3 if g1 > g0 else nan
-        win_itl = (t3 - t2) / ((g3 - g2) / conc) * 1e3 if g3 > g2 else nan
-        windows.append(
-            {
-                "cell": cell,
-                "conc": conc,
-                "input": inl,
-                "output": outl,
-                "temperature": temp,
-                "decode_state": ok,
-                "workers": wp,
-                "paused_s": t1 - t0,
-                "paused_tokens": g1 - g0,
-                "paused_itl_ms": paused_itl,
-                "window_s": t3 - t2,
-                "window_tokens": g3 - g2,
-                "window_itl_ms": win_itl,
-            }
-        )
-        log(
-            a.label,
-            f"cell {cell}: engine ITL paused {paused_itl:.2f} ms, recording "
-            f"{win_itl:.2f} ms ({g3 - g2:.0f} tokens in {t3 - t2:.2f} s)",
-        )
+        for attempt in range(1, a.window_attempts + 1):
+            # tool loaded but paused: engine step time without recording
+            g0, t0 = metric(a.port, gen), time.time()
+            time.sleep(a.paused_s)
+            g1, t1 = metric(a.port, gen), time.time()
+            wp = workers()
+            for pid in wp:
+                os.kill(pid, signal.SIGUSR1)
+            g2, t2 = metric(a.port, gen), time.time()
+            time.sleep(a.window_s)
+            g3, t3 = metric(a.port, gen), time.time()
+            for pid in wp:
+                os.kill(pid, signal.SIGUSR2)
+            paused_itl = (t1 - t0) / ((g1 - g0) / conc) * 1e3 if g1 > g0 else nan
+            win_itl = (t3 - t2) / ((g3 - g2) / conc) * 1e3 if g3 > g2 else nan
+            # recording slows the engine; a window that did not slow it was lost
+            recorded = win_itl - paused_itl > a.min_overhead_ms
+            windows.append(
+                {
+                    "cell": cell,
+                    "attempt": attempt,
+                    "recorded": recorded,
+                    "conc": conc,
+                    "input": inl,
+                    "output": outl,
+                    "temperature": temp,
+                    "decode_state": ok,
+                    "workers": wp,
+                    "paused_s": t1 - t0,
+                    "paused_tokens": g1 - g0,
+                    "paused_itl_ms": paused_itl,
+                    "window_s": t3 - t2,
+                    "window_tokens": g3 - g2,
+                    "window_itl_ms": win_itl,
+                }
+            )
+            log(
+                a.label,
+                f"cell {cell} try {attempt}: engine ITL paused {paused_itl:.2f} ms, "
+                f"window {win_itl:.2f} ms ({g3 - g2:.0f} tokens in {t3 - t2:.2f} s), "
+                f"{'recorded' if recorded else 'NOT recorded'}",
+            )
+            if recorded:
+                break
         kill_group(p.pid)
         p.wait()
         wait_idle()
@@ -342,7 +367,7 @@ def main() -> int:
     mb = sum(os.path.getsize(c) for c in csvs) / 1e6
     log(a.label, f"trace csv={len(csvs)} size={mb:.0f} MB")
 
-    labels = ",".join(w["cell"] for w in windows)
+    labels = ",".join(w["cell"] for w in windows if w["recorded"])
     rc = subprocess.run(
         [
             py,
