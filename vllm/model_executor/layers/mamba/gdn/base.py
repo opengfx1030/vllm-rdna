@@ -15,12 +15,16 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
 )
+from vllm.model_executor.layers.mamba.ops.leapquant_gdn import leapquant_gdn_enabled
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
 class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     """Base class for GatedDeltaNet attention layer."""
+
+    # Layers whose forward reads LeapQuant blobs (VLLM_RDNA_GDN_LEAPQUANT=1).
+    supports_leapquant_state: bool = False
 
     def __init__(
         self,
@@ -45,6 +49,11 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             if self.speculative_config
             else 0
         )
+        if leapquant_gdn_enabled() and not self.supports_leapquant_state:
+            raise ValueError(
+                f"VLLM_RDNA_GDN_LEAPQUANT=1 is not implemented for "
+                f"{type(self).__name__}"
+            )
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:

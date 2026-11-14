@@ -14,6 +14,10 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import ModelDType
 from vllm.distributed import divide
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
+    leapquant_gdn_enabled,
+    leapquant_gdn_layout,
+)
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_kv_cache_torch_dtype,
@@ -125,9 +129,13 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType = "auto",
     ) -> tuple[torch.dtype, torch.dtype]:
-        return cls._mamba_state_dtype(
+        conv_dtype, ssm_dtype = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
+        if leapquant_gdn_enabled():
+            # LeapQuant byte blobs replace the FP32 recurrent state.
+            ssm_dtype = torch.uint8
+        return conv_dtype, ssm_dtype
 
     @classmethod
     def kda_state_dtype(
@@ -285,6 +293,13 @@ class MambaStateShapeCalculator:
             conv_kernel_size - 1 + num_spec,
         )
 
+        if leapquant_gdn_enabled():
+            layout = leapquant_gdn_layout(head_k_dim, head_v_dim, num_spec)
+            return conv_state_shape, (
+                divide(num_v_heads, tp_world_size),
+                layout.nbytes,
+            )
+
         temporal_state_shape = (
             divide(num_v_heads, tp_world_size),
             head_v_dim,
@@ -394,6 +409,24 @@ def get_temporal_copy_spec(
     )
 
 
+def get_leapquant_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    """Marker copy func of LeapQuant GDN blobs.
+
+    Copying slot ``num_accepted_tokens - 1`` must commit that many pending
+    records in the copy's header, which only the fused RDNA2 align kernels do
+    (``copy_mamba_state_block`` in ``csrc/rocm/v1_mamba_rdna2.cu``); a plain
+    memcpy would hand out the uncommitted state."""
+    raise NotImplementedError(
+        "VLLM_RDNA_GDN_LEAPQUANT=1 state copies run in the fused RDNA2 align "
+        "kernels of the V2 model runner"
+    )
+
+
 class MambaStateCopyFuncCalculator:
     @classmethod
     def linear_attention_state_copy_func(cls):
@@ -413,6 +446,8 @@ class MambaStateCopyFuncCalculator:
 
     @classmethod
     def gated_delta_net_state_copy_func(cls):
+        if leapquant_gdn_enabled():
+            return (get_conv_copy_spec, get_leapquant_copy_spec)
         return (get_conv_copy_spec, get_temporal_copy_spec)
 
     @classmethod

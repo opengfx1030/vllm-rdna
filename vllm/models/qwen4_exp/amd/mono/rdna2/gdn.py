@@ -109,7 +109,8 @@ class MonoGDN:
         if (
             qkvz.dtype != torch.float16
             or layer.kv_cache[0].dtype != torch.float16
-            or layer.kv_cache[1].dtype != torch.float32
+            or layer.kv_cache[1].dtype
+            != (torch.float32 if layer._lq_layout is None else torch.uint8)
             or layer.norm.weight.dtype != torch.float16
             or layer.conv1d.weight.dtype != torch.float16
         ):
@@ -216,7 +217,7 @@ class MonoGDN:
                     sidx,
                     BreakableCUDAGraphCapture.current(),
                 )
-            torch.ops._rocm_C.mono_gdn_rdna2(
+            args = (
                 mixed_qkvz[:M],
                 ba[:M],
                 conv_w,
@@ -236,6 +237,19 @@ class MonoGDN:
                 layer.norm.eps,
                 sig,
             )
+            lq = layer._lq_layout
+            if lq is None:
+                torch.ops._rocm_C.mono_gdn_rdna2(*args)
+            else:
+                # LeapQuant: commit the accepted records of the home blobs
+                # (spec: column 0), then the fused core appends this step's.
+                spec = md.spec_sequence_masks is not None
+                layer._lq_normalize(
+                    ssm_state, sidx[:, 0] if spec else sidx, nacc if spec else None
+                )
+                torch.ops._rocm_C.mono_gdn_lq_rdna2(
+                    *args, lq.num_comp, lq.capacity, lq.window
+                )
             if trace is not None:
                 offload_trace.finish_gdn(trace, y[:M], conv_state, ssm_state)
             layer._unbind_decode_state_arenas(*paged, md, md.num_decodes)

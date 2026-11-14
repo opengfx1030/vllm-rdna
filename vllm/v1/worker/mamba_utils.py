@@ -12,9 +12,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncsByType,
     get_conv_copy_spec,
+    get_leapquant_copy_spec,
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
+from vllm.model_executor.layers.mamba.ops.leapquant_gdn import LEAPQUANT_HEADER_BYTES
 from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -866,6 +868,8 @@ class MambaSpecDecodeGPUContext:
 
     # Flag to track if metadata has been populated
     is_initialized: bool = False
+    # LeapQuant GDN blobs need the HIP copy (it commits pending records).
+    has_leapquant_states: bool = False
 
     @classmethod
     def create(
@@ -1060,11 +1064,34 @@ class MambaSpecDecodeGPUContext:
                     # Element size
                     self.state_elem_sizes[idx] = state.element_size()
 
-                    assert (
-                        copy_func is get_conv_copy_spec
-                        or copy_func is get_temporal_copy_spec
+                    assert copy_func in (
+                        get_conv_copy_spec,
+                        get_temporal_copy_spec,
+                        get_leapquant_copy_spec,
                     ), f"unexpected copy func: {copy_func}"
-                    if copy_func is get_conv_copy_spec:
+                    if copy_func is get_leapquant_copy_spec:
+                        # LeapQuant GDN blob [blocks, heads, bytes]: the HIP
+                        # copy commits pending records in the copy's header
+                        # (the last LEAPQUANT_HEADER_BYTES of each head).
+                        if not _ON_RDNA2:
+                            raise ValueError(
+                                "LeapQuant GDN state copies need the RDNA2 "
+                                "HIP mamba copy kernels"
+                            )
+                        if state.dim() != 3 or state.dtype != torch.uint8:
+                            raise ValueError(
+                                "Expected a uint8 [blocks, heads, bytes] "
+                                f"LeapQuant state, got {tuple(state.shape)} "
+                                f"{state.dtype}"
+                            )
+                        self.state_conv_widths[idx] = -1
+                        self.state_inner_sizes[idx] = state[0].numel()
+                        self.has_leapquant_states = True
+                        self.state_dim_row_count[idx] = state.size(1)
+                        self.state_dim_row_stride[idx] = (
+                            state.size(2) - LEAPQUANT_HEADER_BYTES
+                        )
+                    elif copy_func is get_conv_copy_spec:
                         if state.dim() != 3:
                             raise ValueError(
                                 "Expected 3D conv state cache, got "
@@ -1186,7 +1213,9 @@ class MambaSpecDecodeGPUContext:
         if key == self._batch_block_table_key:
             return
         self._batch_block_table_key, self.batch_block_table_stride_req = (
-            self._write_block_table_ptrs(block_tables, self.aligned_index_block_table_ptrs)
+            self._write_block_table_ptrs(
+                block_tables, self.aligned_index_block_table_ptrs
+            )
         )
 
     def compute_aligned_state_indices(
@@ -1371,6 +1400,11 @@ class MambaSpecDecodeGPUContext:
             )
             return
 
+        if self.has_leapquant_states:
+            raise RuntimeError(
+                "VLLM_RDNA_GDN_LEAPQUANT=1 does not support dynamic speculation "
+                "(zero-draft collapse takes the Triton align copy)"
+            )
         grid = (num_reqs, total_states, _TEMPORAL_TILES)
         precopy_mamba_align_fused_kernel[grid](
             state_idx_gpu,
