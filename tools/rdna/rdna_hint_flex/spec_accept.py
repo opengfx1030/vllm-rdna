@@ -16,8 +16,9 @@ about acceptance, so ``serve_validate.sh`` can run this as a LOAD_HOOK:
     LOAD_HOOK=<a script that execs this file> bash serve_validate.sh MTP=2
 
 Usage: spec_accept.py --port 18211 --model q27hi2 [--conc 1] [--max-tokens 256]
-Exit status 1 when the server exposes no speculative counters or no request
-completed.
+[--expect-spec]. Without speculative decoding it reports the aggregate token
+rate only. Exit status 1 when no request completed, or with --expect-spec when
+the speculative counters did not move.
 """
 
 import argparse
@@ -95,6 +96,12 @@ def main() -> int:
     ap.add_argument("--conc", type=int, default=1)
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--rounds", type=int, default=1, help="passes over the prompts")
+    ap.add_argument(
+        "--expect-spec",
+        action="store_true",
+        help="fail when the speculative counters do not move (default: report "
+        "the aggregate rate only, for a plain run)",
+    )
     a = ap.parse_args()
 
     before, before_pos = counters(a.port)
@@ -114,9 +121,12 @@ def main() -> int:
         f"completion_tokens={sum(toks)} in {dt:.1f} s "
         f"({sum(toks) / dt:.1f} tok/s aggregate, not a benchmark)"
     )
-    if not toks or d["drafts"] <= 0:
-        print("spec_accept: no speculative-decoding counters moved: FAIL")
+    if not toks:
+        print("spec_accept: no request completed: FAIL")
         return 1
+    if d["drafts"] <= 0:
+        print("spec_accept: no speculative-decoding counters moved")
+        return 1 if a.expect_spec else 0
     mean_len = 1 + d["accepted"] / d["drafts"]
     rate = d["accepted"] / d["draft_tokens"] if d["draft_tokens"] else float("nan")
     per_pos = [

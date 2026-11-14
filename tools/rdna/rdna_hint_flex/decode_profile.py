@@ -12,13 +12,17 @@ The server is started with tools/rdna/serve_rdna.sh under ``rocprofv3
 replays are traced kernel by kernel). tools/rdna/rdna_hint_flex/roctx_shim maps
 SIGUSR1/SIGUSR2 to roctxProfilerResume/Pause in every process, so recording
 starts only after the engine reached steady decode (all ``conc`` requests
-running, prompt tokens flat). A cell is ``in:out:conc[:temperature]`` (random
-prompts, ignore-eos; ``out`` must outlast the window). Per cell the driver
-records the generated tokens over ``--paused-s`` seconds with the tool loaded
-but paused and over the ``--window-s`` recording window (engine step time with
-and without the profiler). When the cells are done the workers get SIGTERM (the
-tool writes its CSV and chains to vLLM's handler), the server session is killed
-and decode_breakdown.py writes breakdown.md/json.
+running, nothing prefilling, tokens flowing). A cell is
+``in:out:conc[:temperature]`` (random prompts, ignore-eos; ``out`` must outlast
+the window); ``prefill@in:out:conc`` records ``--prefill-window-s`` seconds of
+prefill chunks instead (the prompt must keep the engine prefilling for
+``--settle-s`` + ``--prefill-window-s``). Per decode cell the driver records the
+generated tokens over ``--paused-s`` seconds with the tool loaded but paused and
+over the ``--window-s`` recording window (engine step time with and without the
+profiler); the first window after boot is lost, so a window that did not slow
+the engine is repeated (``--window-attempts``). When the cells are done the
+workers get SIGTERM (the tool writes its CSV and chains to vLLM's handler), the
+server session is killed and decode_breakdown.py writes breakdown.md/json.
 
 Everything after ``--`` is passed to serve_rdna.sh as KEY=VAL. Output:
 OUT_ROOT/LABEL/{serve.log, windows.json, breakdown.md, breakdown.json, trace/
@@ -88,6 +92,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--cache", default="", help="VLLM/Triton cache dir (OUT/cache)")
     ap.add_argument("--cells", default="1024:1024:1,1024:1024:4")
     ap.add_argument("--window-s", type=float, default=2.5)
+    ap.add_argument("--prefill-window-s", type=float, default=6.0)
     ap.add_argument("--paused-s", type=float, default=3.0)
     ap.add_argument("--settle-s", type=float, default=2.0)
     ap.add_argument(
@@ -274,6 +279,14 @@ def main() -> int:
                 return True
         return False
 
+    def wait_running(conc: int) -> bool:
+        t0 = time.time()
+        while time.time() - t0 < a.state_timeout_s:
+            if metric(a.port, "vllm:num_requests_running") >= conc:
+                return True
+            time.sleep(0.5)
+        return False
+
     def wait_idle() -> None:
         t0 = time.time()
         while (
@@ -291,10 +304,46 @@ def main() -> int:
 
     windows = []
     for k, cell in enumerate(c for c in a.cells.replace(" ", ",").split(",") if c):
-        f = cell.split(":")
+        kind, spec = (
+            ("prefill", cell[8:]) if cell.startswith("prefill@") else ("", cell)
+        )
+        f = spec.split(":")
         inl, outl, conc = int(f[0]), int(f[1]), int(f[2])
         temp = float(f[3]) if len(f) > 3 else 0.0
         p = bench(f"cell{k}", inl, outl, conc, conc, temp)
+        if kind:
+            # Prefill window: the prompt-token counter only moves when a prompt
+            # finishes, so the window is timed from the first running request.
+            ok = wait_running(conc)
+            time.sleep(a.settle_s)
+            wp = workers()
+            for pid in wp:
+                os.kill(pid, signal.SIGUSR1)
+            t2 = time.time()
+            time.sleep(a.prefill_window_s)
+            t3 = time.time()
+            for pid in wp:
+                os.kill(pid, signal.SIGUSR2)
+            windows.append(
+                {
+                    "cell": cell,
+                    "attempt": 1,
+                    "recorded": True,
+                    "kind": kind,
+                    "conc": conc,
+                    "input": inl,
+                    "output": outl,
+                    "decode_state": ok,
+                    "workers": wp,
+                    "window_s": t3 - t2,
+                }
+            )
+            log(a.label, f"cell {cell}: prefill window {t3 - t2:.1f} s sent")
+            kill_group(p.pid)
+            p.wait()
+            wait_idle()
+            time.sleep(1)
+            continue
         ok = wait_decode(conc)
         log(a.label, f"cell {cell}: decode state {'reached' if ok else 'NOT reached'}")
         time.sleep(a.settle_s)
