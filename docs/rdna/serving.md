@@ -37,6 +37,7 @@ ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags bel
 | Flash-Next AWQ, MTP=2, two pipeline stages of four cards | [`flashnext-tp4pp2-mtp2`](../../tools/rdna/recipes/flashnext-tp4pp2-mtp2.env) | TP=4, PP=2 | `127.0.0.1:18099`, name `flash-next` |
 | Qwen3.8-27B AWQ, W4A8 prefill | [`27b-awq`](../../tools/rdna/recipes/27b-awq.env) | TP=4 | `127.0.0.1:18210`, name `q27d` |
 | Qwen3.8-27B EXL3, codebook `mul1` | [`27b-exl3`](../../tools/rdna/recipes/27b-exl3.env) | TP=4 | `127.0.0.1:18105`, name `exl3-27b-mul1` |
+| Qwen3.8-27B HI2 3.0 bpw (`rdna_hint_flex`), two cards | [`27b-hi2-tp2`](../../tools/rdna/recipes/27b-hi2-tp2.env) | TP=2 | `127.0.0.1:18211`, name `q27hi2` |
 | DeepSeek-V4-Flash, K128 | [`dsv4-flash`](../../tools/rdna/recipes/dsv4-flash.env) | TP=4 | `127.0.0.1:18300`, name `dsv4-flash` |
 | HIP graphs, breakable capture, TP=2 | [`full`](../../tools/rdna/recipes/full.env) | TP=2 | launcher omits `--host`; port `18094`; no served name |
 
