@@ -184,9 +184,70 @@ no fault markers and no new amdgpu dmesg faults. Loop scan, 1024 -> 512:
 
 The 32k TTFT improves 22.8 %, but output throughput falls 22.5 % despite
 higher acceptance. ITL p99 rises from 435.96 to 648.89 ms (+48.8 %).
-This is a capacity/latency trade-off, not a clean speed win. The full
-ABBA matrix is running at `speed512-20261114-000314-mono`; do not promote
-512 as the default from this single pair.
+This is not a clean speed win. The full ABBA attempt at
+`speed512-20261114-000314-mono` was stopped at the user's request before
+the remaining arms completed. Its partial receipt is not an ABBA result;
+queued KL/acceptance boots were cancelled. Results are preserved and
+GPU testing remains paused.
+
+#### Slowdown investigation (2026-11-14, CPU diagnostics only)
+
+Reconstructed the saved streams, including every chunk's arrival time.
+At 32k c=8, mean request ITL rises from 122.32 to 218.69 ms. Across the
+merged streams, quiet intervals over 100 ms occur almost equally often
+(1367 vs 1365), but their median rises 428 -> 635 ms and their summed
+duration rises 575.04 -> 845.53 s. The whole benchmark grows by 227.87 s.
+The extra time is concentrated in these long steps, not ordinary decode.
+
+Eight individual 512-mode streams pause for 27-55 s; other requests emit
+282-2489 chunks during each pause. No merged-stream gap exceeds 0.661 s.
+These are per-request starvation/replay signatures, not a whole-device
+freeze. KFD eviction counters do not move. A QSA JIT warning exists, but
+cannot explain the multi-request progress during the long individual gaps.
+Absence of a preemption warning is not proof of no preemption:
+`Scheduler._preempt_request` updates counters/events without logging one.
+
+CPU-only diagnostic: `~/w4a8_runs/leapquant/investigate_scheduler512.py`.
+It drives the actual Scheduler and KV managers with representative six-group
+specs and fixed two-token acceptance, using synchronous synthetic output
+updates rather than the deployed async MTP runner. Pool counts 278/556
+model the reported capacities. Architecture metadata is supplied for config
+construction; no GPU or model inference runs. These counts are a mechanism
+reproduction, not measurements of deployed preemptions or GPU speed:
+
+| modeled setting | preemptions | prefill tokens processed | longest inter-output gap, scheduler steps |
+|---|---:|---:|---:|
+| 1024, 278 pool blocks, cap 8 | 6 | 1,232,896 | 1 |
+| 512, 556 pool blocks, cap 8 | 17 | 1,552,896 | 687 |
+| 512, same pool, cap 6 | 0 | 1,048,576 | 1 |
+| 512, same pool, cap 8, watermark 5 % | 0 | 1,048,576 | 1 |
+| 512, 600 pool blocks, cap 8 | 0 | 1,048,576 | 1 |
+
+All cases have the same 32 x 32768 unique input tokens (1,048,576);
+extra tokens are repeated work. A cap of 7 behaves like cap 8.
+A per-request prefill cap of 1024 alone does not solve it (18 preemptions):
+multiple prefills can still fill a step. Watermarks 8 % and 10 % also
+eliminate the reproduced preemptions.
+
+Likely live mechanism [INFERENCE]: smaller pages admit more long requests,
+but full-input reservation does not reserve their future output growth.
+Near cache saturation, a request is preempted and replays tokens while
+others continue. Alignment also changes common mixed-prefill payloads
+from 1024 to 1536 tokens, lengthening each prefill-carrying step.
+The real scheduler's admission and checkpoint paths are unchanged by
+LeapQuant, but the smaller block exposes a different operating point.
+
+Separate short-prompt cost: directly executing
+`Scheduler._mamba_block_aligned_split` for a 1024-token prompt produces
+`[1024]` at block 1024 and `[512, 512]` at block 512. The latter incurs
+another prefill boundary/store-materialize cycle; this explains a concrete
+source of additional startup work, not proof of the observed acceptance
+difference's cause.
+
+Smallest next focused check, when testing resumes: existing `--watermark 0.05`
+with block 512, keeping MTP2, cap 8 and FULL_AND_PIECEWISE unchanged, while
+recording the actual preemption counter and per-step scheduling trace.
+This is **not GPU-validated** and is not enabled in the recipe.
 
 ### Speed (first build): no gain
 
