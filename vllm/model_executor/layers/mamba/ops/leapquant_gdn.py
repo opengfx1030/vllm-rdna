@@ -31,6 +31,16 @@ MTP verify needs no per-token state copies. The align-mode prefix-cache copies
 home blob and commits ``bias + 1`` records in the copy's header. An all-zero
 blob is the zero state.
 
+The fold must never produce NaN: ``_orthonormalize`` scales every column by its
+largest absolute value and sweeps twice (see there), and the smoothing factor
+divides by ``V`` before it sums. So zero, tiny, huge (up to the float limit)
+and exactly low-rank states fold to finite blobs with orthonormal
+compensators. A block that a request has not written yet holds the leftovers
+of another request, so the state is a function of ``z``, ``bscale``,
+``csmooth``, the compensators, the first ``cursor`` records and the header,
+nothing else. Header words outside the range that ``_sane_header`` checks read
+as an empty ring.
+
 This module holds the layout, the opt-in switch and an FP32 PyTorch reference
 used as the oracle for the ROCm kernels; the reference is not on the serving
 path.
@@ -52,7 +62,8 @@ LEAPQUANT_NUM_COMP = 4
 LEAPQUANT_POWER_ITERS = 2
 INT8_MAX = 127.0
 SMOOTH_FLOOR = 1e-6
-ORTH_EPS = 1e-12
+FP32_MAX = 3.4028234663852886e38
+ORTH_DEPENDENT = 0.5
 FP16_MAX = 65504.0
 
 
@@ -203,12 +214,31 @@ def _boundary_state(views: dict[str, torch.Tensor]) -> torch.Tensor:
     return S + torch.einsum("...rv,...rk->...vk", cu, ck)
 
 
+def _sane_header(
+    layout: LeapQuantLayout, header: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(cursor, pending)`` as the kernels read them (``lq_header_ok``).
+
+    Header words that an earlier user of the block left outside ``0 <= cursor``,
+    ``0 <= pending`` and ``cursor + pending <= capacity`` read as an empty ring,
+    so no record index is ever out of bounds."""
+    cursor, pending = header[..., 0].long(), header[..., 1].long()
+    ok = (
+        (cursor >= 0)
+        & (pending >= 0)
+        & (cursor <= layout.capacity)
+        & (pending <= layout.capacity - cursor)
+    )
+    zero = torch.zeros_like(cursor)
+    return torch.where(ok, cursor, zero), torch.where(ok, pending, zero)
+
+
 def leapquant_materialize(layout: LeapQuantLayout, blob: torch.Tensor) -> torch.Tensor:
     """FP32 state ``[..., V, K]`` of normalized blobs (pending must be 0)."""
     vw = layout.views(blob)
-    assert bool((vw["header"][..., 1] == 0).all()), "materialize needs pending == 0"
+    cursor, pending = _sane_header(layout, vw["header"])
+    assert bool((pending == 0).all()), "materialize needs pending == 0"
     S = _boundary_state(vw)
-    cursor = vw["header"][..., 0]
     rk, ru, rg = vw["rec_k"].float(), vw["rec_u"].float(), vw["rec_g"]
     for j in range(int(cursor.max().item()) if cursor.numel() else 0):
         live = (j < cursor)[..., None, None]
@@ -220,15 +250,50 @@ def leapquant_materialize(layout: LeapQuantLayout, blob: torch.Tensor) -> torch.
     return S
 
 
+def _sweep(y: torch.Tensor, cols: list[torch.Tensor]) -> torch.Tensor:
+    """One modified Gram-Schmidt pass of ``y`` against the unit columns ``cols``."""
+    for c in cols:
+        y = y - (c * y).sum(-1, keepdim=True) * c
+    return y
+
+
 def _orthonormalize(Y: torch.Tensor) -> torch.Tensor:
-    """Modified Gram-Schmidt over the last dim's columns: Y [..., N, r]."""
+    """Gram-Schmidt over the last dim's columns: Y [..., N, r] -> Q, same shape.
+
+    For every finite Y each column of Q is zero or has unit norm, and the
+    non-zero columns are orthogonal to fp32 precision:
+
+    * A column is scaled by its largest absolute value before the sweeps and
+      again after them, so no square under- or overflows (the rule of the
+      LeapQuant RFC, vllm-project/vllm#64725, section 5). A column that is zero
+      or not finite is returned as zero.
+    * Two sweeps against the earlier columns ("twice is enough", W. Kahan; see
+      Parlett, The Symmetric Eigenvalue Problem, 1980). One sweep is not enough
+      for a state of rank below ``r``: its columns lie in the span of the
+      earlier ones, the sweep leaves rounding noise, and that noise is partly
+      parallel to the earlier columns. The dominant direction would be counted
+      twice and the INT8 residual would carry a state-sized error.
+    * The dependence test of Daniel, Gragg, Kaufman and Stewart (Math. Comp. 30,
+      1976). When the second sweep removes more than half of the largest entry
+      (``m2 <= ORTH_DEPENDENT * m1``), the column was rounding noise along the
+      earlier columns, and no further sweep can make it orthogonal to them. The
+      column is returned as zero. The next fold restarts a zero column from the
+      fixed block (``leapquant_fold_parts``).
+    """
     cols: list[torch.Tensor] = []
+    zero = torch.zeros_like(Y[..., 0])
     for i in range(Y.shape[-1]):
         y = Y[..., i]
-        for c in cols:
-            y = y - (c * y).sum(-1, keepdim=True) * c
-        n = torch.sqrt((y * y).sum(-1, keepdim=True))
-        cols.append(torch.where(n > ORTH_EPS, y / n.clamp_min(ORTH_EPS), 0.0))
+        m = y.abs().amax(-1, keepdim=True)
+        live = (m > 0) & (m <= FP32_MAX)
+        y = _sweep(torch.where(live, y / torch.where(live, m, 1.0), zero), cols)
+        m1 = y.abs().amax(-1, keepdim=True)
+        y = _sweep(y, cols)
+        m2 = y.abs().amax(-1, keepdim=True)
+        live = live & (m2 > ORTH_DEPENDENT * m1)
+        y = y / torch.where(live, m2, 1.0)
+        n = torch.sqrt((y * y).sum(-1, keepdim=True))  # 1 <= n <= sqrt(N) if live
+        cols.append(torch.where(live, y / n.clamp_min(1.0), zero))
     return torch.stack(cols, dim=-1)
 
 
@@ -246,16 +311,18 @@ def leapquant_fold_parts(
     """Quantize FP32 states ``S [..., V, K]`` into boundary parts.
 
     Compensators come from subspace iteration warm-started at the previous
-    boundary's ``comp_k`` (or a fixed block when it is all zero); the residual
-    is taken against the fp16-rounded compensators, smoothed per key column,
-    and quantized per value row to symmetric INT8.
+    boundary's ``comp_k``. A column of it that is all zero (a fresh block, a
+    zero state, a direction the last fold found dependent) restarts from the
+    fixed block instead of staying dead. The residual is taken against the
+    fp16-rounded compensators, smoothed per key column, and quantized per value
+    row to symmetric INT8.
     """
     S = S.float()
     X0 = _power_init(layout, S.device).expand(*S.shape[:-2], -1, -1)
     if prev_comp_k is not None:
         pk = prev_comp_k.float().transpose(-1, -2)  # [..., K, r]
-        use_prev = (pk.abs().sum((-1, -2)) > 0)[..., None, None]
-        X0 = torch.where(use_prev, pk, X0)
+        alive = pk.abs().sum(-2, keepdim=True) > 0  # [..., 1, r]
+        X0 = torch.where(alive, pk, X0)
     Q = _orthonormalize(S @ X0)  # [..., V, r]
     for _ in range(layout.power_iters):
         Q = _orthonormalize(S @ (S.transpose(-1, -2) @ Q))
@@ -263,7 +330,10 @@ def leapquant_fold_parts(
     comp_u = Q.transpose(-1, -2).clamp(-FP16_MAX, FP16_MAX).half()  # [..., r, V]
     comp_k = Kt.transpose(-1, -2).clamp(-FP16_MAX, FP16_MAX).half()  # [..., r, K]
     R = S - torch.einsum("...rv,...rk->...vk", comp_u.float(), comp_k.float())
-    csmooth = torch.sqrt(R.abs().mean(-2)).clamp_min(SMOOTH_FLOOR)  # [..., K]
+    # Divide before the sum: the sum of |R| over V overflows for |R| of about
+    # 1e37 and more, and an inf factor makes z * bscale * csmooth 0 * inf = NaN.
+    # For V a power of two this equals mean() bit for bit.
+    csmooth = torch.sqrt((R.abs() / R.shape[-2]).sum(-2)).clamp_min(SMOOTH_FLOOR)
     Rs = R / csmooth[..., None, :]
     bscale = Rs.abs().amax(-1) / INT8_MAX  # [..., V]
     safe = torch.where(bscale > 0, bscale, torch.ones_like(bscale))
@@ -302,17 +372,18 @@ def leapquant_normalize(
 
     ``num_accepted`` is the per-request count a speculative verify reads the
     state at (slot ``num_accepted - 1``); ``None`` is a reader of slot 0
-    (prefill, non-spec decode), which commits one pending record."""
+    (prefill, non-spec decode), which commits one pending record. A header
+    outside the range of ``_sane_header`` reads as empty and is rewritten."""
     vw = layout.views(blob)
     hdr = vw["header"]
-    pending = hdr[..., 1]
+    cursor, pending = _sane_header(layout, hdr)
     if num_accepted is None:
         acc = torch.clamp(pending, max=1)
     else:
         acc = torch.minimum(
-            num_accepted.to(torch.int32)[:, None].expand_as(pending), pending
-        )
-    hdr[..., 0] += acc
+            num_accepted.long()[:, None].expand_as(pending), pending
+        ).clamp_min(0)
+    hdr[..., 0] = (cursor + acc).to(torch.int32)
     hdr[..., 1] = 0
     full = hdr[..., 0] >= layout.window  # [N, HV]
     if bool(full.any()):
@@ -365,7 +436,7 @@ def leapquant_decode(
     qn = l2norm(q).repeat_interleave(rep, dim=2) * scale
     kn = l2norm(k).repeat_interleave(rep, dim=2)
     g, beta = gdn_gates(a, b, A_log, dt_bias)
-    cursor = vw["header"][..., 0].long()  # [N, HV]
+    cursor, _ = _sane_header(layout, vw["header"])  # [N, HV]
     outs = []
     n_idx = torch.arange(N, device=blob.device)[:, None]
     h_idx = torch.arange(HV, device=blob.device)[None, :]
