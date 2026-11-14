@@ -1,3 +1,5 @@
+// Algorithm: LeapQuant (Pan et al., arXiv 2609.38166); record ring after
+// ReplaySSM (vllm-project/vllm#62004). Original code written for this fork.
 // LeapQuant GDN blob layout shared by gdn_leapquant_rdna2.cu and the
 // MonoKernel GDN (mono_gdn_rdna2.cu). Must match LeapQuantLayout.offsets in
 // vllm/model_executor/layers/mamba/ops/leapquant_gdn.py.

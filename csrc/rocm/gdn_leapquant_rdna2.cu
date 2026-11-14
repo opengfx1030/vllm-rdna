@@ -1,3 +1,6 @@
+// Algorithm: LeapQuant (Pan et al., arXiv 2609.38166). Record ring, cursor and
+// per-window flush follow ReplaySSM (Dao AI Lab and NVIDIA; vllm-project/vllm
+// #48018, #62004). These HIP kernels are original code written for this fork.
 // LeapQuant INT8 recurrent-state storage for GatedDeltaNet on AMD RDNA2
 // (gfx1030). arXiv 2609.38166; layout and FP32 oracle:
 // vllm/model_executor/layers/mamba/ops/leapquant_gdn.py.

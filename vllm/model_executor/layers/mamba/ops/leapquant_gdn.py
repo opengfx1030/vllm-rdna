@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Algorithm: LeapQuant, Y. Pan, H. Xi, K. Zhu, X. Li, Y. Wu, M. Mishra, H. Zhang,
+# W. X. Zheng, B. Kasikci, S. Han, K. Keutzer, R. Iyer, I. Stoica (arXiv 2609.38166).
+# The record ring, cursor and per-window flush follow ReplaySSM (Dao AI Lab and
+# NVIDIA; vllm-project/vllm#48018, #62004). The FP32 oracle below and the RDNA2
+# HIP kernels are original code written for this fork.
 """LeapQuant recurrent-state storage for Gated DeltaNet (arXiv 2609.38166).
 
 The FP32 GDN state ``S`` of one value head (``[V, K]``, the row-major layout of

@@ -5,6 +5,27 @@ requested in [vllm#64725](https://github.com/vllm-project/vllm/issues/64725))
 to the RDNA2 Gated DeltaNet path. Opt-in with `VLLM_RDNA_GDN_LEAPQUANT=1`
 (gfx10x only; the flag raises elsewhere). Default off: the change is lossy.
 
+## Credits
+
+- **Algorithm:** LeapQuant, Yi Pan, Haocheng Xi, Kan Zhu, Xingyang Li, Yibo Wu,
+  Mayank Mishra, Hongtao Zhang, William X. Zheng, Baris Kasikci, Song Han,
+  Kurt Keutzer, Rishabh Iyer and Ion Stoica
+  ([arXiv 2609.38166](https://arxiv.org/abs/2609.38166)).
+- **Record ring, cursor and per-window flush:** the ReplaySSM design by Dao AI Lab
+  and NVIDIA ([blog](https://dao-lab.ai/blog/2026/replayssm/),
+  [vllm#48018](https://github.com/vllm-project/vllm/pull/48018),
+  [vllm#62004](https://github.com/vllm-project/vllm/pull/62004) by Johnny-Liou).
+  ReplaySSM for Mamba2 reaches this tree through the upstream merge. Its GDN
+  decode kernel (#62004, still open upstream) is not in this tree.
+- **Proposal and design context:** the LeapQuant RFC
+  [vllm#64725](https://github.com/vllm-project/vllm/issues/64725) by
+  lihaoyang-amd. It reports a prototype with one fold launch across layers and
+  the per-window FP16 checkpoint baseline that LeapQuant must beat on memory.
+  The RFC has no source code, and none of it is used here.
+- **Code:** the HIP kernels, layout header, FP32 oracle, scheduler changes and
+  tests in this PR are original work for this fork. Existing files keep their
+  upstream authors in git history.
+
 ## What it stores
 
 The FP32 state of one value head (`[V, K] = [128, 128]`, 64 KiB) becomes one
@@ -35,39 +56,39 @@ instead of once per token. The FP32 oracle is
 
 ## How it fits the serving path (MTP2, cudagraphs, prefix caching)
 
-* **Slots are record counts.** The FP32 layout keeps one state per speculative
+- **Slots are record counts.** The FP32 layout keeps one state per speculative
   token (`spec_state_indices[n, t]`). The blob lives at the home block
   `spec_state_indices[n, 0]`; "slot `t`" is "commit `t + 1` pending records".
   A decode/verify step appends its records and sets `pending`;
   `gdn_lq_normalize_rdna2` (first op of the next step) commits
   `num_accepted` of them (rejected drafts are dropped by never committing) and
   folds once `cursor >= window`. MTP verify needs no per-token state copies.
-* **Readers of slot 0** (chunked prefill, non-spec decodes) commit
+- **Readers of slot 0** (chunked prefill, non-spec decodes) commit
   `min(1, pending)`, the same state the FP32 path reads.
-* **Prefill** materializes the blob to an FP32 `[N, HV, V, K]` initial state,
+- **Prefill** materializes the blob to an FP32 `[N, HV, V, K]` initial state,
   runs the unchanged HIP prefill chain (`VLLM_GDN_HIP_PREFILL=1`) and stores
   the final state back (`gdn_lq_store_rdna2`). Inside a chunk nothing
   changes; LeapQuant error enters at chunk boundaries (MAXBAT 2048).
-* **Prefix caching (`mamba-align`, V2 runner):** the align precopy/postprocess
+- **Prefix caching (`mamba-align`, V2 runner):** the align precopy/postprocess
   HIP kernels (`v1_mamba_rdna2.cu`, `copy_mamba_state_block`) copy the whole
   blob from the home block and write `cursor + min(bias + 1, pending)` into
   the copy's header, which is exactly the FP32 "copy slot `bias`" rule. The V1
   runner's memcpy specs and the Triton precopy fallback raise instead of
   silently copying wrong bytes.
-* **MonoKernel (`EXTRA_ARGS=--monokernel`):** pure decode and pure verify
+- **MonoKernel (`EXTRA_ARGS=--monokernel`):** pure decode and pure verify
   batches run `gdn_lq_normalize_rdna2` and then `mono_gdn_lq_rdna2`, the
   `mono_gdn_rdna2` fused conv + delta rule + gated norm launch with the
   LeapQuant load/append in place of the FP32 state load/store (each 32-row
   tile rebuilds its rows from the blob; records are written per tile). Batches
   with prefill take the layer's path as with FP32 state.
-* **HIP only.** Every LeapQuant read and write is one of the kernels above;
+- **HIP only.** Every LeapQuant read and write is one of the kernels above;
   the FP32-state Triton decode warmup is skipped under the flag (it never
   runs). Paths the flag does not change (conv update, gated norm outside the
   MonoKernel) are the recipe's, identical with the flag off.
-* **Cudagraphs:** every op is a fixed-shape launch on the current stream that
+- **Cudagraphs:** every op is a fixed-shape launch on the current stream that
   reads its metadata from device tensors, so FULL_AND_PIECEWISE captures it
   like the FP32 kernels.
-* **Refused combinations** (raise at init): fused CUDA spec decode,
+- **Refused combinations** (raise at init): fused CUDA spec decode,
   AITER/FlashInfer GDN, align mode on the V1 runner, head dims other than 128.
 
 ## Use
@@ -269,13 +290,13 @@ difference's cause.
 The user rejected a watermark/cadence workaround. The opt-in LeapQuant
 scheduler now changes admission and work ordering instead:
 
-* **Reserve bounded growth before admission.** The full-sequence check uses
+- **Reserve bounded growth before admission.** The full-sequence check uses
   prompt length + requested maximum output + an in-flight verification tail,
   clamped to the model context limit. The tail includes every configured
   concurrent batch, not just one final verify. Draft KV lookahead is separate.
   Already admitted requests' unallocated growth is subtracted from free blocks.
   These are allocator-derived promises, not eagerly allocated KV pages.
-* **Account for physical recurrent peaks.** A future single-step allocation
+- **Account for physical recurrent peaks.** A future single-step allocation
   alone undercounts Mamba align mode: initial state + two draft slots is three
   pages. A synchronous boundary transition needs four; two unresolved
   prefill chunks can keep five live pages. The peak bound includes
@@ -283,11 +304,11 @@ scheduler now changes admission and work ordering instead:
   limited by the logical state columns. The coordinator takes the larger
   of its normal prediction and this peak, subtracting held/adopted pages
   and accounting for evictable prefix hits.
-* **Ready decoders first under FCFS.** Their target and draft rows consume
+- **Ready decoders first under FCFS.** Their target and draft rows consume
   the input budget before running prefills; prefills use what remains.
   Explicit priority policy is unchanged. No sleep, watermark increase,
   fixed sequence cap, cadence change, or reduction in speculative width.
-* **No reservation ledger.** Growth is derived from live group tables.
+- **No reservation ledger.** Growth is derived from live group tables.
   Allocated pages stop being promises; early EOS and cancellation release
   the request's remaining promise. Shared cached prefixes are not charged twice.
 
@@ -422,12 +443,12 @@ MonoKernel on, same columns:
 | 32k/2k c=4 | +0.1 % | -0.0 % | +0.5 % | +0.3 % (regr.) | +3.5 % |
 | 32k/2k c=8 | +2.7 % (regr.) | -9.5 % (regr.) | +0.9 % (regr.) | +0.1 % (regr.) | -3.9 % |
 
-* Output aggregate follows MTP acceptance (1.68-2.60 per boot), not the
+- Output aggregate follows MTP acceptance (1.68-2.60 per boot), not the
   flag.
-* **c=1 ITL p99 +6 %** (23.6 -> 25.0 ms) is the fold: all 36 layers
+- **c=1 ITL p99 +6 %** (23.6 -> 25.0 ms) is the fold: all 36 layers
   refold on the same step every ~16 committed tokens, one layer after the
   other.
-* 16k/1k c=8 TTFT p50 is bimodal per boot (MonoKernel-on base boots: 11.7 s
+- 16k/1k c=8 TTFT p50 is bimodal per boot (MonoKernel-on base boots: 11.7 s
   and 7.0 s); prefill aggregate does not move.
 
 ### Efficiency pass: one normalize launch per KV-cache group
@@ -438,7 +459,7 @@ Per decode step on one V620 (36 layers, HIP-graph replay,
 on folds (40 us per fold workgroup, one layer after the other) and ~55 us on
 replaying the window's records.
 
-* **Grouped normalize.** The GDN layers of one KV-cache group share a block
+- **Grouped normalize.** The GDN layers of one KV-cache group share a block
   table and one attention metadata, so the group's first LeapQuant layer
   normalizes all of its layers' blobs in one launch (`layer_offsets`, grid.y
   = layer) and the others skip. The groups are built at KV-cache bind
@@ -449,9 +470,9 @@ replaying the window's records.
   decode) stay per layer. Same bytes as per-layer normalize
   (`test_grouped_normalize_matches_per_layer`,
   `test_normalize_groups_follow_kv_cache_groups`).
-* **Replay loads.** The record replay loops unroll by 2 so two records'
+- **Replay loads.** The record replay loops unroll by 2 so two records'
   loads issue together (unroll 4 was slower at n=8). Same arithmetic order.
-* Tried and dropped: LDS instead of shuffle reductions in the fold (40 us ->
+- Tried and dropped: LDS instead of shuffle reductions in the fold (40 us ->
   39 us at n=1, 96 us -> 110 us at n=8). Power iterations 2 -> 0 saves 20-40
   us per step but changes the compensators; not taken, quality not measured.
 
@@ -478,19 +499,19 @@ state slots per group. The leader committed the other groups' records at
 its own group's slots, which belong to other requests in those groups.
 Their own slots were never committed.
 
-* Symptom: decode fell into repetition loops, which MTP accepts easily.
+- Symptom: decode fell into repetition loops, which MTP accepts easily.
   The MonoKernel-on ABBA receipt showed fake speed "wins" (c=1 output
   +37 %, ITL p50 -4 to -8 % at c=4/8). Outputs whose last 600 chars compress
   below 0.12 (zlib), out of 32 at c=8: base boots 2-7, flag-on boots 10-21.
   On the first build, the flag-on boots matched base (1-6).
-* The gated checks missed it. Prompt KL and teacher-forced PPL do not run
+- The gated checks missed it. Prompt KL and teacher-forced PPL do not run
   decode (head KL 0.01178/0.01172 vs floor CI 0.01413, PPL +0.47/+0.15 %).
   The concurrency probe hinted at it: 1 FAIL and 10 soft divergences, vs
   0-5 soft on every other boot.
-* Isolation: the tree3 and tree2 kernels are bitwise identical over 200
+- Isolation: the tree3 and tree2 kernels are bitwise identical over 200
   MTP steps (decode, normalize, MonoKernel). Disabling only the Python
   grouping restores base behaviour.
-* Fix: `d879da8c93` builds one group per KV-cache group.
+- Fix: `d879da8c93` builds one group per KV-cache group.
   `test_normalize_groups_follow_kv_cache_groups` uses two groups with
   different slots per request.
 
@@ -511,21 +532,21 @@ columns and rule as above:
 | 32k/2k c=4 | +1.5 % (regr.) | +0.0 % | -1.0 % | -0.1 % | +1.4 % |
 | 32k/2k c=8 | +1.7 % | +2.1 % (win) | +0.1 % | -0.1 % (win) | +4.6 % (win) |
 
-* **The c=1 ITL p99 fold spike is gone** (+6 % in the first build, now
+- **The c=1 ITL p99 fold spike is gone** (+6 % in the first build, now
   -0.6 / -0.3 / +0.3 %): each KV-cache group's folds run in one launch.
-* ITL p50 moves -0.1 to -1.4 %, and -5.4 % at 1k/512 c=8 (45.2 vs 47.8 ms).
-* At 1k/512 c=1 (4 requests), acceptance length from each benchmark JSON
+- ITL p50 moves -0.1 to -1.4 %, and -5.4 % at 1k/512 c=8 (45.2 vs 47.8 ms).
+- At 1k/512 c=1 (4 requests), acceptance length from each benchmark JSON
   is A1=2.034, B1=1.774, B2=1.622, A2=2.269 tokens per step. Both flag-on
   boots have lower acceptance and output throughput despite similar ITL.
   The -19.3 % throughput result remains a regression to investigate.
   Other cells move in both directions; pooling their acceptance logs
   cannot establish parity for this cell.
-* 1k/512 c=4 ITL p99 +258 % is one boot (B2 380.9 ms vs 60.9-62.6 ms on the
+- 1k/512 c=4 ITL p99 +258 % is one boot (B2 380.9 ms vs 60.9-62.6 ms on the
   others). The first build had the same stall on a base boot (-72 %).
-* At 32k/2k c=8 every arm logs `Running: 5-6 reqs, Waiting: 2-3 reqs`
+- At 32k/2k c=8 every arm logs `Running: 5-6 reqs, Waiting: 2-3 reqs`
   (TTFT p50 ~85 s). This is consistent with KV admission pressure
   [INFERENCE]; the 512 experiment will check admission and throughput.
-* Gates: quality PASS (head KL 0.01158 / 0.01178 vs floor 0.01376, top-1
+- Gates: quality PASS (head KL 0.01158 / 0.01178 vs floor 0.01376, top-1
   0.967 vs 0.964, PPL +0.055 / -0.077 %), concurrency probe PASS with 0
   failing on both flag-on boots, stall PASS. Repetition loops (`loopscan.py`,
   out of 32 per c=8 cell): base 0-5, flag on 1-5.
@@ -548,12 +569,12 @@ Speed is mixed (5 winning cells, 4 with at least one regression):
 | 32k/2k c=4 | -0.9 % | +0.0 % | -1.2 % | +0.0 % | +1.4 % |
 | 32k/2k c=8 | +3.3 % | -0.6 % | -2.0 % | -0.1 % | -7.2 % |
 
-* Both head boots pass KL against the floor (0.01186/0.01205 vs 0.01490),
+- Both head boots pass KL against the floor (0.01186/0.01205 vs 0.01490),
   PPL (+0.121/+0.350 %, limit 2 %) and concurrency (0 failing).
-* At 1k c=1, acceptance length is A1=1.814, B1=1.865, B2=1.909,
+- At 1k c=1, acceptance length is A1=1.814, B1=1.865, B2=1.909,
   A2=1.787: the MonoKernel-on acceptance regression does not reproduce
   in this MonoKernel-off receipt. This does not establish the cause.
-* Loop scan: c=8 base 2-5/32, head 1-4/32. At 16k c=1 and 32k c=1,
+- Loop scan: c=8 base 2-5/32, head 1-4/32. At 16k c=1 and 32k c=1,
   B1 flags 2/4 while the other boots flag 0/4; retain these as quality
   concerns for the larger decode study rather than treating gate PASS
   as complete decode-quality evidence.
