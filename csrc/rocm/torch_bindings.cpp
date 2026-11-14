@@ -369,8 +369,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor num_accepted_tokens, float scale) -> ()");
   rocm_ops.impl("gdn_spec_verify_rdna2", torch::kCUDA, &gdn_spec_verify_rdna2);
 
-  // LeapQuant INT8 GDN recurrent state for AMD RDNA2 (gfx1030); opt-in via
-  // VLLM_RDNA_GDN_LEAPQUANT. blob = uint8 [blocks, HV, nbytes].
+  // LeapQuant INT8 GDN recurrent state for AMD RDNA2 (gfx1030); selected by
+  // --replayssm-state-dtype leapquant. blob = uint8 [blocks, HV, nbytes].
   // layer_offsets: optional int64 [layers] byte offsets of same-shape blobs
   // from `blob`; one launch then normalizes every layer of the group.
   rocm_ops.def(

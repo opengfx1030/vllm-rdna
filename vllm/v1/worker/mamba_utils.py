@@ -16,7 +16,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
-from vllm.model_executor.layers.mamba.ops.leapquant_gdn import LEAPQUANT_HEADER_BYTES
+from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
+    LEAPQUANT_HEADER_BYTES,
+    is_leapquant_state_format,
+)
 from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -747,6 +750,27 @@ def validate_mamba_state_copy_funcs(
         )
 
 
+def select_state_copy_funcs(
+    mamba_groups: dict[MambaSpec, list[int]],
+    copy_funcs: MambaStateCopyFuncsByType,
+) -> MambaStateCopyFuncsByType:
+    """Validate ``copy_funcs`` and mark the LeapQuant states in them.
+
+    A model names one copy function per state type and cannot see the config.
+    The spec can: a LeapQuant temporal state is a byte blob whose copy must
+    commit pending records, so its entry becomes ``get_leapquant_copy_spec``.
+    """
+    validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
+    selected = dict(copy_funcs)
+    for mamba_spec in mamba_groups:
+        if is_leapquant_state_format(mamba_spec.state_format):
+            selected[mamba_spec.mamba_type] = tuple(
+                get_leapquant_copy_spec if func is get_temporal_copy_spec else func
+                for func in copy_funcs[mamba_spec.mamba_type]
+            )
+    return selected
+
+
 @dataclasses.dataclass
 class MambaCopyBuffers:
     src_ptrs: CpuGpuBuffer
@@ -1402,8 +1426,8 @@ class MambaSpecDecodeGPUContext:
 
         if self.has_leapquant_states:
             raise RuntimeError(
-                "VLLM_RDNA_GDN_LEAPQUANT=1 does not support dynamic speculation "
-                "(zero-draft collapse takes the Triton align copy)"
+                "--replayssm-state-dtype leapquant does not support dynamic "
+                "speculation (zero-draft collapse takes the Triton align copy)"
             )
         grid = (num_reqs, total_states, _TEMPORAL_TILES)
         precopy_mamba_align_fused_kernel[grid](

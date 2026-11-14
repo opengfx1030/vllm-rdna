@@ -5,6 +5,12 @@
 # The record ring, cursor and per-window flush follow ReplaySSM (Dao AI Lab and
 # NVIDIA; vllm-project/vllm#48018, #62004). The FP32 oracle below and the RDNA2
 # HIP kernels are original code written for this fork.
+# The flag name --replayssm-state-dtype is the one the upstream LeapQuant RFC
+# (vllm-project/vllm#64725, lihaoyang-amd) takes from draft vllm-project/vllm#52962
+# (askliar). The refused combinations and the state-format identity answer the
+# safety section of that RFC. verify_leapquant_gdn and LeapQuantLayout.state_format
+# are original code written for this fork; no code comes from either upstream
+# change.
 """LeapQuant recurrent-state storage for Gated DeltaNet (arXiv 2609.38166).
 
 The FP32 GDN state ``S`` of one value head (``[V, K]``, the row-major layout of
@@ -31,18 +37,21 @@ MTP verify needs no per-token state copies. The align-mode prefix-cache copies
 home blob and commits ``bias + 1`` records in the copy's header. An all-zero
 blob is the zero state.
 
-This module holds the layout, the opt-in switch and an FP32 PyTorch reference
-used as the oracle for the ROCm kernels; the reference is not on the serving
-path.
+This module holds the layout and its format identity, the start-up validation
+(``verify_leapquant_gdn``), and an FP32 PyTorch reference used as the oracle for
+the ROCm kernels; the reference is not on the serving path.
+``--replayssm-state-dtype leapquant`` selects the format.
 """
 
 from __future__ import annotations
 
-import functools
-import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 LEAPQUANT_ALIGN = 16
 # The int32 header [cursor, pending, 0, 0] is the last section of every blob.
@@ -50,28 +59,138 @@ LEAPQUANT_HEADER_BYTES = 16
 LEAPQUANT_WINDOW = 32
 LEAPQUANT_NUM_COMP = 4
 LEAPQUANT_POWER_ITERS = 2
+LEAPQUANT_HEAD_DIM = 128
+# First segment of LeapQuantLayout.state_format.
+LEAPQUANT_FORMAT = "leapquant-int8"
+# Raise this when the blob sections, their order, their alignment, or the
+# meaning of their contents change.
+LEAPQUANT_LAYOUT_VERSION = 1
+# dtype of the k and u records in the ring. The decay g stays FP32.
+LEAPQUANT_RECORD_DTYPE = torch.float16
+LEAPQUANT_FLAG = "--replayssm-state-dtype leapquant"
 INT8_MAX = 127.0
 SMOOTH_FLOOR = 1e-6
 ORTH_EPS = 1e-12
 FP16_MAX = 65504.0
 
 
-@functools.cache
-def leapquant_gdn_enabled() -> bool:
-    """Opt-in LeapQuant GDN state storage (``VLLM_RDNA_GDN_LEAPQUANT=1``).
+def _check_head_dims(head_k_dim: int, head_v_dim: int) -> None:
+    if head_k_dim != LEAPQUANT_HEAD_DIM or head_v_dim != LEAPQUANT_HEAD_DIM:
+        raise ValueError(
+            f"{LEAPQUANT_FLAG} supports head_k_dim == head_v_dim == "
+            f"{LEAPQUANT_HEAD_DIM}, got {head_k_dim} / {head_v_dim}."
+        )
 
-    The kernels are RDNA2 HIP only, so the flag fails loudly elsewhere instead
-    of silently serving FP32 state."""
-    if os.environ.get("VLLM_RDNA_GDN_LEAPQUANT", "0") != "1":
-        return False
+
+def is_leapquant_state_format(state_format: str | None) -> bool:
+    """Whether ``MambaSpec.state_format`` names LeapQuant state."""
+    return (
+        state_format is not None and state_format.split("/", 1)[0] == LEAPQUANT_FORMAT
+    )
+
+
+def verify_leapquant_gdn(
+    vllm_config: VllmConfig,
+    *,
+    head_dims: tuple[int, int] | None = None,
+    fused_cuda_spec_decode: bool = False,
+    flashinfer_checkpoints: bool = False,
+) -> None:
+    """Refuse every setup that LeapQuant GDN state does not support.
+
+    This is the only place that decides. A refused setup stops the start-up and
+    names the flag and the cause. There is no fallback to FP32 state.
+
+    ``VllmConfig`` calls it with the configuration alone, after the
+    model-specific config update has resolved ``mamba_cache_mode``. Each
+    LeapQuant GDN layer calls it again with the facts that exist only once the
+    layer is built: ``head_dims``, ``fused_cuda_spec_decode`` (the fused CUDA
+    decode kernel is selected) and ``flashinfer_checkpoints`` (the FlashInfer
+    prefill backend is selected). The caller checks that
+    ``cache_config.replayssm_state_dtype`` is ``"leapquant"`` first.
+    """
     from vllm.platforms.rdna import on_rdna2_hip
 
+    cache_config = vllm_config.cache_config
     if not on_rdna2_hip():
         raise ValueError(
-            "VLLM_RDNA_GDN_LEAPQUANT=1 needs gfx10x: the LeapQuant GDN "
-            "kernels are RDNA2 HIP only"
+            f"{LEAPQUANT_FLAG} needs an RDNA2 (gfx10x) ROCm GPU with "
+            "VLLM_RDNA_ALL_HIP=1. The LeapQuant GDN kernels are HIP kernels for "
+            "gfx10x only."
         )
-    return True
+    if cache_config.use_replayssm:
+        raise ValueError(
+            f"{LEAPQUANT_FLAG} cannot be used with --use-replayssm. "
+            "--use-replayssm selects the Mamba2 and KDA ReplaySSM kernels and "
+            "removes the speculative state blocks. LeapQuant keeps its own "
+            "record ring in each state block. Remove --use-replayssm."
+        )
+    if vllm_config.mamba_config.enable_stochastic_rounding:
+        raise ValueError(
+            f"{LEAPQUANT_FLAG} cannot be used with "
+            "--enable-mamba-cache-stochastic-rounding. Stochastic rounding is "
+            "for FP16 SSM caches. A LeapQuant state is INT8 with FP16 records. "
+            "Remove --enable-mamba-cache-stochastic-rounding."
+        )
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if (
+        kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance
+    ) or cache_config.kv_offloading_size is not None:
+        raise ValueError(
+            f"{LEAPQUANT_FLAG} cannot be used with a KV connector or KV "
+            "offloading (--kv-transfer-config, --kv-offloading-size). A connector "
+            "would move LeapQuant state blocks between instances or to the host, "
+            "and no connector knows the format. Remove the connector or the "
+            "offloading option."
+        )
+    if cache_config.mamba_cache_mode == "align" and not vllm_config.use_v2_model_runner:
+        raise ValueError(
+            f"{LEAPQUANT_FLAG} with mamba align prefix caching "
+            "(--mamba-cache-mode align) needs the V2 model runner. Its fused "
+            "align copies commit the LeapQuant records. Set "
+            "VLLM_USE_V2_MODEL_RUNNER=1 or turn prefix caching off."
+        )
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if (
+        rocm_aiter_ops.are_gdn_triton_kernels_available()
+        or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+    ):
+        raise ValueError(
+            f"{LEAPQUANT_FLAG} does not cover the AITER GDN path. Set "
+            "VLLM_ROCM_USE_AITER=0."
+        )
+    if flashinfer_checkpoints:
+        raise ValueError(
+            f"{LEAPQUANT_FLAG} does not cover the FlashInfer GDN prefill "
+            "backend. Select another one with --gdn-prefill-backend."
+        )
+    if fused_cuda_spec_decode:
+        raise ValueError(
+            f"{LEAPQUANT_FLAG} does not cover the fused CUDA spec-decode kernel. "
+            "Set VLLM_GDN_DECODE_KERNEL=triton."
+        )
+    model_config = vllm_config.model_config
+    speculative_config = vllm_config.speculative_config
+    # A drafter can get its own VllmConfig that holds the draft model config
+    # (Qwen4Exp MTP builds one with ``replace``). The target model decides.
+    is_draft = (
+        speculative_config is not None
+        and model_config is speculative_config.draft_model_config
+    )
+    if head_dims is None and model_config is not None and not is_draft:
+        text_config = model_config.hf_text_config
+        head_k_dim = getattr(text_config, "linear_key_head_dim", None)
+        head_v_dim = getattr(text_config, "linear_value_head_dim", None)
+        if head_k_dim is None or head_v_dim is None:
+            raise ValueError(
+                f"{LEAPQUANT_FLAG} stores the recurrent state of Gated DeltaNet "
+                "layers. This model config has no linear_key_head_dim or "
+                "linear_value_head_dim. Remove the flag."
+            )
+        head_dims = (head_k_dim, head_v_dim)
+    if head_dims is not None:
+        _check_head_dims(*head_dims)
 
 
 def leapquant_gdn_layout(
@@ -79,11 +198,7 @@ def leapquant_gdn_layout(
 ) -> LeapQuantLayout:
     """Serving layout: window 32, r = 4, ring sized for one
     verify step of ``num_spec + 1`` tokens."""
-    if head_k_dim != 128 or head_v_dim != 128:
-        raise ValueError(
-            "VLLM_RDNA_GDN_LEAPQUANT=1 supports head_k_dim == head_v_dim == 128, "
-            f"got {head_k_dim} / {head_v_dim}"
-        )
+    _check_head_dims(head_k_dim, head_v_dim)
     return LeapQuantLayout(
         head_k_dim=head_k_dim,
         head_v_dim=head_v_dim,
@@ -123,8 +238,8 @@ class LeapQuantLayout:
             ("csmooth", torch.float32, (K,)),
             ("comp_k", torch.float16, (r, K)),
             ("comp_u", torch.float16, (r, V)),
-            ("rec_k", torch.float16, (cap, K)),
-            ("rec_u", torch.float16, (cap, V)),
+            ("rec_k", LEAPQUANT_RECORD_DTYPE, (cap, K)),
+            ("rec_u", LEAPQUANT_RECORD_DTYPE, (cap, V)),
             ("rec_g", torch.float32, (cap,)),
             ("header", torch.int32, (4,)),
         ]
@@ -144,6 +259,24 @@ class LeapQuantLayout:
     @property
     def nbytes(self) -> int:
         return self.offsets["_total"]
+
+    @property
+    def state_format(self) -> str:
+        """Identity of the state this layout stores.
+
+        It holds every field that fixes the byte layout or the meaning of the
+        bytes: the format, the layout version, the head dimensions, the
+        compensator rank ``r``, the window ``p``, the ring capacity, and the
+        record dtype. Two blobs are exchangeable only when these strings are
+        equal. ``power_iters`` is not part of it: it changes how a fold fits the
+        compensators, not what a blob holds.
+        """
+        record = str(LEAPQUANT_RECORD_DTYPE).removeprefix("torch.")
+        return (
+            f"{LEAPQUANT_FORMAT}/v{LEAPQUANT_LAYOUT_VERSION}"
+            f"/k{self.head_k_dim}v{self.head_v_dim}"
+            f"/r{self.num_comp}/p{self.window}/cap{self.capacity}/rec-{record}"
+        )
 
     def views(self, blob: torch.Tensor) -> dict[str, torch.Tensor]:
         """Typed views of ``blob`` (uint8, ``[..., nbytes]``, last dim dense)."""
