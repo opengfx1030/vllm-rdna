@@ -1,0 +1,1412 @@
+{
+ "protocol": {
+  "order": [
+   "A1",
+   "C1",
+   "C2",
+   "A2"
+  ],
+  "boot_repeats_per_mode": 2,
+  "requests_per_cell_per_boot": 16,
+  "baseline": "FP32 state/block1024, flashnext-mtp2 + MonoKernel, budget0",
+  "leapquant": "window32/rank4/block512, flashnext-leapquant-mtp2, adaptive450ms/share0/overhead1",
+  "shared": "TP4 V620 b4 HIP2-5 d9/dc/df/e2; MTP2, MonoKernel, FULL_AND_PIECEWISE",
+  "sampling": "T1 top_p.95 top_k20 min_p0 presence0 repetition1; random/completions dataset seed12345; no API seed; ignore EOS",
+  "warmup": "One separate 64-output request at each workload length before its measured group; prefix cache reset before every cell",
+  "aggregation": "Rates/latencies mean of two boot summaries; percentile columns are means of per-boot percentiles. Acceptance pools counts. PP/request=input/meanTTFT; PP wave=c*input/p99TTFT, not separately timed GPU PP; TG/request=1000/meanTPOT; TG aggregate=outputs/walltime including prefill.",
+  "quality_scope": "PPL/prefix/concurrency/after-load probes plus random-output loop flags; not a new powered task-accuracy or decode-KL study"
+ },
+ "throughput_requests": 384,
+ "boots": {
+  "A1": {
+   "run": "/home/chenco_adm/w4a8_runs/leapquant/matrix-A1-20261114-191152",
+   "peak_junction_c": 83.0,
+   "ppl": 4.83,
+   "verification_summary": "[19:12:02] boot TREE=/home/chenco_adm/w4a8_runs/leapquant/tree10 RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=2,3,4,5 PORT=18787 overrides=VLLM_RDNA_GDN_LEAPQUANT=0 BLOCK_SIZE=1024 VLLM_SERVER_DEV_MODE=1 VLLM_RDNA_DECODE_STALL_MS=0 VLLM_RDNA_DECODE_SHARE=0 VLLM_DECODE_STALL_MAX_OVERHEAD=1.0 EXTRA_ARGS=--monokernel bench_extra=\n[19:12:02] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock\n[19:16:42] READY in 280s served=flash-next\n[19:16:49] PROBE PASS\nPASS  prompt='The capital of France is'\n      reply=' Paris. Paris is a city of great historical and cultural significance, known for its iconic landmarks such as the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral. It is also a major center for fashion, gastronomy,'\nPASS  prompt='1+1='\n      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '\nPASS  prompt='The capital of Germany is'\n      reply=\" Berlin, which is also the country's largest city and one of its 16 federal states. With a population of approximately 3.5 million, Berlin is the second most populous city in the European Union. It serves as the headquarters\"\nRESULT PASS (3/3)\n[19:16:56] PPL PROBE PASS\n    PPL 4.83 (mean NLL 1.576 over 261 tokens) PASS\n    ok      'The history of the printing press begins' -> ' with the invention of movable type in China during the Song Dynasty (960-1279 AD). Bi Sheng, a Chinese artisan, is credited with creating the first movable type printing system around 1040 AD. This innovation allowed for the mass production of texts, significantly impacting the spread of'\n    ok      'Here is a short recipe for vegetable soup:' -> '\\n\\n**Ingredients**\\n- 1 onion, chopped \\n- 2 carrots, sliced \\n- 2 celery stalks, chopped \\n- 1 potato, diced \\n- 1 can (14 oz) diced tomatoes \\n- 4 cups vegetable broth \\n- 1 tsp dried thyme \\n- Salt'\n    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'\n    RESULT PASS\n[19:17:03] PREFIX PASS\n    cold TTFT 0.86 s, warm TTFT 0.40 s, speedup 2.2x -> PASS\n    prefix cache: queries +3854, hits +1024, warm hit rate 53.1% (hit granularity 2048 tokens)\n    cold text: '\\n\\n<think>\\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '\n    warm text: '\\n\\n<think>\\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '\n[19:17:17] warmup rc=0 in 14s (sizes default); slowest:\n    decode batch 3:   1.76 s\n    decode batch 4:   1.39 s\n    decode batch 6:   0.82 s\n[19:17:49] CONCURRENCY PASS\n    WARN churn    (8, 0)   prompt 0: near-tie token 4/16: margin solo 0.016 got 0.266, continuation mean lp -0.62 vs solo -0.89\n    WARN churn    (10, 6)  prompt 6: near-tie token 15/24: margin solo 0.094 got 0.047, continuation mean lp -0.11 vs solo -0.12\n    WARN churn    (13, 7)  prompt 7: near-tie token 3/40: margin solo 0.109 got 0.000, continuation mean lp -0.47 vs solo -0.26\n    WARN churn    (14, 2)  prompt 2: near-tie token 43/48: margin solo 0.234 got 0.078, continuation mean lp -0.19 vs solo -0.15\n    WARN long     0        prompt 0: near-tie token 47/64: margin solo 0.047 got 0.078, continuation mean lp -0.23 vs solo -0.25\n    WARN long     2        prompt 2: near-tie token 46/64: margin solo 0.047 got 0.031, continuation mean lp -0.14 vs solo -0.14\n    WARN long     3        prompt 3: near-tie token 42/64: margin solo 0.234 got 0.078, continuation mean lp -0.27 vs solo -0.22\n    RESULT PASS: 0 failing, 20 near-tie, 0 soft, 0 solo-noise, 28 identical of 48 checks (27.1s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 1.86 nats, a flip fails if both runs are sure)\n[19:17:49] load hook: /home/chenco_adm/w4a8_runs/leapquant/tree10/.tmp/leapquant_matrix.sh\n[20:05:37] LOAD HOOK rc=0 PASS\n    [19:49:23] START warmup-long-c4 n=1\n    [19:49:52] FINISH warmup-long-c4\n    [19:49:57] START bench-32768x2048-c4 n=16\n    [19:56:11] FINISH bench-32768x2048-c4\n    [19:56:11] WINDOW-END long-c4\n    [19:58:12] WINDOW long-c8\n    [19:58:17] START warmup-long-c8 n=1\n    [19:58:46] FINISH warmup-long-c8\n    [19:58:51] START bench-32768x2048-c8 n=16\n    [20:05:37] FINISH bench-32768x2048-c8\n    [20:05:37] WINDOW-END long-c8\n    MATRIX HOOK PASS\n[20:05:43] PROBE-AFTER-LOAD PASS\n[20:05:43] evicted_ms since READY: Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok\n[20:05:43] markers:\n          4 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_config=CompressedTensorsConfig, quantizat\n          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t\n          1 WNA16 MoE backend.\n          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)\n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, \n          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x\n          1 qwen_gdn_full_forward (opaque to inductor; projecti\n          1 Model loading took 20.56 GiB memory and 87.249807 seconds\n          1 Model loading took 20.56 GiB memory and 87.104928 seconds\n          1 Model loading took 20.56 GiB memory and 86.314715 seconds\n          1 Model loading took 20.56 GiB memory and 85.971809 seconds\n          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo\n[20:05:43] fault markers in serve.log: 0\n[20:05:43] new amdgpu dmesg faults: 0\nn/a\n[20:05:43] done\n",
+   "preemptions_total": 10.0,
+   "preemptions_during_matrix": 10.0,
+   "loop_flags": 17
+  },
+  "C1": {
+   "run": "/home/chenco_adm/w4a8_runs/leapquant/matrix-C1-20261114-200608",
+   "peak_junction_c": 83.0,
+   "ppl": 4.81,
+   "verification_summary": "[20:06:18] boot TREE=/home/chenco_adm/w4a8_runs/leapquant/tree10 RECIPE=flashnext-leapquant-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=2,3,4,5 PORT=18787 overrides=VLLM_RDNA_GDN_LEAPQUANT=1 BLOCK_SIZE=512 VLLM_SERVER_DEV_MODE=1 VLLM_RDNA_DECODE_STALL_MS=450 VLLM_RDNA_DECODE_SHARE=0 VLLM_DECODE_STALL_MAX_OVERHEAD=1.0 EXTRA_ARGS=--monokernel bench_extra=\n[20:06:18] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock\n[20:10:58] READY in 280s served=flash-next\n[20:11:05] PROBE PASS\nPASS  prompt='The capital of France is'\n      reply=' Paris. Paris is the capital of France.\\n\\n### 1.2.2.2 \u57fa\u4e8e\u89c4\u5219\u7684\u8bed\u6cd5\\n\\n\u57fa\u4e8e\u89c4\u5219\u7684\u8bed\u6cd5 (Rule-based Grammar) \u662f\u6307\u7528\u4eba\u5de5\u5236\u5b9a\u7684\u89c4\u5219, \u7cbe\u786e\u5730\u3001\u5f62\u5f0f\u5316\u5730\u63cf\u8ff0\u8bed\u8a00'\nPASS  prompt='1+1='\n      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '\nPASS  prompt='The capital of Germany is'\n      reply=\" Berlin, which is also the country's largest city and one of its 16 federal states. With a population of approximately 3.5 million, Berlin is the second most populous city in the European Union. It serves as a major\"\nRESULT PASS (3/3)\n[20:11:12] PPL PROBE PASS\n    PPL 4.81 (mean NLL 1.570 over 261 tokens) PASS\n    ok      'The history of the printing press begins' -> ' with the invention of movable type in China during the Song Dynasty (960-1279 AD). Bi Sheng, a Chinese artisan, is credited with creating the first movable type printing system around 1040 AD. This innovation allowed for the mass production of texts, significantly impacting the spread of'\n    ok      'Here is a short recipe for vegetable soup:' -> '\\n\\n1. Heat 2 tablespoons of olive oil in a large pot over medium heat.\\n2. Add 1 chopped onion and 3 minced garlic cloves, and saut\u00e9 until softened.\\n3. Add 2 chopped carrots, 2 chopped celery stalks, and 1 chopped bell pepper, and cook'\n    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'\n    RESULT PASS\n[20:11:19] PREFIX PASS\n    cold TTFT 0.90 s, warm TTFT 0.28 s, speedup 3.2x -> PASS\n    prefix cache: queries +3854, hits +1536, warm hit rate 79.7% (hit granularity 2048 tokens)\n    cold text: '\\n\\n<think>\\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '\n    warm text: '\\n\\n<think>\\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '\n[20:11:34] warmup rc=0 in 15s (sizes default); slowest:\n    decode batch 2:   1.88 s\n    decode batch 4:   1.37 s\n    decode batch 6:   1.06 s\n[20:12:05] CONCURRENCY PASS\n    WARN churn    (2, 6)   prompt 6: near-tie token 15/24: margin solo 0.016 got 0.000, continuation mean lp -0.11 vs solo -0.12\n    WARN churn    (8, 0)   prompt 0: near-tie token 12/16: margin solo 0.023 got 0.000, continuation mean lp -0.99 vs solo -0.95\n    WARN churn    (10, 6)  prompt 6: near-tie token 15/24: margin solo 0.016 got 0.047, continuation mean lp -0.11 vs solo -0.12\n    WARN churn    (11, 1)  prompt 1: near-tie token 18/64: margin solo 0.000 got 0.094, continuation mean lp -0.24 vs solo -0.30\n    WARN long     0        prompt 0: near-tie token 11/64: margin solo 0.156 got 0.219, continuation mean lp -0.23 vs solo -0.22\n    WARN long     1        prompt 1: near-tie token 48/64: margin solo 0.234 got 0.125, continuation mean lp -0.18 vs solo -0.21\n    WARN long     3        prompt 3: near-tie token 42/64: margin solo 0.078 got 0.078, continuation mean lp -0.28 vs solo -0.22\n    RESULT PASS: 0 failing, 16 near-tie, 1 soft, 0 solo-noise, 31 identical of 48 checks (27.0s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 1.99 nats, a flip fails if both runs are sure)\n[20:12:05] load hook: /home/chenco_adm/w4a8_runs/leapquant/tree10/.tmp/leapquant_matrix.sh\n[20:58:40] LOAD HOOK rc=0 PASS\n    [20:44:17] FINISH warmup-long-c4\n    [20:44:22] START bench-32768x2048-c4 n=16\n    [20:50:27] FINISH bench-32768x2048-c4\n    [20:50:27] WINDOW-END long-c4\n    [20:52:28] WINDOW long-c8\n    [20:52:33] START warmup-long-c8 n=1\n    [20:53:02] FINISH warmup-long-c8\n    [20:53:07] START bench-32768x2048-c8 n=16\n    [20:58:40] FINISH bench-32768x2048-c8\n    [20:58:40] WINDOW-END long-c8\n    PREEMPTION GATE PASS: zero preemptions across this boot\n    MATRIX HOOK PASS\n[20:58:47] PROBE-AFTER-LOAD PASS\n[20:58:47] evicted_ms since READY: Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok\n[20:58:47] markers:\n          4 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_config=CompressedTensorsConfig, quantizat\n          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t\n          1 WNA16 MoE backend.\n          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)\n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, \n          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x\n          1 qwen_gdn_full_forward (opaque to inductor; projecti\n          1 Model loading took 20.28 GiB memory and 87.214551 seconds\n          1 Model loading took 20.28 GiB memory and 86.710545 seconds\n          1 Model loading took 20.28 GiB memory and 86.398442 seconds\n          1 Model loading took 20.28 GiB memory and 86.337664 seconds\n          1 GPU KV cache size: 273,456 tokens, Maximum concurrency fo\n[20:58:47] fault markers in serve.log: 0\n[20:58:47] new amdgpu dmesg faults: 0\nn/a\n[20:58:47] done\n",
+   "preemptions_total": 0.0,
+   "preemptions_during_matrix": 0.0,
+   "loop_flags": 16
+  },
+  "C2": {
+   "run": "/home/chenco_adm/w4a8_runs/leapquant/matrix-C2-20261114-205912",
+   "peak_junction_c": 83.0,
+   "ppl": 4.85,
+   "verification_summary": "[20:59:22] boot TREE=/home/chenco_adm/w4a8_runs/leapquant/tree10 RECIPE=flashnext-leapquant-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=2,3,4,5 PORT=18787 overrides=VLLM_RDNA_GDN_LEAPQUANT=1 BLOCK_SIZE=512 VLLM_SERVER_DEV_MODE=1 VLLM_RDNA_DECODE_STALL_MS=450 VLLM_RDNA_DECODE_SHARE=0 VLLM_DECODE_STALL_MAX_OVERHEAD=1.0 EXTRA_ARGS=--monokernel bench_extra=\n[20:59:22] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock\n[21:04:03] READY in 281s served=flash-next\n[21:04:09] PROBE PASS\nPASS  prompt='The capital of France is'\n      reply=' Paris. Paris is the capital of France.\\n\\n### 1.2.2.2 \u57fa\u4e8e\u89c4\u5219\u7684\u8bed\u6cd5\\n\\n\u57fa\u4e8e\u89c4\u5219\u7684\u8bed\u6cd5 (Rule-based Grammar) \u662f\u6307\u7528\u4eba\u5de5\u5236\u5b9a\u7684\u89c4\u5219, \u7cbe\u786e\u5730\u3001\u5f62\u5f0f\u5316\u5730\u63cf\u8ff0\u8bed\u8a00'\nPASS  prompt='1+1='\n      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '\nPASS  prompt='The capital of Germany is'\n      reply=\" Berlin, which is also the country's largest city and one of its 16 federal states. With a population of approximately 3.5 million, Berlin is the second most populous city in the European Union. It serves as a major\"\nRESULT PASS (3/3)\n[21:04:16] PPL PROBE PASS\n    PPL 4.85 (mean NLL 1.578 over 261 tokens) PASS\n    ok      'The history of the printing press begins' -> ' with the invention of movable type in China during the Song Dynasty (960-1279 AD). Bi Sheng, a Chinese artisan, is credited with creating the first movable type printing system around 1040 AD. This innovation allowed for the mass production of texts, significantly impacting the spread of'\n    ok      'Here is a short recipe for vegetable soup:' -> '\\n\\n**Ingredients**\\n- 1 onion, chopped \\n- 2 carrots, sliced \\n- 2 celery stalks, chopped \\n- 1 potato, diced \\n- 1 can (14 oz) diced tomatoes \\n- 4 cups vegetable broth \\n- 1 tsp dried thyme \\n- Salt'\n    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'\n    RESULT PASS\n[21:04:22] PREFIX PASS\n    cold TTFT 0.92 s, warm TTFT 0.28 s, speedup 3.3x -> PASS\n    prefix cache: queries +3854, hits +1536, warm hit rate 79.7% (hit granularity 2048 tokens)\n    cold text: '\\n\\n<think>\\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '\n    warm text: '\\n\\n<think>\\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '\n[21:04:39] warmup rc=0 in 17s (sizes default); slowest:\n    decode batch 3:   2.44 s\n    decode batch 5:   2.17 s\n    decode batch 8:   1.33 s\n[21:05:10] CONCURRENCY PASS\n    WARN churn    (0, 0)   prompt 0: near-tie token 4/16: margin solo 0.000 got 0.016, continuation mean lp -0.73 vs solo -0.56\n    WARN churn    (1, 3)   prompt 3: near-tie token 42/64: margin solo 0.016 got 0.000, continuation mean lp -0.43 vs solo -0.38\n    WARN churn    (3, 1)   prompt 1: near-tie token 19/64: margin solo 0.016 got 0.234, continuation mean lp -0.17 vs solo -0.26\n    WARN churn    (10, 6)  prompt 6: near-tie token 15/24: margin solo 0.016 got 0.078, continuation mean lp -0.11 vs solo -0.12\n    WARN churn    (11, 1)  prompt 1: near-tie token 19/64: margin solo 0.016 got 0.000, continuation mean lp -0.22 vs solo -0.26\n    WARN long     2        prompt 2: near-tie token 42/64: margin solo 0.047 got 0.016, continuation mean lp -0.17 vs solo -0.24\n    WARN long     3        prompt 3: near-tie token 60/64: margin solo 0.062 got 0.094, continuation mean lp -0.16 vs solo -0.28\n    RESULT PASS: 0 failing, 13 near-tie, 0 soft, 0 solo-noise, 35 identical of 48 checks (27.1s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 2.81 nats, a flip fails if both runs are sure)\n[21:05:10] load hook: /home/chenco_adm/w4a8_runs/leapquant/tree10/.tmp/leapquant_matrix.sh\n[21:38:46] LOAD HOOK rc=0 PASS\n    [21:21:29] FINISH warmup-long-c1\n    [21:21:33] START bench-32768x2048-c1 n=16\n    [21:30:32] FINISH bench-32768x2048-c1\n    [21:30:32] WINDOW-END long-c1\n    [21:32:32] WINDOW long-c8\n    [21:32:37] START warmup-long-c8 n=1\n    [21:33:09] FINISH warmup-long-c8\n    [21:33:14] START bench-32768x2048-c8 n=16\n    [21:38:46] FINISH bench-32768x2048-c8\n    [21:38:46] WINDOW-END long-c8\n    PREEMPTION GATE PASS: zero preemptions across this boot\n    MATRIX HOOK PASS\n[21:38:53] PROBE-AFTER-LOAD PASS\n[21:38:53] evicted_ms since READY: Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok\n[21:38:53] markers:\n          4 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_config=CompressedTensorsConfig, quantizat\n          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t\n          1 WNA16 MoE backend.\n          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)\n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, \n          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x\n          1 qwen_gdn_full_forward (opaque to inductor; projecti\n          1 Model loading took 20.28 GiB memory and 87.446430 seconds\n          1 Model loading took 20.28 GiB memory and 86.736564 seconds\n          1 Model loading took 20.28 GiB memory and 86.611303 seconds\n          1 Model loading took 20.28 GiB memory and 86.285518 seconds\n          1 GPU KV cache size: 273,456 tokens, Maximum concurrency fo\n[21:38:53] fault markers in serve.log: 0\n[21:38:53] new amdgpu dmesg faults: 0\nn/a\n[21:38:53] done\n",
+   "preemptions_total": 0.0,
+   "preemptions_during_matrix": 0.0,
+   "loop_flags": 9
+  },
+  "A2": {
+   "run": "/home/chenco_adm/w4a8_runs/leapquant/matrix-A2-20261114-213918",
+   "peak_junction_c": 84.0,
+   "ppl": 4.81,
+   "verification_summary": "[21:39:28] boot TREE=/home/chenco_adm/w4a8_runs/leapquant/tree10 RECIPE=flashnext-mtp2 MODEL=/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c GPUS=2,3,4,5 PORT=18787 overrides=VLLM_RDNA_GDN_LEAPQUANT=0 BLOCK_SIZE=1024 VLLM_SERVER_DEV_MODE=1 VLLM_RDNA_DECODE_STALL_MS=0 VLLM_RDNA_DECODE_SHARE=0 VLLM_DECODE_STALL_MAX_OVERHEAD=1.0 EXTRA_ARGS=--monokernel bench_extra=\n[21:39:28] waiting for boot lock /home/chenco_adm/w4a8_runs/boot.lock\n[21:44:38] READY in 310s served=flash-next\n[21:44:45] PROBE PASS\nPASS  prompt='The capital of France is'\n      reply=' Paris. Paris is a city of great historical and cultural significance, known for its iconic landmarks such as the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral. It is also a major center for fashion, gastronomy,'\nPASS  prompt='1+1='\n      reply='2, 2+2=4, 3+3=6, 4+4=8, 5+5=10, 6+6=12, 7+7=14, '\nPASS  prompt='The capital of Germany is'\n      reply=\" Berlin, which is also the country's largest city and one of its 16 federal states. With a population of approximately 3.5 million, Berlin is the second most populous city in the European Union. It serves as the headquarters\"\nRESULT PASS (3/3)\n[21:44:52] PPL PROBE PASS\n    PPL 4.81 (mean NLL 1.571 over 261 tokens) PASS\n    ok      'The history of the printing press begins' -> ' with the invention of movable type in China during the Song Dynasty (960-1279 AD). Bi Sheng, a Chinese artisan, is credited with creating the first movable type printing system around 1040 AD. This innovation allowed for the mass production of texts, significantly impacting the spread of'\n    ok      'Here is a short recipe for vegetable soup:' -> '\\n\\n<think>\\nThe user seems to be starting a message about a vegetable soup recipe but hasn\\'t actually asked a question or made a complete request. They\\'ve written \"Here is a short recipe for vegetable soup:\" which suggests they might be about to share a recipe, or they might want me to provide one. Since the'\n    ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. This definition establishes the foundational criterion for identifying primes. To determine whether a given number is prime, one must verify that it is not divisible by any integer between 2 and the square root of the number, inclusive. This'\n    RESULT PASS\n[21:44:59] PREFIX PASS\n    cold TTFT 0.84 s, warm TTFT 0.40 s, speedup 2.1x -> PASS\n    prefix cache: queries +3854, hits +1024, warm hit rate 53.1% (hit granularity 2048 tokens)\n    cold text: '\\n\\n<think>\\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '\n    warm text: '\\n\\n<think>\\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '\n[21:45:12] warmup rc=0 in 13s (sizes default); slowest:\n    decode batch 3:   1.71 s\n    decode batch 7:   0.91 s\n    decode batch 6:   0.87 s\n[21:45:46] CONCURRENCY PASS\n    WARN together 7        prompt 7: near-tie token 45/64: margin solo 0.047 got 0.141, continuation mean lp -0.56 vs solo -0.61\n    WARN churn    (3, 1)   prompt 1: near-tie token 19/64: margin solo 0.312 got 0.125, continuation mean lp -0.28 vs solo -0.20\n    WARN churn    (8, 0)   prompt 0: near-tie token 6/16: margin solo 0.422 got 0.172, continuation mean lp -0.85 vs solo -0.48\n    WARN churn    (9, 3)   prompt 3: near-tie token 42/64: margin solo 0.047 got 0.031, continuation mean lp -0.38 vs solo -0.42\n    WARN churn    (11, 1)  prompt 1: near-tie token 18/64: margin solo 0.141 got 0.016, continuation mean lp -0.15 vs solo -0.22\n    WARN churn    (13, 7)  prompt 7: near-tie token 3/40: margin solo 0.078 got 0.094, continuation mean lp -0.27 vs solo -0.47\n    WARN churn    (14, 2)  prompt 2: near-tie token 43/48: margin solo 0.234 got 0.141, continuation mean lp -0.18 vs solo -0.15\n    RESULT PASS: 0 failing, 12 near-tie, 1 soft, 0 solo-noise, 35 identical of 48 checks (28.3s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 2.05 nats, a flip fails if both runs are sure)\n[21:45:46] load hook: /home/chenco_adm/w4a8_runs/leapquant/tree10/.tmp/leapquant_matrix.sh\n[22:20:55] LOAD HOOK rc=0 PASS\n    [22:01:33] START warmup-long-c1 n=1\n    [22:02:02] FINISH warmup-long-c1\n    [22:02:07] START bench-32768x2048-c1 n=16\n    [22:11:43] FINISH bench-32768x2048-c1\n    [22:11:43] WINDOW-END long-c1\n    [22:13:43] WINDOW long-c8\n    [22:13:49] START warmup-long-c8 n=1\n    [22:14:21] FINISH warmup-long-c8\n    [22:14:26] START bench-32768x2048-c8 n=16\n    [22:20:55] FINISH bench-32768x2048-c8\n    [22:20:55] WINDOW-END long-c8\n    MATRIX HOOK PASS\n[22:21:03] PROBE-AFTER-LOAD PASS\n[22:21:03] evicted_ms since READY: Worker_TP0_EP0=+0 Worker_TP1_EP1=+0 Worker_TP2_EP2=+0 Worker_TP3_EP3=+0 -> ok\n[22:21:03] markers:\n          4 Initialized AMD PLE embedding language_model.model.layers.1.ple.ple_embedding.ngram_embedding: quantization_config=CompressedTensorsConfig, quantizat\n          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t\n          1 WNA16 MoE backend.\n          1 Using CompressedTensorsWNA16RDNA2MoEMethod (native RDNA2 W4A16 HIP kernel)\n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 3/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 2/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 1/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 1, rank 0/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 3/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 2/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 1/4, devices [0, 1, \n          1 rdna_ar: one-shot all-reduce active (handle 0, rank 0/4, devices [0, 1, \n          1 qwen_gdn_full_forward', 'vllm::gdn_attention_core_x\n          1 qwen_gdn_full_forward (opaque to inductor; projecti\n          1 Model loading took 20.56 GiB memory and 99.450233 seconds\n          1 Model loading took 20.56 GiB memory and 97.768483 seconds\n          1 Model loading took 20.56 GiB memory and 100.447475 seconds\n          1 Model loading took 20.56 GiB memory and 100.300021 seconds\n          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo\n[22:21:03] fault markers in serve.log: 0\n[22:21:03] new amdgpu dmesg faults: 0\nn/a\n[22:21:03] done\n",
+   "preemptions_total": 6.0,
+   "preemptions_during_matrix": 6.0,
+   "loop_flags": 17
+  }
+ },
+ "per_boot": [
+  {
+   "prefill_req": 2525.048838977985,
+   "prefill_wave": 2468.4011181725987,
+   "decode_req": 88.84349863134513,
+   "decode_agg": 83.14918923690597,
+   "ttft_mean_s": 0.4055367104956531,
+   "ttft_p99_s": 0.41484343547781466,
+   "itl_mean_ms": 23.669494007232743,
+   "itl_p50_ms": 23.679747013375163,
+   "itl_p99_ms": 24.20590891793836,
+   "arm": "A1",
+   "input": 1024,
+   "output": 512,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 98.52170628699241,
+   "mtp_draft_steps": 3888,
+   "mtp_draft_tokens": 7776,
+   "mtp_accepted_tokens": 4297,
+   "mtp_length": 2.1051954732510287,
+   "mtp_acceptance_pct": 55.25977366255144,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 793.7253912649066,
+   "prefill_wave": 2605.5930803717206,
+   "decode_req": 37.370576476831836,
+   "decode_agg": 247.06858633254492,
+   "ttft_mean_s": 1.290118737877492,
+   "ttft_p99_s": 3.144005893211579,
+   "itl_mean_ms": 54.27480694268701,
+   "itl_p50_ms": 48.895090993028134,
+   "itl_p99_ms": 382.3086620075628,
+   "arm": "A1",
+   "input": 1024,
+   "output": 512,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 33.156785011000466,
+   "mtp_draft_steps": 4031,
+   "mtp_draft_tokens": 8062,
+   "mtp_accepted_tokens": 4152,
+   "mtp_length": 2.0300173654180105,
+   "mtp_acceptance_pct": 51.50086827090052,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2752.848397320513,
+   "prefill_wave": 2728.8219595406886,
+   "decode_req": 92.96199859486306,
+   "decode_agg": 60.38969269005626,
+   "ttft_mean_s": 5.951653573058138,
+   "ttft_p99_s": 6.004056051629595,
+   "itl_mean_ms": 24.119444662475424,
+   "itl_p50_ms": 24.15984048275277,
+   "itl_p99_ms": 24.742599005112424,
+   "arm": "A1",
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 271.3045764960116,
+   "mtp_draft_steps": 7300,
+   "mtp_draft_tokens": 14600,
+   "mtp_accepted_tokens": 9078,
+   "mtp_length": 2.2435616438356165,
+   "mtp_acceptance_pct": 62.178082191780824,
+   "preemptions": 0.0,
+   "loop_flags": 2,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 833.9529719942408,
+   "prefill_wave": 2559.1306471777284,
+   "decode_req": 19.836762398679188,
+   "decode_agg": 112.805328388688,
+   "ttft_mean_s": 19.646191752060986,
+   "ttft_p99_s": 51.21739296293817,
+   "itl_mean_ms": 114.61795388971515,
+   "itl_p50_ms": 50.066558993421495,
+   "itl_p99_ms": 428.99913678877056,
+   "arm": "A1",
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 145.2413661130122,
+   "mtp_draft_steps": 7199,
+   "mtp_draft_tokens": 14398,
+   "mtp_accepted_tokens": 9179,
+   "mtp_length": 2.2750381997499654,
+   "mtp_acceptance_pct": 63.751909987498266,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2691.0639121960776,
+   "prefill_wave": 2674.382772085342,
+   "decode_req": 101.39590656368249,
+   "decode_agg": 63.277902333519314,
+   "ttft_mean_s": 12.17659671756337,
+   "ttft_p99_s": 12.252546771548804,
+   "itl_mean_ms": 24.29750769595298,
+   "itl_p50_ms": 24.349083483684808,
+   "itl_p99_ms": 24.883083747699857,
+   "arm": "A1",
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 517.8427032440086,
+   "mtp_draft_steps": 13298,
+   "mtp_draft_tokens": 26596,
+   "mtp_accepted_tokens": 19473,
+   "mtp_length": 2.4643555421867953,
+   "mtp_acceptance_pct": 73.21777710933975,
+   "preemptions": 0.0,
+   "loop_flags": 7,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 419.13004526109245,
+   "prefill_wave": 1798.336720378081,
+   "decode_req": 21.362142188982485,
+   "decode_agg": 85.225576738126,
+   "ttft_mean_s": 78.18098552106312,
+   "ttft_p99_s": 145.77025371805067,
+   "itl_mean_ms": 114.99134261929066,
+   "itl_p50_ms": 44.53233495587483,
+   "itl_p99_ms": 435.1808676752262,
+   "arm": "A1",
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 384.48551777697867,
+   "mtp_draft_steps": 13333,
+   "mtp_draft_tokens": 26666,
+   "mtp_accepted_tokens": 19435,
+   "mtp_length": 2.4576614415360387,
+   "mtp_acceptance_pct": 72.88307207680192,
+   "preemptions": 10.0,
+   "loop_flags": 8,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2052.54254865649,
+   "prefill_wave": 2014.6351781914327,
+   "decode_req": 86.73026715164232,
+   "decode_agg": 80.11154690172266,
+   "ttft_mean_s": 0.498893433741614,
+   "ttft_p99_s": 0.5082806113408879,
+   "itl_mean_ms": 23.602724552083888,
+   "itl_p50_ms": 23.613299999851733,
+   "itl_p99_ms": 24.15753842215054,
+   "arm": "C1",
+   "input": 1024,
+   "output": 512,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 102.25741877197288,
+   "mtp_draft_steps": 3994,
+   "mtp_draft_tokens": 7988,
+   "mtp_accepted_tokens": 4194,
+   "mtp_length": 2.0500751126690036,
+   "mtp_acceptance_pct": 52.503755633450176,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 638.2272536203769,
+   "prefill_wave": 2398.241608896383,
+   "decode_req": 39.57000757689656,
+   "decode_agg": 268.34962310154725,
+   "ttft_mean_s": 1.6044441759440815,
+   "ttft_p99_s": 3.4158359898399793,
+   "itl_mean_ms": 54.37398370943571,
+   "itl_p50_ms": 47.289601498050615,
+   "itl_p99_ms": 269.2044037306914,
+   "arm": "C1",
+   "input": 1024,
+   "output": 512,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 30.527339316962752,
+   "mtp_draft_steps": 3800,
+   "mtp_draft_tokens": 7600,
+   "mtp_accepted_tokens": 4388,
+   "mtp_length": 2.154736842105263,
+   "mtp_acceptance_pct": 57.73684210526316,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2708.954004224191,
+   "prefill_wave": 2685.415521527989,
+   "decode_req": 94.84546091334148,
+   "decode_agg": 60.827595925685216,
+   "ttft_mean_s": 6.048090877309733,
+   "ttft_p99_s": 6.101104230855708,
+   "itl_mean_ms": 24.052330321690736,
+   "itl_p50_ms": 24.08807398751378,
+   "itl_p99_ms": 24.778059870004654,
+   "arm": "C1",
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 269.35143088700715,
+   "mtp_draft_steps": 7175,
+   "mtp_draft_tokens": 14350,
+   "mtp_accepted_tokens": 9206,
+   "mtp_length": 2.283066202090592,
+   "mtp_acceptance_pct": 64.15331010452962,
+   "preemptions": 0.0,
+   "loop_flags": 2,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 761.2513298992782,
+   "prefill_wave": 2555.0479362680794,
+   "decode_req": 20.56323354651861,
+   "decode_agg": 112.61382731232015,
+   "ttft_mean_s": 21.522458295301476,
+   "ttft_p99_s": 51.29923323139082,
+   "itl_mean_ms": 108.96423848516076,
+   "itl_p50_ms": 48.18242503097281,
+   "itl_p99_ms": 425.14101235894486,
+   "arm": "C1",
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 145.4883506850456,
+   "mtp_draft_steps": 7305,
+   "mtp_draft_tokens": 14610,
+   "mtp_accepted_tokens": 9078,
+   "mtp_length": 2.242710472279261,
+   "mtp_acceptance_pct": 62.13552361396304,
+   "preemptions": 0.0,
+   "loop_flags": 5,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2665.248631576536,
+   "prefill_wave": 2649.382698210701,
+   "decode_req": 99.2661851033207,
+   "decode_agg": 62.218543797846095,
+   "ttft_mean_s": 12.294537782247062,
+   "ttft_p99_s": 12.368164109371719,
+   "itl_mean_ms": 24.208757602392392,
+   "itl_p50_ms": 24.254782998468727,
+   "itl_p99_ms": 24.91601206129417,
+   "arm": "C1",
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 526.6597062519868,
+   "mtp_draft_steps": 13630,
+   "mtp_draft_tokens": 27260,
+   "mtp_accepted_tokens": 19141,
+   "mtp_length": 2.4043286867204694,
+   "mtp_acceptance_pct": 70.21643433602348,
+   "preemptions": 0.0,
+   "loop_flags": 5,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 488.8696516750353,
+   "prefill_wave": 1916.5407304251632,
+   "decode_req": 26.433577065674747,
+   "decode_agg": 105.01195774439871,
+   "ttft_mean_s": 67.02809202356002,
+   "ttft_p99_s": 136.7797698418057,
+   "itl_mean_ms": 91.99808356608267,
+   "itl_p50_ms": 45.981895993463695,
+   "itl_p99_ms": 435.0170520163374,
+   "arm": "C1",
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 312.0406542629935,
+   "mtp_draft_steps": 13468,
+   "mtp_draft_tokens": 26936,
+   "mtp_accepted_tokens": 19300,
+   "mtp_length": 2.4330264330264333,
+   "mtp_acceptance_pct": 71.65132165132165,
+   "preemptions": 0.0,
+   "loop_flags": 4,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2057.851889759154,
+   "prefill_wave": 2010.0416471730518,
+   "decode_req": 81.99530750060238,
+   "decode_agg": 76.07664379661885,
+   "ttft_mean_s": 0.4976062685054785,
+   "ttft_p99_s": 0.5094421806832543,
+   "itl_mean_ms": 23.578392814138592,
+   "itl_p50_ms": 23.580366047099233,
+   "itl_p99_ms": 24.273577257990837,
+   "arm": "C2",
+   "input": 1024,
+   "output": 512,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 107.68088063795585,
+   "mtp_draft_steps": 4229,
+   "mtp_draft_tokens": 8458,
+   "mtp_accepted_tokens": 3961,
+   "mtp_length": 1.9366280444549537,
+   "mtp_acceptance_pct": 46.83140222274769,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 653.7526218019327,
+   "prefill_wave": 2403.695770385333,
+   "decode_req": 39.98254935987282,
+   "decode_agg": 268.99059107191385,
+   "ttft_mean_s": 1.5663417106879933,
+   "ttft_p99_s": 3.4080852081737247,
+   "itl_mean_ms": 53.96917701004956,
+   "itl_p50_ms": 46.8556999694556,
+   "itl_p99_ms": 270.5139903095551,
+   "arm": "C2",
+   "input": 1024,
+   "output": 512,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 30.45459682197543,
+   "mtp_draft_steps": 3789,
+   "mtp_draft_tokens": 7578,
+   "mtp_accepted_tokens": 4405,
+   "mtp_length": 2.162575877540248,
+   "mtp_acceptance_pct": 58.128793877012406,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2706.6521409501697,
+   "prefill_wave": 2683.448493082475,
+   "decode_req": 93.22959300888458,
+   "decode_agg": 60.14144807895614,
+   "ttft_mean_s": 6.053234455997881,
+   "ttft_p99_s": 6.105576478264993,
+   "itl_mean_ms": 24.06340068885408,
+   "itl_p50_ms": 24.093194981105626,
+   "itl_p99_ms": 24.872729636263102,
+   "arm": "C2",
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 272.4244347839849,
+   "mtp_draft_steps": 7296,
+   "mtp_draft_tokens": 14592,
+   "mtp_accepted_tokens": 9081,
+   "mtp_length": 2.244654605263158,
+   "mtp_acceptance_pct": 62.2327302631579,
+   "preemptions": 0.0,
+   "loop_flags": 1,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 811.379214845667,
+   "prefill_wave": 2554.0561491446197,
+   "decode_req": 19.514362165630196,
+   "decode_agg": 104.34602937987138,
+   "ttft_mean_s": 20.192777557305817,
+   "ttft_p99_s": 51.319153670093506,
+   "itl_mean_ms": 107.01286625733005,
+   "itl_p50_ms": 49.17558599845506,
+   "itl_p99_ms": 426.217160213273,
+   "arm": "C2",
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 157.01603690499905,
+   "mtp_draft_steps": 7838,
+   "mtp_draft_tokens": 15676,
+   "mtp_accepted_tokens": 8544,
+   "mtp_length": 2.090073998468997,
+   "mtp_acceptance_pct": 54.50369992344986,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2666.604719061448,
+   "prefill_wave": 2649.539329344391,
+   "decode_req": 101.97586924036462,
+   "decode_agg": 63.2839955896908,
+   "ttft_mean_s": 12.28828546119621,
+   "ttft_p99_s": 12.36743294846965,
+   "itl_mean_ms": 24.22309535447564,
+   "itl_p50_ms": 24.270657042507082,
+   "itl_p99_ms": 25.106733069987968,
+   "arm": "C2",
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 517.7928431140026,
+   "mtp_draft_steps": 13261,
+   "mtp_draft_tokens": 26522,
+   "mtp_accepted_tokens": 19508,
+   "mtp_length": 2.4710806123218463,
+   "mtp_acceptance_pct": 73.5540306160923,
+   "preemptions": 0.0,
+   "loop_flags": 5,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 526.7136469772591,
+   "prefill_wave": 1966.211357320634,
+   "decode_req": 24.833242109160004,
+   "decode_agg": 105.13992375406868,
+   "ttft_mean_s": 62.21217199905732,
+   "ttft_p99_s": 133.32442569003615,
+   "itl_mean_ms": 99.20846457500828,
+   "itl_p50_ms": 45.15845549758524,
+   "itl_p99_ms": 436.19265449233353,
+   "arm": "C2",
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 311.6608689639834,
+   "mtp_draft_steps": 13294,
+   "mtp_draft_tokens": 26588,
+   "mtp_accepted_tokens": 19466,
+   "mtp_length": 2.464269595306153,
+   "mtp_acceptance_pct": 73.21347976530765,
+   "preemptions": 0.0,
+   "loop_flags": 3,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2516.8305163825257,
+   "prefill_wave": 2449.5807351071594,
+   "decode_req": 89.91746790789145,
+   "decode_agg": 84.06923909198801,
+   "ttft_mean_s": 0.40686092819305486,
+   "ttft_p99_s": 0.4180307206552243,
+   "itl_mean_ms": 23.722365608094066,
+   "itl_p50_ms": 23.72715703677386,
+   "itl_p99_ms": 24.834202078636736,
+   "arm": "A2",
+   "input": 1024,
+   "output": 512,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 97.44348930096021,
+   "mtp_draft_steps": 3833,
+   "mtp_draft_tokens": 7666,
+   "mtp_accepted_tokens": 4352,
+   "mtp_length": 2.135403078528568,
+   "mtp_acceptance_pct": 56.770153926428385,
+   "preemptions": 0.0,
+   "loop_flags": 0,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 770.4489894632463,
+   "prefill_wave": 2610.6286180095726,
+   "decode_req": 40.73803252950473,
+   "decode_agg": 280.6682449014959,
+   "ttft_mean_s": 1.3290951302478788,
+   "ttft_p99_s": 3.1379415453760884,
+   "itl_mean_ms": 55.59473062323347,
+   "itl_p50_ms": 48.873643012484536,
+   "itl_p99_ms": 383.34526277903933,
+   "arm": "A2",
+   "input": 1024,
+   "output": 512,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 29.18748433003202,
+   "mtp_draft_steps": 3610,
+   "mtp_draft_tokens": 7220,
+   "mtp_accepted_tokens": 4583,
+   "mtp_length": 2.269529085872576,
+   "mtp_acceptance_pct": 63.47645429362881,
+   "preemptions": 0.0,
+   "loop_flags": 1,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2732.990929208231,
+   "prefill_wave": 2707.4519428323856,
+   "decode_req": 94.70089362057651,
+   "decode_agg": 60.960921057164185,
+   "ttft_mean_s": 5.994897321063036,
+   "ttft_p99_s": 6.051446284531266,
+   "itl_mean_ms": 24.15638268862771,
+   "itl_p50_ms": 24.189619987737387,
+   "itl_p99_ms": 25.35665950854309,
+   "arm": "A2",
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 268.7623434140114,
+   "mtp_draft_steps": 7155,
+   "mtp_draft_tokens": 14310,
+   "mtp_accepted_tokens": 9224,
+   "mtp_length": 2.2891684136967156,
+   "mtp_acceptance_pct": 64.45842068483577,
+   "preemptions": 0.0,
+   "loop_flags": 1,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 822.4443768998736,
+   "prefill_wave": 2557.343342673361,
+   "decode_req": 20.084808581519013,
+   "decode_agg": 113.22790222032604,
+   "ttft_mean_s": 19.92110404080813,
+   "ttft_p99_s": 51.25318834309582,
+   "itl_mean_ms": 116.18823589278942,
+   "itl_p50_ms": 50.47263501910493,
+   "itl_p99_ms": 429.41996115026996,
+   "arm": "A2",
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 144.69931597000686,
+   "mtp_draft_steps": 7014,
+   "mtp_draft_tokens": 14028,
+   "mtp_accepted_tokens": 9369,
+   "mtp_length": 2.3357570573139435,
+   "mtp_acceptance_pct": 66.78785286569718,
+   "preemptions": 0.0,
+   "loop_flags": 3,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 2679.2520577823598,
+   "prefill_wave": 2646.35777333278,
+   "decode_req": 91.21506667441447,
+   "decode_agg": 59.067706819909475,
+   "ttft_mean_s": 12.230278933562658,
+   "ttft_p99_s": 12.382301565646776,
+   "itl_mean_ms": 24.270886036162633,
+   "itl_p50_ms": 24.310711509315297,
+   "itl_p99_ms": 26.868364898255088,
+   "arm": "A2",
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 1,
+   "completed": 16,
+   "duration_s": 554.753210580966,
+   "mtp_draft_steps": 14798,
+   "mtp_draft_tokens": 29596,
+   "mtp_accepted_tokens": 17965,
+   "mtp_length": 2.2140154074874983,
+   "mtp_acceptance_pct": 60.70077037437492,
+   "preemptions": 0.0,
+   "loop_flags": 5,
+   "empty_outputs": 0
+  },
+  {
+   "prefill_req": 413.29551432443367,
+   "prefill_wave": 1837.6167025891157,
+   "decode_req": 23.953091777980557,
+   "decode_agg": 89.9269907038715,
+   "ttft_mean_s": 79.28467371237275,
+   "ttft_p99_s": 142.6543411532184,
+   "itl_mean_ms": 95.73863210138416,
+   "itl_p50_ms": 43.742329988162965,
+   "itl_p99_ms": 435.48169460264035,
+   "arm": "A2",
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 8,
+   "completed": 16,
+   "duration_s": 364.38448282901663,
+   "mtp_draft_steps": 14282,
+   "mtp_draft_tokens": 28564,
+   "mtp_accepted_tokens": 18483,
+   "mtp_length": 2.294146478084302,
+   "mtp_acceptance_pct": 64.7073239042151,
+   "preemptions": 6.0,
+   "loop_flags": 7,
+   "empty_outputs": 0
+  }
+ ],
+ "comparisons": [
+  {
+   "input": 1024,
+   "output": 512,
+   "concurrency": 1,
+   "baseline": {
+    "prefill_req": 2520.939677680255,
+    "prefill_wave": 2458.990926639879,
+    "decode_req": 89.38048326961828,
+    "decode_agg": 83.609214164447,
+    "ttft_mean_s": 0.406198819344354,
+    "ttft_p99_s": 0.4164370780665195,
+    "itl_mean_ms": 23.695929807663404,
+    "itl_p50_ms": 23.70345202507451,
+    "itl_p99_ms": 24.520055498287547,
+    "boot_ranges": {
+     "prefill_req": [
+      2516.8305163825257,
+      2525.048838977985
+     ],
+     "prefill_wave": [
+      2449.5807351071594,
+      2468.4011181725987
+     ],
+     "decode_req": [
+      88.84349863134513,
+      89.91746790789145
+     ],
+     "decode_agg": [
+      83.14918923690597,
+      84.06923909198801
+     ],
+     "ttft_mean_s": [
+      0.4055367104956531,
+      0.40686092819305486
+     ],
+     "ttft_p99_s": [
+      0.41484343547781466,
+      0.4180307206552243
+     ],
+     "itl_mean_ms": [
+      23.669494007232743,
+      23.722365608094066
+     ],
+     "itl_p50_ms": [
+      23.679747013375163,
+      23.72715703677386
+     ],
+     "itl_p99_ms": [
+      24.20590891793836,
+      24.834202078636736
+     ]
+    },
+    "mtp_length": 2.1201916850148947,
+    "mtp_acceptance_pct": 56.00958425074472,
+    "preemptions": 0.0,
+    "loop_flags": 0,
+    "completed": 32
+   },
+   "leapquant": {
+    "prefill_req": 2055.197219207822,
+    "prefill_wave": 2012.3384126822423,
+    "decode_req": 84.36278732612234,
+    "decode_agg": 78.09409534917076,
+    "ttft_mean_s": 0.49824985112354625,
+    "ttft_p99_s": 0.5088613960120711,
+    "itl_mean_ms": 23.59055868311124,
+    "itl_p50_ms": 23.596833023475483,
+    "itl_p99_ms": 24.215557840070687,
+    "boot_ranges": {
+     "prefill_req": [
+      2052.54254865649,
+      2057.851889759154
+     ],
+     "prefill_wave": [
+      2010.0416471730518,
+      2014.6351781914327
+     ],
+     "decode_req": [
+      81.99530750060238,
+      86.73026715164232
+     ],
+     "decode_agg": [
+      76.07664379661885,
+      80.11154690172266
+     ],
+     "ttft_mean_s": [
+      0.4976062685054785,
+      0.498893433741614
+     ],
+     "ttft_p99_s": [
+      0.5082806113408879,
+      0.5094421806832543
+     ],
+     "itl_mean_ms": [
+      23.578392814138592,
+      23.602724552083888
+     ],
+     "itl_p50_ms": [
+      23.580366047099233,
+      23.613299999851733
+     ],
+     "itl_p99_ms": [
+      24.15753842215054,
+      24.273577257990837
+     ]
+    },
+    "mtp_length": 1.9917305119785966,
+    "mtp_acceptance_pct": 49.58652559892983,
+    "preemptions": 0.0,
+    "loop_flags": 0,
+    "completed": 32
+   },
+   "delta_percent": {
+    "prefill_req": -18.474954501926245,
+    "prefill_wave": -18.164057016996438,
+    "decode_req": -5.613860833980889,
+    "decode_agg": -6.59630504890144,
+    "ttft_mean_s": 22.661570490965953,
+    "ttft_p99_s": 22.194065517573414,
+    "itl_mean_ms": -0.4446802695967089,
+    "itl_p50_ms": -0.44980368887300726,
+    "itl_p99_ms": -1.241831031900098,
+    "mtp_length": -6.058941460068768
+   }
+  },
+  {
+   "input": 1024,
+   "output": 512,
+   "concurrency": 8,
+   "baseline": {
+    "prefill_req": 782.0871903640765,
+    "prefill_wave": 2608.1108491906466,
+    "decode_req": 39.05430450316828,
+    "decode_agg": 263.8684156170204,
+    "ttft_mean_s": 1.3096069340626855,
+    "ttft_p99_s": 3.1409737192938336,
+    "itl_mean_ms": 54.934768782960234,
+    "itl_p50_ms": 48.884367002756335,
+    "itl_p99_ms": 382.8269623933011,
+    "boot_ranges": {
+     "prefill_req": [
+      770.4489894632463,
+      793.7253912649066
+     ],
+     "prefill_wave": [
+      2605.5930803717206,
+      2610.6286180095726
+     ],
+     "decode_req": [
+      37.370576476831836,
+      40.73803252950473
+     ],
+     "decode_agg": [
+      247.06858633254492,
+      280.6682449014959
+     ],
+     "ttft_mean_s": [
+      1.290118737877492,
+      1.3290951302478788
+     ],
+     "ttft_p99_s": [
+      3.1379415453760884,
+      3.144005893211579
+     ],
+     "itl_mean_ms": [
+      54.27480694268701,
+      55.59473062323347
+     ],
+     "itl_p50_ms": [
+      48.873643012484536,
+      48.895090993028134
+     ],
+     "itl_p99_ms": [
+      382.3086620075628,
+      383.34526277903933
+     ]
+    },
+    "mtp_length": 2.143174977097239,
+    "mtp_acceptance_pct": 57.158748854861926,
+    "preemptions": 0.0,
+    "loop_flags": 1,
+    "completed": 32
+   },
+   "leapquant": {
+    "prefill_req": 645.9899377111549,
+    "prefill_wave": 2400.968689640858,
+    "decode_req": 39.77627846838469,
+    "decode_agg": 268.6701070867306,
+    "ttft_mean_s": 1.5853929433160374,
+    "ttft_p99_s": 3.411960599006852,
+    "itl_mean_ms": 54.171580359742634,
+    "itl_p50_ms": 47.07265073375311,
+    "itl_p99_ms": 269.85919702012325,
+    "boot_ranges": {
+     "prefill_req": [
+      638.2272536203769,
+      653.7526218019327
+     ],
+     "prefill_wave": [
+      2398.241608896383,
+      2403.695770385333
+     ],
+     "decode_req": [
+      39.57000757689656,
+      39.98254935987282
+     ],
+     "decode_agg": [
+      268.34962310154725,
+      268.99059107191385
+     ],
+     "ttft_mean_s": [
+      1.5663417106879933,
+      1.6044441759440815
+     ],
+     "ttft_p99_s": [
+      3.4080852081737247,
+      3.4158359898399793
+     ],
+     "itl_mean_ms": [
+      53.96917701004956,
+      54.37398370943571
+     ],
+     "itl_p50_ms": [
+      46.8556999694556,
+      47.289601498050615
+     ],
+     "itl_p99_ms": [
+      269.2044037306914,
+      270.5139903095551
+     ]
+    },
+    "mtp_length": 2.158650678613783,
+    "mtp_acceptance_pct": 57.932533930689154,
+    "preemptions": 0.0,
+    "loop_flags": 0,
+    "completed": 32
+   },
+   "delta_percent": {
+    "prefill_req": -17.401800506356047,
+    "prefill_wave": -7.942229894640763,
+    "decode_req": 1.8486412046022638,
+    "decode_agg": 1.8197295263558066,
+    "ttft_mean_s": 21.058685784276033,
+    "ttft_p99_s": 8.62748000877711,
+    "itl_mean_ms": -1.3892630116144722,
+    "itl_p50_ms": -3.7061260686899633,
+    "itl_p99_ms": -29.508832049587784,
+    "mtp_length": 0.7220923014650493
+   }
+  },
+  {
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 1,
+   "baseline": {
+    "prefill_req": 2742.919663264372,
+    "prefill_wave": 2718.136951186537,
+    "decode_req": 93.83144610771978,
+    "decode_agg": 60.675306873610225,
+    "ttft_mean_s": 5.973275447060587,
+    "ttft_p99_s": 6.027751168080431,
+    "itl_mean_ms": 24.137913675551566,
+    "itl_p50_ms": 24.17473023524508,
+    "itl_p99_ms": 25.049629256827757,
+    "boot_ranges": {
+     "prefill_req": [
+      2732.990929208231,
+      2752.848397320513
+     ],
+     "prefill_wave": [
+      2707.4519428323856,
+      2728.8219595406886
+     ],
+     "decode_req": [
+      92.96199859486306,
+      94.70089362057651
+     ],
+     "decode_agg": [
+      60.38969269005626,
+      60.960921057164185
+     ],
+     "ttft_mean_s": [
+      5.951653573058138,
+      5.994897321063036
+     ],
+     "ttft_p99_s": [
+      6.004056051629595,
+      6.051446284531266
+     ],
+     "itl_mean_ms": [
+      24.119444662475424,
+      24.15638268862771
+     ],
+     "itl_p50_ms": [
+      24.15984048275277,
+      24.189619987737387
+     ],
+     "itl_p99_ms": [
+      24.742599005112424,
+      25.35665950854309
+     ]
+    },
+    "mtp_length": 2.2661362850224833,
+    "mtp_acceptance_pct": 63.30681425112418,
+    "preemptions": 0.0,
+    "loop_flags": 3,
+    "completed": 32
+   },
+   "leapquant": {
+    "prefill_req": 2707.8030725871804,
+    "prefill_wave": 2684.432007305232,
+    "decode_req": 94.03752696111303,
+    "decode_agg": 60.48452200232067,
+    "ttft_mean_s": 6.050662666653807,
+    "ttft_p99_s": 6.10334035456035,
+    "itl_mean_ms": 24.05786550527241,
+    "itl_p50_ms": 24.090634484309703,
+    "itl_p99_ms": 24.825394753133878,
+    "boot_ranges": {
+     "prefill_req": [
+      2706.6521409501697,
+      2708.954004224191
+     ],
+     "prefill_wave": [
+      2683.448493082475,
+      2685.415521527989
+     ],
+     "decode_req": [
+      93.22959300888458,
+      94.84546091334148
+     ],
+     "decode_agg": [
+      60.14144807895614,
+      60.827595925685216
+     ],
+     "ttft_mean_s": [
+      6.048090877309733,
+      6.053234455997881
+     ],
+     "ttft_p99_s": [
+      6.101104230855708,
+      6.105576478264993
+     ],
+     "itl_mean_ms": [
+      24.052330321690736,
+      24.06340068885408
+     ],
+     "itl_p50_ms": [
+      24.08807398751378,
+      24.093194981105626
+     ],
+     "itl_p99_ms": [
+      24.778059870004654,
+      24.872729636263102
+     ]
+    },
+    "mtp_length": 2.2636998134199433,
+    "mtp_acceptance_pct": 63.184990670997166,
+    "preemptions": 0.0,
+    "loop_flags": 3,
+    "completed": 32
+   },
+   "delta_percent": {
+    "prefill_req": -1.2802631862501967,
+    "prefill_wave": -1.2400016808053582,
+    "decode_req": 0.21962877259362745,
+    "decode_agg": -0.3144357748152249,
+    "ttft_mean_s": 1.2955575258345453,
+    "ttft_p99_s": 1.254019689468877,
+    "itl_mean_ms": -0.33162837250608757,
+    "itl_p50_ms": -0.34786634687145046,
+    "itl_p99_ms": -0.8951609678325201,
+    "mtp_length": -0.10751655223224521
+   }
+  },
+  {
+   "input": 16384,
+   "output": 1024,
+   "concurrency": 8,
+   "baseline": {
+    "prefill_req": 828.1986744470572,
+    "prefill_wave": 2558.2369949255444,
+    "decode_req": 19.9607854900991,
+    "decode_agg": 113.01661530450701,
+    "ttft_mean_s": 19.78364789643456,
+    "ttft_p99_s": 51.235290653016996,
+    "itl_mean_ms": 115.4030948912523,
+    "itl_p50_ms": 50.26959700626321,
+    "itl_p99_ms": 429.20954896952026,
+    "boot_ranges": {
+     "prefill_req": [
+      822.4443768998736,
+      833.9529719942408
+     ],
+     "prefill_wave": [
+      2557.343342673361,
+      2559.1306471777284
+     ],
+     "decode_req": [
+      19.836762398679188,
+      20.084808581519013
+     ],
+     "decode_agg": [
+      112.805328388688,
+      113.22790222032604
+     ],
+     "ttft_mean_s": [
+      19.646191752060986,
+      19.92110404080813
+     ],
+     "ttft_p99_s": [
+      51.21739296293817,
+      51.25318834309582
+     ],
+     "itl_mean_ms": [
+      114.61795388971515,
+      116.18823589278942
+     ],
+     "itl_p50_ms": [
+      50.066558993421495,
+      50.47263501910493
+     ],
+     "itl_p99_ms": [
+      428.99913678877056,
+      429.41996115026996
+     ]
+    },
+    "mtp_length": 2.3050024625342997,
+    "mtp_acceptance_pct": 65.25012312671498,
+    "preemptions": 0.0,
+    "loop_flags": 3,
+    "completed": 32
+   },
+   "leapquant": {
+    "prefill_req": 786.3152723724726,
+    "prefill_wave": 2554.5520427063493,
+    "decode_req": 20.038797856074403,
+    "decode_agg": 108.47992834609576,
+    "ttft_mean_s": 20.857617926303647,
+    "ttft_p99_s": 51.309193450742164,
+    "itl_mean_ms": 107.9885523712454,
+    "itl_p50_ms": 48.679005514713936,
+    "itl_p99_ms": 425.67908628610894,
+    "boot_ranges": {
+     "prefill_req": [
+      761.2513298992782,
+      811.379214845667
+     ],
+     "prefill_wave": [
+      2554.0561491446197,
+      2555.0479362680794
+     ],
+     "decode_req": [
+      19.514362165630196,
+      20.56323354651861
+     ],
+     "decode_agg": [
+      104.34602937987138,
+      112.61382731232015
+     ],
+     "ttft_mean_s": [
+      20.192777557305817,
+      21.522458295301476
+     ],
+     "ttft_p99_s": [
+      51.29923323139082,
+      51.319153670093506
+     ],
+     "itl_mean_ms": [
+      107.01286625733005,
+      108.96423848516076
+     ],
+     "itl_p50_ms": [
+      48.18242503097281,
+      49.17558599845506
+     ],
+     "itl_p99_ms": [
+      425.14101235894486,
+      426.217160213273
+     ]
+    },
+    "mtp_length": 2.1637060027735586,
+    "mtp_acceptance_pct": 58.18530013867794,
+    "preemptions": 0.0,
+    "loop_flags": 5,
+    "completed": 32
+   },
+   "delta_percent": {
+    "prefill_req": -5.057168450860883,
+    "prefill_wave": -0.14404264446588044,
+    "decode_req": 0.3908281365680777,
+    "decode_agg": -4.014176982904505,
+    "ttft_mean_s": 5.428574323053126,
+    "ttft_p99_s": 0.14424198005562605,
+    "itl_mean_ms": -6.424907864900698,
+    "itl_p50_ms": -3.1641222255095913,
+    "itl_p99_ms": -0.822549892444735,
+    "mtp_length": -6.12999170531856
+   }
+  },
+  {
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 1,
+   "baseline": {
+    "prefill_req": 2685.1579849892187,
+    "prefill_wave": 2660.3702727090613,
+    "decode_req": 96.30548661904848,
+    "decode_agg": 61.1728045767144,
+    "ttft_mean_s": 12.203437825563014,
+    "ttft_p99_s": 12.317424168597789,
+    "itl_mean_ms": 24.284196866057805,
+    "itl_p50_ms": 24.329897496500053,
+    "itl_p99_ms": 25.875724322977472,
+    "boot_ranges": {
+     "prefill_req": [
+      2679.2520577823598,
+      2691.0639121960776
+     ],
+     "prefill_wave": [
+      2646.35777333278,
+      2674.382772085342
+     ],
+     "decode_req": [
+      91.21506667441447,
+      101.39590656368249
+     ],
+     "decode_agg": [
+      59.067706819909475,
+      63.277902333519314
+     ],
+     "ttft_mean_s": [
+      12.17659671756337,
+      12.230278933562658
+     ],
+     "ttft_p99_s": [
+      12.252546771548804,
+      12.382301565646776
+     ],
+     "itl_mean_ms": [
+      24.270886036162633,
+      24.29750769595298
+     ],
+     "itl_p50_ms": [
+      24.310711509315297,
+      24.349083483684808
+     ],
+     "itl_p99_ms": [
+      24.883083747699857,
+      26.868364898255088
+     ]
+    },
+    "mtp_length": 2.33250284738041,
+    "mtp_acceptance_pct": 66.6251423690205,
+    "preemptions": 0.0,
+    "loop_flags": 12,
+    "completed": 32
+   },
+   "leapquant": {
+    "prefill_req": 2665.9266753189922,
+    "prefill_wave": 2649.461013777546,
+    "decode_req": 100.62102717184266,
+    "decode_agg": 62.75126969376845,
+    "ttft_mean_s": 12.291411621721636,
+    "ttft_p99_s": 12.367798528920684,
+    "itl_mean_ms": 24.215926478434014,
+    "itl_p50_ms": 24.262720020487905,
+    "itl_p99_ms": 25.011372565641068,
+    "boot_ranges": {
+     "prefill_req": [
+      2665.248631576536,
+      2666.604719061448
+     ],
+     "prefill_wave": [
+      2649.382698210701,
+      2649.539329344391
+     ],
+     "decode_req": [
+      99.2661851033207,
+      101.97586924036462
+     ],
+     "decode_agg": [
+      62.218543797846095,
+      63.2839955896908
+     ],
+     "ttft_mean_s": [
+      12.28828546119621,
+      12.294537782247062
+     ],
+     "ttft_p99_s": [
+      12.36743294846965,
+      12.368164109371719
+     ],
+     "itl_mean_ms": [
+      24.208757602392392,
+      24.22309535447564
+     ],
+     "itl_p50_ms": [
+      24.254782998468727,
+      24.270657042507082
+     ],
+     "itl_p99_ms": [
+      24.91601206129417,
+      25.106733069987968
+     ]
+    },
+    "mtp_length": 2.4372466624521216,
+    "mtp_acceptance_pct": 71.86233312260607,
+    "preemptions": 0.0,
+    "loop_flags": 10,
+    "completed": 32
+   },
+   "delta_percent": {
+    "prefill_req": -0.7162077530534439,
+    "prefill_wave": -0.4100654350045141,
+    "decode_req": 4.481095215130337,
+    "decode_agg": 2.580337991655357,
+    "ttft_mean_s": 0.7208935499662283,
+    "ttft_p99_s": 0.4089683007858058,
+    "itl_mean_ms": -0.28113092642241266,
+    "itl_p50_ms": -0.2761108057352524,
+    "itl_p99_ms": -3.3403963751803656,
+    "mtp_length": 4.490618958486903
+   }
+  },
+  {
+   "input": 32768,
+   "output": 2048,
+   "concurrency": 8,
+   "baseline": {
+    "prefill_req": 416.21277979276306,
+    "prefill_wave": 1817.9767114835984,
+    "decode_req": 22.65761698348152,
+    "decode_agg": 87.57628372099875,
+    "ttft_mean_s": 78.73282961671794,
+    "ttft_p99_s": 144.21229743563453,
+    "itl_mean_ms": 105.36498736033741,
+    "itl_p50_ms": 44.1373324720189,
+    "itl_p99_ms": 435.33128113893326,
+    "boot_ranges": {
+     "prefill_req": [
+      413.29551432443367,
+      419.13004526109245
+     ],
+     "prefill_wave": [
+      1798.336720378081,
+      1837.6167025891157
+     ],
+     "decode_req": [
+      21.362142188982485,
+      23.953091777980557
+     ],
+     "decode_agg": [
+      85.225576738126,
+      89.9269907038715
+     ],
+     "ttft_mean_s": [
+      78.18098552106312,
+      79.28467371237275
+     ],
+     "ttft_p99_s": [
+      142.6543411532184,
+      145.77025371805067
+     ],
+     "itl_mean_ms": [
+      95.73863210138416,
+      114.99134261929066
+     ],
+     "itl_p50_ms": [
+      43.742329988162965,
+      44.53233495587483
+     ],
+     "itl_p99_ms": [
+      435.1808676752262,
+      435.48169460264035
+     ]
+    },
+    "mtp_length": 2.37309433279015,
+    "mtp_acceptance_pct": 68.65471663950751,
+    "preemptions": 16.0,
+    "loop_flags": 15,
+    "completed": 32
+   },
+   "leapquant": {
+    "prefill_req": 507.7916493261472,
+    "prefill_wave": 1941.3760438728987,
+    "decode_req": 25.633409587417376,
+    "decode_agg": 105.0759407492337,
+    "ttft_mean_s": 64.62013201130867,
+    "ttft_p99_s": 135.0520977659209,
+    "itl_mean_ms": 95.60327407054547,
+    "itl_p50_ms": 45.570175745524466,
+    "itl_p99_ms": 435.60485325433547,
+    "boot_ranges": {
+     "prefill_req": [
+      488.8696516750353,
+      526.7136469772591
+     ],
+     "prefill_wave": [
+      1916.5407304251632,
+      1966.211357320634
+     ],
+     "decode_req": [
+      24.833242109160004,
+      26.433577065674747
+     ],
+     "decode_agg": [
+      105.01195774439871,
+      105.13992375406868
+     ],
+     "ttft_mean_s": [
+      62.21217199905732,
+      67.02809202356002
+     ],
+     "ttft_p99_s": [
+      133.32442569003615,
+      136.7797698418057
+     ],
+     "itl_mean_ms": [
+      91.99808356608267,
+      99.20846457500828
+     ],
+     "itl_p50_ms": [
+      45.15845549758524,
+      45.981895993463695
+     ],
+     "itl_p99_ms": [
+      435.0170520163374,
+      436.19265449233353
+     ]
+    },
+    "mtp_length": 2.4485464464539275,
+    "mtp_acceptance_pct": 72.42732232269636,
+    "preemptions": 0.0,
+    "loop_flags": 7,
+    "completed": 32
+   },
+   "delta_percent": {
+    "prefill_req": 22.002897070816108,
+    "prefill_wave": 6.78772899618707,
+    "decode_req": 13.133740437510921,
+    "decode_agg": 19.982187282558716,
+    "ttft_mean_s": -17.92479410953701,
+    "ttft_p99_s": -6.351885264016433,
+    "itl_mean_ms": -9.26466517421759,
+    "itl_p50_ms": 3.2463295655982938,
+    "itl_p99_ms": 0.06284228293598204,
+    "mtp_length": 3.179482274312506
+   }
+  }
+ ]
+}
