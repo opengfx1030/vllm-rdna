@@ -1689,6 +1689,31 @@ class MambaManager(SingleTypeKVCacheManager):
             )
         )
 
+    def get_num_blocks_for_peak(
+        self,
+        request_id: str,
+        num_tokens_main_model: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_admission_batches: int,
+    ) -> int:
+        """Additional pages at an align-mode state transition, not just this step."""
+        if self.mamba_cache_mode != "align":
+            return 0
+        spec = self.kv_cache_spec
+        assert isinstance(spec, MambaSpec)
+        peak = min(
+            cdiv(num_tokens_main_model, self.block_size) + spec.num_speculative_blocks,
+            1
+            + num_admission_batches
+            + spec.num_speculative_blocks
+            + spec.num_prefill_checkpoint_blocks,
+        )
+        held = sum(not block.is_null for block in self.req_to_blocks[request_id])
+        adopted = sum(not block.is_null for block in new_computed_blocks)
+        return max(0, peak - held - adopted) + self._get_num_evictable_blocks(
+            new_computed_blocks
+        )
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,

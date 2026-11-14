@@ -123,7 +123,7 @@ long-context PPL +0.23 %, gsm8k / needle / humaneval (160 each, pooled 480)
 
 ### Memory at block 1024: no KV capacity gain
 
-KV capacity is 266,945 tokens with the flag on and off. With
+The original on/off boots both reported 266,945 capacity tokens. With
 `BLOCK_SIZE=1024` the attention page sets the unified page size: vLLM pads
 the GDN page by 29.13 % (FP32 state) or by 182.78 % (LeapQuant) to match it,
 so the smaller state becomes padding and frees no KV blocks. One block, one
@@ -141,13 +141,20 @@ shrink together. The fixed per-request Mamba reservation does not: smaller
 pages reduce its byte cost. LeapQuant makes a 512-token page feasible; the
 793 KiB FP32 state cannot fit it.
 
-`MambaSpec.max_memory_usage_bytes` reserves `2 + num_speculative_blocks +
-num_prefill_checkpoint_blocks` pages in align mode. This HIP GDN path has
-no internal prefill checkpoint exporter (`_checkpoint_alignment=None`), so
-the reservation is **4 pages per GDN group**, not 5 (MTP2, checkpoint
-blocks=0). For the 3 groups that is 12 pool blocks per request. An actual
-CPU-only `MambaSpec` calculation gives 4 MiB per layer at block 1024 and
+The original `MambaSpec.max_memory_usage_bytes` formula reserved
+`2 + num_speculative_blocks + num_prefill_checkpoint_blocks` pages in align
+mode: **4 pages per GDN group** at MTP2, checkpoint blocks=0 (12 planning
+blocks for the 3 groups). That formula gave 4 MiB/layer at block 1024 and
 2 MiB at block 512; state contents are 812,032 and 370,816 bytes.
+HIP has no internal prefill checkpoint exporter (`_checkpoint_alignment=None`).
+
+This is not a bound on live asynchronous residency: two unresolved prefill
+chunks can retain three home states plus two draft slots, **5 live pages**
+per group. The extra page is a retained input state, not a checkpoint export.
+LeapQuant startup sizing now matches the concurrency-aware admission bound:
+5 MiB/layer at 1024 and 2.5 MiB at 512 with two unresolved batches. The
+flag-off planning formula is unchanged.
+
 The LeapQuant kernel suite passes 13 tests, including grouped normalize
 on 512 KiB and 1 MiB padded pages. These cases check equality with dense
 per-layer normalization and preservation of neighboring conv/padding bytes.
@@ -187,8 +194,8 @@ higher acceptance. ITL p99 rises from 435.96 to 648.89 ms (+48.8 %).
 This is not a clean speed win. The full ABBA attempt at
 `speed512-20261114-000314-mono` was stopped at the user's request before
 the remaining arms completed. Its partial receipt is not an ABBA result;
-queued KL/acceptance boots were cancelled. Results are preserved and
-GPU testing remains paused.
+queued KL/acceptance boots were cancelled. The full matrix and powered
+quality study remain paused; only the targeted scheduling check below resumed.
 
 #### Slowdown investigation (2026-11-14, CPU diagnostics only)
 
@@ -222,6 +229,8 @@ reproduction, not measurements of deployed preemptions or GPU speed:
 | 512, same pool, cap 6 | 0 | 1,048,576 | 1 |
 | 512, same pool, cap 8, watermark 5 % | 0 | 1,048,576 | 1 |
 | 512, 600 pool blocks, cap 8 | 0 | 1,048,576 | 1 |
+| 1024, same pool/cap, bounded-growth admission | 0 | 1,048,576 | 1 |
+| 512, same pool/cap, bounded-growth admission | 0 | 1,048,576 | 1 |
 
 All cases have the same 32 x 32768 unique input tokens (1,048,576);
 extra tokens are repeated work. A cap of 7 behaves like cap 8.
@@ -234,8 +243,8 @@ but full-input reservation does not reserve their future output growth.
 Near cache saturation, a request is preempted and replays tokens while
 others continue. Alignment also changes common mixed-prefill payloads
 from 1024 to 1536 tokens, lengthening each prefill-carrying step.
-The real scheduler's admission and checkpoint paths are unchanged by
-LeapQuant, but the smaller block exposes a different operating point.
+The original LeapQuant build leaves admission and checkpoint scheduling
+unchanged; the smaller block exposes a different operating point.
 
 Separate short-prompt cost: directly executing
 `Scheduler._mamba_block_aligned_split` for a 1024-token prompt produces
@@ -244,10 +253,132 @@ another prefill boundary/store-materialize cycle; this explains a concrete
 source of additional startup work, not proof of the observed acceptance
 difference's cause.
 
-Smallest next focused check, when testing resumes: existing `--watermark 0.05`
-with block 512, keeping MTP2, cap 8 and FULL_AND_PIECEWISE unchanged, while
-recording the actual preemption counter and per-step scheduling trace.
-This is **not GPU-validated** and is not enabled in the recipe.
+#### Scheduling implementation (2026-11-14)
+
+The user rejected a watermark/cadence workaround. The opt-in LeapQuant
+scheduler now changes admission and work ordering instead:
+
+* **Reserve bounded growth before admission.** The full-sequence check uses
+  prompt length + requested maximum output + an in-flight verification tail,
+  clamped to the model context limit. The tail includes every configured
+  concurrent batch, not just one final verify. Draft KV lookahead is separate.
+  Already admitted requests' unallocated growth is subtracted from free blocks.
+  These are allocator-derived promises, not eagerly allocated KV pages.
+* **Account for physical recurrent peaks.** A future single-step allocation
+  alone undercounts Mamba align mode: initial state + two draft slots is three
+  pages. A synchronous boundary transition needs four; two unresolved
+  prefill chunks can keep five live pages. The peak bound includes
+  `1 + concurrent_batches + speculative_blocks + checkpoint_blocks`,
+  limited by the logical state columns. The coordinator takes the larger
+  of its normal prediction and this peak, subtracting held/adopted pages
+  and accounting for evictable prefix hits.
+* **Ready decoders first under FCFS.** Their target and draft rows consume
+  the input budget before running prefills; prefills use what remains.
+  Explicit priority policy is unchanged. No sleep, watermark increase,
+  fixed sequence cap, cadence change, or reduction in speculative width.
+* **No reservation ledger.** Growth is derived from live group tables.
+  Allocated pages stop being promises; early EOS and cancellation release
+  the request's remaining promise. Shared cached prefixes are not charged twice.
+
+Enabled only with the existing RDNA LeapQuant flag. Flag-off admission stays
+unchanged; explicitly disabling `scheduler_reserve_full_isl` also disables
+the new growth-admission gate. MTP2, speculative state blocks,
+FULL_AND_PIECEWISE and prefix checkpoints are unchanged.
+Declaring a very large `max_tokens` can now reduce admitted concurrency
+even if EOS would arrive early: this is a worst-case growth promise,
+not an output-length predictor.
+
+The retained 32-request CPU reproduction with the new policy, cap 8, no
+prefill cap and zero watermark processes only the 1,048,576 unique prompt
+tokens at both page sizes (last two rows above), with no preemptions and
+one-step inter-output gaps. At 512 it takes 6,299 synthetic steps, including
+695 prefill-carrying steps; these are not GPU timing measurements.
+
+`tests/v1/core/test_leapquant_scheduling.py`: 21 cases pass with real sync
+and async scheduler/allocator objects and synthetic model outputs; the
+two-in-flight test skips its inapplicable sync variant. Cases cover pressure
+at both block sizes, recurrent peaks, early EOS/cancellation, prefix sharing,
+full speculative width ahead of prefill, final verifies beyond the output
+limit, context clamping, two unresolved verifies crossing a page boundary,
+and retained input states across pipelined prefill chunks. CPU platform config
+normally forces async off; the fixture preserves GPU concurrency metadata
+without executing a model.
+Five original cases failed before the scheduler change. Recurrent-peak and
+two-batch-tail regressions each failed against the preceding implementation
+before their accounting fixes.
+A separate two-batch prefill reproduction (4k prompts, 8k batch budget,
+per-request prefill cap 1024, 53 pool blocks) observes five live recurrent
+states and two preemptions under the one-batch peak estimate. Concurrency-aware
+accounting eliminates the preemptions; pools 53/54/60/61/65 all drain without
+preemption. This is an allocator correctness check, not a new prefill-cap recipe.
+
+Startup sizing must use that same peak, or a cache can pass the initial
+max-context check yet never admit a bounded full-context request.
+The live-residency regression also checks that planned bytes cover the
+observed five pages; it failed at 2 MiB planned versus 2.5 MiB live before
+the sizing correction. A separate actual `check_enough_kv_cache_memory`
+smoke at context 4096 requires 29 usable pages, rejects the old 26-page
+total budget and accepts 30 total pages (including the null page).
+
+The broader cache/alignment run passes 261 existing cases; three fixture
+failures also reproduce on unmodified `tree4` (circular-group Mamba mode,
+and the two CPU-platform Flash-Next TP4 state-grid cases). They are unchanged.
+
+This fixes the reproduced admission/replay mechanism, not every prefill cost:
+512-token checkpoints still split a 1k prompt into two forwards, and a
+mixed-prefill step can still take longer than pure decode. No acceptance
+parity or end-to-end speed improvement follows from CPU scheduling alone.
+
+#### Targeted live scheduling check (2026-11-14)
+
+Receipt `~/w4a8_runs/leapquant/scheduler512-final-20261114-025040`,
+b4 HIP 2-5, resolved buses d9/dc/df/e2. Same 512-token pages, MTP2,
+MonoKernel, FULL_AND_PIECEWISE, cap 8 and 32 x 32768/2048 requests
+as the original 512 smoke. This measures the complete in-flight scheduling
+policy (`tree6`), before the startup-sizing-only correction. It is not ABBA.
+
+| metric | original 512 smoke | complete pipeline admission + decoder-first |
+|---|---:|---:|
+| output tok/s | 64.66 | 104.13 |
+| duration, s | 1013.56 | 629.36 |
+| TTFT p50, s | 65.79 | 53.07 |
+| mean request ITL, ms | 218.69 | 107.62 |
+| ITL p50, ms | 46.36 | 45.08 |
+| ITL p99, ms | 648.89 | 644.54 |
+| longest inter-chunk gap after first token, s | 54.65 | 0.667 |
+| MTP acceptance length | 2.459 | 2.325 |
+| loop-scan flagged requests | 3/32 | 5/32 |
+
+All 32 complete. Fresh-boot Prometheus counter
+`vllm:num_preemptions_total{engine="0",model_name="flash-next"} = 0`.
+No request has an inter-chunk gap above one second; no KFD eviction
+increments, GPU fault markers or new dmesg faults. Peak junction is 83 C.
+Greedy, PPL (4.83), prefix reuse (2.9x), concurrency
+(0 failing, 16 near-tie, 2 soft) and
+after-load probes pass.
+
+Output throughput recovers despite lower acceptance in this boot; the long
+request gaps disappear without reducing speculative width.
+The ~644 ms p99 prefill-carrying steps remain. Loop-scan flags and the
+unresolved controlled acceptance/decode-quality studies prevent a quality
+or merge-readiness claim.
+
+Earlier policy snapshots, receipts `scheduler512-20261114-020245` and
+`scheduler512-20261114-022815`, measured 102.48 and 105.79 output tok/s,
+respectively; both also completed 32/32 with zero actual preemptions and
+no inter-chunk request gap over one second. These are developmental checks,
+not additional final-build repeats or an ABBA qualification.
+
+Final startup-only smoke:
+`~/w4a8_runs/leapquant/scheduler512-sizing-20261114-031237` (`tree7`,
+including the startup-sizing correction). Real 512-token groups remain
+`(512, 512, 512, 512, 8, 512)` with the fixed 3.75 GiB KV budget.
+Correctly accounting for retained states changes the reported capacity to
+**273,456 tokens**, not 275,523 (+2.44 % versus the original 266,945-token
+1024 baseline). This corrects the capacity estimate; no speed cell ran here.
+Greedy, PPL 4.83, prefix reuse 2.9x, concurrency (0 failing, 16 near-tie,
+1 soft), after-load and zero-preemption gates all pass. No KFD evictions
+or new GPU faults; peak junction 68 C. b4 was released afterward.
 
 ### Speed (first build): no gain
 
