@@ -157,7 +157,12 @@ def test_actual_native_device_embedding_cpu_forward(tmp_path):
     from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEDeviceEmbedding
 
     raw = np.zeros((8, 5, 18), dtype=np.uint8)
-    raw[:, :, :2] = np.array([0.01], dtype="<f2").view(np.uint8)
+    raw[:, :, :2] = (
+        (np.arange(1, 41, dtype=np.float32) / 1024)
+        .astype("<f2")
+        .view(np.uint8)
+        .reshape(8, 5, 2)
+    )
     raw[:, :, 2:] = np.arange(16, dtype=np.uint8)[None, None, :] | (
         (15 - np.arange(16, dtype=np.uint8))[None, None, :] << 4
     )
@@ -220,7 +225,17 @@ def test_kernel_source_masks_padded_output_lanes():
         and n.func.attr == "store"
     ]
     assert stores
-    assert all(any(k.arg == "mask" for k in n.keywords) for n in stores)
+    assert all(
+        any(k.arg == "mask" and ast.unparse(k.value) == "d < WIDTH" for k in n.keywords)
+        for n in stores
+    )
+    locals_ = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "local" for t in n.targets)
+    ]
+    assert len(locals_) == 1 and ast.unparse(locals_[0].value).endswith(".to(tl.int64)")
 
 
 def test_rejects_incompatible_explicit_dtype(tmp_path):
