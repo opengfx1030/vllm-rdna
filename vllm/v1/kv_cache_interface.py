@@ -1142,10 +1142,14 @@ class MambaSpec(KVCacheSpec):
                 leapquant_gdn_enabled,
             )
 
-            # LeapQuant admission accounts for retained inputs of unresolved
-            # batches. Startup capacity checks must use the same physical peak.
+            # Decode-growth admission (LeapQuant or --decode-growth-admission)
+            # accounts for retained inputs of unresolved batches. Startup
+            # capacity checks must use the same physical peak.
             concurrent_batches = (
-                vllm_config.max_concurrent_batches if leapquant_gdn_enabled() else 1
+                vllm_config.max_concurrent_batches
+                if leapquant_gdn_enabled()
+                or vllm_config.scheduler_config.decode_growth_admission
+                else 1
             )
             return self.page_size_bytes * (
                 1

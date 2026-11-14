@@ -217,6 +217,16 @@ class SchedulerConfig:
     pure-decode steps while a prefill runs alongside decoders (prefills are
     deferred until it is paid). 0 disables the cadence."""
 
+    decode_growth_admission: bool = False
+    """Hybrid (Mamba + attention) models only: admit a request only if the
+    pool can hold its declared output growth, the speculative verify rows, and
+    the recurrent-state peak of every concurrent batch, and schedule ready
+    decoders ahead of running prefills under FCFS. This removes preemption and
+    prompt replay when the cache is tight. Always on with LeapQuant GDN state;
+    this flag turns it on for other state dtypes. No effect without Mamba
+    layers. False (the default) keeps the upstream admission and ordering. See
+    `docs/rdna2/decode-growth-admission-2026-11-14.md`."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.

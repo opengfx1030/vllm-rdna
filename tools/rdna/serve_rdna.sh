@@ -157,6 +157,7 @@ PP_PARTITION=${PP_PARTITION:-}  # layers per stage, e.g. 16,16,16 -> VLLM_PP_LAY
 BLOCK_SIZE=${BLOCK_SIZE:-}
 LPTH=${LPTH:-}
 PREFILL_INTERVAL=${PREFILL_INTERVAL:-}
+DECODE_GROWTH_ADMISSION=${DECODE_GROWTH_ADMISSION:-0}   # 1: --decode-growth-admission (hybrid models)
 DIST_TIMEOUT=${DIST_TIMEOUT:-}
 SERVE_ENTRY=${SERVE_ENTRY:-cli}
 COMPILE_MODE=${COMPILE_MODE:-}
@@ -385,6 +386,7 @@ cmd+=(--tensor-parallel-size "$TP" --dtype float16)
 cmd+=(--max-num-seqs "$SEQS" --max-num-batched-tokens "$MAXBAT")
 [[ -n $LPTH ]] && cmd+=(--long-prefill-token-threshold "$LPTH")
 [[ -n $PREFILL_INTERVAL ]] && cmd+=(--prefill-schedule-interval "$PREFILL_INTERVAL")
+[[ $DECODE_GROWTH_ADMISSION == 1 ]] && cmd+=(--decode-growth-admission)
 [[ -n $DIST_TIMEOUT ]] && cmd+=(--distributed-timeout-seconds "$DIST_TIMEOUT")
 [[ -n $GMEM ]] && cmd+=(--gpu-memory-utilization "$GMEM")
 # KV=auto: let vLLM size the cache from --gpu-memory-utilization after profiling.

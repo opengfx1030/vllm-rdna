@@ -435,18 +435,27 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
-        self._lq_decode_growth_admission = (
-            kv_cache_config.has_mamba_layers and leapquant_gdn_enabled()
+        self._decode_growth_admission = kv_cache_config.has_mamba_layers and (
+            leapquant_gdn_enabled() or self.scheduler_config.decode_growth_admission
         )
         # Final verifies can extend beyond the output limit. Each additional
         # concurrent batch can still hold a full, unresolved target query.
-        self._lq_admission_tail_tokens = self.num_spec_tokens + (
+        self._admission_tail_tokens = self.num_spec_tokens + (
             vllm_config.max_concurrent_batches - 1
         ) * (1 + self.num_spec_tokens)
-        if self._lq_decode_growth_admission:
+        if self._decode_growth_admission:
             logger.info(
-                "LeapQuant scheduling: bounded output admission=%s, decoder-first FCFS",
+                "Decode-growth scheduling (selected by %s): bounded output "
+                "admission=%s, decoder-first FCFS",
+                "--decode-growth-admission"
+                if self.scheduler_config.decode_growth_admission
+                else "LeapQuant",
                 self.scheduler_reserve_full_isl,
+            )
+        elif self.scheduler_config.decode_growth_admission:
+            logger.info(
+                "--decode-growth-admission has no effect: the KV cache has no "
+                "Mamba layers."
             )
         # Adaptive prefill scheduling. Off unless VLLM_RDNA_DYNAMIC_PREFILL=1; when it
         # is off every hook below is skipped and the static config is used unchanged.
@@ -971,7 +980,7 @@ class Scheduler(SchedulerInterface):
             )
 
         if (
-            self._lq_decode_growth_admission
+            self._decode_growth_admission
             and self.policy == SchedulingPolicy.FCFS
             and len(self.running) > 1
         ):
@@ -1667,11 +1676,11 @@ class Scheduler(SchedulerInterface):
 
                 reserved_blocks = 0
                 num_admission_tokens = None
-                if self._lq_decode_growth_admission and self.scheduler_reserve_full_isl:
+                if self._decode_growth_admission and self.scheduler_reserve_full_isl:
                     num_admission_tokens = min(
                         request.num_prompt_tokens
                         + request.max_tokens
-                        + self._lq_admission_tail_tokens,
+                        + self._admission_tail_tokens,
                         self.max_model_len,
                     )
                     # Promise future growth, not just the prompt's current chunk.
@@ -3726,9 +3735,7 @@ class Scheduler(SchedulerInterface):
     ) -> int:
         """Physical growth still needed, using each group's recycling rules."""
         full_num_tokens = min(
-            request.num_prompt_tokens
-            + request.max_tokens
-            + self._lq_admission_tail_tokens
+            request.num_prompt_tokens + request.max_tokens + self._admission_tail_tokens
             if reserve_output
             else request.num_tokens,
             self.max_model_len,

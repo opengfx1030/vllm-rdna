@@ -94,6 +94,26 @@ def test_watermark_config_cli():
 
 
 @pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], False),
+        (["--decode-growth-admission"], True),
+        (["--no-decode-growth-admission"], False),
+    ],
+)
+def test_decode_growth_admission_cli(tmp_path, argv, expected):
+    from transformers import OPTConfig
+
+    OPTConfig(architectures=["OPTForCausalLM"]).save_pretrained(tmp_path)
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--model", str(tmp_path), "--skip-tokenizer-init", *argv])
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.decode_growth_admission is expected
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.scheduler_config.decode_growth_admission is expected
+
+
+@pytest.mark.parametrize(
     "option",
     ["--gpu-memory-utilization", "--device-memory-utilization"],
 )

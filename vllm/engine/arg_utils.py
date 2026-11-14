@@ -717,6 +717,7 @@ class EngineArgs:
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
     decode_stall_budget_ms: float | None = SchedulerConfig.decode_stall_budget_ms
     decode_time_share: float = SchedulerConfig.decode_time_share
+    decode_growth_admission: bool = SchedulerConfig.decode_growth_admission
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1813,6 +1814,10 @@ class EngineArgs:
             "--decode-time-share", **scheduler_kwargs["decode_time_share"]
         )
         scheduler_group.add_argument(
+            "--decode-growth-admission",
+            **scheduler_kwargs["decode_growth_admission"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2688,6 +2693,7 @@ class EngineArgs:
             prefill_schedule_interval=self.prefill_schedule_interval,
             decode_stall_budget_ms=self.decode_stall_budget_ms,
             decode_time_share=self.decode_time_share,
+            decode_growth_admission=self.decode_growth_admission,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
