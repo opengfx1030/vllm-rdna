@@ -8,10 +8,10 @@
 change that only acts across decode steps (a lossy recurrent-state format such
 as the LeapQuant GDN state, which a single-chunk prefill never stores) is
 invisible there. This tool greedy-generates from fixed passages with the
-top-k logprobs of every generated token. Up to the first token where two runs
-disagree, both runs decoded the same context, so the per-position KL there is a
-decode-path KL; the divergence point itself is reported, and a second run of
-the reference configuration (``--floor``) gives the noise floor of both.
+top-k logprobs of every generated token. Through the first token where two runs
+disagree, both predictions use the same preceding context, so their per-position
+KL is a decode-path KL. Later predictions are excluded. A second run of the
+reference configuration (``--floor``) gives the noise floor.
 
     python decode_kl.py collect --url http://127.0.0.1:18096 --model flash-next \\
         --out A.json [--passages 32] [--passage-chars 6000] [--gen-tokens 512] \\
@@ -20,8 +20,8 @@ the reference configuration (``--floor``) gives the noise floor of both.
 
 ``--workers`` requests run concurrently, so decode batches hold several
 requests as in serving. KL(ref || cand) is taken on the partition of the
-vocabulary into the tokens of both top-k lists plus one cell for the rest
-(a lower bound on the full KL, as in ``topk_kl.py``).
+vocabulary into the shared tokens of both top-k lists plus one cell for the rest
+(a lower bound on the full KL).
 """
 
 import argparse
@@ -144,7 +144,8 @@ def pair(ref: dict, cand: dict) -> dict:
         n = min(len(r["ids"]), len(c["ids"]))
         d = next((i for i in range(n) if r["ids"][i] != c["ids"][i]), n)
         divergence.append(d)
-        for i in range(d):
+        # The first differing token is predicted from the same preceding tokens.
+        for i in range(min(d + 1, n)):
             kl, cov = kl_partition(r["top"][i], c["top"][i])
             kls.append(kl)
             covs.append(cov)

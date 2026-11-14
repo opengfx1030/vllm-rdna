@@ -98,6 +98,11 @@ boots `quality-20261113-005043` (on/off/off2) and
 
 ### Quality: gated checks inside the floor; decode-path KL needs more samples
 
+**Historical decode-KL values below exclude the first divergent prediction.**
+That prediction still uses identical input context and is now included by
+`decode_kl.py`; later predictions remain excluded. Do not compare these old
+values directly with the corrected metric. Prefill KL and PPL are unaffected.
+
 | check (MonoKernel off) | off -> on | floor (off -> off2) |
 |---|---|---|
 | `topk_kl` docs, 64 windows: KL / top-1 | 0.01198, 0.01202 / 0.967 | 0.01168 [upper CI 0.01394] / 0.968 |
