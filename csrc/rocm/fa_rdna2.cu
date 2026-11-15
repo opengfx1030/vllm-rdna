@@ -1143,9 +1143,9 @@ __global__ __launch_bounds__(256) void fa_decode_paged_splitk_gqa_kernel_256(
 // docs/rdna2/hi2-c8-profile-2026-11-15.md). What changes is how the tile moves
 // through LDS. The kernel above spends about 700 LDS instructions per thread
 // per 32-token tile, most of them bank-conflicted 2-byte accesses, which makes
-// it LDS-bound at 16k context
-// (~1.2 ms per layer for 8 rows x 2 KV heads x 16k tokens, 226 GB/s of a
-// 512 GB/s card):
+// it LDS-bound at 16k context (measured in the model trace,
+// docs/rdna2/hi2-c8-profile-2026-11-15.md: 2.02 ms per layer for 8 rows x
+// 2 KV heads x 16.5k tokens, 134 GB/s of a 512 GB/s card):
 //   * S phase: lane k reads its K row and the Q row as 16-byte vectors (the
 //     row stride of 264 halves is 33 x 16 bytes, so 8 lanes cover 8 distinct
 //     bank groups) instead of 128 b32 reads each;
