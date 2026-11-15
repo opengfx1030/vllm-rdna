@@ -490,8 +490,8 @@ The `auto` configuration (`gemv2_auto`): MT = M up to 4, 6 for M = 5-6, 8
 above (larger M runs MT = 8 along `grid.y`); 2 rows per wave at M <= 2, 4 from
 M = 3 on (2 when R < 2048: [INFERENCE] nothing that short was measured); 4
 waves per block. Per M, this single choice is within 1% of the best
-per-tensor choice in whole-step time (4% in one of three runs, from 8 waves per
-block on gate_up at M=4).
+per-tensor choice in whole-step time (4% in one of three runs, where 8 waves per
+block were 10% faster on gate_up at M=4; 1% in the other two).
 
 Warm weights, for contrast (`--layers 1`: one layer replayed from the Infinity
 Cache; same process): gate_up layer 0, M=1, v1 51.5 us against v2 38.1 us,
@@ -531,8 +531,8 @@ weight loads, persistent scheduling (~2%), an in-loop INT4 branch (spills).
   x M in {1, 2, 3, 4, 5, 8, 13, 24, 48, 64}: 210 output sets) hash identically
   between the base `_rocm_C` and `_custom_ops.py` and this branch's.
 * Real tensors (`bench_tp2.py --check "0:0:0;1:4:4;2:2:4;3:4:4;4:4:4;8:4:4;8:2:4"
-  --check-layers 0,3,30,31,41,47,63`, 588 cells): v2 against v1 differs in
-  0.13-0.25% of the outputs, by at most 1.95e-3 (3.3e-4 of max |y|: about one
+  --check-layers 0,3,30,31,41,47,63`, 588 cells, final binary): v2 against v1
+  differs in 0.18% of the outputs, by at most 3.9e-3 (3.4e-4 of max |y|: one
   fp16 ulp of the largest outputs); against the float64 decode of the same
   rows the error is identical for v1 and v2 in every cell (v2 never worse);
   the pair-interleaved and the natural activation give the same bits.
