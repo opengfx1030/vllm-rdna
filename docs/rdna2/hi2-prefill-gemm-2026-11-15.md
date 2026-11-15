@@ -9,8 +9,9 @@ rocBLAS") is the starting point. Labels: **[measured]** = produced by a command 
 
 **Measurement window.** `pgrep -f '^(/usr/sbin/|/usr/bin/)?docker buildx build'` returned nothing at
 the start and at the end of every run in this note (logged in `bench_results/2026-11-15_hi2-prefill-gemm/`:
-`phase1.log`, `phase2_markers.log`, `run_probe2.log`, `phase4.log` .. `phase9.log`; the baseline sweep logged it
-the same way). No number here was taken during an image build. HIP 5 carried only this work; HIP 2-4 belonged
+`phase1.log`, `phase2_markers.log`, `run_probe2.log`, `phase4.log` and `phase9.log`; phases 5 to 8
+and the baseline sweep logged it the same way, but those logs are not in the repository, see the file
+table at the end). No number here was taken during an image build. HIP 5 carried only this work; HIP 2-4 belonged
 to other agents. The box load average was 3-20 (other agents' CPU jobs); the timed work is GPU-only,
 CUDA-graph launched. The re-measure list at the end names what a quieter window should repeat.
 
@@ -504,4 +505,4 @@ pointing at a hipcc): `pytest tests/kernels/quantization/test_rdna_prefill_gemm_
 | `.../sweep.py`, `report.py` | build / check / run / probe / occ / isa / remarks; tables |
 | `.../isa_mix.py`, `gen_dot2_bank.py`, `prof_rocblas.py`, `clk_log.sh` | analysis helpers |
 | `tests/kernels/quantization/test_rdna_prefill_gemm_sweep.py` | name grammar, presets, report tables (CPU); correctness vs fp32 and rocBLAS, strided / odd shapes (GPU) |
-| `bench_results/2026-11-15_hi2-prefill-gemm/` | all CSVs (`sweep_a/c/d/e/f/g`, `confirm_f`, `baseline_a`, `check_*`, `diag_a/b`, `probe_a/c`), logs, `isa_summary.txt`, `isa_final.txt`, `dot2_bank.txt`, `prof_summary.md`, `tunableop_results0.csv` |
+| `bench_results/2026-11-15_hi2-prefill-gemm/` | all CSVs (`sweep_a/c/d/e/f/g`, `confirm_f`, `baseline_a`, `check_*`, `diag_a/b`, `probe_a/c`), the logs of phases 1, 2, 4 and 9 and of the probes, `isa_summary.txt`, `isa_final.txt`, `dot2_bank.txt`, `prof_summary.md`, `tunableop_results0.csv`. Left out of the repository: the raw logs `phase5.log` .. `phase8.log` and `baseline_a.log` (0.6 MB); they are in commit `b47eb6c384` of branch `feat/hi2-integration` |

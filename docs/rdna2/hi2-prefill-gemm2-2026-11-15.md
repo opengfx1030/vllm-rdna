@@ -346,4 +346,7 @@ $PY $SW/bench_prod.py --shapes gate_up --m 1024,2048 --designs 0,3 --no-auto --d
 ```
 
 Files: `bench_results/2026-11-15_hi2-prefill-gemm2/` (`prod_*.csv` production grids, `lin*.csv` composite and tail
-runs, `screen*.csv` lever screens, `abl_d1d4.csv` ablation, `err_table_*.csv` error tables, `*.log` run logs).
+runs, `screen*.csv` lever screens, `abl_d1d4.csv` ablation, `err_table_*.csv` error tables, the short `*.log` run
+logs). Left out of the repository: the raw logs `bench_a1.log`, `bench_a2grid.log`, `bench_a3m128.log`, `grid_b1.log`,
+`lin1.log`, `lin2.log` and `post_grid_a8.log` (0.4 MB); they are in commit `b47eb6c384` of branch
+`feat/hi2-integration`.
