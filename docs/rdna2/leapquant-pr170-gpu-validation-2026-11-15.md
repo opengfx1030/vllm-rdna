@@ -30,13 +30,17 @@ file was written, and this note makes no throughput claim.
 | Pending | the floor and the packing boots on the 27B, and every Flash-Next TP4 item |
 
 **Status of the arms.** `A` and `B` are complete. `A2` (the boot-to-boot
-floor), `P`, `C512` and `C512P` were queued behind the quiet windows of another
-job on the box (a booter waits while a quiet file is fresh) and had not booted
-when this note was committed. The chain keeps running in
-`quality-20261115-162845/`. A hand-off script, `finish_pr170.sh`, runs
-`compare_pr170.sh` and `extract_boot_pr170.sh` when the chain ends (outputs
-`compare.txt` and `boot_extract.txt` in that directory), releases the lease and
-removes the scratch. Sections 3, 4 and 6 mark what is still missing.
+floor) booted at 18:12 and passed the probes (section 3), but its quality
+collects were cut off in the prompt-level collect (window 22 of 64): at about
+18:17 the chain and the `A2` server were terminated from outside. The cause was
+not identified. The server log shows a graceful shutdown, and there is no fault,
+eviction or OOM. The hand-off script then released the lease `a2` and removed
+the scratch (everything except the logs and `tree-pr170`), and another job took
+`a2` at 18:18. So `P`, `C512` and `C512P` never booted, and this note has no
+floor and no packed engine boot. `compare.txt` in `quality-20261115-162845/`
+was written by the hand-off script and fails on the missing `A2` files: ignore
+its floor parts. Sections 3, 4 and 6 mark what is missing, and "Still pending
+on the 27B" has the commands.
 
 ## Setup
 
@@ -152,8 +156,10 @@ flag off, `B` with `--replayssm-state-dtype leapquant`, `A2` flag off again (the
 boot-to-boot floor of section 4), then the packing and block-size arms of
 section 6. Each boot runs the launcher probes (greedy, PPL, prefix cache,
 concurrency), then the quality collects of section 4 against the same server,
-then the greedy probe again. Every arm passed all of them. No arm shows a KFD
-eviction after READY (`evicted_ms` +0 on both ranks) or an amdgpu dmesg fault.
+then the greedy probe again. `A` and `B` passed all of them, with no KFD
+eviction after READY (`evicted_ms` +0 on both ranks) and no amdgpu dmesg fault.
+`A2` passed the probes; its collects were cut off (status above). `P`, `C512`
+and `C512P` never booted.
 
 **Server log with the flag on (arm B).**
 
@@ -187,10 +193,12 @@ The last column is the number the CPU planner what-if gave before the boot
 | Arm | State | Block | GPU KV cache size | Concurrency | Group sizes | GDN page padded by | Planner |
 |---|---|---:|---:|---:|---|---|---:|
 | `A` | FP32 | 1024 | **328,658** | 1.25x | (1024, 1024, 1024, 1024) | 29.13% | 328,658 |
+| `A2` | FP32 | 1024 | **328,658** | 1.25x | (1024, 1024, 1024, 1024) | 29.13% | 328,658 |
 | `B` | LeapQuant | 1024 | **325,019** | 1.24x | (1024, 1024, 1024, 1024) | 123.15% | 325,019 |
 
-The arms `A2`, `P`, `C512` and `C512P` had not booted when this note was
-committed. Section 6 has the planner values for the last three.
+The arms `P`, `C512` and `C512P` never booted (section 6 has the planner values
+for them). The second flag-off boot `A2` gives the same capacity and groups as
+`A`.
 
 At the recipe's block 1024 **LeapQuant adds no KV tokens on the 27B**: 325,019
 against 328,658 (-1.1%). The attention page (2 MiB per layer at block 1024) is
@@ -208,6 +216,7 @@ inputs of unresolved batches"). The same holds on Flash-Next at block 1024
 | Arm | greedy | PPL probe | prefix cache | concurrency (48 checks) |
 |---|---|---|---|---|
 | `A` | 3/3 | 4.90 (NLL 1.590, 261 tokens) | cold TTFT 3.82 s, warm 1.14 s, hits +2048, cold text = warm text | 0 failing, 5 near-tie, 43 identical |
+| `A2` | 3/3 | 4.90 (NLL 1.590, 261 tokens) | cold TTFT 3.81 s, warm 1.14 s, hits +2048, cold text = warm text | 0 failing, 6 near-tie, 42 identical |
 | `B` | 3/3 | 4.90 (NLL 1.590, 261 tokens) | cold TTFT 3.83 s, warm 1.14 s, hits +2048, cold text = warm text | 0 failing, 4 near-tie, 44 identical |
 
 The prefix probe is the check of the V2 align copy marker: a warm request
@@ -243,8 +252,9 @@ the state back.
 
 **No verdict against a floor yet.** The floor is the same comparison between two
 flag-off boots (`A` against `A2`): it says how much of a difference above is the
-boot and how much is the flag. `A2` has not booted, so only the gate of
-`quality_ab.py` applies (a PPL change of at most 2%), and it passes with 0.014%.
+boot and how much is the flag. `A2` booted, but its collects were cut off, so
+only the gate of `quality_ab.py` applies (a PPL change of at most 2%), and it
+passes with 0.014%.
 For scale only: #168 measured on Flash-Next at TP4 a prompt-level KL of 0.0120
 against a floor of 0.0117 and a long-context PPL change of +0.15% against a
 floor of +0.10%. That is another model, another TP and a MoE with its own noise.
@@ -311,8 +321,8 @@ nothing. The LeapQuant GDN page is 939,776 bytes (888,576 of state, 51,200 of
 conv), the FP32 page 1,624,064, and the attention page 2 MiB at block 1024 and
 1 MiB at block 512.
 
-**Engine boots: pending.** `P`, `C512` and `C512P` had not booted when this
-note was committed. They must print, for `P`: `kv cache group sizes (1024,
+**Engine boots: not run.** `P`, `C512` and `C512P` never booted (the chain was
+terminated, see the status above). They must print, for `P`: `kv cache group sizes (1024,
 1024, 1024)`, `GPU KV cache size: 331,129 tokens`, and `LeapQuant page packing:
 48 Mamba layer(s) of 939776 bytes use 2 KV-cache group(s); one block holds 24
 of them.` For `C512`: 334,768 tokens. For `C512P`: the same 334,768 and the
@@ -322,19 +332,23 @@ checks the align-mode copy on unpadded pages, and its quality collects against
 
 ## Still pending on the 27B (lease `a2`, HIP 0,1)
 
-`A2` (the floor), `P`, `C512` and `C512P`: the chain of `run_quality_pr170.sh`
-was started for them and was waiting for the quiet windows of another job when
-this note was committed. When the chain has ended, `compare.txt` and
-`boot_extract.txt` in `quality-20261115-162845/` hold the floor comparison, the
-capacities and the probes. Fill sections 3, 4 and 6 from them. If the chain
-was stopped before it finished (the hand-off script stops it at 20:30), run the
-missing arms into the same run directory, with the lease `a2` taken first:
+`A2` (the floor), `P`, `C512` and `C512P`. `A2` has probes but no collects, and
+the other three never booted. The hand-off script released `a2` at 18:18 and
+another job holds it now (`HI2.a2`, until 2026-11-16T04:18), so take `a2`
+first (ask Main). Then run the arms into the same run directory, with the
+partial `A2` directory kept aside:
 
 ```bash
 cd ~/w4a8_runs/leapquant/pr170-gpu
-PROFILE=27b QUIET_OWN=<agent> ARMS="A2 P C512 C512P" RUN=$(cat quality.path) bash run_matrix_pr170.sh
+R=$(cat quality.path); mv "$R/A2" "$R/A2.partial"
+PROFILE=27b QUIET_OWN=<agent> ARMS="A2 P C512 C512P" RUN=$R bash run_matrix_pr170.sh
 bash compare_pr170.sh
+bash extract_boot_pr170.sh      # boot lines, capacities and probes of every arm
 ```
+
+Then fill sections 3, 4 and 6 and tick the two 27B items of the PR body. The
+Triton and Inductor caches of this run were deleted, so the first boot compiles
+again.
 
 ## Still pending (TP4)
 

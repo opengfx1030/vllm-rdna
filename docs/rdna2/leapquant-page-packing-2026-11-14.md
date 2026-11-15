@@ -371,9 +371,9 @@ python tests/v1/core/test_leapquant_page_packing.py   # prints the tables
 
 Status after the GPU run of 2026-11-15 on two V620 with the 27B AWQ at TP2
 ([validation note](leapquant-pr170-gpu-validation-2026-11-15.md)). The kernel
-item is done. The 27B packed boot (arm `P`, block 1024) was queued behind the
-quiet windows of another job and had not booted when this was written, and the
-Flash-Next items need four GPUs, so the other items are open.
+item is done. The 27B packed boot (arm `P`, block 1024) was not run: the chain
+that was to boot it was terminated at 18:17 and the lease passed to another job.
+The Flash-Next items need four GPUs, so the other items are open.
 
 - [ ] Boot with `REPLAYSSM_STATE_DTYPE=leapquant VLLM_RDNA_GDN_LEAPQUANT_PACK=1` at
   block 640. The log shows 5 KV-cache groups instead of 6 and the line
