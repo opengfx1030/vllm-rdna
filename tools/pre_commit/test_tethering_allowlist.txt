@@ -102,6 +102,7 @@ tests/tools/test_stall_probe.py  # fork-only stall probe tool, CPU unit test aga
 tests/tools/test_concurrency_probe.py  # fork-only concurrency probe tool, CPU unit test against a fake completions server; not in CI
 tests/tools/test_moe_placement.py  # fork-only MoE placement analysis tool, CPU unit test; not in CI
 tests/tools/test_tunableop_missing.py  # fork-only TunableOp missing-shape harness, CPU unit test; not in CI
+tests/tools/test_tunableop_env.py  # fork-only TunableOp helper selection (preferred / opt-in profiles, rows-per-rank log), CPU unit test; not in CI
 tests/tools/test_topk_kl.py  # fork-only top-k KL / agentic bench quality tools, CPU unit test; not in CI
 # pciescope (PCIe fabric monitor for par1-cs25), CPU unit tests under
 # tests/tools/rdna/pciescope/; test files are named test_pciescope_<part>_*.py and
