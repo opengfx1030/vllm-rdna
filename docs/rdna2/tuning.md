@@ -360,6 +360,10 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_FA_RDNA2_GQA_MODE` | subgroup | GQA prefill mode. `subgroup` was measured faster than varlen/splitk. |
 | `VLLM_FA_RDNA2_SPLIT_DECODE` | 1 | Split-K decode for MTP-verify and mixed batches (gated to ≤ 256 query×head rows). |
 | `VLLM_FA_RDNA2_VERIFY_FULL_GRAPH` | 1 | Capture MTP-verify steps as FULL graphs (`UNIFORM_BATCH`). |
+| `VLLM_FA_RDNA2_UNFUSED_PREFILL` | 0 | 1 runs prefill chunks of head_dim 256 with fp16 KV as two rocBLAS GEMMs and an in-place softmax per query block instead of the flash kernel: 3.1x to 4.5x faster at kernel level on the 27B TP2 shape (3.4 to 3.6 vs 11 to 15 TFLOP/s), fp16 scores (2 to 3x the kernel's error). Opt-in; measured on HI2 27B TP2 only. [Doc](hi2-attn-prefill-2026-11-14.md). |
+| `VLLM_FA_RDNA2_UNFUSED_PREFILL_MIN_Q` | 64 | Shortest query run that takes the GEMM path. |
+| `VLLM_FA_RDNA2_UNFUSED_PREFILL_SCRATCH_MB` | 768 | Scratch bound per call (gathered K and V plus one score tile); a sequence that does not fit uses the flash kernel. |
+| `VLLM_FA_RDNA2_UNFUSED_PREFILL_QBLOCK` | 512 | Most query rows per GEMM block. |
 | `VLLM_FARDNA2_ENABLE_SPEC_GATE`, `VLLM_FARDNA2_SPEC_VERIFY_Q_LEN` | 0, 3 | Legacy gate that rejects verify batches. Leave off. |
 | `VLLM_USE_RDNA2_MLA` | 0 | HIP sparse-MLA decode (DeepSeek-V4) instead of Triton. |
 
