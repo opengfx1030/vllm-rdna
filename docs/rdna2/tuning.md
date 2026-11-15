@@ -364,6 +364,7 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_FA_RDNA2_UNFUSED_PREFILL_MIN_Q` | 64 | Shortest query run that takes the GEMM path. |
 | `VLLM_FA_RDNA2_UNFUSED_PREFILL_SCRATCH_MB` | 768 | Scratch bound per call (gathered K and V plus one score tile); a sequence that does not fit uses the flash kernel. |
 | `VLLM_FA_RDNA2_UNFUSED_PREFILL_QBLOCK` | 512 | Most query rows per GEMM block. |
+| `VLLM_RDNA_LM_HEAD_GEMV_MAX_M` | 8 (`27b-hi2-tp2` recipe: 32) | Rows up to which the dense `gemv_f16_rdna2` kernel (it serves 1 to 32) takes the LM head on gfx10x; every other dense GEMM keeps 8. For an LM head with no TunableOp row (HI2 27B at TP=2) the rocBLAS fallback for 9 to 32 rows (MTP verify) was 10.4 ms at 12 rows. 8 is the previous behaviour. |
 | `VLLM_FARDNA2_ENABLE_SPEC_GATE`, `VLLM_FARDNA2_SPEC_VERIFY_Q_LEN` | 0, 3 | Legacy gate that rejects verify batches. Leave off. |
 | `VLLM_USE_RDNA2_MLA` | 0 | HIP sparse-MLA decode (DeepSeek-V4) instead of Triton. |
 
