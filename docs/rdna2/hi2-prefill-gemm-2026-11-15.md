@@ -175,10 +175,10 @@ ceiling is 18.43 / (VALU instructions per dot2).)
   ~10 TF/s per GHz = 18-20 TF/s at 1.8-2.0 GHz. That matches the measured 17.4-19.8 TF/s of the fused
   kernel [derived]. Neither can reach rocBLAS by tuning; a decode-once-into-LDS fused kernel would
   remove most of that overhead but then has the dense kernel's ceiling minus the decode, so it is moot
-  unless the dense kernel wins (it does not, below).
+  unless the dense kernel clears the bar (it does not, below).
 * A plain dense micro-kernel has **1.13-1.28 instructions per dot2**: the instruction economy of my
-  kernels equals rocBLAS's (1.128 / 1.139). The 128 accumulators per thread of the TT8_16 / 16x8 tiles
-  lower the LDS read traffic from 0.25 to 0.19 B per flop (4 x ds_read_b128 per dot2) [derived].
+  kernels equals rocBLAS's (1.128 / 1.139). The 128 accumulators per thread of the 16x8 / 8x16 tiles (rocBLAS's
+  TT8_16) lower the LDS-read instructions per dot2 from 0.062 (8x8 tile) to 0.047 [measured, `isa_summary.txt`].
 * **Occupancy as measured** (`sweep.py occ`: every block logs (start, end); the peak overlap over the GPU
   divided by 36 WGPs): 128x128 BK32 8x8 (168 VGPR, 40 KB LDS) 2 blocks of 8 waves per WGP = 4 waves/SIMD
   although the compiler reports 5; 128x64 8x4 (112 VGPR) 4 blocks; 64x64 4x4 (71 VGPR) 6; 64x64 BK64 8x4
@@ -332,8 +332,8 @@ What each step was worth (measured, with the mechanism where I have it):
 
 ### Memory path against block order (`MODE 4` = global loads + LDS stores + barriers only, no dot2)
 
-`diag_b.csv` (HIP 5, shader clock 2.44-2.48 GHz at 142-162 W: this build is not power limited; rocBLAS rows
-of the same runs: gate_up M=512 3991 us heuristic-or-tuned, M=2048 18322 / 15954, in_proj_qkvz M=2048 7667 / 7115):
+`diag_b.csv` (HIP 5, shader clock 2.44-2.48 GHz at 142-162 W: this build is not power limited; rocBLAS rows of
+the same runs, heuristic / tuned: gate_up M=512 4010 / 3991 us, M=2048 18322 / 15954, in_proj_qkvz M=2048 7667 / 7115):
 
 | cell | design (all LW8) | RAST 0 | RAST 4 | RAST 8 | RAST 16 |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -345,10 +345,10 @@ of the same runs: gate_up M=512 3991 us heuristic-or-tuned, M=2048 18322 / 15954
 | in_proj_qkvz M=2048 | 128x128 t16x8 swizzle | 3706 | - | **3357** | - |
 
 With the default order the memory path of gate_up alone costs about as much as rocBLAS's whole GEMM at M=512
-(3878 vs 3991 us) and 61 % of it at M=2048; grouped order cuts it **1.8-2.5x** (the weights are read through
-the cache hierarchy once per group of 4-8 M tiles instead of once per M tile). On in_proj_qkvz (84 MB of weights,
-which fits the Infinity Cache) the gain is 1.1-1.2x. [measured]; this is the mechanism behind the RAST row
-of the table above and behind rocBLAS's own WGM8 choice for the tuned gate_up rows.
+(3878 vs 3991 us) and 61 % of it at M=2048; grouped order cuts it **1.8-2.5x** [measured]. On in_proj_qkvz
+(84 MB of weights, which fits the Infinity Cache) the gain is only 1.1-1.2x [measured]. That the weights then
+cross the cache hierarchy once per group of 4-8 M tiles instead of once per M tile is the likely mechanism behind
+the RAST row of the table above and behind rocBLAS's own WGM8 choice for the tuned gate_up rows [inference].
 
 ## Confirmation: the finalists against rocBLAS in one interleaved window
 
