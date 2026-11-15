@@ -290,6 +290,72 @@ def preset(name: str) -> list[Variant]:
         out += [V(bm=256, bn=128, tm=16, tn=8, lw=8, pad=p) for p in (0, 16)]
         return [v for v in out if v.valid()]
     if (
+        name == "rast2"
+    ):  # block order on the strongest families (RAST was only swept on the 128x128 / 8x8 design before)
+        out = [V(bm=256, bn=128, tm=16, tn=8, lw=8, rast=2)]
+        out += [V(bm=256, bn=128, tm=8, tn=16, lw=8, rast=r) for r in (2, 4, 8, 16)]
+        for r in (4, 8, 16):
+            out += [
+                V(bm=128, bn=128, tm=16, tn=8, lw=8, pad=0, swz=1, rast=r),
+                V(bm=256, bn=128, tm=16, tn=8, lw=8, pad=0, swz=1, rast=r),
+                V(bm=128, bn=256, tm=16, tn=8, lw=8, rast=r),
+            ]
+        out += [V(bm=256, bn=128, tm=16, tn=8, lw=8, rast=4, ku=2)]
+        out += [V(bm=128, bn=64, bk=64, nbuf=1, lw=8, rast=r) for r in (4, 8)]
+        return [v for v in out if v.valid()]
+    if (
+        name == "rast3"
+    ):  # cross of the two best families of rast2: 8x16 thread tiles x swizzled LDS x block order x unroll
+        out = []
+        for r in (4, 8):
+            out += [
+                V(bm=128, bn=128, tm=8, tn=16, lw=8, pad=0, swz=1, rast=r),
+                V(bm=256, bn=128, tm=8, tn=16, lw=8, pad=0, swz=1, rast=r),
+                V(bm=128, bn=128, tm=8, tn=16, lw=8, rast=r),
+                V(bm=128, bn=256, tm=8, tn=16, lw=8, rast=r),
+            ]
+        out += [
+            V(bm=128, bn=128, tm=16, tn=8, lw=8, pad=0, swz=1, rast=8, ku=k)
+            for k in (2, 4)
+        ]
+        out += [V(bm=128, bn=128, tm=16, tn=8, lw=8, pad=0, swz=1, rast=2)]
+        out += [V(bm=256, bn=128, tm=8, tn=16, lw=8, rast=4, ku=2)]
+        return [v for v in out if v.valid()]
+    if (
+        name == "rast4"
+    ):  # around the best design of rast3: 128x128 / 8x16 / swizzled LDS / 8-byte fragments / RAST 8
+        out = [
+            V(bm=128, bn=128, tm=8, tn=16, lw=8, pad=0, swz=1, rast=r)
+            for r in (2, 16, 32)
+        ]
+        out += [
+            V(bm=128, bn=128, tm=8, tn=16, lw=8, pad=0, swz=1, rast=8, ku=k)
+            for k in (2, 4)
+        ]
+        out += [
+            V(bm=128, bn=128, tm=8, tn=16, lw=16, pad=0, swz=1, rast=8, brot=b)
+            for b in (0, 1)
+        ]
+        out += [
+            V(bm=128, bn=128, tm=8, tn=16, lw=8, pad=0, swz=1, rast=8, bk=64, nbuf=1)
+        ]
+        out += [
+            V(bm=128, bn=256, tm=8, tn=16, lw=8, pad=0, swz=1, rast=r) for r in (4, 8)
+        ]
+        out += [V(bm=64, bn=128, tm=4, tn=16, lw=8, pad=0, swz=1, rast=8)]
+        out += [V(bm=128, bn=64, tm=8, tn=8, lw=8, pad=0, swz=1, rast=8)]
+        out += [V(bm=128, bn=128, tm=8, tn=16, lw=8, pad=0, swz=1, rast=8, glw=8)]
+        return [v for v in out if v.valid()]
+    if (
+        name == "memdiag"
+    ):  # MODE 4 (global loads + LDS stores + barriers only) against block order: the memory path alone
+        out = [V(bm=256, bn=128, tm=8, tn=16, lw=8, mode=4, rast=r) for r in (0, 4, 16)]
+        out += [
+            V(bm=128, bn=128, tm=16, tn=8, lw=8, pad=0, swz=1, mode=4, rast=r)
+            for r in (0, 8)
+        ]
+        return [v for v in out if v.valid()]
+    if (
         name == "rot"
     ):  # B k-pair rotation: do the two dot2 sources need different VGPR banks?
         out = [V(mode=m, brot=r) for m in (0, 1, 3) for r in (0, 1)]

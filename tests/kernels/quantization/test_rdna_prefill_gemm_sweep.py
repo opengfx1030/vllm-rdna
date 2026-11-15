@@ -43,7 +43,7 @@ sweep: Any = importlib.import_module("sweep")
 report: Any = importlib.import_module("report")
 
 PRESETS = [
-    "base", "diag", "diag2", "tiles", "core", "occ", "knobs", "rast", "splitk", "lw8", "swz", "rot", "t168", "fin",
+    "base", "diag", "diag2", "tiles", "core", "occ", "knobs", "rast", "splitk", "lw8", "swz", "rot", "t168", "fin", "best256", "rast2", "rast3", "rast4", "memdiag",
 ]  # fmt: skip
 
 

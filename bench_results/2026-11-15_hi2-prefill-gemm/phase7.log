@@ -1,0 +1,454 @@
+Sun Nov 15 05:57:51 AM CET 2026
+no docker buildx build (start)
+ 05:57:51 up 4 days, 21:19,  7 users,  load average: 6.72, 5.76, 5.51
+12 variants, 12 to compile, 8 jobs
+ok   128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z   2.1s
+
+ok   256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z   2.1s
+
+ok   128x128k32t8x16n2p8r4g16b0w0s1m0u1l8   2.1s
+
+ok   128x256k32t8x16n2p8r4g16b0w0s1m0u1l8   2.1s
+
+ok   128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z   2.1s
+
+ok   256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z   2.1s
+
+ok   128x128k32t8x16n2p8r8g16b0w0s1m0u1l8   2.2s
+
+ok   128x256k32t8x16n2p8r8g16b0w0s1m0u1l8   2.1s
+
+ok   128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z   2.2s
+
+ok   128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z   2.3s
+
+ok   128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z   2.1s
+
+ok   256x128k32t8x16n2p8r4g16b0w0s1m0u2l8   2.2s
+
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+ok   128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z          cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z          cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x16n2p8r4g16b0w0s1m0u1l8           cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t8x16n2p8r4g16b0w0s1m0u1l8           cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z          cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z          cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x16n2p8r8g16b0w0s1m0u1l8           cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t8x16n2p8r8g16b0w0s1m0u1l8           cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z          cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z          cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z          cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t8x16n2p8r4g16b0w0s1m0u2l8           cases  65 worst abs 0.0078 rel 2.12e-04
+=== shape gate_up 05:58:07
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+rocblas_heur  default                              gate_up       M=512      3817.0 us (min  3739.3)  23.91 TF/s  vs_rb    1.0  err           
+rocblas_tuned tunableop                            gate_up       M=512      3821.1 us (min  3815.1)  23.89 TF/s  vs_rb  0.999  err           Default
+rocblas_heur_hot default                              gate_up       M=512      3813.5 us (min  3807.7)  23.93 TF/s  vs_rb  1.001  err           
+rocblas_tuned_hot tunableop                            gate_up       M=512      3811.1 us (min  3807.3)  23.95 TF/s  vs_rb  1.002  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=512      3603.3 us (min  3590.3)  25.33 TF/s  vs_rb  1.059  err  0.01562  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=512      3586.1 us (min  3580.6)  25.45 TF/s  vs_rb  1.064  err  0.01562  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=512      3651.5 us (min  3620.5)  24.99 TF/s  vs_rb  1.045  err  0.01562  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=512      3993.1 us (min  3970.3)  22.86 TF/s  vs_rb  0.956  err  0.01562  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=512      3569.5 us (min  3542.6)  25.57 TF/s  vs_rb  1.069  err  0.01562  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=512      3600.9 us (min  3591.6)  25.35 TF/s  vs_rb   1.06  err  0.01562  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=512      3659.9 us (min  3648.3)  24.94 TF/s  vs_rb  1.043  err  0.01562  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=512      3992.2 us (min  3908.4)  22.86 TF/s  vs_rb  0.956  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z gate_up       M=512      3885.3 us (min  3856.8)  23.49 TF/s  vs_rb  0.982  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z gate_up       M=512      3755.2 us (min  3748.4)   24.3 TF/s  vs_rb  1.016  err  0.01562  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z gate_up       M=512      3693.0 us (min  3674.4)  24.71 TF/s  vs_rb  1.034  err  0.01562  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 gate_up       M=512      4526.3 us (min  4364.3)  20.16 TF/s  vs_rb  0.843  err  0.01562  
+rocblas_heur  default                              gate_up       M=1024     8618.6 us (min  8570.7)  21.18 TF/s  vs_rb  0.885  err           
+rocblas_tuned tunableop                            gate_up       M=1024     7631.5 us (min  7549.4)  23.92 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326079
+rocblas_heur_hot default                              gate_up       M=1024     8576.3 us (min  8528.2)  21.28 TF/s  vs_rb   0.89  err           
+rocblas_tuned_hot tunableop                            gate_up       M=1024     7599.8 us (min  7565.5)  24.02 TF/s  vs_rb  1.004  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=1024     6995.8 us (min  6981.4)  26.09 TF/s  vs_rb  1.091  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=1024     7058.0 us (min  7052.4)  25.86 TF/s  vs_rb  1.081  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=1024     7147.7 us (min  7135.6)  25.54 TF/s  vs_rb  1.068  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=1024     7790.6 us (min  7778.7)  23.43 TF/s  vs_rb   0.98  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=1024     6982.1 us (min  6964.1)  26.14 TF/s  vs_rb  1.093  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=1024     7058.4 us (min  7052.7)  25.86 TF/s  vs_rb  1.081  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=1024     7151.2 us (min  7115.0)  25.53 TF/s  vs_rb  1.067  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=1024     7673.3 us (min  7609.3)  23.79 TF/s  vs_rb  0.995  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z gate_up       M=1024     7481.0 us (min  7444.4)   24.4 TF/s  vs_rb   1.02  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z gate_up       M=1024     7262.8 us (min  7255.1)  25.13 TF/s  vs_rb  1.051  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z gate_up       M=1024     7303.5 us (min  7253.3)  24.99 TF/s  vs_rb  1.045  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 gate_up       M=1024     8903.4 us (min  8620.5)   20.5 TF/s  vs_rb  0.857  err  0.00781  
+rocblas_heur  default                              gate_up       M=2048    17533.6 us (min 17331.9)  20.82 TF/s  vs_rb  0.873  err           
+rocblas_tuned tunableop                            gate_up       M=2048    15315.5 us (min 15235.3)  23.84 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326079
+rocblas_heur_hot default                              gate_up       M=2048    17434.4 us (min 17328.4)  20.94 TF/s  vs_rb  0.878  err           
+rocblas_tuned_hot tunableop                            gate_up       M=2048    15358.1 us (min 15276.9)  23.77 TF/s  vs_rb  0.997  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=2048    13937.4 us (min 13913.6)  26.19 TF/s  vs_rb  1.099  err  0.01562  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=2048    14055.0 us (min 13977.0)  25.97 TF/s  vs_rb   1.09  err  0.01562  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=2048    14179.1 us (min 14142.7)  25.75 TF/s  vs_rb   1.08  err  0.01562  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=2048    15377.4 us (min 15341.7)  23.74 TF/s  vs_rb  0.996  err  0.01562  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=2048    13862.5 us (min 13828.9)  26.34 TF/s  vs_rb  1.105  err  0.01562  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=2048    14166.0 us (min 14081.1)  25.77 TF/s  vs_rb  1.081  err  0.01562  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=2048    14177.8 us (min 14101.3)  25.75 TF/s  vs_rb   1.08  err  0.01562  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=2048    15139.6 us (min 14948.2)  24.11 TF/s  vs_rb  1.012  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z gate_up       M=2048    14790.9 us (min 14644.6)  24.68 TF/s  vs_rb  1.035  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z gate_up       M=2048    14354.8 us (min 14305.4)  25.43 TF/s  vs_rb  1.067  err  0.01562  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z gate_up       M=2048    14570.5 us (min 14442.8)  25.06 TF/s  vs_rb  1.051  err  0.01562  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 gate_up       M=2048    17641.4 us (min 16908.4)  20.69 TF/s  vs_rb  0.868  err  0.01562  
+rocblas_heur  default                              gate_up       M=700      6365.3 us (min  6328.6)   19.6 TF/s  vs_rb  0.905  err           
+rocblas_tuned tunableop                            gate_up       M=700      5763.1 us (min  5688.6)  21.65 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326063
+rocblas_heur_hot default                              gate_up       M=700      6302.1 us (min  6270.8)   19.8 TF/s  vs_rb  0.914  err           
+rocblas_tuned_hot tunableop                            gate_up       M=700      5725.9 us (min  5677.4)  21.79 TF/s  vs_rb  1.006  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=700      5382.6 us (min  5346.4)  23.18 TF/s  vs_rb  1.071  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=700      5428.6 us (min  5415.0)  22.99 TF/s  vs_rb  1.062  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=700      5471.4 us (min  5429.6)  22.81 TF/s  vs_rb  1.053  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=700      6052.9 us (min  6034.5)  20.61 TF/s  vs_rb  0.952  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=700      5250.8 us (min  5240.9)  23.76 TF/s  vs_rb  1.098  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=700      5427.1 us (min  5420.2)  22.99 TF/s  vs_rb  1.062  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=700      5352.9 us (min  5343.2)  23.31 TF/s  vs_rb  1.077  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=700      5922.8 us (min  5807.7)  21.07 TF/s  vs_rb  0.973  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z gate_up       M=700      5672.0 us (min  5657.4)   22.0 TF/s  vs_rb  1.016  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z gate_up       M=700      5528.6 us (min  5510.1)  22.57 TF/s  vs_rb  1.042  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z gate_up       M=700      5542.5 us (min  5463.2)  22.51 TF/s  vs_rb   1.04  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 gate_up       M=700      6733.6 us (min  6440.8)  18.53 TF/s  vs_rb  0.856  err  0.00781  
+rocblas_heur  default                              gate_up       M=1500    13143.1 us (min 12950.0)  20.34 TF/s  vs_rb    0.9  err           
+rocblas_tuned tunableop                            gate_up       M=1500    11822.8 us (min 11664.5)  22.62 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326063
+rocblas_heur_hot default                              gate_up       M=1500    12957.7 us (min 12825.1)  20.64 TF/s  vs_rb  0.912  err           
+rocblas_tuned_hot tunableop                            gate_up       M=1500    11765.8 us (min 11634.3)  22.73 TF/s  vs_rb  1.005  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=1500    10529.8 us (min 10488.7)  25.39 TF/s  vs_rb  1.123  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z gate_up       M=1500    10733.9 us (min 10666.5)  24.91 TF/s  vs_rb  1.101  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=1500    10720.5 us (min 10652.5)  24.94 TF/s  vs_rb  1.103  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 gate_up       M=1500    11809.5 us (min 11780.1)  22.64 TF/s  vs_rb  1.001  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=1500    10475.2 us (min 10413.0)  25.53 TF/s  vs_rb  1.129  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z gate_up       M=1500    10789.1 us (min 10720.4)  24.78 TF/s  vs_rb  1.096  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=1500    10724.9 us (min 10697.5)  24.93 TF/s  vs_rb  1.102  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 gate_up       M=1500    11594.5 us (min 11347.0)  23.06 TF/s  vs_rb   1.02  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z gate_up       M=1500    11239.9 us (min 11153.5)  23.79 TF/s  vs_rb  1.052  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z gate_up       M=1500    10883.7 us (min 10862.5)  24.57 TF/s  vs_rb  1.086  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z gate_up       M=1500    10936.9 us (min 10804.9)  24.45 TF/s  vs_rb  1.081  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 gate_up       M=1500    13398.9 us (min 12511.6)  19.96 TF/s  vs_rb  0.882  err  0.00781  
+=== shape in_proj_qkvz 05:58:52
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+rocblas_heur  default                              in_proj_qkvz  M=512      2058.9 us (min  2054.9)  20.86 TF/s  vs_rb    1.0  err           
+rocblas_tuned tunableop                            in_proj_qkvz  M=512      2064.2 us (min  2053.6)  20.81 TF/s  vs_rb  0.997  err           Default
+rocblas_heur_hot default                              in_proj_qkvz  M=512      2024.5 us (min  2006.5)  21.21 TF/s  vs_rb  1.017  err           
+rocblas_tuned_hot tunableop                            in_proj_qkvz  M=512      2013.7 us (min  2002.6)  21.33 TF/s  vs_rb  1.022  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=512      1829.0 us (min  1825.2)  23.48 TF/s  vs_rb  1.126  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=512      1808.6 us (min  1805.4)  23.75 TF/s  vs_rb  1.138  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=512      1855.7 us (min  1835.4)  23.14 TF/s  vs_rb   1.11  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=512      2058.2 us (min  2044.9)  20.87 TF/s  vs_rb    1.0  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=512      1819.8 us (min  1814.1)   23.6 TF/s  vs_rb  1.131  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=512      1814.7 us (min  1813.1)  23.67 TF/s  vs_rb  1.135  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=512      1853.4 us (min  1844.8)  23.17 TF/s  vs_rb  1.111  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=512      2053.0 us (min  2027.0)  20.92 TF/s  vs_rb  1.003  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z in_proj_qkvz  M=512      1987.1 us (min  1986.6)  21.61 TF/s  vs_rb  1.036  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z in_proj_qkvz  M=512      1934.9 us (min  1924.1)   22.2 TF/s  vs_rb  1.064  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z in_proj_qkvz  M=512      1872.5 us (min  1858.8)  22.94 TF/s  vs_rb    1.1  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 in_proj_qkvz  M=512      2285.9 us (min  2231.2)  18.79 TF/s  vs_rb  0.901  err  0.00781  
+rocblas_heur  default                              in_proj_qkvz  M=1024     3903.3 us (min  3857.5)  22.01 TF/s  vs_rb  0.934  err           
+rocblas_tuned tunableop                            in_proj_qkvz  M=1024     3644.4 us (min  3642.7)  23.57 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              in_proj_qkvz  M=1024     3804.9 us (min  3795.4)  22.58 TF/s  vs_rb  0.958  err           
+rocblas_tuned_hot tunableop                            in_proj_qkvz  M=1024     3599.0 us (min  3588.0)  23.87 TF/s  vs_rb  1.013  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=1024     3420.9 us (min  3416.9)  25.11 TF/s  vs_rb  1.065  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=1024     3522.0 us (min  3520.1)  24.39 TF/s  vs_rb  1.035  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=1024     3481.0 us (min  3467.9)  24.68 TF/s  vs_rb  1.047  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=1024     3865.2 us (min  3851.6)  22.22 TF/s  vs_rb  0.943  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=1024     3444.1 us (min  3435.7)  24.94 TF/s  vs_rb  1.058  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=1024     3529.6 us (min  3522.0)  24.34 TF/s  vs_rb  1.033  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=1024     3515.3 us (min  3505.1)  24.44 TF/s  vs_rb  1.037  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=1024     3840.5 us (min  3808.0)  22.37 TF/s  vs_rb  0.949  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z in_proj_qkvz  M=1024     3727.5 us (min  3726.7)  23.04 TF/s  vs_rb  0.978  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z in_proj_qkvz  M=1024     3625.4 us (min  3616.8)  23.69 TF/s  vs_rb  1.005  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z in_proj_qkvz  M=1024     3462.2 us (min  3441.3)  24.81 TF/s  vs_rb  1.053  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 in_proj_qkvz  M=1024     4423.2 us (min  4340.1)  19.42 TF/s  vs_rb  0.824  err  0.00781  
+rocblas_heur  default                              in_proj_qkvz  M=2048     7652.4 us (min  7551.4)  22.45 TF/s  vs_rb  0.924  err           
+rocblas_tuned tunableop                            in_proj_qkvz  M=2048     7072.7 us (min  7047.4)  24.29 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              in_proj_qkvz  M=2048     7553.0 us (min  7528.2)  22.75 TF/s  vs_rb  0.936  err           
+rocblas_tuned_hot tunableop                            in_proj_qkvz  M=2048     7021.0 us (min  7005.8)  24.47 TF/s  vs_rb  1.007  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=2048     6612.8 us (min  6593.3)  25.98 TF/s  vs_rb   1.07  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=2048     6775.8 us (min  6745.2)  25.35 TF/s  vs_rb  1.044  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=2048     6721.3 us (min  6713.3)  25.56 TF/s  vs_rb  1.052  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=2048     7376.9 us (min  7361.6)  23.29 TF/s  vs_rb  0.959  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=2048     6658.5 us (min  6656.9)   25.8 TF/s  vs_rb  1.062  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=2048     6918.2 us (min  6852.0)  24.83 TF/s  vs_rb  1.022  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=2048     6811.0 us (min  6789.5)  25.22 TF/s  vs_rb  1.038  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=2048     7366.1 us (min  7271.5)  23.32 TF/s  vs_rb   0.96  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z in_proj_qkvz  M=2048     7137.9 us (min  7118.6)  24.07 TF/s  vs_rb  0.991  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z in_proj_qkvz  M=2048     6948.5 us (min  6921.1)  24.72 TF/s  vs_rb  1.018  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z in_proj_qkvz  M=2048     6697.1 us (min  6632.5)  25.65 TF/s  vs_rb  1.056  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 in_proj_qkvz  M=2048     8488.8 us (min  8251.1)  20.24 TF/s  vs_rb  0.833  err  0.00781  
+rocblas_heur  default                              in_proj_qkvz  M=700      2989.1 us (min  2948.8)  19.64 TF/s  vs_rb  0.926  err           
+rocblas_tuned tunableop                            in_proj_qkvz  M=700      2768.8 us (min  2760.3)  21.21 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              in_proj_qkvz  M=700      2914.5 us (min  2904.8)  20.15 TF/s  vs_rb   0.95  err           
+rocblas_tuned_hot tunableop                            in_proj_qkvz  M=700      2725.9 us (min  2718.6)  21.54 TF/s  vs_rb  1.016  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=700      2636.6 us (min  2619.7)  22.27 TF/s  vs_rb   1.05  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=700      2705.8 us (min  2696.6)   21.7 TF/s  vs_rb  1.023  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=700      2650.9 us (min  2642.4)  22.15 TF/s  vs_rb  1.044  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=700      2977.3 us (min  2967.9)  19.72 TF/s  vs_rb   0.93  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=700      2594.6 us (min  2585.2)  22.63 TF/s  vs_rb  1.067  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=700      2716.4 us (min  2713.4)  21.62 TF/s  vs_rb  1.019  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=700      2624.6 us (min  2622.7)  22.37 TF/s  vs_rb  1.055  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=700      2946.9 us (min  2887.7)  19.93 TF/s  vs_rb   0.94  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z in_proj_qkvz  M=700      2834.4 us (min  2830.7)  20.72 TF/s  vs_rb  0.977  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z in_proj_qkvz  M=700      2757.9 us (min  2751.2)  21.29 TF/s  vs_rb  1.004  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z in_proj_qkvz  M=700      2697.4 us (min  2676.9)  21.77 TF/s  vs_rb  1.026  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 in_proj_qkvz  M=700      3328.3 us (min  3240.5)  17.64 TF/s  vs_rb  0.832  err  0.00781  
+rocblas_heur  default                              in_proj_qkvz  M=1500     6087.1 us (min  5924.2)  20.67 TF/s  vs_rb   0.86  err           
+rocblas_tuned tunableop                            in_proj_qkvz  M=1500     5235.9 us (min  5214.9)  24.03 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              in_proj_qkvz  M=1500     6053.8 us (min  6031.4)  20.79 TF/s  vs_rb  0.865  err           
+rocblas_tuned_hot tunableop                            in_proj_qkvz  M=1500     5177.5 us (min  5153.5)   24.3 TF/s  vs_rb  1.011  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=1500     5057.3 us (min  5026.2)  24.88 TF/s  vs_rb  1.035  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z in_proj_qkvz  M=1500     5110.8 us (min  5078.4)  24.62 TF/s  vs_rb  1.024  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=1500     5129.4 us (min  5086.3)  24.53 TF/s  vs_rb  1.021  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 in_proj_qkvz  M=1500     5639.9 us (min  5616.6)  22.31 TF/s  vs_rb  0.928  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=1500     5050.2 us (min  5023.6)  24.92 TF/s  vs_rb  1.037  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z in_proj_qkvz  M=1500     5141.3 us (min  5125.1)  24.47 TF/s  vs_rb  1.018  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=1500     5187.1 us (min  5167.7)  24.26 TF/s  vs_rb  1.009  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 in_proj_qkvz  M=1500     5541.1 us (min  5445.2)  22.71 TF/s  vs_rb  0.945  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z in_proj_qkvz  M=1500     5478.5 us (min  5433.9)  22.97 TF/s  vs_rb  0.956  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z in_proj_qkvz  M=1500     5286.0 us (min  5273.1)   23.8 TF/s  vs_rb  0.991  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z in_proj_qkvz  M=1500     5074.5 us (min  5006.5)   24.8 TF/s  vs_rb  1.032  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 in_proj_qkvz  M=1500     6326.7 us (min  6065.8)  19.89 TF/s  vs_rb  0.828  err  0.00781  
+=== shape down 05:59:35
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+rocblas_heur  default                              down          M=512      2273.3 us (min  2209.1)  20.07 TF/s  vs_rb  0.999  err           
+rocblas_tuned tunableop                            down          M=512      2271.5 us (min  2266.6)  20.09 TF/s  vs_rb    1.0  err           Default
+rocblas_heur_hot default                              down          M=512      2188.6 us (min  2173.1)  20.85 TF/s  vs_rb  1.038  err           
+rocblas_tuned_hot tunableop                            down          M=512      2180.9 us (min  2179.5)  20.92 TF/s  vs_rb  1.042  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=512      1907.1 us (min  1896.3)  23.93 TF/s  vs_rb  1.191  err  0.01562  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=512      2127.8 us (min  2127.0)  21.45 TF/s  vs_rb  1.068  err  0.01562  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=512      1938.3 us (min  1935.9)  23.54 TF/s  vs_rb  1.172  err  0.01562  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=512      2303.0 us (min  2299.5)  19.82 TF/s  vs_rb  0.986  err  0.01562  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=512      1894.9 us (min  1892.0)  24.08 TF/s  vs_rb  1.199  err  0.01562  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=512      2129.1 us (min  2126.1)  21.43 TF/s  vs_rb  1.067  err  0.01562  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=512      1942.7 us (min  1938.7)  23.49 TF/s  vs_rb  1.169  err  0.01562  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=512      2299.2 us (min  2257.0)  19.85 TF/s  vs_rb  0.988  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z down          M=512      2195.3 us (min  2191.5)  20.79 TF/s  vs_rb  1.035  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z down          M=512      2142.0 us (min  2141.3)   21.3 TF/s  vs_rb   1.06  err  0.01562  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z down          M=512      1948.1 us (min  1927.8)  23.42 TF/s  vs_rb  1.166  err  0.01562  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 down          M=512      2804.9 us (min  2663.9)  16.27 TF/s  vs_rb   0.81  err  0.01562  
+rocblas_heur  default                              down          M=1024     4005.7 us (min  3976.4)  22.78 TF/s  vs_rb  0.999  err           
+rocblas_tuned tunableop                            down          M=1024     4000.2 us (min  3987.1)  22.82 TF/s  vs_rb    1.0  err           Default
+rocblas_heur_hot default                              down          M=1024     3904.7 us (min  3873.9)  23.37 TF/s  vs_rb  1.024  err           
+rocblas_tuned_hot tunableop                            down          M=1024     3903.3 us (min  3892.1)  23.38 TF/s  vs_rb  1.025  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=1024     3544.2 us (min  3534.8)  25.75 TF/s  vs_rb  1.129  err  0.01562  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=1024     3772.1 us (min  3756.8)   24.2 TF/s  vs_rb   1.06  err  0.01562  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=1024     3618.6 us (min  3613.7)  25.22 TF/s  vs_rb  1.105  err  0.01562  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=1024     4089.9 us (min  4075.0)  22.32 TF/s  vs_rb  0.978  err  0.01562  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=1024     3546.4 us (min  3537.0)  25.74 TF/s  vs_rb  1.128  err  0.01562  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=1024     3776.3 us (min  3759.3)  24.17 TF/s  vs_rb  1.059  err  0.01562  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=1024     3621.0 us (min  3615.2)  25.21 TF/s  vs_rb  1.105  err  0.01562  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=1024     4065.4 us (min  4019.6)  22.45 TF/s  vs_rb  0.984  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z down          M=1024     3919.5 us (min  3905.6)  23.29 TF/s  vs_rb  1.021  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z down          M=1024     3805.8 us (min  3790.6)  23.98 TF/s  vs_rb  1.051  err  0.01562  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z down          M=1024     3625.4 us (min  3595.2)  25.17 TF/s  vs_rb  1.103  err  0.01562  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 down          M=1024     4708.6 us (min  4590.6)  19.38 TF/s  vs_rb   0.85  err  0.01562  
+rocblas_heur  default                              down          M=2048     7664.7 us (min  7639.5)  23.82 TF/s  vs_rb    1.0  err           
+rocblas_tuned tunableop                            down          M=2048     7671.6 us (min  7641.7)  23.79 TF/s  vs_rb  0.999  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              down          M=2048     7529.2 us (min  7508.7)  24.24 TF/s  vs_rb  1.018  err           
+rocblas_tuned_hot tunableop                            down          M=2048     7572.4 us (min  7502.9)  24.11 TF/s  vs_rb  1.012  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=2048     7079.0 us (min  7045.1)  25.79 TF/s  vs_rb  1.083  err  0.01562  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=2048     7100.9 us (min  7052.8)  25.71 TF/s  vs_rb  1.079  err  0.01562  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=2048     7192.9 us (min  7181.9)  25.38 TF/s  vs_rb  1.066  err  0.01562  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=2048     7654.4 us (min  7641.8)  23.85 TF/s  vs_rb  1.001  err  0.01562  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=2048     7059.7 us (min  7055.0)  25.86 TF/s  vs_rb  1.086  err  0.01562  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=2048     7162.9 us (min  7086.1)  25.48 TF/s  vs_rb   1.07  err  0.01562  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=2048     7199.1 us (min  7182.8)  25.36 TF/s  vs_rb  1.065  err  0.01562  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=2048     7604.2 us (min  7503.8)   24.0 TF/s  vs_rb  1.008  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z down          M=2048     7624.1 us (min  7565.9)  23.94 TF/s  vs_rb  1.005  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z down          M=2048     7361.4 us (min  7341.9)   24.8 TF/s  vs_rb  1.041  err  0.01562  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z down          M=2048     7157.6 us (min  7127.5)   25.5 TF/s  vs_rb  1.071  err  0.01562  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 down          M=2048     8829.6 us (min  8584.5)  20.67 TF/s  vs_rb  0.868  err  0.01562  
+rocblas_heur  default                              down          M=700      3116.8 us (min  3080.4)  20.02 TF/s  vs_rb  0.998  err           
+rocblas_tuned tunableop                            down          M=700      3111.1 us (min  3098.9)  20.05 TF/s  vs_rb    1.0  err           Default
+rocblas_heur_hot default                              down          M=700      3038.1 us (min  3005.3)  20.54 TF/s  vs_rb  1.024  err           
+rocblas_tuned_hot tunableop                            down          M=700      3029.0 us (min  3020.5)   20.6 TF/s  vs_rb  1.027  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=700      2717.0 us (min  2707.9)  22.96 TF/s  vs_rb  1.145  err  0.01562  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=700      2975.0 us (min  2961.6)  20.97 TF/s  vs_rb  1.046  err  0.01562  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=700      2774.2 us (min  2769.2)  22.49 TF/s  vs_rb  1.121  err  0.01562  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=700      3244.7 us (min  3243.5)  19.23 TF/s  vs_rb  0.959  err  0.01562  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=700      2705.6 us (min  2704.4)  23.06 TF/s  vs_rb   1.15  err  0.01562  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=700      2971.9 us (min  2966.7)  20.99 TF/s  vs_rb  1.047  err  0.01562  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=700      2770.3 us (min  2768.8)  22.52 TF/s  vs_rb  1.123  err  0.01562  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=700      3204.7 us (min  3144.9)  19.47 TF/s  vs_rb  0.971  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z down          M=700      3024.7 us (min  3021.8)  20.63 TF/s  vs_rb  1.029  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z down          M=700      2940.5 us (min  2935.9)  21.22 TF/s  vs_rb  1.058  err  0.01562  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z down          M=700      2764.3 us (min  2725.3)  22.57 TF/s  vs_rb  1.125  err  0.01562  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 down          M=700      3696.2 us (min  3573.4)  16.88 TF/s  vs_rb  0.842  err  0.01562  
+rocblas_heur  default                              down          M=1500     5805.9 us (min  5795.3)  23.03 TF/s  vs_rb    1.0  err           
+rocblas_tuned tunableop                            down          M=1500     5818.1 us (min  5788.7)  22.98 TF/s  vs_rb  0.998  err           Default
+rocblas_heur_hot default                              down          M=1500     5726.5 us (min  5686.5)  23.35 TF/s  vs_rb  1.014  err           
+rocblas_tuned_hot tunableop                            down          M=1500     5725.1 us (min  5681.7)  23.35 TF/s  vs_rb  1.014  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=1500     5356.8 us (min  5335.4)  24.96 TF/s  vs_rb  1.084  err  0.01562  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=1500     5413.9 us (min  5393.8)  24.69 TF/s  vs_rb  1.072  err  0.01562  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=1500     5485.8 us (min  5453.4)  24.37 TF/s  vs_rb  1.058  err  0.01562  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 down          M=1500     5903.6 us (min  5892.0)  22.65 TF/s  vs_rb  0.983  err  0.01562  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=1500     5337.9 us (min  5328.5)  25.05 TF/s  vs_rb  1.088  err  0.01562  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z down          M=1500     5452.5 us (min  5417.7)  24.52 TF/s  vs_rb  1.065  err  0.01562  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=1500     5510.4 us (min  5499.7)  24.26 TF/s  vs_rb  1.054  err  0.01562  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 down          M=1500     5887.3 us (min  5792.5)  22.71 TF/s  vs_rb  0.986  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z down          M=1500     5878.7 us (min  5824.6)  22.74 TF/s  vs_rb  0.988  err  0.01562  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z down          M=1500     5640.8 us (min  5636.9)   23.7 TF/s  vs_rb  1.029  err  0.01562  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z down          M=1500     5410.8 us (min  5359.5)  24.71 TF/s  vs_rb  1.073  err  0.01562  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 down          M=1500     6737.0 us (min  6495.2)  19.84 TF/s  vs_rb  0.862  err  0.01562  
+=== shape qkv_proj 06:00:19
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+rocblas_heur  default                              qkv_proj      M=512      1837.1 us (min  1816.7)  20.46 TF/s  vs_rb    1.0  err           
+rocblas_tuned tunableop                            qkv_proj      M=512      1846.7 us (min  1843.3)  20.35 TF/s  vs_rb  0.995  err           Default
+rocblas_heur_hot default                              qkv_proj      M=512      1771.2 us (min  1768.2)  21.22 TF/s  vs_rb  1.037  err           
+rocblas_tuned_hot tunableop                            qkv_proj      M=512      1778.5 us (min  1767.5)  21.13 TF/s  vs_rb  1.033  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=512      1647.7 us (min  1632.8)  22.81 TF/s  vs_rb  1.115  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=512      1714.5 us (min  1710.3)  21.92 TF/s  vs_rb  1.071  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=512      1640.0 us (min  1636.3)  22.92 TF/s  vs_rb   1.12  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=512      1903.8 us (min  1895.3)  19.74 TF/s  vs_rb  0.965  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=512      1630.3 us (min  1623.7)  23.05 TF/s  vs_rb  1.127  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=512      1722.2 us (min  1720.1)  21.82 TF/s  vs_rb  1.067  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=512      1645.9 us (min  1641.6)  22.83 TF/s  vs_rb  1.116  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=512      1902.1 us (min  1879.4)  19.76 TF/s  vs_rb  0.966  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z qkv_proj      M=512      1789.1 us (min  1785.4)  21.01 TF/s  vs_rb  1.027  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z qkv_proj      M=512      1741.2 us (min  1736.1)  21.58 TF/s  vs_rb  1.055  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z qkv_proj      M=512      1680.5 us (min  1668.8)  22.36 TF/s  vs_rb  1.093  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 qkv_proj      M=512      2220.5 us (min  2132.3)  16.92 TF/s  vs_rb  0.827  err  0.00781  
+rocblas_heur  default                              qkv_proj      M=1024     3470.6 us (min  3446.9)  21.66 TF/s  vs_rb   0.93  err           
+rocblas_tuned tunableop                            qkv_proj      M=1024     3228.7 us (min  3221.4)  23.28 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              qkv_proj      M=1024     3404.0 us (min  3380.7)  22.08 TF/s  vs_rb  0.948  err           
+rocblas_tuned_hot tunableop                            qkv_proj      M=1024     3186.1 us (min  3178.1)  23.59 TF/s  vs_rb  1.013  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=1024     3031.7 us (min  3030.3)  24.79 TF/s  vs_rb  1.065  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=1024     3119.0 us (min  3114.0)   24.1 TF/s  vs_rb  1.035  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=1024     3080.6 us (min  3077.6)   24.4 TF/s  vs_rb  1.048  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=1024     3426.0 us (min  3420.9)  21.94 TF/s  vs_rb  0.942  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=1024     3059.6 us (min  3047.3)  24.57 TF/s  vs_rb  1.055  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=1024     3118.6 us (min  3113.1)   24.1 TF/s  vs_rb  1.035  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=1024     3122.7 us (min  3114.7)  24.07 TF/s  vs_rb  1.034  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=1024     3400.2 us (min  3376.3)  22.11 TF/s  vs_rb   0.95  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z qkv_proj      M=1024     3294.2 us (min  3290.1)  22.82 TF/s  vs_rb   0.98  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z qkv_proj      M=1024     3199.6 us (min  3197.7)  23.49 TF/s  vs_rb  1.009  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z qkv_proj      M=1024     3080.6 us (min  3055.6)   24.4 TF/s  vs_rb  1.048  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 qkv_proj      M=1024     4033.8 us (min  3807.5)  18.63 TF/s  vs_rb    0.8  err  0.00781  
+rocblas_heur  default                              qkv_proj      M=2048     6887.4 us (min  6746.8)  21.83 TF/s  vs_rb  0.912  err           
+rocblas_tuned tunableop                            qkv_proj      M=2048     6278.8 us (min  6270.9)  23.94 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              qkv_proj      M=2048     6746.7 us (min  6705.1)  22.28 TF/s  vs_rb  0.931  err           
+rocblas_tuned_hot tunableop                            qkv_proj      M=2048     6207.8 us (min  6183.2)  24.22 TF/s  vs_rb  1.011  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=2048     5922.2 us (min  5916.7)  25.38 TF/s  vs_rb   1.06  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=2048     5984.9 us (min  5965.5)  25.12 TF/s  vs_rb  1.049  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=2048     6009.3 us (min  5988.3)  25.02 TF/s  vs_rb  1.045  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=2048     6488.6 us (min  6477.8)  23.17 TF/s  vs_rb  0.968  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=2048     5955.4 us (min  5954.5)  25.24 TF/s  vs_rb  1.054  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=2048     6129.6 us (min  6091.1)  24.52 TF/s  vs_rb  1.024  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=2048     6044.8 us (min  6034.5)  24.87 TF/s  vs_rb  1.039  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=2048     6491.6 us (min  6386.9)  23.16 TF/s  vs_rb  0.967  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z qkv_proj      M=2048     6313.4 us (min  6296.4)  23.81 TF/s  vs_rb  0.995  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z qkv_proj      M=2048     6131.3 us (min  6123.1)  24.52 TF/s  vs_rb  1.024  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z qkv_proj      M=2048     6013.6 us (min  5979.9)   25.0 TF/s  vs_rb  1.044  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 qkv_proj      M=2048     7437.2 us (min  7263.6)  20.21 TF/s  vs_rb  0.844  err  0.00781  
+rocblas_heur  default                              qkv_proj      M=700      2630.8 us (min  2602.0)  19.53 TF/s  vs_rb  0.911  err           
+rocblas_tuned tunableop                            qkv_proj      M=700      2396.4 us (min  2393.1)  21.44 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326063
+rocblas_heur_hot default                              qkv_proj      M=700      2550.3 us (min  2549.0)  20.15 TF/s  vs_rb   0.94  err           
+rocblas_tuned_hot tunableop                            qkv_proj      M=700      2364.7 us (min  2356.7)  21.73 TF/s  vs_rb  1.013  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=700      2333.8 us (min  2331.2)  22.02 TF/s  vs_rb  1.027  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=700      2338.0 us (min  2337.5)  21.98 TF/s  vs_rb  1.025  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=700      2376.8 us (min  2356.2)  21.62 TF/s  vs_rb  1.008  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=700      2615.2 us (min  2608.9)  19.65 TF/s  vs_rb  0.916  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=700      2348.1 us (min  2344.4)  21.88 TF/s  vs_rb  1.021  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=700      2339.0 us (min  2336.5)  21.97 TF/s  vs_rb  1.025  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=700      2386.3 us (min  2382.0)  21.53 TF/s  vs_rb  1.004  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=700      2536.1 us (min  2502.1)  20.26 TF/s  vs_rb  0.945  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z qkv_proj      M=700      2573.4 us (min  2551.8)  19.97 TF/s  vs_rb  0.931  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z qkv_proj      M=700      2478.8 us (min  2478.0)  20.73 TF/s  vs_rb  0.967  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z qkv_proj      M=700      2364.1 us (min  2355.4)  21.73 TF/s  vs_rb  1.014  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 qkv_proj      M=700      2866.3 us (min  2799.0)  17.93 TF/s  vs_rb  0.836  err  0.00781  
+rocblas_heur  default                              qkv_proj      M=1500     5274.5 us (min  5262.8)  20.87 TF/s  vs_rb  0.906  err           
+rocblas_tuned tunableop                            qkv_proj      M=1500     4777.2 us (min  4769.5)  23.05 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              qkv_proj      M=1500     5176.8 us (min  5156.8)  21.27 TF/s  vs_rb  0.923  err           
+rocblas_tuned_hot tunableop                            qkv_proj      M=1500     4739.9 us (min  4707.4)  23.23 TF/s  vs_rb  1.008  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=1500     4495.4 us (min  4481.7)  24.49 TF/s  vs_rb  1.063  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=1500     4579.5 us (min  4570.9)  24.04 TF/s  vs_rb  1.043  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=1500     4553.5 us (min  4503.2)  24.18 TF/s  vs_rb  1.049  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 qkv_proj      M=1500     5023.6 us (min  5016.8)  21.92 TF/s  vs_rb  0.951  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=1500     4469.1 us (min  4450.9)  24.64 TF/s  vs_rb  1.069  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z qkv_proj      M=1500     4664.7 us (min  4649.8)   23.6 TF/s  vs_rb  1.024  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=1500     4552.4 us (min  4536.2)  24.18 TF/s  vs_rb  1.049  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 qkv_proj      M=1500     5020.4 us (min  4935.9)  21.93 TF/s  vs_rb  0.952  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z qkv_proj      M=1500     4797.2 us (min  4790.9)  22.95 TF/s  vs_rb  0.996  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z qkv_proj      M=1500     4682.4 us (min  4669.3)  23.51 TF/s  vs_rb   1.02  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z qkv_proj      M=1500     4563.7 us (min  4513.1)  24.13 TF/s  vs_rb  1.047  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 qkv_proj      M=1500     5649.2 us (min  5479.9)  19.49 TF/s  vs_rb  0.846  err  0.00781  
+=== shape out_proj 06:01:04
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+rocblas_heur  default                              out_proj      M=512       838.1 us (min   829.6)  19.22 TF/s  vs_rb  0.969  err           
+rocblas_tuned tunableop                            out_proj      M=512       812.2 us (min   808.6)  19.83 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326045
+rocblas_heur_hot default                              out_proj      M=512       773.7 us (min   768.8)  20.82 TF/s  vs_rb   1.05  err           
+rocblas_tuned_hot tunableop                            out_proj      M=512       765.4 us (min   763.3)  21.04 TF/s  vs_rb  1.061  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=512       750.3 us (min   738.4)  21.46 TF/s  vs_rb  1.082  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=512       787.2 us (min   785.3)  20.46 TF/s  vs_rb  1.032  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=512       764.6 us (min   760.2)  21.06 TF/s  vs_rb  1.062  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=512       888.0 us (min   883.6)  18.14 TF/s  vs_rb  0.915  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=512       738.6 us (min   736.2)  21.81 TF/s  vs_rb    1.1  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=512       790.7 us (min   789.8)  20.37 TF/s  vs_rb  1.027  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=512       766.7 us (min   762.7)  21.01 TF/s  vs_rb  1.059  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=512       883.4 us (min   875.4)  18.23 TF/s  vs_rb  0.919  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z out_proj      M=512       838.8 us (min   836.7)   19.2 TF/s  vs_rb  0.968  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z out_proj      M=512       821.7 us (min   817.7)   19.6 TF/s  vs_rb  0.988  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z out_proj      M=512       775.2 us (min   772.1)  20.78 TF/s  vs_rb  1.048  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 out_proj      M=512      1017.5 us (min   982.2)  15.83 TF/s  vs_rb  0.798  err  0.00781  
+rocblas_heur  default                              out_proj      M=1024     1528.1 us (min  1512.8)  21.08 TF/s  vs_rb  0.926  err           
+rocblas_tuned tunableop                            out_proj      M=1024     1414.9 us (min  1413.6)  22.77 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326063
+rocblas_heur_hot default                              out_proj      M=1024     1490.8 us (min  1489.3)  21.61 TF/s  vs_rb  0.949  err           
+rocblas_tuned_hot tunableop                            out_proj      M=1024     1391.0 us (min  1388.0)  23.16 TF/s  vs_rb  1.017  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=1024     1388.1 us (min  1386.0)  23.21 TF/s  vs_rb  1.019  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=1024     1370.7 us (min  1368.8)   23.5 TF/s  vs_rb  1.032  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=1024     1380.0 us (min  1373.7)  23.34 TF/s  vs_rb  1.025  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=1024     1510.2 us (min  1508.2)  21.33 TF/s  vs_rb  0.937  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=1024     1371.0 us (min  1368.8)   23.5 TF/s  vs_rb  1.032  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=1024     1372.1 us (min  1371.4)  23.48 TF/s  vs_rb  1.031  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=1024     1368.0 us (min  1365.8)  23.55 TF/s  vs_rb  1.034  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=1024     1492.5 us (min  1479.8)  21.58 TF/s  vs_rb  0.948  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z out_proj      M=1024     1476.9 us (min  1473.1)  21.81 TF/s  vs_rb  0.958  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z out_proj      M=1024     1457.1 us (min  1444.9)  22.11 TF/s  vs_rb  0.971  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z out_proj      M=1024     1413.6 us (min  1410.2)  22.79 TF/s  vs_rb  1.001  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 out_proj      M=1024     1710.0 us (min  1689.7)  18.84 TF/s  vs_rb  0.827  err  0.00781  
+rocblas_heur  default                              out_proj      M=2048     2919.9 us (min  2894.6)  22.06 TF/s  vs_rb  0.902  err           
+rocblas_tuned tunableop                            out_proj      M=2048     2633.8 us (min  2615.3)  24.46 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              out_proj      M=2048     2938.3 us (min  2907.3)  21.93 TF/s  vs_rb  0.896  err           
+rocblas_tuned_hot tunableop                            out_proj      M=2048     2594.2 us (min  2589.4)  24.83 TF/s  vs_rb  1.015  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=2048     2659.4 us (min  2601.0)  24.23 TF/s  vs_rb   0.99  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=2048     2563.1 us (min  2553.5)  25.14 TF/s  vs_rb  1.028  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=2048     2647.8 us (min  2635.5)  24.33 TF/s  vs_rb  0.995  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=2048     2839.4 us (min  2836.0)  22.69 TF/s  vs_rb  0.928  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=2048     2603.7 us (min  2595.9)  24.74 TF/s  vs_rb  1.012  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=2048     2605.8 us (min  2602.5)  24.72 TF/s  vs_rb  1.011  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=2048     2643.1 us (min  2640.7)  24.37 TF/s  vs_rb  0.997  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=2048     2753.3 us (min  2739.1)   23.4 TF/s  vs_rb  0.957  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z out_proj      M=2048     2791.8 us (min  2785.9)  23.08 TF/s  vs_rb  0.943  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z out_proj      M=2048     2704.1 us (min  2702.6)  23.82 TF/s  vs_rb  0.974  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z out_proj      M=2048     2634.4 us (min  2627.1)  24.46 TF/s  vs_rb    1.0  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 out_proj      M=2048     3167.3 us (min  3116.7)  20.34 TF/s  vs_rb  0.832  err  0.00781  
+rocblas_heur  default                              out_proj      M=700      1124.8 us (min  1105.9)  19.58 TF/s  vs_rb  0.995  err           
+rocblas_tuned tunableop                            out_proj      M=700      1119.3 us (min  1117.8)  19.67 TF/s  vs_rb    1.0  err           Default
+rocblas_heur_hot default                              out_proj      M=700      1101.4 us (min  1096.9)  19.99 TF/s  vs_rb  1.016  err           
+rocblas_tuned_hot tunableop                            out_proj      M=700      1094.8 us (min  1090.1)  20.11 TF/s  vs_rb  1.022  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=700      1108.8 us (min  1097.0)  19.86 TF/s  vs_rb  1.009  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=700      1080.9 us (min  1079.9)  20.37 TF/s  vs_rb  1.036  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=700      1084.6 us (min  1081.0)   20.3 TF/s  vs_rb  1.032  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=700      1213.7 us (min  1208.1)  18.14 TF/s  vs_rb  0.922  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=700      1063.7 us (min  1059.9)   20.7 TF/s  vs_rb  1.052  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=700      1094.8 us (min  1093.0)  20.11 TF/s  vs_rb  1.022  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=700      1059.2 us (min  1058.5)  20.79 TF/s  vs_rb  1.057  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=700      1184.9 us (min  1170.4)  18.58 TF/s  vs_rb  0.945  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z out_proj      M=700      1159.0 us (min  1158.0)   19.0 TF/s  vs_rb  0.966  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z out_proj      M=700      1133.7 us (min  1130.8)  19.42 TF/s  vs_rb  0.987  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z out_proj      M=700      1130.7 us (min  1125.3)  19.47 TF/s  vs_rb   0.99  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 out_proj      M=700      1332.5 us (min  1314.2)  16.53 TF/s  vs_rb   0.84  err  0.00781  
+rocblas_heur  default                              out_proj      M=1500     2224.0 us (min  2160.9)  21.22 TF/s  vs_rb  0.997  err           
+rocblas_tuned tunableop                            out_proj      M=1500     2217.1 us (min  2206.4)  21.28 TF/s  vs_rb    1.0  err           Default
+rocblas_heur_hot default                              out_proj      M=1500     2193.3 us (min  2189.3)  21.51 TF/s  vs_rb  1.011  err           
+rocblas_tuned_hot tunableop                            out_proj      M=1500     2172.2 us (min  2165.1)  21.72 TF/s  vs_rb  1.021  err           
+dense         128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=1500     1994.5 us (min  1974.3)  23.66 TF/s  vs_rb  1.112  err  0.00781  
+dense         256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=1500     1990.0 us (min  1983.1)  23.71 TF/s  vs_rb  1.114  err  0.00781  
+dense         128x128k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=1500     1997.1 us (min  1985.5)  23.63 TF/s  vs_rb   1.11  err  0.00781  
+dense         128x256k32t8x16n2p8r4g16b0w0s1m0u1l8 out_proj      M=1500     2231.1 us (min  2225.8)  21.15 TF/s  vs_rb  0.994  err  0.00781  
+dense         128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=1500     1991.2 us (min  1984.1)   23.7 TF/s  vs_rb  1.113  err  0.00781  
+dense         256x128k32t8x16n2p0r8g16b0w0s1m0u1l8z out_proj      M=1500     2028.5 us (min  2021.1)  23.26 TF/s  vs_rb  1.093  err  0.00781  
+dense         128x128k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=1500     2026.6 us (min  2025.1)  23.28 TF/s  vs_rb  1.094  err  0.00781  
+dense         128x256k32t8x16n2p8r8g16b0w0s1m0u1l8 out_proj      M=1500     2145.4 us (min  2122.8)  21.99 TF/s  vs_rb  1.033  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u2l8z out_proj      M=1500     2156.4 us (min  2136.6)  21.88 TF/s  vs_rb  1.028  err  0.00781  
+dense         128x128k32t16x8n2p0r8g16b0w0s1m0u4l8z out_proj      M=1500     2073.5 us (min  2064.4)  22.76 TF/s  vs_rb  1.069  err  0.00781  
+dense         128x128k32t16x8n2p0r2g16b0w0s1m0u1l8z out_proj      M=1500     2002.3 us (min  1987.4)  23.57 TF/s  vs_rb  1.107  err  0.00781  
+dense         256x128k32t8x16n2p8r4g16b0w0s1m0u2l8 out_proj      M=1500     2438.6 us (min  2370.8)  19.35 TF/s  vs_rb  0.909  err  0.00781  
+Sun Nov 15 06:01:49 AM CET 2026
+no docker buildx build (end)
+ 06:01:49 up 4 days, 21:23,  9 users,  load average: 9.06, 7.23, 6.14
