@@ -422,6 +422,20 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                 "fp16 weights (correct, not memory-saving)."
             )
 
+    def fold_silu(self, layer: torch.nn.Module) -> bool:
+        """Ask this (down projection) layer to run SiluAndMul in its input
+        transform: with RDNA_HINT_FLEX_FUSE_SILU=1, on the RDNA2 kernels in F16
+        compute mode, `apply` then takes the [M, 2K] gate | up output of the
+        gate_up projection instead of silu(gate) * up, and the activation launch
+        in front of the GEMV disappears. Called once per layer when the MLP is
+        built; the MLP skips its activation iff this returns True."""
+        if os.environ.get("RDNA_HINT_FLEX_FUSE_SILU", "0") in ("", "0"):
+            return False
+        if not self.use_kernels or self.compute_mode != COMPUTE_MODES["f16"]:
+            return False
+        layer.hi2_silu_input = True
+        return True
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -430,8 +444,17 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         shape = x.shape
         x2 = x.reshape(-1, shape[-1])
+        segments = layer._rdna_hint_flex_segments
+        silu = getattr(layer, "hi2_silu_input", False)
+        if silu and (len(segments) != 1 or not segments[0]["transform"]):
+            # No input transform to fold into: the plain activation.
+            act = torch.empty(
+                (x2.shape[0], x2.shape[-1] // 2), dtype=x2.dtype, device=x2.device
+            )
+            torch.ops._C.silu_and_mul(act, x2)
+            x2, silu = act, False
         outs = []
-        for seg in layer._rdna_hint_flex_segments:
+        for seg in segments:
             if self.use_kernels:
                 y = ops.rdna_hint_flex_linear_rdna2(
                     x2,
@@ -447,6 +470,7 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                     seg["transform"],
                     DECODE_MAX_M,
                     self.compute_mode,
+                    silu,
                 )
             else:
                 xt = x2
