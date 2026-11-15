@@ -10,6 +10,8 @@ builder runs on CPU tensors with the RDNA platform probes patched, so these
 tests need no GPU.
 """
 
+import dataclasses
+
 import pytest
 import torch
 
@@ -17,7 +19,9 @@ from tests.v1.attention.test_gdn_metadata_builder import (
     _DUMMY_MODEL_DIR,
     BLOCK_SIZE,
     DEVICE,
+    _create_gdn_builder,
 )
+from tests.v1.attention.test_gdn_metadata_builder import _build as _build_batch
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
@@ -40,7 +44,8 @@ def rdna2(monkeypatch):
     """An RDNA2 platform with the recipe's flags: in-place decode on, Triton
     conv update."""
     monkeypatch.setattr(gdn_attn, "on_rdna_family", lambda: True)
-    monkeypatch.setattr(gdn_attn, "on_rdna2", lambda: True)
+    monkeypatch.setattr(gdn_attn, "on_rdna2_hip", lambda: True)
+    monkeypatch.setattr(gdn_attn, "_gdn_decode_rdna2_loaded", lambda: True)
     monkeypatch.setattr(gdn_attn, "leapquant_gdn_enabled", lambda: False)
     monkeypatch.setenv("VLLM_RDNA_GDN_DECODE_INPLACE", "1")
     monkeypatch.setenv("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "0")
@@ -160,6 +165,50 @@ def test_other_kv_groups_stage_their_own_buffer(rdna2, mode):
     assert _indices(meta).tolist() == [5, 9]  # the first group is unchanged
 
 
+def _same(a, b) -> bool:
+    if isinstance(a, torch.Tensor):
+        return isinstance(b, torch.Tensor) and a.shape == b.shape and torch.equal(a, b)
+    if isinstance(a, dict):
+        return (
+            isinstance(b, dict)
+            and a.keys() == b.keys()
+            and all(_same(a[k], b[k]) for k in a)
+        )
+    return a == b
+
+
+# (num speculative tokens, seq_lens, query_lens, draft tokens per request or None)
+_NOT_PURE_DECODE = {
+    "mtp_verify": (2, [80, 96], [3, 3], [2, 2]),
+    "mtp_verify_with_a_row_that_did_not_draft": (
+        2,
+        [80, 96, 70],
+        [3, 3, 1],
+        [2, 2, -1],
+    ),
+    "mtp_verify_and_a_prefill": (2, [80, 50], [3, 50], [2, -1]),
+    "decode_and_a_prefill": (0, [64, 50], [1, 50], None),
+}
+
+
+@pytest.mark.parametrize("case", _NOT_PURE_DECODE.values(), ids=_NOT_PURE_DECODE.keys())
+def test_other_steps_keep_their_metadata(rdna2, monkeypatch, case):
+    """MTP verify and mixed prefill + decode steps never went through the
+    arenas: the flag leaves their metadata field for field what it was."""
+    num_spec, seq_lens, query_lens, draft = case
+    inplace = _create_gdn_builder(num_spec, full_cuda_graph=True, max_num_seqs=8)
+    monkeypatch.setenv("VLLM_RDNA_GDN_DECODE_INPLACE", "0")
+    arena = _create_gdn_builder(num_spec, full_cuda_graph=True, max_num_seqs=8)
+    assert inplace._decode_inplace and not arena._decode_inplace
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    table = torch.arange(1, 1 + 8 * len(seq_lens), dtype=torch.int32).view(-1, 8)
+    got = _build_batch(inplace, batch, draft, table)
+    want = _build_batch(arena, batch, draft, table)
+    assert not got.use_state_arenas and not want.use_state_arenas
+    for field in dataclasses.fields(GDNAttentionMetadata):
+        assert _same(getattr(got, field.name), getattr(want, field.name)), field.name
+
+
 @pytest.mark.parametrize("cache_mode", ["none", "align"])
 def test_cache_modes(rdna2, cache_mode):
     builder = _builder(cache_mode=cache_mode)
@@ -168,6 +217,26 @@ def test_cache_modes(rdna2, cache_mode):
     assert not meta.use_state_arenas
     assert _indices(meta).data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
     assert _indices(meta).tolist() == [5, 9]
+
+
+def test_align_mode_stages_the_last_block_of_each_request(rdna2, monkeypatch):
+    """Prefix caching (mamba align mode) keeps a request's state in the last
+    block of its table, a different column per request. The staged slots are
+    what the arena gather would have read."""
+    table = torch.tensor([[5, 6, 7, 8], [9, 10, 11, 12]], dtype=torch.int32)
+    seq_lens = [BLOCK_SIZE // 2, 2 * BLOCK_SIZE + 5]  # state in block 0 and block 2
+    inplace = _builder(cache_mode="align")
+    monkeypatch.setenv("VLLM_RDNA_GDN_DECODE_INPLACE", "0")
+    arena = _builder(cache_mode="align")
+    assert inplace._decode_inplace and not arena._decode_inplace
+    staged = _build(inplace, seq_lens, [1, 1], table)
+    reference = _build(arena, seq_lens, [1, 1], table)
+    assert reference.cache_slot_indices is not None
+    assert reference.cache_slot_indices.tolist() == [5, 11]
+    assert _indices(staged).tolist() == [5, 11]
+    assert (
+        _indices(staged).data_ptr() == inplace.non_spec_state_indices_tensor.data_ptr()
+    )
 
 
 def test_enable_predicate(rdna2, monkeypatch):
@@ -181,9 +250,23 @@ def test_enable_predicate(rdna2, monkeypatch):
     assert not gdn_decode_inplace_enabled(config)
     monkeypatch.setenv("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "0")
     assert gdn_decode_inplace_enabled(config)
-    monkeypatch.setattr(gdn_attn, "on_rdna2", lambda: False)
+    monkeypatch.setattr(gdn_attn, "on_rdna2_hip", lambda: False)
     assert not gdn_decode_inplace_enabled(config)
-    monkeypatch.setattr(gdn_attn, "on_rdna2", lambda: True)
+    monkeypatch.setattr(gdn_attn, "on_rdna2_hip", lambda: True)
+    # the layer's strided HIP decode is what was validated
+    for name in (
+        "VLLM_RDNA_GDN_OPAQUE",
+        "VLLM_GDN_DECODE_RDNA2",
+        "VLLM_GDN_STRIDED_INPUTS",
+    ):
+        monkeypatch.setenv(name, "0")
+        assert not gdn_decode_inplace_enabled(config), name
+        monkeypatch.setenv(name, "1")
+        assert gdn_decode_inplace_enabled(config), name
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(gdn_attn, "_gdn_decode_rdna2_loaded", lambda: False)
+    assert not gdn_decode_inplace_enabled(config)
+    monkeypatch.setattr(gdn_attn, "_gdn_decode_rdna2_loaded", lambda: True)
     monkeypatch.setattr(gdn_attn, "leapquant_gdn_enabled", lambda: True)
     assert not gdn_decode_inplace_enabled(config)
     monkeypatch.setattr(gdn_attn, "leapquant_gdn_enabled", lambda: False)

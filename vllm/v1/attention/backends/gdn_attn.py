@@ -17,7 +17,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
 )
 from vllm.model_executor.layers.mamba.ops.leapquant_gdn import leapquant_gdn_enabled
-from vllm.platforms.rdna import on_rdna2, on_rdna_family
+from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -43,6 +43,20 @@ GDN_ARENA_NULL_SLOT = 0
 
 logger = init_logger(__name__)
 
+# The layer switches that make `_rdna_strided_decode_inputs` true
+# (qwen_gdn_linear_attn.py): the in-place decode was validated with all of them on.
+_STRIDED_DECODE_ENVS = (
+    "VLLM_RDNA_GDN_OPAQUE",
+    "VLLM_GDN_DECODE_RDNA2",
+    "VLLM_GDN_STRIDED_INPUTS",
+)
+
+
+def _gdn_decode_rdna2_loaded() -> bool:
+    return hasattr(torch.ops, "_rocm_C") and hasattr(
+        torch.ops._rocm_C, "gdn_decode_rdna2"
+    )
+
 
 def gdn_decode_inplace_enabled(vllm_config: VllmConfig) -> bool:
     """``VLLM_RDNA_GDN_DECODE_INPLACE=1``: decode-only batches run on the paged
@@ -56,19 +70,29 @@ def gdn_decode_inplace_enabled(vllm_config: VllmConfig) -> bool:
     conv update skip NULL slots (zero output row, no state access). So the
     gather/scatter copies the arenas cost per layer are dead weight.
 
-    gfx10x, fp16 and the Triton conv update only (the HIP conv update runs a
-    NULL slot as an ordinary line, harmless in a private arena but a write
-    into the paged cache's null block), and not with LeapQuant state, whose
-    kernels were validated against the arenas. Anything else keeps the arenas.
+    Only the validated envelope: the gfx10x HIP kernels, an fp16 model, the HIP
+    GDN decode with strided inputs (``_rdna_strided_decode_inputs``) and the
+    Triton conv update (the HIP conv update runs a NULL slot as an ordinary
+    line, harmless in a private arena but a write into the paged cache's null
+    block), and not LeapQuant state, whose kernels were validated against the
+    arenas. Anything else keeps the arenas.
     """
     if os.environ.get("VLLM_RDNA_GDN_DECODE_INPLACE", "0") != "1":
         return False
-    if not on_rdna2():
-        reason = "it needs gfx10x"
+    if not on_rdna2_hip():
+        reason = "it needs the gfx10x HIP kernels (VLLM_RDNA_ALL_HIP=1)"
     elif vllm_config.model_config.dtype != torch.float16:
         reason = "it needs an fp16 model"
     elif os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1") != "0":
         reason = "it needs VLLM_CAUSAL_CONV1D_RDNA2_UPDATE=0 (Triton conv update)"
+    elif any(os.environ.get(name, "1") == "0" for name in _STRIDED_DECODE_ENVS):
+        reason = (
+            "it needs the HIP decode with strided inputs, none of "
+            + ", ".join(_STRIDED_DECODE_ENVS)
+            + " may be 0"
+        )
+    elif not _gdn_decode_rdna2_loaded():
+        reason = "the gdn_decode_rdna2 op is not built"
     elif leapquant_gdn_enabled():
         reason = "it does not cover LeapQuant state"
     else:
