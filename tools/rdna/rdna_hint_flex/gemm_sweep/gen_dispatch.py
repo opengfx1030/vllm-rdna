@@ -1,0 +1,228 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
+"""Generate the (N, K, M) -> design dispatch table of the HI2 prefill GEMM.
+
+Input: interleaved-window CSVs in the ``sweep.py`` format (``kind``, ``variant``,
+``shape``, ``N``, ``K``, ``M``, ``us``): rocBLAS rows (``rocblas_heur`` and
+``rocblas_tuned``) and dense rows of the designs in ``csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu``
+(``dense`` from ``sweep.py run`` or ``hip`` from ``bench_prod.py``). Per (N, K, M)
+cell: the design with the lowest time is the pick (the first design when it is
+within 1 % of the lowest), unless it is not at least ``--min-gain`` faster than
+the better of the two rocBLAS rows, in which case the cell stays on rocBLAS (-1).
+Later files override earlier ones for the same
+(kind, variant, N, K, M). The cells of one (N, K) slot become the anchors of its
+table row; the kernel serves an M by its nearest anchor and leaves M outside
+[``--lo-frac`` x first anchor, ``--hi-factor`` x last anchor] to rocBLAS.
+
+``--composite`` takes ``bench_linear.py`` CSVs (the whole composite op against
+rocBLAS in one window): a cell where the op with ``prefill_gemm=1`` is not at
+least ``--min-gain`` faster than the better rocBLAS row stays on rocBLAS even
+when the kernel alone measured faster (after the dequant pass the fp16 scratch
+is hot, which favours rocBLAS at the smallest M).
+
+    python gen_dispatch.py --csv confirm_f.csv --out ../../../../csrc/rocm/rdna_hint_flex_dense_gemm_table.cuh
+    python gen_dispatch.py --check ...   # exit 1 when the checked-in header differs
+
+The design list is the order of ``kDesigns`` in the .cu (a test keeps them equal).
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[3]
+KERNEL_CU = REPO / "csrc" / "rocm" / "rdna_hint_flex_dense_gemm_rdna2.cu"
+DEFAULT_OUT = REPO / "csrc" / "rocm" / "rdna_hint_flex_dense_gemm_table.cuh"
+
+# design id = index; same order as kDesigns in rdna_hint_flex_dense_gemm_rdna2.cu.
+# The table picks among the first NUM_MAIN (full-size tiles); the rest are the
+# tail designs (tail_design() in the .cu).
+DESIGNS = [
+    "128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf",
+    "128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf",
+    "128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf",
+    "256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf",
+    "32x128k64t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf",
+    "64x128k64t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf",
+]
+NUM_MAIN = 4
+DENSE_KINDS = ("dense", "hip")
+RB_KINDS = ("rocblas_heur", "rocblas_tuned")
+TIE = 1.01
+
+
+def kernel_design_names(path: Path = KERNEL_CU) -> list[str]:
+    """Design names as listed in the kDesigns table of the kernel source."""
+    import regex as re
+
+    text = path.read_text()
+    body = text[text.index("kDesigns[]") :]
+    body = body[: body.index("};")]
+    return re.findall(r'\{"([^"]+)",\s*\d+,\s*\d+,\s*\d+\}', body)
+
+
+def load(csvs: list[Path]) -> dict[tuple[int, int, int], dict[str, float]]:
+    """cells[(N, K, M)] = {"rb_heur": us, "rb_tuned": us, "<design>": us}."""
+    seen: dict[tuple, float] = {}
+    for p in csvs:
+        with open(p, newline="") as fh:
+            for r in csv.DictReader(fh):
+                if r["kind"] not in DENSE_KINDS + RB_KINDS or not r.get("us"):
+                    continue
+                if r["kind"] in DENSE_KINDS and r["variant"] not in DESIGNS:
+                    continue
+                key = (r["kind"], r["variant"], int(r["N"]), int(r["K"]), int(r["M"]))
+                seen[key] = float(r["us"])
+    cells: dict[tuple[int, int, int], dict[str, float]] = {}
+    for (kind, variant, n, k, m), us in seen.items():
+        name = {"rocblas_heur": "rb_heur", "rocblas_tuned": "rb_tuned"}.get(
+            kind, variant
+        )
+        cells.setdefault((n, k, m), {})[name] = us
+    return cells
+
+
+def load_veto(csvs: list[Path], min_gain: float) -> set[tuple[int, int, int]]:
+    """(N, K, M) cells where the composite op is not min_gain faster than rocBLAS."""
+    seen: dict[tuple, float] = {}
+    for p in csvs:
+        with open(p, newline="") as fh:
+            for r in csv.DictReader(fh):
+                if not r.get("us"):
+                    continue
+                if r["kind"] in RB_KINDS or (
+                    r["kind"] == "hip" and r["variant"] == "prefill_gemm=1"
+                ):
+                    key = (r["kind"], int(r["N"]), int(r["K"]), int(r["M"]))
+                    seen[key] = float(r["us"])
+    veto = set()
+    for (kind, n, k, m), us in seen.items():
+        rb = [seen[(kk, n, k, m)] for kk in RB_KINDS if (kk, n, k, m) in seen]
+        if kind == "hip" and rb and us * min_gain > min(rb):
+            veto.add((n, k, m))
+    return veto
+
+
+def pick_cell(row: dict[str, float], min_gain: float) -> tuple[int, float, float]:
+    """(design id or -1, best rocBLAS us, best design us) of one cell."""
+    rb = min(row[k] for k in ("rb_heur", "rb_tuned") if k in row)
+    best_id, best_us = -1, float("inf")
+    for i, d in enumerate(DESIGNS[:NUM_MAIN]):
+        if d in row and row[d] < best_us:
+            best_id, best_us = i, row[d]
+    # within TIE of the best: keep the first design (fewer kernels in play, and
+    # the measurement noise between two near-equal designs is a coin flip)
+    if best_id > 0 and DESIGNS[0] in row and row[DESIGNS[0]] <= best_us * TIE:
+        best_id, best_us = 0, row[DESIGNS[0]]
+    if best_id < 0 or best_us * min_gain > rb:
+        return -1, rb, best_us
+    return best_id, rb, best_us
+
+
+def build(cells, min_gain: float, lo_frac: float, hi_factor: float, veto=frozenset()):
+    slots: dict[tuple[int, int], list[tuple[int, int, float, float]]] = {}
+    for (n, k, m), row in sorted(cells.items()):
+        if not any(kk in row for kk in ("rb_heur", "rb_tuned")):
+            continue  # no rocBLAS reference: nothing to compare against
+        d, rb, us = pick_cell(row, min_gain)
+        if (n, k, m) in veto:
+            d = -1
+        slots.setdefault((n, k), []).append((m, d, rb, us))
+    return slots
+
+
+def render(
+    slots, csv_names: list[str], min_gain: float, lo_frac: float, hi_factor: float
+) -> str:
+    out = [
+        "// SPDX-License-Identifier: Apache-2.0",
+        "// SPDX-FileCopyrightText: Copyright contributors to the vLLM project",
+        "//",
+        "// (N, K, M) -> design table of the HI2 prefill GEMM. GENERATED by",
+        "// tools/rdna/rdna_hint_flex/gemm_sweep/gen_dispatch.py from "
+        + ", ".join(csv_names)
+        + ";",
+        f"// min gain over the better rocBLAS row {min_gain}; do not edit by hand.",
+        "// Per slot: measured M anchors with their design (-1 = rocBLAS faster or",
+        "// not clearly slower); an M is served by its nearest anchor inside",
+        f"// [{lo_frac} x first anchor, {hi_factor} x last anchor], rocBLAS outside.",
+        "#pragma once",
+        "",
+        "#include <cstdint>",
+        "",
+        "namespace vllm {",
+        "namespace rdna_hint_flex {",
+        "namespace gemm {",
+        "",
+        "struct Anchor {",
+        "  int32_t m;",
+        "  int32_t design;",
+        "};",
+        "struct Slot {",
+        "  int32_t n, k, m_lo, m_hi, count;",
+        "  const Anchor* anchors;",
+        "};",
+        "",
+    ]
+    names = []
+    for (n, k), cells in slots.items():
+        nm = f"kAnchors_{n}_{k}"
+        names.append((n, k, nm, cells))
+        out.append(f"inline constexpr Anchor {nm}[] = {{")
+        for m, d, rb, us in cells:
+            out.append(f"    {{{m}, {d}}},  // rocBLAS {rb:.0f} us, design {us:.0f} us")
+        out.append("};")
+        out.append("")
+    out.append("inline constexpr Slot kSlots[] = {")
+    for n, k, nm, cells in names:
+        lo = int(cells[0][0] * lo_frac)
+        hi = int(cells[-1][0] * hi_factor + 0.999)
+        out.append(f"    {{{n}, {k}, {lo}, {hi}, {len(cells)}, {nm}}},")
+    out.append("};")
+    out.append("")
+    out += [
+        "}  // namespace gemm",
+        "}  // namespace rdna_hint_flex",
+        "}  // namespace vllm",
+        "",
+    ]
+    return "\n".join(out)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawTextHelpFormatter
+    )
+    ap.add_argument("--csv", action="append", required=True, type=Path)
+    ap.add_argument("--composite", action="append", default=[], type=Path)
+    ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--min-gain", type=float, default=1.01)
+    ap.add_argument("--lo-frac", type=float, default=0.75)
+    ap.add_argument("--hi-factor", type=float, default=2.0)
+    ap.add_argument("--check", action="store_true")
+    args = ap.parse_args()
+    if kernel_design_names() != DESIGNS:
+        sys.exit(f"DESIGNS differs from kDesigns in {KERNEL_CU}")
+    veto = load_veto(args.composite, args.min_gain)
+    slots = build(load(args.csv), args.min_gain, args.lo_frac, args.hi_factor, veto)
+    names = [p.name for p in args.csv]
+    if args.composite:
+        names.append("vetoed by " + ", ".join(p.name for p in args.composite))
+    text = render(slots, names, args.min_gain, args.lo_frac, args.hi_factor)
+    if args.check:
+        same = args.out.exists() and args.out.read_text() == text
+        print("table is current" if same else f"{args.out} differs from the CSVs")
+        return 0 if same else 1
+    args.out.write_text(text)
+    for (n, k), cells in slots.items():
+        print(f"N={n} K={k}: " + " ".join(f"M{m}:{d}" for m, d, _, _ in cells))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

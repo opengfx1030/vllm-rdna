@@ -323,13 +323,18 @@ rdse_tunableop_report() {
         return
     fi
     if [[ -f $lib ]] && command -v sha256sum >/dev/null 2>&1; then
-        local sha match
+        local sha picked mode name
         sha=$(sha256sum -- "$lib")
         sha=${sha:0:12}
-        match=$(_tunableop_profiles "$rows_root/profiles.json" |
-            awk -F'\t' -v h="$sha" 'substr($3, 1, 12) == h { print $1; exit }')
-        if [[ -n $match ]]; then
-            rdse_profile_line="$match (auto-selected for librocblas.so.5 $sha)"
+        picked=$(_tunableop_pick "$rows_root/profiles.json" "$sha" "" "${TUNABLEOP_PREFER:-}")
+        IFS=$'\t' read -r mode name _ <<< "$picked"
+        if [[ $mode == preferred ]]; then
+            rdse_profile_line="$name (preferred via TUNABLEOP_PREFER for librocblas.so.5 $sha)"
+        elif [[ -n $name ]]; then
+            rdse_profile_line="$name (auto-selected for librocblas.so.5 $sha)"
+            if [[ -n ${TUNABLEOP_PREFER:-} ]]; then
+                rdse_profile_line+="; preferred ${TUNABLEOP_PREFER} is not registered for this build"
+            fi
         else
             rdse_profile_line="no profile matches librocblas.so.5 $sha; per-user fallback row set"
         fi
@@ -470,6 +475,11 @@ RDSE_ENV_KEYS=(
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
     VLLM_PLE_CPU_OFFLOAD VLLM_PLE_OFFLOAD_READY_TIMEOUT VLLM_PLE_QUANT_DIR
     VLLM_EXL3_DEBUG
+    VLLM_RDNA_HINT_FLEX_COMPUTE_MODE RDNA_HINT_FLEX_GEMV RDNA_HINT_FLEX_GEMV_SPLIT
+    RDNA_HINT_FLEX_FUSE_SILU RDNA_HINT_FLEX_PREFILL RDNA_HINT_FLEX_PREFILL_GEMM
+    RDNA_HINT_FLEX_MOE_GROUPED_MIN
+    VLLM_FA_RDNA2_UNFUSED_PREFILL VLLM_RDNA_GEMMA_RESIDUAL_DIRECT VLLM_RDNA_GDN_DECODE_INPLACE
+    VLLM_RDNA_LM_HEAD_GEMV_MAX_M
     VLLM_RDNA_DECODE_STALL_MS VLLM_RDNA_DECODE_SHARE VLLM_DECODE_STALL_MAX_OVERHEAD VLLM_DECODE_STALL_FIT_ALL
     NCCL_P2P_LEVEL NCCL_P2P_DISABLE RCCL_P2P_NET_DISABLE RCCL_P2P_BATCH_ENABLE NCCL_PROTO
     RCCL_MSCCL_ENABLE

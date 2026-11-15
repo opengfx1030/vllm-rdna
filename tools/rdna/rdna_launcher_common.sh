@@ -12,7 +12,7 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/rdna_launcher_common.sh"
 #   MODEL=/path/to/ckpt VENV=/path/to/venv
 #   rdna_init                 # tree, venv, ROCm SDK, shared vLLM env, caches
-#   rdna_tunableop            # honours TUNABLEOP=0/1, TUNABLEOP_PROFILE/ROOT
+#   rdna_tunableop            # honours TUNABLEOP=0/1, TUNABLEOP_PROFILE/PREFER/ROOT
 #   rdna_select_attention fa  # fa | triton  (sets $attention_backend)
 #   rdna_mtp_args 2           # sets $spec_args and $capture_sizes
 #   rdna_kill_stale           # scoped to $VLLM_CACHE_ROOT
@@ -25,6 +25,9 @@
 #   ROCM_SDK_ROOT                (default: /opt/rocm/core-7.14)
 #   TUNABLEOP=0|1                (default: 1)
 #   TUNABLEOP_PROFILE=<name>     explicit TunableOp profile (validated)
+#   TUNABLEOP_PREFER=<name>      soft choice (a recipe's rows on top of the canonical
+#                                profile): used when registered for this rocBLAS build,
+#                                else auto-select; never fails a launch
 #   VLLM_CACHE_ROOT / TRITON_CACHE_DIR / TORCHINDUCTOR_CACHE_DIR /
 #   TORCH_EXTENSIONS_DIR         (default: <tree>/cache/*)
 #   RUN_CWD                      (default: <tree>/cache/run; never /tmp)

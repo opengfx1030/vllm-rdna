@@ -1,0 +1,11 @@
+Sun Nov 15 02:12:59 AM CET 2026
+no docker buildx build (start)
+ 02:13:00 up 4 days, 17:34, 14 users,  load average: 6.42, 7.94, 11.18
+=== shape gate_up 02:13:00
+=== shape in_proj_qkvz 02:22:15
+=== shape down 02:31:41
+=== shape qkv_proj 02:40:42
+=== shape out_proj 02:47:29
+Sun Nov 15 02:54:08 AM CET 2026
+no docker buildx build (end)
+ 02:54:08 up 4 days, 18:15, 11 users,  load average: 8.26, 12.87, 15.08

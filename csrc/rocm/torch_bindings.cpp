@@ -1193,7 +1193,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.def(
       "rdna_hint_flex_act_transform_rdna2(Tensor x, Tensor col_scale, Tensor "
       "had, "
-      "Tensor! out) -> ()");
+      "Tensor! out, bool pair_interleaved=False, bool silu_mul=False) -> ()");
   rocm_ops.impl("rdna_hint_flex_act_transform_rdna2", torch::kCUDA,
                 &rdna_hint_flex_act_transform_rdna2);
   rocm_ops.def(
@@ -1202,6 +1202,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor row_nbits, Tensor row_block, Tensor! out) -> ()");
   rocm_ops.impl("rdna_hint_flex_gemv_rdna2", torch::kCUDA,
                 &rdna_hint_flex_gemv_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_gemv2_rdna2(Tensor x, Tensor codes, Tensor code_off, "
+      "Tensor blk_params, Tensor param_off, Tensor row_consts, "
+      "Tensor row_nbits, Tensor row_block, Tensor! out, int mt, int rpw, "
+      "int wpb, bool x_pi) -> ()");
+  rocm_ops.impl("rdna_hint_flex_gemv2_rdna2", torch::kCUDA,
+                &rdna_hint_flex_gemv2_rdna2);
   rocm_ops.def(
       "rdna_hint_flex_dequant_rdna2(Tensor codes, Tensor code_off, Tensor "
       "blk_params, "
@@ -1213,9 +1220,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "rdna_hint_flex_linear_rdna2(Tensor x, Tensor col_scale, Tensor had, "
       "Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, "
       "Tensor row_consts, Tensor row_nbits, Tensor row_block, "
-      "bool transform, int decode_max_m, int mode) -> Tensor");
+      "bool transform, int decode_max_m, int mode, bool silu_mul=False, "
+      "int prefill_gemm=0) -> Tensor");
   rocm_ops.impl("rdna_hint_flex_linear_rdna2", torch::kCUDA,
                 &rdna_hint_flex_linear_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_dense_gemm_rdna2(Tensor x, Tensor w, Tensor! out, "
+      "int design=-1) -> ()");
+  rocm_ops.impl("rdna_hint_flex_dense_gemm_rdna2", torch::kCUDA,
+                &rdna_hint_flex_dense_gemm_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_dense_gemm_pick_rdna2(int m, int n, int k) -> int");
+  rocm_ops.impl("rdna_hint_flex_dense_gemm_pick_rdna2",
+                &rdna_hint_flex_dense_gemm_pick_rdna2);
   rocm_ops.def(
       "rdna_hint_flex_act_quant_rdna2(Tensor x, Tensor col_scale, Tensor had, "
       "bool transform, Tensor! xq, Tensor! sx, Tensor! sumq) -> ()");

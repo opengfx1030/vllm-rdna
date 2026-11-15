@@ -1,0 +1,58 @@
+== isa/prod/awq_a128
+hot loop: 2385 instructions, 1024 v_dot2 (42.9%), 64 other FMA-class
+per v_dot2: ds_read 0.062  ds_write 0.000  global_load 0.012  other VALU 0.887  total instr 2.329
+VALU instructions per v_dot2: 1.887 -> issue-bound ceiling 9.77 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 192/1024
+== isa/prod/gemm2_128
+hot loop: 1171 instructions, 512 v_dot2 (43.7%), 52 other FMA-class
+per v_dot2: ds_read 0.086  ds_write 0.016  global_load 0.023  other VALU 0.801  total instr 2.287
+VALU instructions per v_dot2: 1.801 -> issue-bound ceiling 10.24 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 296/512
+== isa/tensile/mt128x256_tt8_16_wgm8
+hot loop: 1155 instructions, 1024 v_dot2 (88.7%), 0 other FMA-class
+per v_dot2: ds_read 0.047  ds_write 0.023  global_load 0.003  other VALU 0.004  total instr 1.128
+VALU instructions per v_dot2: 1.004 -> issue-bound ceiling 18.36 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 256/1024
+== isa/tensile/mt128x128_tt8_16_wgm1
+hot loop: 1166 instructions, 1024 v_dot2 (87.8%), 0 other FMA-class
+per v_dot2: ds_read 0.047  ds_write 0.031  global_load 0.004  other VALU 0.004  total instr 1.139
+VALU instructions per v_dot2: 1.004 -> issue-bound ceiling 18.36 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 256/1024
+== 128x128k32t8x8n2p8r0g16b0w0s1m0u1
+hot loop: 632 instructions, 512 v_dot2 (81.0%), 0 other FMA-class
+per v_dot2: ds_read 0.062  ds_write 0.008  global_load 0.016  other VALU 0.023  total instr 1.234
+VALU instructions per v_dot2: 1.023 -> issue-bound ceiling 18.01 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 512/512
+== 256x128k32t16x8n2p8r0g16b0w0s1m0u1
+hot loop: 1188 instructions, 1024 v_dot2 (86.2%), 0 other FMA-class
+per v_dot2: ds_read 0.047  ds_write 0.006  global_load 0.012  other VALU 0.016  total instr 1.160
+VALU instructions per v_dot2: 1.016 -> issue-bound ceiling 18.15 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 1024/1024
+== 128x128k32t16x8n2p8r0g16b0w0s1m0u1l8
+hot loop: 655 instructions, 512 v_dot2 (78.2%), 0 other FMA-class
+per v_dot2: ds_read 0.047  ds_write 0.016  global_load 0.031  other VALU 0.080  total instr 1.279
+VALU instructions per v_dot2: 1.080 -> issue-bound ceiling 17.07 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 256/512
+== 128x128k64t8x8n1p0r0g16b0w6s1m0u1z
+hot loop: 295 instructions, 256 v_dot2 (86.8%), 0 other FMA-class
+per v_dot2: ds_read 0.062  ds_write 0.000  global_load 0.000  other VALU 0.016  total instr 1.152
+VALU instructions per v_dot2: 1.016 -> issue-bound ceiling 18.15 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 0/256
+== 128x128k32t8x8n2p8r0g16b0w0s1m0u1q1
+hot loop: 637 instructions, 512 v_dot2 (80.4%), 0 other FMA-class
+per v_dot2: ds_read 0.062  ds_write 0.008  global_load 0.016  other VALU 0.035  total instr 1.244
+VALU instructions per v_dot2: 1.035 -> issue-bound ceiling 17.81 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 0/512
+== 128x128k32t16x8n2p8r0g16b0w0s1m0u1l8o1
+hot loop: 657 instructions, 512 v_dot2 (77.9%), 0 other FMA-class
+per v_dot2: ds_read 0.047  ds_write 0.016  global_load 0.031  other VALU 0.080  total instr 1.283
+VALU instructions per v_dot2: 1.080 -> issue-bound ceiling 17.07 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 256/512
+
+variant                                        thr  vgpr spill scratch    lds  waves/SIMD(compiler)
+128x128k32t8x8n2p8r0g16b0w0s1m0u1              256   166     0      0  40960      5
+256x128k32t16x8n2p8r0g16b0w0s1m0u1             256   228     0      0  61440      4
+128x128k32t16x8n2p8r0g16b0w0s1m0u1l8           128   249     0      0  40960      3
+128x128k64t8x8n1p0r0g16b0w6s1m0u1z             256   159     0      0  32768      6
+128x128k32t8x8n2p8r0g16b0w0s1m0u1q1            256   172     0      0  40960      5
+128x128k32t16x8n2p8r0g16b0w0s1m0u1l8o1         128   248     0      0  40960      3

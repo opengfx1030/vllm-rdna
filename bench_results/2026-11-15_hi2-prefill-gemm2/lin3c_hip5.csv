@@ -1,0 +1,15 @@
+phase,kind,variant,shape,N,K,M,us,us_min,tflops,vs_rb,max_abs,rel_fro,rel_fp32,vgpr,lds,scratch,threads,blocks_per_wgp,waves_per_simd,gfx_mhz,power_w,note
+lin3c,rocblas_heur,default,gate_up,17408,5120,512,4360.1,4319.0,20.93,0.998,,,0.00e+00,,,,,,,1704.0,174.0, vs_heur 1.000
+lin3c,rocblas_tuned,tunableop,gate_up,17408,5120,512,4350.3,4312.4,20.98,1.0,,,0.00e+00,,,,,,,1704.0,175.0,Default vs_heur 1.002
+lin3c,hip,prefill_gemm=1,gate_up,17408,5120,512,4540.4,4371.9,20.1,0.958,,,2.28e-05,,,,,,,1874.5,174.0,mode 1 vs_heur 0.960
+lin3c,rocblas_heur,default,gate_up,17408,5120,384,4176.1,4144.8,16.39,1.0,,,0.00e+00,,,,,,,1765.0,175.0, vs_heur 1.000
+lin3c,hip,prefill_gemm=1,gate_up,17408,5120,384,3494.1,3475.0,19.59,1.195,,,2.30e-05,,,,,,,1810.0,174.0,mode 1 vs_heur 1.195
+lin3c,rocblas_heur,default,gate_up,17408,5120,448,4291.2,4267.4,18.61,1.0,,,0.00e+00,,,,,,,1729.0,174.0, vs_heur 1.000
+lin3c,hip,prefill_gemm=1,gate_up,17408,5120,448,4133.4,4087.2,19.32,1.038,,,2.21e-05,,,,,,,1723.0,175.0,mode 1 vs_heur 1.038
+lin3c,rocblas_heur,default,gate_up,17408,5120,576,6028.5,5992.9,17.03,1.0,,,0.00e+00,,,,,,,1730.0,175.0, vs_heur 1.000
+lin3c,hip,prefill_gemm=1,gate_up,17408,5120,576,5093.7,4981.5,20.16,1.184,,,2.25e-05,,,,,,,1723.5,175.0,mode 1 vs_heur 1.184
+lin3c,rocblas_heur,default,gate_up,17408,5120,640,6039.9,5955.4,18.89,1.0,,,0.00e+00,,,,,,,1566.0,175.0, vs_heur 1.000
+lin3c,hip,prefill_gemm=1,gate_up,17408,5120,640,5183.2,5094.1,22.01,1.165,,,2.27e-05,,,,,,,1711.0,174.0,mode 1 vs_heur 1.165
+lin3c,rocblas_heur,default,gate_up,17408,5120,512,4416.4,4398.4,20.67,0.998,,,0.00e+00,,,,,,,1674.0,174.0, vs_heur 1.000
+lin3c,rocblas_tuned,tunableop,gate_up,17408,5120,512,4409.0,4390.5,20.7,1.0,,,0.00e+00,,,,,,,1676.0,175.0,Default vs_heur 1.002
+lin3c,hip,prefill_gemm=1,gate_up,17408,5120,512,4508.4,4347.7,20.24,0.978,,,2.27e-05,,,,,,,1795.5,174.0,mode 1 vs_heur 0.980

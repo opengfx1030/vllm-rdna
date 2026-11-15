@@ -352,6 +352,12 @@ if TYPE_CHECKING:
     VLLM_PLE_DISK_OFFLOAD_DIR: str = ""
     VLLM_PLE_QUANT_DIR: str = ""
     VLLM_RDNA_DENSE_INT8: bool = False
+    # gfx10x only: GemmaRMSNorm with a residual (Qwen3.5/3.8 hybrid decoder
+    # norms) caches its fp16 (1 + w) scale and runs torch.ops._C.fused_add_rms_norm
+    # in place on x and residual, dropping 3 scale launches and 2 clone launches
+    # per call. Default off; audited for Qwen3.5 / Qwen3.8 only, see
+    # docs/rdna2/hi2-residual-direct-2026-11-15.md
+    VLLM_RDNA_GEMMA_RESIDUAL_DIRECT: bool = False
     VLLM_RDNA_FUSED_HC: bool = True
     VLLM_RDNA_FUSED_SE: bool = True
     # Qwen4Exp / Qwen3.8-Flash-Next on gfx1030: HIP paths for the HC prefill
@@ -2308,6 +2314,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PLE_DISK_OFFLOAD_DIR": lambda: os.getenv("VLLM_PLE_DISK_OFFLOAD_DIR", ""),
     "VLLM_PLE_QUANT_DIR": lambda: os.getenv("VLLM_PLE_QUANT_DIR", ""),
     "VLLM_RDNA_DENSE_INT8": lambda: os.getenv("VLLM_RDNA_DENSE_INT8", "0") == "1",
+    "VLLM_RDNA_GEMMA_RESIDUAL_DIRECT": lambda: (
+        os.getenv("VLLM_RDNA_GEMMA_RESIDUAL_DIRECT", "0") == "1"
+    ),
     "VLLM_RDNA_FUSED_HC": lambda: os.getenv("VLLM_RDNA_FUSED_HC", "1") == "1",
     "VLLM_RDNA_FUSED_SE": lambda: os.getenv("VLLM_RDNA_FUSED_SE", "1") == "1",
     "VLLM_RDNA_HC_PREFILL_HIP": lambda: (

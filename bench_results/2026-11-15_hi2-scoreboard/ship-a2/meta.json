@@ -1,0 +1,22 @@
+{
+ "arm": "ship-a2",
+ "recipe": "27b-hi2-tp2",
+ "model": "/home/chenco_adm/.cache/huggingface/hub/models--BlivionIaG--Qwen3.8-27B-HI2-3.0bpw/snapshots/db2a3aa3cd5efb0f92403cd4864e1f0d99378149",
+ "gpus": "0,1",
+ "buses": "d1 d4",
+ "cells": [
+  "1024:512:1:16",
+  "1024:512:8:16",
+  "16384:1024:1:8",
+  "16384:1024:8:16",
+  "32768:2048:1:4"
+ ],
+ "quiet_hold": "1",
+ "overrides": "",
+ "tree_sha": "15a4bc6f49",
+ "build_running_start": "0",
+ "start": "2026-11-15 21:21:01",
+ "env": {},
+ "build_running_end": "0",
+ "serve_validate_rc": 0
+}
