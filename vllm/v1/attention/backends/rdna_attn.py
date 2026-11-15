@@ -38,6 +38,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops import rdna_unfused_prefill as unfused_prefill
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     has_native_kv_cache_layout,
 )
@@ -71,6 +72,9 @@ _SUPPORTED_HEAD_SIZES: tuple[int, ...] = (128, 256)
 # 0.38x, B=8 H12/2 0.80x, vs 1.10-1.21x for B=8 H6/1).
 _SPLIT_DECODE_MAX_ROWS: int = 256
 _SUPPORTED_ARCH_PREFIX: str = "gfx103"
+# Head sizes whose long prefill chunks may take the unfused GEMM path (opt-in,
+# VLLM_FA_RDNA2_UNFUSED_PREFILL=1): measured at head_dim 256 only.
+_UNFUSED_HEAD_SIZES: tuple[int, ...] = (256,)
 
 
 def _on_gfx10x() -> bool:
@@ -168,6 +172,27 @@ class RdnaAttentionMetadata:
     num_decode_tokens: int = 0
     # None for single-token decode batches.
     decode_query_start_loc: torch.Tensor | None = None
+    # Per-row query and KV lengths on the host, set only when the unfused
+    # prefill path is enabled and a row has at least its min_q tokens.
+    host_q_lens: list[int] | None = None
+    host_kv_lens: list[int] | None = None
+
+
+def _set_host_row_lens(
+    meta: RdnaAttentionMetadata, cm: CommonAttentionMetadata
+) -> None:
+    """Copy the per-row lengths of a prefill step to the host (no GPU sync).
+
+    ``seq_lens_cpu_upper_bound`` is exact for prefill rows, the only rows the
+    unfused path takes (it is optimistic for async-spec decode rows).
+    """
+    upper = cm.seq_lens_cpu_upper_bound
+    if upper is None:
+        return
+    n = cm.num_reqs
+    qsl = cm.query_start_loc_cpu
+    meta.host_q_lens = (qsl[1 : n + 1] - qsl[:n]).tolist()
+    meta.host_kv_lens = upper[:n].tolist()
 
 
 class RdnaAttentionMetadataBuilder(AttentionMetadataBuilder[RdnaAttentionMetadata]):
@@ -179,6 +204,8 @@ class RdnaAttentionMetadataBuilder(AttentionMetadataBuilder[RdnaAttentionMetadat
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        unfused_cfg = unfused_prefill.config_from_env()
+        self._unfused_min_q = unfused_cfg.min_q if unfused_cfg is not None else 0
         if _split_decode_enabled():
             self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
@@ -217,6 +244,8 @@ class RdnaAttentionMetadataBuilder(AttentionMetadataBuilder[RdnaAttentionMetadat
             prefill_query_start_loc=cm.query_start_loc,
             max_prefill_seq_len=cm.max_seq_len,
         )
+        if self._unfused_min_q and cm.max_query_len >= self._unfused_min_q:
+            _set_host_row_lens(meta, cm)
         if cm.max_query_len <= 1:
             meta.num_decodes = cm.num_reqs
             meta.num_decode_tokens = cm.num_actual_tokens
@@ -311,6 +340,22 @@ class RdnaAttentionImpl(AttentionImpl):
             self.sliding_window = (-1, -1)
         else:
             self.sliding_window = (sliding_window - 1, 0)
+        # Opt-in: long prefill chunks as rocBLAS GEMMs (VLLM_FA_RDNA2_UNFUSED_PREFILL).
+        self._unfused = (
+            unfused_prefill.config_from_env()
+            if head_size in _UNFUSED_HEAD_SIZES and not self._is_int4_fp16
+            else None
+        )
+        if self._unfused is not None:
+            logger.info_once(
+                "RDNA_ATTN: unfused prefill attention enabled (query rows >= %d, "
+                "scratch <= %d MiB, query block <= %d rows); the flash kernel "
+                "keeps decode, verify, short chunks and sequences above the "
+                "scratch bound",
+                self._unfused.min_q,
+                self._unfused.scratch_bytes >> 20,
+                self._unfused.max_qblock,
+            )
 
     def _can_run_fa_rdna2(
         self,
@@ -490,6 +535,7 @@ class RdnaAttentionImpl(AttentionImpl):
                         paged_block_size,
                         sliding_window,
                         dst[nd_tok:],
+                        host_rows=self._host_rows(attn_metadata, nd),
                     )
             else:
                 self._forward_prefill(
@@ -503,6 +549,7 @@ class RdnaAttentionImpl(AttentionImpl):
                     paged_block_size,
                     sliding_window,
                     dst,
+                    host_rows=self._host_rows(attn_metadata, 0),
                 )
         if dst is not out:
             out.copy_(dst)
@@ -611,7 +658,160 @@ class RdnaAttentionImpl(AttentionImpl):
             out.copy_(dst)
         return output
 
+    def _host_rows(
+        self, meta: RdnaAttentionMetadata, first_row: int
+    ) -> tuple[list[int], list[int]] | None:
+        if (
+            self._unfused is None
+            or meta.host_q_lens is None
+            or meta.host_kv_lens is None
+        ):
+            return None
+        return meta.host_q_lens[first_row:], meta.host_kv_lens[first_row:]
+
     def _forward_prefill(
+        self,
+        q: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seqused_k: torch.Tensor,
+        max_seqlen_k: int,
+        paged_block_size: int,
+        sliding_window: int,
+        dst: torch.Tensor,
+        causal: bool = True,
+        host_rows: tuple[list[int], list[int]] | None = None,
+    ) -> None:
+        if (
+            host_rows is not None
+            and self._unfused is not None
+            and causal
+            and sliding_window == 0
+            and q.dtype == torch.float16
+            and key_cache.dtype == torch.float16
+            and value_cache.dtype == torch.float16
+            and self._forward_prefill_unfused(
+                q,
+                key_cache,
+                value_cache,
+                block_table,
+                cu_seqlens_q,
+                seqused_k,
+                max_seqlen_k,
+                paged_block_size,
+                dst,
+                host_rows,
+            )
+        ):
+            return
+        self._forward_prefill_kernels(
+            q,
+            key_cache,
+            value_cache,
+            block_table,
+            cu_seqlens_q,
+            seqused_k,
+            max_seqlen_k,
+            paged_block_size,
+            sliding_window,
+            dst,
+            causal=causal,
+        )
+
+    def _forward_prefill_unfused(
+        self,
+        q: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seqused_k: torch.Tensor,
+        max_seqlen_k: int,
+        paged_block_size: int,
+        dst: torch.Tensor,
+        host_rows: tuple[list[int], list[int]],
+    ) -> bool:
+        """Long rows as GEMMs, the rest through the flash kernel.
+
+        Returns False without touching ``dst`` when no row qualifies (or the
+        host lengths do not describe this call), and after an out-of-memory
+        error, which also turns the path off: the caller then runs the flash
+        kernel over the whole call.
+        """
+        cfg = self._unfused
+        assert cfg is not None
+        q_lens, kv_lens = host_rows
+        if len(q_lens) != seqused_k.size(0) or sum(q_lens) != q.size(0):
+            return False
+        group = self.num_heads // self.num_kv_heads
+        plans = [
+            unfused_prefill.plan_query_block(
+                n,
+                s,
+                group,
+                self.num_kv_heads,
+                self.head_size,
+                cfg.scratch_bytes,
+                cfg.max_qblock,
+            )
+            if n >= cfg.min_q
+            else 0
+            for n, s in zip(q_lens, kv_lens)
+        ]
+        if not any(plans):
+            return False
+        try:
+            tok = 0
+            i = 0
+            while i < len(q_lens):
+                if plans[i]:
+                    n = q_lens[i]
+                    unfused_prefill.unfused_paged_prefill(
+                        q[tok : tok + n],
+                        key_cache,
+                        value_cache,
+                        block_table[i],
+                        kv_lens[i],
+                        self.scale,
+                        dst[tok : tok + n],
+                        plans[i],
+                    )
+                    tok += n
+                    i += 1
+                    continue
+                # A run of rows that stay on the flash kernel.
+                j, end = i, tok
+                while j < len(q_lens) and not plans[j]:
+                    end += q_lens[j]
+                    j += 1
+                if end > tok:
+                    self._forward_prefill_kernels(
+                        q[tok:end],
+                        key_cache,
+                        value_cache,
+                        block_table[i:j],
+                        cu_seqlens_q[i : j + 1] - cu_seqlens_q[i],
+                        seqused_k[i:j],
+                        max_seqlen_k,
+                        paged_block_size,
+                        0,
+                        dst[tok:end],
+                    )
+                tok, i = end, j
+        except torch.OutOfMemoryError:
+            logger.warning_once(
+                "RDNA_ATTN: unfused prefill ran out of memory; falling back to "
+                "the flash kernel for the rest of the run (lower "
+                "VLLM_FA_RDNA2_UNFUSED_PREFILL_SCRATCH_MB)"
+            )
+            self._unfused = None
+            return False
+        logger.info_once("RDNA_ATTN: unfused prefill attention is serving long chunks")
+        return True
+
+    def _forward_prefill_kernels(
         self,
         q: torch.Tensor,
         key_cache: torch.Tensor,
