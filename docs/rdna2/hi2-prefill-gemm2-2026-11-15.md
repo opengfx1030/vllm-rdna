@@ -52,6 +52,10 @@ the arm compares the kernel with the better rocBLAS row at the 16k/32k c=1 chunk
 with the heuristic at the c=8 M = 1025..1031 chunks, which are 3 of the 5 scoreboard cells (census:
 `~/w4a8_runs/hi2-tunable/sched/census.txt`). Compare against the same recipe without the argument.
 
+Result: arms `gemm` (HIP 2,3), `final2-a2` and `final2-mtp2-a2` (HIP 0,1) in
+[`hi2-27b-tp2-serving.md`](hi2-27b-tp2-serving.md#dense-hip-prefill-gemm). The switch is on in the
+`27b-hi2-tp2*` recipes.
+
 ## Kernel level: the production grid (`prod_b1.csv`, HIP 5, a7 build)
 
 The four shipped designs (D1 `128x128k32 8x16 r8`, D2 = D1 with groups of 4, D3 `128x64k64 8x8`, D4 `256x128k32

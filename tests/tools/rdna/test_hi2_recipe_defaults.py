@@ -240,7 +240,8 @@ def test_recipe_serving_shape(venv, name):
         assert fragment in out, (name, fragment)
 
 
-def test_pending_prefill_gemm_is_a_commented_one_line_flip():
+def test_prefill_gemm_recipe_line_follows_the_table():
+    """The recipes set PREFILL_GEMM as the doc table says, else a commented line."""
     default = switch_table()["RDNA_HINT_FLEX_PREFILL_GEMM"][0]
     for name in HI2:
         text = (RECIPES / f"{name}.env").read_text()

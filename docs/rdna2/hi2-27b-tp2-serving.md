@@ -61,8 +61,10 @@ What a good boot logs (each line is printed once by a worker or the launcher):
   allocated, so `VLLM_RDNA_GDN_DECODE_INPLACE` did not take effect. When it is refused the
   worker logs `VLLM_RDNA_GDN_DECODE_INPLACE=1 ignored, the GDN decode keeps its state arenas:
   <reason>`.
-- `RDNA_HINT_FLEX_GEMV`, `RDNA_HINT_FLEX_FUSE_SILU` and `VLLM_RDNA_LM_HEAD_GEMV_MAX_M` log
-  nothing; `PRINT=1` shows the values the launcher exports.
+- `RDNA_HINT_FLEX_GEMV`, `RDNA_HINT_FLEX_FUSE_SILU`, `VLLM_RDNA_LM_HEAD_GEMV_MAX_M` and
+  `RDNA_HINT_FLEX_PREFILL_GEMM` log nothing when they take effect; `PRINT=1` shows the values
+  the launcher exports. A `_rocm_C` older than this tree makes the model log one warning
+  (`this _rocm_C build has no rdna_hint_flex_dense_gemm_rdna2; prefill stays on rocBLAS`).
 - `Unknown vLLM environment variable detected: VLLM_RDNA_...` warnings from the API server
   are cosmetic: the fork reads these variables directly and does not register them in
   `vllm/envs.py` (the allreduce and conv1d variables of every recipe do the same).
@@ -74,7 +76,8 @@ in `27b-hi2-tp2` and `27b-hi2-tp2-mtp2`. The first column is what the recipes se
 column the one-line opt-out. `tests/tools/rdna/test_hi2_recipe_defaults.py` reads this table
 and fails when a recipe and the table disagree, or when an opt-out does not win over the
 recipe (on the command line and in the caller's environment). Effects are scoreboard arms
-against the flags-off `base` arm, see [Measured results](#measured-results).
+against the flags-off `base` arm (the last row: against `final-a2`, which has the other
+seven on), see [Measured results](#measured-results).
 
 | Recipe default | What it does | Measured effect | Opt-out |
 | --- | --- | --- | --- |
@@ -85,7 +88,7 @@ against the flags-off `base` arm, see [Measured results](#measured-results).
 | `RDNA_HINT_FLEX_FUSE_SILU=1` | The dense MLP's SiluAndMul is folded into the down projection's activation transform: 64 launches fewer per step, outputs bit-identical to the unfused path (unit tests). | Not isolated: arm `stack` holds all five switches. Microbenchmark 0.19 to 0.20 ms per step (0.7% of a c=1 step). `stack` against `residual` times `gdnglue` at c=1: x1.01 [derived] | `RDNA_HINT_FLEX_FUSE_SILU=0` (only `0` or empty turn it off: `false` counts as on) |
 | `VLLM_RDNA_LM_HEAD_GEMV_MAX_M=32` | The LM head takes the dense GEMV for up to 32 rows (code default 8). It matters only when a step has more than 8 logit rows: MTP=2 with three or more requests (three rows each). At MTP=0 a step has at most `SEQS` = 8 rows and nothing changes. HIP 4 microbenchmark, 12 rows: rocBLAS 11.4 ms, GEMV 5.1 ms; 24 rows: 11.7 and 7.4 ms. | arms `mtp2-nofix` to `mtp2-lmfix` (MTP=2, no other switch): c=4 82.0 to 86.2 tok/s (x1.05), ITL p99 118.8 to 92.6 ms; c=8 98.6 to 100.4; c=1 and c=2 unchanged | `VLLM_RDNA_LM_HEAD_GEMV_MAX_M=8` |
 | `TUNABLEOP_PREFER=rocm7.14-rocblas5.5-hi2-27b-tp2` | TunableOp rows for the rocBLAS prefill GEMMs: the canonical `rocm7.14-rocblas5.5` rows plus 36 rows per rank for this model (gate_up, in_proj_qkvz, qkv and out / o_proj at M = 1023, 1024, 2046 to 2048; in_proj_ba at the census M). A soft preference: used only when the profile is registered for the loaded `librocblas.so.5` (sha256 `f30bb442e9b5...`), otherwise the launcher warns and loads the canonical rows. The rows are build-specific. | arm `tunable`: TTFT 1k/512 c=1 1.51 to 1.41 s, 16k/1k c=1 30.54 to 28.68 s, 32k/2k c=1 75.75 to 72.09 s; output x1.01 to x1.03 at c=1, within noise at c=8; concurrency gate 0 of 480 checks failing with and without the rows | `TUNABLEOP_PREFER=` (empty); `TUNABLEOP_PROFILE=<name>` wins over it |
-| `RDNA_HINT_FLEX_PREFILL_GEMM=` | **Not a default yet.** Dense HIP prefill GEMM above M = 48 in place of dequant + rocBLAS, where its dispatch table measured faster. Enable it for one launch with `RDNA_HINT_FLEX_PREFILL_GEMM=hip` after `RECIPE=`. | Microbenchmark only: 1.09 to 1.12x over tuned rocBLAS at M = 2048, 1.16x over the heuristic (geomean of 45 cells). Scoreboard arms `gemm`, `final2`, `final2-mtp2`: pending | `RDNA_HINT_FLEX_PREFILL_GEMM=rocblas` |
+| `RDNA_HINT_FLEX_PREFILL_GEMM=hip` | Dense HIP prefill GEMM above M = 48 in place of dequant + rocBLAS, per shape where its dispatch table measured faster (rocBLAS everywhere else). It rounds differently from rocBLAS (see Quality). | arm `final2-a2` against `final-a2`, same card pair: 16k/1k c=8 30.3 to 34.8 tok/s (x1.15), TTFT 75.95 to 64.08 s; 1k/512 c=8 137.7 to 147.7 (x1.07); TTFT 16k/1k c=1 21.81 to 20.45 s, 32k/2k c=1 47.43 to 44.77 s; c=1 decode unchanged. Microbenchmark 1.09 to 1.12x over tuned rocBLAS at M = 2048 | `RDNA_HINT_FLEX_PREFILL_GEMM=rocblas` |
 
 Notes on the table:
 
@@ -176,17 +179,23 @@ or `lm_head` stays resident for it, and the guess to the contrary in
   but per-row int8 of a vocabulary-sized fp16 matrix is lossy and no `decode_kl.py` run against
   the fp16 head exists. No recipe enables it. Do not, before such a run.
 - **0.11 GiB of the weight memory is unexplained** (see Slots and memory).
-- **Not bit-identical to the old defaults.** Long-context PPL 3.6633 to 3.6635, prompt KL
-  7.7e-6 nats per token (top-1 agreement 0.9986), decode KL 7.0e-6 against a boot-to-boot floor
-  of 2.4e-6, no confident flip; the scoreboard judges these "above floor" because the floor of
-  the prompt KL is exactly 0. `residual` and `gdnglue` alone sit at the floor; the KL comes from
-  `attn`, the tuned rows and `gemv` (see Quality). `RDNA_HINT_FLEX_GEMV=auto` is not
+- **Not bit-identical to the old defaults.** Long-context PPL 3.6633 to 3.6635 (3.6631 with the
+  dense prefill GEMM), prompt KL 7.7e-6 nats per token (7.8e-6; top-1 agreement 0.9986 to
+  0.9987), decode KL 7.0e-6 to 8.1e-6 against a boot-to-boot floor of 2.4e-6, no confident
+  flip; the scoreboard judges these "above floor" because the floor of the prompt KL is
+  exactly 0. `residual` and `gdnglue` alone sit at the floor; the KL comes from `attn`, the
+  tuned rows, `gemv` and the dense GEMM (see Quality). `RDNA_HINT_FLEX_GEMV=auto` is not
   batch-invariant, see the table.
 - **The TunableOp rows are build-specific.** They are registered for `librocblas.so.5` sha256
   `f30bb442e9b5...` (rocBLAS 5.5.0.cd957402, ROCm 7.14, torch 2.12.0+rocm7.14.0). Another build
   falls back to the canonical rows with a warning; solver ids do not carry over, so re-tune with
   `tools/rdna/rdna_hint_flex/tunableop_hi2.sh` on a new build.
-- **Dense prefill GEMM is pending** (the last section).
+- **The dense prefill GEMM rounds differently from rocBLAS** [measured]. With it, long PPL is
+  3.6631 (3.6635 without), prompt KL 7.80e-6 (7.73e-6) against `base`, decode KL 8.1e-6
+  (8.0e-6 without, same card pair) and there is still no confident flip, but a prompt
+  prefilled by it can differ from one prefilled by rocBLAS in a late token. It is part of the
+  gfx10x kernel set of `rdna_hint_flex`; an older `_rocm_C` keeps rocBLAS with one warning.
+  Opt out with `RDNA_HINT_FLEX_PREFILL_GEMM=rocblas`.
 - **Scope.** Measured on two V620 (gfx1030) at TP=2 only. TP=1, TP=4 and gfx11 were not run
   with these recipes. The 262,144-token context fits the KV pool, but no benchmark cell goes
   beyond 32k.
@@ -245,18 +254,22 @@ RECIPE=27b-hi2-tp2 MODEL=/path/to/Qwen3.8-27B-HI2-3.0bpw GPUS=2,3 PORT=18211 TAG
 
 ## Measured results
 
-All arms: HIP 2,3 (PCI `d9 dc`) of `par1-cs25`, quiet protocol, KFD evictions 0 in every
-window, junction temperature at most 85 C, greedy / PPL / prefix-cache / concurrency probes
-PASS. Raw files: `bench_results/2026-11-15_hi2-scoreboard/<arm>/` in this repository (`meta.json`
-and `scoreboard.md` of every arm named below, `scoreboard.json` of `base`, `final` and
-`final-mtp2`, `runs.tsv` of the two concurrency arms) and `~/w4a8_runs/scoreboard/<arm>/` on
-the box, which has every file of every arm. The first table is `scoreboard_report.py table`
-output with columns reduced (command below); the other tables are read from the per-arm
-`scoreboard.md`.
+All arms: quiet protocol, KFD evictions 0 in every window, junction temperature at most 86 C,
+greedy / PPL / prefix-cache / concurrency probes PASS. Arms without a suffix ran on HIP 2,3
+(PCI `d9 dc`) of `par1-cs25`, arms with the suffix `-a2` on HIP 0,1 (PCI `d1 d4`). The second
+pair reads 1 to 3% faster, so compare arms only within one pair. Raw files:
+`bench_results/2026-11-15_hi2-scoreboard/<arm>/` in this repository (`meta.json` and
+`scoreboard.md` of every arm named below, `scoreboard.json` of `base`, `final`, `final-mtp2`,
+`gemm` and the five `-a2` arms, `runs.tsv` of the two concurrency arms) and
+`~/w4a8_runs/scoreboard/<arm>/` on the box, which has every file of every arm. The first
+table is `scoreboard_report.py table` output with columns reduced (commands below); the other
+tables are read from the per-arm `scoreboard.md`.
 
 ```bash
 python tools/rdna/rdna_hint_flex/scoreboard_report.py table \
   bench_results/2026-11-15_hi2-scoreboard/{base,final,final-mtp2}
+python tools/rdna/rdna_hint_flex/scoreboard_report.py table \
+  bench_results/2026-11-15_hi2-scoreboard/{final-a2,ship-a2,final2-a2}
 ```
 
 ### Recipe defaults against flags off
@@ -303,6 +316,75 @@ switches without rows, `final` = `stack` and the rows. `base2` is `base` booted 
 | `tunable` | `TUNABLEOP_PREFER=...hi2-27b-tp2` | 33.3 | 93.1 | 16.2 | 23.2 | 13.2 | 28.68 |
 | `final` | the five switches and the rows | 40.3 | 135.4 | 19.7 | 29.4 | 16.8 | 22.75 |
 
+### Dense prefill GEMM and the shipped recipes (card pair a2)
+
+These arms ran on the other card pair (HIP 0,1, PCI `d1 d4`), so they compare only with each
+other. `final-a2` is `final` again (the seven switches, no dense GEMM; tree `b47eb6c384`).
+`ship-a2` is the recipe `27b-hi2-tp2` of `15a4bc6f49` with no environment variable at all
+(before the dense GEMM was added to it): it reproduces `final-a2` within 0.1% on every cell,
+with equal PPL and prompt KL. `final2-a2` is `final-a2` plus `RDNA_HINT_FLEX_PREFILL_GEMM=hip`,
+which is the recipe as it is now.
+
+| Cell | Arm | Output tok/s | TTFT (s) | Prefill tok/s | Decode tok/s per request | ITL p50 / p99 (ms) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1k/512 c=1 | `final-a2` | 40.7 | 1.35 | 757 | 45.5 | 22.0 / 22.6 |
+| 1k/512 c=1 | `ship-a2` | 40.7 | 1.35 | 757 | 45.5 | 22.0 / 22.3 |
+| 1k/512 c=1 | `final2-a2` | 40.9 | 1.27 | 806 | 45.5 | 22.0 / 22.4 |
+| 1k/512 c=8 | `final-a2` | 137.7 | 6.76 | 215 | 22.7 | 34.9 / 36.4 |
+| 1k/512 c=8 | `ship-a2` | 137.8 | 6.77 | 215 | 22.7 | 34.9 / 36.1 |
+| 1k/512 c=8 | `final2-a2` | 147.7 | 5.72 | 250 | 23.5 | 34.9 / 36.2 |
+| 16k/1k c=1 | `final-a2` | 20.1 | 21.81 | 751 | 35.2 | 28.5 / 28.9 |
+| 16k/1k c=1 | `ship-a2` | 20.1 | 21.78 | 752 | 35.2 | 28.4 / 28.7 |
+| 16k/1k c=1 | `final2-a2` | 20.7 | 20.45 | 801 | 35.2 | 28.4 / 28.8 |
+| 16k/1k c=8 | `final-a2` | 30.3 | 75.95 | 333 | 6.2 | 63.0 / 1743.9 |
+| 16k/1k c=8 | `ship-a2` | 30.3 | 75.88 | 334 | 6.2 | 62.8 / 1741.0 |
+| 16k/1k c=8 | `final2-a2` | 34.8 | 64.08 | 394 | 6.9 | 62.9 / 1455.0 |
+| 32k/2k c=1 | `final-a2` | 17.2 | 47.43 | 691 | 28.5 | 35.2 / 35.8 |
+| 32k/2k c=1 | `ship-a2` | 17.2 | 47.44 | 691 | 28.5 | 35.1 / 35.5 |
+| 32k/2k c=1 | `final2-a2` | 17.6 | 44.77 | 732 | 28.5 | 35.1 / 35.6 |
+
+With MTP=2: `ship-mtp2-a2` is the recipe `27b-hi2-tp2-mtp2` of `15a4bc6f49`, `final2-mtp2-a2` is
+`final2-a2` with `MTP=2`.
+
+| Cell | Arm | Output tok/s | TTFT (s) | Prefill tok/s | Decode tok/s per request | ITL p50 / p99 (ms) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1k/512 c=1 | `ship-mtp2-a2` | 69.0 | 1.39 | 735 | 85.7 | 33.3 / 33.7 |
+| 1k/512 c=1 | `final2-mtp2-a2` | 70.2 | 1.30 | 787 | 86.2 | 33.3 / 33.7 |
+| 1k/512 c=8 | `ship-mtp2-a2` | 136.9 | 7.12 | 211 | 25.4 | 92.7 / 1581.2 |
+| 1k/512 c=8 | `final2-mtp2-a2` | 146.6 | 5.51 | 276 | 25.6 | 92.6 / 1315.1 |
+| 16k/1k c=1 | `ship-mtp2-a2` | 27.6 | 22.20 | 738 | 69.1 | 41.6 / 42.1 |
+| 16k/1k c=1 | `final2-mtp2-a2` | 28.7 | 20.88 | 785 | 69.5 | 41.6 / 42.2 |
+| 16k/1k c=8 | `ship-mtp2-a2` | 29.5 | 76.48 | 354 | 6.2 | 195.9 / 1855.3 |
+| 16k/1k c=8 | `final2-mtp2-a2` | 32.9 | 68.12 | 374 | 6.8 | 196.0 / 1641.3 |
+| 32k/2k c=1 | `ship-mtp2-a2` | 24.6 | 48.49 | 676 | 58.8 | 50.2 / 51.5 |
+| 32k/2k c=1 | `final2-mtp2-a2` | 25.4 | 45.91 | 714 | 58.7 | 50.3 / 51.6 |
+
+The effect of the dense GEMM on one card pair (output tok/s, TTFT mean; the ratio comes from
+the unrounded values):
+
+| Cell | MTP 0: `final-a2` to `final2-a2` | MTP 2: `ship-mtp2-a2` to `final2-mtp2-a2` |
+| --- | --- | --- |
+| 1k/512 c=1 | 40.7 to 40.9 (x1.01), 1.35 to 1.27 s | 69.0 to 70.2 (x1.02), 1.39 to 1.30 s |
+| 1k/512 c=8 | 137.7 to 147.7 (x1.07), 6.76 to 5.72 s | 136.9 to 146.6 (x1.07), 7.12 to 5.51 s |
+| 16k/1k c=1 | 20.1 to 20.7 (x1.03), 21.81 to 20.45 s | 27.6 to 28.7 (x1.04), 22.20 to 20.88 s |
+| 16k/1k c=8 | 30.3 to 34.8 (x1.15), 75.95 to 64.08 s | 29.5 to 32.9 (x1.12), 76.48 to 68.12 s |
+| 32k/2k c=1 | 17.2 to 17.6 (x1.02), 47.43 to 44.77 s | 24.6 to 25.4 (x1.03), 48.49 to 45.91 s |
+
+The kernel runs only in prefill chunks of more than 48 rows, so the decode rate at c=1 does not
+move (45.5, 35.2 and 28.5 tok/s per request at 1k, 16k and 32k). At 16k/1k c=8 the ITL p99
+falls from 1743.9 to 1455.0 ms and the decode rate per request rises from 6.2 to 6.9 tok/s.
+On the first pair, `gemm` (the switch and the tuned rows) against `tunable` (the rows alone)
+points the same way:
+
+| Cell | `tunable` | `gemm` |
+| --- | ---: | ---: |
+| 1k/512 c=1, tok/s | 33.3 | 33.4 |
+| 1k/512 c=8, tok/s | 93.1 | 97.5 |
+| 16k/1k c=1, tok/s | 16.2 | 16.7 |
+| 16k/1k c=8, tok/s | 23.2 | 26.0 |
+| 32k/2k c=1, tok/s | 13.2 | 13.5 |
+| TTFT 16k/1k c=1 (s) | 28.68 | 26.87 |
+
 ### Quality
 
 Short PPL is 5.730 in every arm. The reference is `base`, the floor `base2` (two boots of the
@@ -321,6 +403,12 @@ passages of 512 greedy tokens at 8 concurrent.
 | `tunable` | 3.6636 | 7.33e-6 | 0.9986 | 6.44e-6 | 22/32 | 6/6 |
 | `final` | 3.6635 | 7.73e-6 | 0.9986 | 7.01e-6 | 21/32 | 5/6 |
 | `final-mtp2` | 3.6635 | 7.73e-6 | 0.9986 | 8.36e-6 | 13/32 | 6/6 |
+| `gemm` (HIP 2,3) | 3.6631 | 7.39e-6 | 0.9986 | 9.48e-6 | 20/32 | 6/6 |
+| `final-a2` | 3.6635 | 7.73e-6 | 0.9986 | 8.04e-6 | 21/32 | 6/6 |
+| `ship-a2` | 3.6635 | 7.73e-6 | 0.9986 | 7.14e-6 | 20/32 | 6/6 |
+| `final2-a2` | 3.6631 | 7.80e-6 | 0.9987 | 8.13e-6 | 21/32 | 6/6 |
+| `ship-mtp2-a2` | 3.6635 | 7.73e-6 | 0.9986 | 7.86e-6 | 18/32 | 6/6 |
+| `final2-mtp2-a2` | 3.6631 | 7.80e-6 | 0.9987 | 8.08e-6 | 21/32 | 5/6 |
 
 Zero confident flips in every decode-KL pass. `final`: dNLL +0.00001 (95% interval -0.00002 to
 +0.00003), 5 of 6 long passages greedy-identical (first divergence at token 87.5 on average
@@ -329,12 +417,20 @@ against 96 for all six). The prompt KL is 0 for `gemv`, `residual` and `gdnglue`
 round differently (57 of the 89 candidate rows change a rounding, `hi2-27b-tunableop-2026-11-15.md`).
 The decode KL of `gemv` is `auto`'s M=1 against M >= 2 difference (table above).
 
+The dense prefill GEMM (`gemm`, `final2*`) moves the long PPL by -0.01% (3.6635 to 3.6631
+against `final`) and the prompt KL by +0.07e-6; `gemm` has 7.39e-6 against `base`, the order of
+the other switches. Quality does not depend on the card pair: `final-a2` has `final`'s PPL,
+prompt KL and top-1. The decode KL and the identical count vary from boot to boot of one
+configuration (`final` 7.0e-6 and 21/32, `final-a2` 8.0e-6 and 21/32, `ship-a2` 7.1e-6 and
+20/32; floor 2.4e-6 and 28/32). There is still no confident flip.
+
 ### MTP arms
 
-`final-mtp2` is in the first table. Acceptance (`spec_accept.py`, 24 natural-text prompts of
-about 254 tokens): c=1 mean acceptance length 2.307, draft acceptance 65.4%, per position
-0.763 and 0.544; c=4 2.315, 65.7%, 0.768 and 0.547; both PASS. The two arms that isolate the
-LM-head cap run MTP=2 without the other switches:
+`final-mtp2` is in the first table, `ship-mtp2-a2` and `final2-mtp2-a2` in the dense GEMM
+section. Acceptance (`spec_accept.py`, 24 natural-text prompts of about 254 tokens): c=1 mean
+acceptance length 2.307, draft acceptance 65.4%, per position 0.763 and 0.544; c=4 2.315,
+65.7%, 0.768 and 0.547; both PASS (`final2-mtp2-a2`, with the dense GEMM, measures the same
+values). The two arms that isolate the LM-head cap run MTP=2 without the other switches:
 
 | Cell | `mtp2-nofix` (cap 8) | `mtp2-lmfix` (cap 32) |
 | --- | --- | --- |
@@ -355,11 +451,12 @@ near-ties) and 0 of 288 (all identical). Per-run lines: `conc-on/runs.tsv`, `con
 ### Arms, trees and result paths
 
 Each tree sha is a commit in the history of this branch (`git checkout <sha>` reproduces the
-arm). Overrides are over the recipe `27b-hi2-tp2` as that tree had it: no HI2 switch was on
-in it. From `gemv` on it already carried `VLLM_RDNA_LM_HEAD_GEMV_MAX_M=32` (no effect at
-MTP=0, where a step has at most 8 logit rows; `base`, `base2` and `attn` ran with 8), and
-from `tunable` on `TUNABLEOP_PREFER=rocm7.14-rocblas5.5-hi2-27b-tp2` (`conc-on` relies on it;
-the other arms of that tree name it, and `conc-off` empties it).
+arm). Overrides are over the recipe `27b-hi2-tp2` as that tree had it: up to `b47eb6c384` no
+HI2 switch was on in it, at `15a4bc6f49` the first seven switches of the table are. From
+`gemv` on it already carried `VLLM_RDNA_LM_HEAD_GEMV_MAX_M=32` (no effect at MTP=0, where a
+step has at most 8 logit rows; `base`, `base2` and `attn` ran with 8), and from `tunable` on
+`TUNABLEOP_PREFER=rocm7.14-rocblas5.5-hi2-27b-tp2` (`conc-on` relies on it; the other arms of
+that tree name it, and `conc-off` empties it).
 
 | Arm | Tree | Overrides |
 | --- | --- | --- |
@@ -374,29 +471,45 @@ the other arms of that tree name it, and `conc-off` empties it).
 | `final-mtp2` | `b2d569c402` | `final` and `MTP=2` |
 | `mtp2-nofix`, `mtp2-lmfix` | `f7edb8b1e7` | `MTP=2` and `VLLM_RDNA_LM_HEAD_GEMV_MAX_M=8` or `32` |
 | `conc-on`, `conc-off` | `b2d569c402` | `VLLM_RDNA_AR_HIER=0` (and `TUNABLEOP_PREFER=` for `conc-off`) |
+| `gemm` | `b47eb6c384` | `RDNA_HINT_FLEX_PREFILL_GEMM=hip` and `TUNABLEOP_PREFER=rocm7.14-rocblas5.5-hi2-27b-tp2` (HIP 2,3) |
+| `final-a2` | `b47eb6c384` | as `final`, on HIP 0,1 |
+| `final2-a2` | `b47eb6c384` | as `final-a2` and `RDNA_HINT_FLEX_PREFILL_GEMM=hip` |
+| `final2-mtp2-a2` | `b47eb6c384` | as `final2-a2` and `MTP=2` |
+| `ship-a2` | `15a4bc6f49` | none: the recipe `27b-hi2-tp2` as it was at that commit (seven switches, no dense GEMM) |
+| `ship-mtp2-a2` | `15a4bc6f49` | `RECIPE=27b-hi2-tp2-mtp2`, nothing else |
+| `ship-gemm-a2` | `15a4bc6f49` | `RDNA_HINT_FLEX_PREFILL_GEMM=hip` over the recipe `27b-hi2-tp2`: the recipe as flipped. Pending |
 
 The scoreboard tools were synced to the box tree of `base` and `attn` as files (its `tree_sha`
-reads `ef0b99ea9b+scoreboard`); the model snapshot is
-`db2a3aa3cd5efb0f92403cd4864e1f0d99378149`.
+reads `ef0b99ea9b+scoreboard`). The box trees of `gemm`, `final-a2`, `final2-a2` and
+`final2-mtp2-a2` are copies of `b47eb6c384` without `.git` (`tree_sha` reads `b47eb6c384` for
+`gemm` and `unknown` for the three `-a2` arms); `ship-a2` and `ship-mtp2-a2` ran from a copy of
+`15a4bc6f49`. The a2 arms used the `serve_validate.sh` of commit `de9f74c240` (branch
+`feat/hi2-c8-opt`, not in this one), which only adds a lock that serializes the measured
+windows of the card pairs. The model snapshot is `db2a3aa3cd5efb0f92403cd4864e1f0d99378149`.
 
-## Pending: dense HIP prefill GEMM
+## Dense HIP prefill GEMM
 
 `RDNA_HINT_FLEX_PREFILL_GEMM=hip` replaces the dequant plus rocBLAS GEMM of a prefill chunk by
-a dense HIP kernel above M = 48, per shape where its dispatch table measured faster
+a dense HIP kernel above M = 48, per shape where its dispatch table measured faster and
+rocBLAS everywhere else
 ([`hi2-prefill-gemm-2026-11-15.md`](hi2-prefill-gemm-2026-11-15.md),
-[`hi2-prefill-gemm2-2026-11-15.md`](hi2-prefill-gemm2-2026-11-15.md)). The code is in this
-branch and off by default. The kernel and composite microbenchmark gives 1.09 to 1.12x over
-tuned rocBLAS at M = 2048 and 1.16x over the rocBLAS heuristic (geomean of 45 cells). No
-scoreboard arm has finished: `gemm` (the switch alone against `base`), `final2` (`final` and
-the switch) and `final2-mtp2` are queued. Until they land, it is not in the recipes: each
-carries a commented `# RDNA_HINT_FLEX_PREFILL_GEMM=hip` line, and the last table row above has
-an empty default.
+[`hi2-prefill-gemm2-2026-11-15.md`](hi2-prefill-gemm2-2026-11-15.md)). The code is off by
+default and both recipes turn it on. The kernel and composite microbenchmark gives 1.09 to
+1.12x over tuned rocBLAS at M = 2048 and 1.16x over the rocBLAS heuristic (geomean of 45
+cells) [measured].
 
-Proposed gate to make it a default [inference: not agreed]: `final2` is faster than `final` on
-the TTFT of the 16k and 32k cells and equal at 1k, long PPL and KL stay at `final`'s values
-(3.6635, 7.7e-6), and every validity line passes. The flip is one uncommented line in each of
-the two recipes and the new value in the first cell of the table row above; the test follows
-the table.
+The gate for making it a default was set before the arms ran [inference: set by the author,
+not agreed outside the project]: lower TTFT on the 16k and 32k cells, no loss on the 1k cells,
+long PPL and prompt KL at `final`'s values (3.6635, 7.7e-6), every validity line PASS.
+`final2-a2` against `final-a2` (same card pair) meets it: TTFT 21.81 to 20.45 s at 16k/1k c=1
+and 47.43 to 44.77 s at 32k/2k c=1; 1k/512 c=1 40.7 to 40.9 tok/s and c=8 137.7 to 147.7;
+long PPL 3.6631 (3.6635) and prompt KL 7.80e-6 (7.73e-6), a rounding-level move; KFD
+evictions 0 and every probe PASS. The MTP recipe gains the same way (`final2-mtp2-a2` against
+`ship-mtp2-a2`, acceptance PASS), and so does the switch with the tuned rows on the other pair
+(`gemm` against `tunable`).
+
+`ship-gemm-a2` is the confirming arm of the flip: the recipe of `15a4bc6f49` with the switch
+set from the environment, which is the recipe as it is now. Result: pending.
 
 ## Related notes
 
