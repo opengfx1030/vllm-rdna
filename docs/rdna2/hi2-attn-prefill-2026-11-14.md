@@ -163,11 +163,22 @@ same sums give about 5.9 s saved out of roughly 29 s [derived]. One request per 
 boot per arm: the boot-to-boot spread is not known, which is what the scoreboard's floor
 arm measures.
 
+## Scoreboard (quiet window, 2026-11-15)
+
+Arms `base`, `attn` and the floor arm `base2` on TP=2, HIP 2,3 (tables and paths:
+[`hi2-27b-tp2-serving.md`](hi2-27b-tp2-serving.md)). TTFT 16k/1k c=1 30.54 to 24.64 s
+(prefill 536 to 665 tok/s), 32k/2k c=1 75.75 to 53.22 s (433 to 616 tok/s), 16k/1k c=8
+97.14 to 79.33 s; output tok/s x1.10, x1.17 and x1.16 on those cells; 1k/512 c=1 and the
+decode rate are unchanged (33.0 tok/s, 36.5 per request). Quality against the baseline
+with its floor: long-context PPL 3.6633 to 3.6635 (+0.006%), prompt KL 7.55e-6 nats per
+token, decode KL 6.97e-6 against 2.37e-6 between two baseline boots, 19/32 identical
+decodes (the baseline pair: 28/32). That is a small difference above the floor, the fp16
+score rounding of the error table above `[inference]`. The switch is on in the recipes
+`27b-hi2-tp2` and `27b-hi2-tp2-mtp2`.
+
 ## Not done
 
-The quiet-window old/new comparison (scoreboard arms `base`, `attn`, floor `base2`: 1k/512
-and 16k/1k at c=1 and c=8, 32k/2k), quality against the baseline with its noise floor,
-long-context (64k and more) timing, TunableOp rows for the new GEMM shapes (they vary with
+Long-context (64k and more) timing, TunableOp rows for the new GEMM shapes (they vary with
 the context, so rows cannot cover them), TP=1 and TP=4 end to end, head_dim 128, and the
 other recipes. The path costs a gather of K and V per chunk and fp16 scores (error above);
 a fused kernel that keeps the 3.4-3.6 TFLOP/s kernel's memory behaviour but reaches GEMM

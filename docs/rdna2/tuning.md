@@ -360,11 +360,11 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_FA_RDNA2_GQA_MODE` | subgroup | GQA prefill mode. `subgroup` was measured faster than varlen/splitk. |
 | `VLLM_FA_RDNA2_SPLIT_DECODE` | 1 | Split-K decode for MTP-verify and mixed batches (gated to ≤ 256 query×head rows). |
 | `VLLM_FA_RDNA2_VERIFY_FULL_GRAPH` | 1 | Capture MTP-verify steps as FULL graphs (`UNIFORM_BATCH`). |
-| `VLLM_FA_RDNA2_UNFUSED_PREFILL` | 0 | 1 runs prefill chunks of head_dim 256 with fp16 KV as two rocBLAS GEMMs and an in-place softmax per query block instead of the flash kernel: 3.1x to 4.5x faster at kernel level on the 27B TP2 shape (3.4 to 3.6 vs 11 to 15 TFLOP/s), fp16 scores (2 to 3x the kernel's error). Opt-in; measured on HI2 27B TP2 only. [Doc](hi2-attn-prefill-2026-11-14.md). |
+| `VLLM_FA_RDNA2_UNFUSED_PREFILL` | 0 (`27b-hi2-tp2*` recipes: 1) | 1 runs prefill chunks of head_dim 256 with fp16 KV as two rocBLAS GEMMs and an in-place softmax per query block instead of the flash kernel: 3.1x to 4.5x faster at kernel level on the 27B TP2 shape (3.4 to 3.6 vs 11 to 15 TFLOP/s), fp16 scores (2 to 3x the kernel's error). Opt-in; on in the `27b-hi2-tp2*` recipes (HI2 27B TP2: TTFT 16k/1k c=1 30.5 to 24.6 s, 32k/2k c=1 75.8 to 53.2 s, scoreboard arm `attn`); measured on that model only. [Doc](hi2-attn-prefill-2026-11-14.md). |
 | `VLLM_FA_RDNA2_UNFUSED_PREFILL_MIN_Q` | 64 | Shortest query run that takes the GEMM path. |
 | `VLLM_FA_RDNA2_UNFUSED_PREFILL_SCRATCH_MB` | 768 | Scratch bound per call (gathered K and V plus one score tile); a sequence that does not fit uses the flash kernel. |
 | `VLLM_FA_RDNA2_UNFUSED_PREFILL_QBLOCK` | 512 | Most query rows per GEMM block. |
-| `VLLM_RDNA_LM_HEAD_GEMV_MAX_M` | 8 (`27b-hi2-tp2` recipe: 32) | Rows up to which the dense `gemv_f16_rdna2` kernel (it serves 1 to 32) takes the LM head on gfx10x; every other dense GEMM keeps 8. For an LM head with no TunableOp row (HI2 27B at TP=2) the rocBLAS fallback for 9 to 32 rows (MTP verify) was 10.4 ms at 12 rows. 8 is the previous behaviour. |
+| `VLLM_RDNA_LM_HEAD_GEMV_MAX_M` | 8 (`27b-hi2-tp2*` recipes: 32) | Rows up to which the dense `gemv_f16_rdna2` kernel (it serves 1 to 32) takes the LM head on gfx10x; every other dense GEMM keeps 8. For an LM head with no TunableOp row (HI2 27B at TP=2) the rocBLAS fallback for 9 to 32 rows (MTP verify) was 10.4 ms at 12 rows; MTP=2 c=4 82.0 to 86.2 tok/s. 8 is the previous behaviour. |
 | `VLLM_FARDNA2_ENABLE_SPEC_GATE`, `VLLM_FARDNA2_SPEC_VERIFY_Q_LEN` | 0, 3 | Legacy gate that rejects verify batches. Leave off. |
 | `VLLM_USE_RDNA2_MLA` | 0 | HIP sparse-MLA decode (DeepSeek-V4) instead of Triton. |
 
@@ -376,6 +376,9 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_RDNA2_W4A16_RUNTIME_DISPATCH` | 0 | Choose decode/prefill kernel per call at run time (custom op) instead of at trace time. |
 | `VLLM_RDNA_DENSE_INT8`, `_ONLY`, `_MIN_ROWS` | 0, 0, 64 | int8 weight-only shadow copies of dense fp16 projections for decode. Off in all recipes. |
 | `VLLM_RDNA_DENSE_GEMV` | 0 | Force `gemv_f16_rdna2` for n ≤ 5. **Never route anything to wvSplitK on gfx1030**: it asserts on device. |
+| `RDNA_HINT_FLEX_GEMV` | unset = `v1` (`27b-hi2-tp2*` recipes: `auto`) | HI2 (`rdna_hint_flex`) decode GEMV at 2 to 48 rows. `auto` = v2 from M = 2 (v1 at M = 1), `v2` = v2 at every M (batch-invariant, about 3% slower at c=1); `auto` is not batch-invariant (an fp16 ulp in a logit between M = 1 and M >= 2). HI2 27B TP2 c=8: 92.5 to 117.8 tok/s. Read once per process; the values are exact and case-sensitive, anything else is v1. [Doc](rdna-hint-flex-weights.md). |
+| `RDNA_HINT_FLEX_FUSE_SILU` | 0 (`27b-hi2-tp2*` recipes: 1) | Folds the SiluAndMul of an MLP into the activation transform of the HI2 `down_proj` (one launch less per MLP; HI2 kernels in F16 mode, MLPs without an expert gate). Bit-identical to the unfused path (unit tests). Empty or `0` is off; **any other value, `false` included, is on.** [Doc](rdna-hint-flex-weights.md). |
+| `RDNA_HINT_FLEX_PREFILL_GEMM` | unset = rocBLAS | `hip` runs the dequantized prefill GEMM of HI2 layers above M = 48 on the dense HIP kernel where its dispatch table beats rocBLAS (microbenchmark 1.09 to 1.12x over tuned rocBLAS at M = 2048); `hip-notail` pads a short tail to a whole tile row instead of running it apart; `rocblas`, `off`, `0` or empty keep rocBLAS, any other value raises at model build. No recipe sets it yet: the scoreboard arms are pending. [Doc](hi2-prefill-gemm2-2026-11-15.md). |
 | `VLLM_DISABLED_KERNELS` | — | Upstream registry: e.g. `RDNA2W4A16LinearKernel` to fall back to Triton/Exllama. |
 
 ### MoE
@@ -401,7 +404,7 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_GDN_HIP_PREFILL` | 1 | HIP GDN prefill chain (prep/solve-WY/delta-h/o). On by default since the 2026-10-15 kernel rewrites; faster than Triton at every served shape. |
 | `VLLM_RDNA_GDN_OPAQUE` | 1 | Whole GDN layer as one opaque op. 0 keeps the projections in the compiled graph. |
 | `VLLM_GDN_STRIDED_INPUTS` | 1 | RDNA2 GDN spec-verify reads q/k/v, a/b and z in place at their token strides (views into the conv output and the projections) and writes `core_attn_out` directly: drops the cat + 3 copies, two `a`/`b` copies, the z copy and the output copy per layer. 0 restores the copies (A/B). Needs `VLLM_GDN_DECODE_RDNA2=1` and the opaque layer. |
-| `VLLM_RDNA_GDN_DECODE_INPLACE` | 0 | gfx10x fp16 GDN decode of a pure non-speculative batch runs on the paged conv/ssm state in place: no per-layer state arenas (the gather before and the scatter after every decode, 9 launches per layer; ~0.65 GiB per rank at HI2 TP=2 not allocated), no `core_attn_out` zero fill, no `b`/`a`/`z` copies. 13 (c=1) or 16 (c>=2) launches per GDN layer become 3. Only with the HIP GDN decode and strided inputs on, an fp16 model, `VLLM_CAUSAL_CONV1D_RDNA2_UPDATE=0` and no LeapQuant state; otherwise it logs one warning and keeps the arenas. Bit-exact against the arena path on the unit harness (`docs/rdna2/hi2-gdn-glue-2026-11-15.md`); not measured end to end yet. |
+| `VLLM_RDNA_GDN_DECODE_INPLACE` | 0 (`27b-hi2-tp2*` recipes: 1) | gfx10x fp16 GDN decode of a pure non-speculative batch runs on the paged conv/ssm state in place: no per-layer state arenas (the gather before and the scatter after every decode, 9 launches per layer; ~0.65 GiB per rank at HI2 TP=2 not allocated), no `core_attn_out` zero fill, no `b`/`a`/`z` copies. 13 (c=1) or 16 (c>=2) launches per GDN layer become 3. Only with the HIP GDN decode and strided inputs on, an fp16 model, `VLLM_CAUSAL_CONV1D_RDNA2_UPDATE=0` and no LeapQuant state; otherwise it logs one warning and keeps the arenas. Bit-exact against the arena path on the unit harness (`docs/rdna2/hi2-gdn-glue-2026-11-15.md`). HI2 27B TP2 (scoreboard arm `gdnglue`): 1k/512 c=1 33.0 to 37.1 tok/s, `Model loading took` 7.46 to 6.79 GiB. |
 | `VLLM_CAUSAL_CONV1D_RDNA2_FWD`, `_UPDATE` | 1 | HIP causal conv1d. Recipes set 0 (Triton). |
 | `VLLM_CAUSAL_CONV1D_RDNA2_SPEC_STATE` | 0 | Let those HIP kernels run on an MTP-sized conv state (`width - 1 + num_spec`). They read and write only the first `width - 1` columns, so the extra capacity is ignored -- opt-in until validated on the other recipes and MTP; off means an over-capacity state takes Triton. |
 | `VLLM_RDNA_FUSED_HC` | 1 | Fused hyper-connection decode (Flash-Next). |
@@ -528,6 +531,13 @@ path (correctness A/B only).
 - `VLLM_HIPPIHX`, `_LIB`, `_CODE_OBJECT`: route ops through a prebuilt hippihx
   V1 library when its plan is ready.
 - `VLLM_NO_PARTIAL_HASH=1`: disable partial-block prefix hits (debugging).
+- `VLLM_RDNA_GEMMA_RESIDUAL_DIRECT` (0; `27b-hi2-tp2*` recipes: 1): a `GemmaRMSNorm` with a
+  residual (gfx10x, fp16, 2-D) reads a cached fp16 scale and runs the in-place fused
+  add-norm: 6 launches become 1 per call, 128 calls per step on the HI2 27B (about -1.95 ms
+  at c=1, 33.0 to 35.3 tok/s). Global for every `GemmaRMSNorm` in the process and guarded
+  only for Qwen3.5 / Qwen3.8 (`qwen3_next`, `qwen3_5`, MTP drafters): do not set it for
+  gemma, gemma2, gemma3, rnj1 or interns2_mobius.
+  [Doc](hi2-residual-direct-2026-11-15.md).
 
 ### Diagnostics (off by default; slow, do not bench with them)
 
@@ -576,7 +586,7 @@ or the run CWD.
 
 `TUNABLEOP_PREFER=<name>` is the soft form: it applies only when that profile is
 registered for the loaded library's hash, else the launcher warns and
-auto-selects. Recipe `27b-hi2-tp2` sets it to the opt-in derived profile
+auto-selects. Recipes `27b-hi2-tp2` and `27b-hi2-tp2-mtp2` set it to the opt-in derived profile
 `rocm7.14-rocblas5.5-hi2-27b-tp2` (the canonical rows plus the 27B HI2 TP=2 prefill
 rows, `docs/rdna2/hi2-27b-tunableop-2026-11-15.md`); `TUNABLEOP_PREFER=` (empty)
 gives the canonical rows. The helper also logs the rows per rank file

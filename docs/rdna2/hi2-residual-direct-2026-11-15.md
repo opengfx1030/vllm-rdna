@@ -123,7 +123,7 @@ else reads the old values afterwards.
 | MTP drafter (`qwen3_5_mtp.py` L205-237, `qwen3_next_mtp.py`) | The drafter gets the target's final-normed `hidden_states` and reads it only through `pre_fc_norm_hidden` (no residual, out of place) into `fc`, a fresh tensor that is the drafter layer's layer-0 residual; its final `self.norm(hidden_states, residual)` mutates only drafter-local tensors. `inputs_embeds` is normed out of place. Safe. |
 | Target final norm (`qwen3_next.py` L747) | Mutates the last mlp output and the residual; the returned `hidden_states` is the only live reference. The residual is discarded. Safe. |
 | Speculative verify | Same decoder layers with rows = requests x (1 + spec tokens), at most 24 in the recipe: contiguous 2-D, covered by the 24-row test. The GDN spec-verify kernel reads inputs inside its own layer, before the post-attention norm. Safe. |
-| FULL / PIECEWISE cudagraph | Captured kernels run in the same order on the same static buffers; in-place updates of graph-owned tensors are what the clones' replacements do. The scale buffer is persistent and refreshed in place (same address), so capture never bakes a stale scale. Inductor sees the mutation through `mutates_args` and copies only where another consumer needs the old value (compiled chain: 1 launch per call). Not run in the full engine. |
+| FULL / PIECEWISE cudagraph | Captured kernels run in the same order on the same static buffers; in-place updates of graph-owned tensors are what the clones' replacements do. The scale buffer is persistent and refreshed in place (same address), so capture never bakes a stale scale. Inductor sees the mutation through `mutates_args` and copies only where another consumer needs the old value (compiled chain: 1 launch per call). Run in the full engine as scoreboard arm `residual` (FULL_AND_PIECEWISE; the greedy, PPL, prefix-cache and concurrency probes pass). |
 | Other `GemmaRMSNorm` callers with a residual (gemma, gemma2, gemma3, rnj1, interns2_mobius) | Same `norm(x, residual)` rebinding pattern; **no guards** for a caller-owned `inputs_embeds` or aux layer 0 there. Do not set the switch for them. |
 | AR + norm fusion passes (`allreduce_rms_fusion.py`) | They match the functional norm ops; with the flag on and gfx10x the opaque functional op is gone from the graph for the fp16 2-D case, so a pattern for it would not fire. None is active in the HI2 recipe (`rdna_ar` is a custom all-reduce) `[inference]`. |
 
@@ -136,8 +136,19 @@ bash tools/rdna/rdna_hint_flex/scoreboard.sh residual VLLM_RDNA_GEMMA_RESIDUAL_D
 Baseline arm: the recipe with the flag off. Quality: bit-exact per norm call, so greedy
 output, PPL and top-k KL should match the baseline exactly; any difference is a bug.
 
-What the arm should show, relative to the baseline's c1 trace of 2,451 launches
+Prediction before the run, relative to the baseline's c1 trace of 2,451 launches
 (`order-breakdown` c1a) `[derived from the 6 -> 1 launch change, x128 calls]`: 2,451 ->
 1,811 launches per step (-640), elementwise 633 -> 249 (-384) and copy / memset 370 -> 114
 (-256) `[inference: those families' attribution]`. ITL: about -1.9 to -2.2 ms at c1
-(microbenchmark and plan) `[inference]` until the arm measures it.
+(microbenchmark and plan) `[inference]`.
+
+**Measured** (scoreboard arm `residual`, HIP 2,3, TP=2, quiet protocol, 2026-11-15): decode
+36.5 to 39.3 tok/s per request at 1k/512 c=1, that is 27.40 to 25.45 ms per step, **-1.95
+ms** `[derived]`: inside the predicted range and equal to the microbenchmark's 1.94 to 1.96
+ms. Output 33.0 to 35.3 tok/s (x1.07) at 1k/512 c=1, x1.03 at 16k/1k c=1, x1.02 at c=8;
+TTFT unchanged (1.51 s, 30.50 s). Quality at the baseline's floor: long-context PPL 3.6633
+(equal), prompt KL 0, decode KL 1.98e-6 against 2.37e-6 between two baseline boots, 28/32
+identical decodes (the baseline pair: 28/32). The launch trace was not taken.
+`VLLM_RDNA_GEMMA_RESIDUAL_DIRECT=1` is on in the recipes `27b-hi2-tp2` and
+`27b-hi2-tp2-mtp2` (the HI2 model only: see the `GemmaRMSNorm` callers row above); tables
+and paths in [`hi2-27b-tp2-serving.md`](hi2-27b-tp2-serving.md).

@@ -41,12 +41,19 @@ Labels: **[measured]** = a run listed here, **[inference]** = a run must confirm
 
 ## Running arms
 
+The recipes `27b-hi2-tp2` and `27b-hi2-tp2-mtp2` turn the HI2 switches on
+([`hi2-27b-tp2-serving.md`](hi2-27b-tp2-serving.md)), so an arm that means "flags off" names
+the opt-outs: `OFF` below is that list, and a later `KEY=value` wins over an earlier one.
+
 ```bash
 # on the box, my lane (HIP 2,3 = PCI d9 dc; the driver refuses if HIP != BUSES)
-scoreboard.sh base                                     # flags off: the baseline
-scoreboard.sh base2                                    # second boot of the baseline: the floor
-BASELINE=base FLOOR=base2 scoreboard.sh attn VLLM_FA_RDNA2_UNFUSED_PREFILL=1
-BASELINE=base FLOOR=base2 scoreboard.sh mtp2 MTP=2
+OFF="RDNA_HINT_FLEX_GEMV=v1 VLLM_FA_RDNA2_UNFUSED_PREFILL=0 VLLM_RDNA_GEMMA_RESIDUAL_DIRECT=0
+ VLLM_RDNA_GDN_DECODE_INPLACE=0 RDNA_HINT_FLEX_FUSE_SILU=0 VLLM_RDNA_LM_HEAD_GEMV_MAX_M=8
+ TUNABLEOP_PREFER="
+scoreboard.sh base $OFF                                # flags off: the baseline
+scoreboard.sh base2 $OFF                               # second boot of the baseline: the floor
+BASELINE=base FLOOR=base2 scoreboard.sh attn $OFF VLLM_FA_RDNA2_UNFUSED_PREFILL=1
+BASELINE=base FLOOR=base2 scoreboard.sh mtp2 $OFF MTP=2
 python tools/rdna/rdna_hint_flex/scoreboard_report.py table \
     ~/w4a8_runs/scoreboard/{base,base2,attn,mtp2} --out table.md   # one row per arm and cell
 ```
@@ -66,19 +73,21 @@ greedy, PPL, prefix and concurrency probes, ran the cell (TTFT 1.47 s, decode 36
 request, evictions +0/+0), ran the three quality passes at smoke size (about one minute) and wrote the
 report with thermals (junction 78 / 74 C) and VRAM (27.1 GiB). The baseline / floor plumbing
 was exercised by comparing the smoke arm with itself (every delta zero, "within floor"):
-that checks the code path, not a result. The noise floor of the real quality passes is
-unknown until `base` and `base2` finish. A full arm is about 45 to 50 minutes
+that checks the code path, not a result. The noise floor of the real quality passes was
+measured by `base2` against `base`: long-context PPL 3.6633 both, 6/6 identical greedy
+continuations, prompt KL 0 (top-1 1.0000), decode KL 2.37e-6 nats with 28/32 identical
+decodes, output tok/s within 0.1% in every cell. A full arm takes about 45 to 50 minutes
 [inference: 3 min boot, 5 min probes, about 21 min of cells, a quality pass, quiet gaps].
 
-## Queue started [status file below, results pending]
+## Queue [done]
 
-`~/w4a8_runs/hi2-tp2/sb_queue.sh` runs `base`, `base2` (floor) and `attn`
+`~/w4a8_runs/hi2-tp2/sb_queue.sh` ran `base`, `base2` (floor) and `attn`
 (`VLLM_FA_RDNA2_UNFUSED_PREFILL=1`, baseline `base`, floor `base2`) one after the other on
-HIP 2,3 under the quiet protocol, started at 01:33 box time; progress in
-`~/w4a8_runs/hi2-tp2/sb-queue.status`, per-arm logs `sb-ARM.stdout`, results
-`~/w4a8_runs/scoreboard/ARM/scoreboard.md`. Until those files exist no number from this
-harness is a result. To stop it: `pkill -f sb_queue.sh`, then stop the server of the arm
-that is running.
+HIP 2,3 under the quiet protocol, starting 2026-11-15 01:33 box time; the results are in
+`~/w4a8_runs/scoreboard/ARM/scoreboard.md`. Later arms (`gemv`, `residual`, `gdnglue`,
+`stack`, `tunable`, `final`, the MTP arms and the concurrency pairs) used the same driver:
+the arm list, tables and tree SHAs are in [`hi2-27b-tp2-serving.md`](hi2-27b-tp2-serving.md),
+copies of the result files in `bench_results/2026-11-15_hi2-scoreboard/`.
 
 ## Limits
 

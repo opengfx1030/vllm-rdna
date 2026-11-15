@@ -11,6 +11,15 @@ card during a measurement; HIP 2,3 (the TP=2 pair) were not touched. Labels:
 source at the cited place, **[DERIVED]** = arithmetic on measured values,
 **[INFERENCE]** = a model or expectation a TP=2 run must confirm.
 
+> **Status (2026-11-15, after the scoreboard queue).** Gate A and gate B ran on HIP 2,3 and the
+> rows ship as the default of recipes `27b-hi2-tp2` and `27b-hi2-tp2-mtp2`. The deterministic
+> concurrency probe fails 0 of 480 checks with the rows (arm `conc-on`) and 0 of 480 without
+> them (`conc-off`). Arm `tunable` against `base`: TTFT 1k/512 c=1 1.51 to 1.41 s, 16k/1k c=1
+> 30.54 to 28.68 s, 32k/2k c=1 75.75 to 72.09 s, output x1.01 to x1.03 at c=1 and within noise
+> at c=8; long-context PPL 3.6633 to 3.6636, prompt KL 7.3e-6. Sections 1 to 6 were measured
+> on HIP 4 before that: where they say "not run" or "not accepted", this status supersedes
+> them. Tables and paths: [`hi2-27b-tp2-serving.md`](hi2-27b-tp2-serving.md).
+
 ## Summary
 
 * The TP=2 serving path of this model issues rocBLAS GEMMs for every prefill chunk
@@ -45,8 +54,8 @@ source at the cited place, **[DERIVED]** = arithmetic on measured values,
 * Model level, one GPU, the TP=2 GEMMs emulated (3 prompts x 64 greedy tokens, rows off
   vs on): tokens identical, max |dlogit| over the top-20 raw fp16 logits 0.094 with the
   three prompts batched and 0.043 one at a time (section 4.2). The LM head ships no row
-  (section 3.3). **Not run: the deterministic concurrency probe on HIP 2,3** (section 7);
-  the rows are not accepted until it passes.
+  (section 3.3). The deterministic concurrency probe on HIP 2,3 (section 7) later failed 0 of
+  480 checks with the rows and 0 of 480 without them (status note above).
 
 ## 1. Shape census
 
@@ -441,8 +450,9 @@ TunableOp rows per rank (a worker on device ordinal r reads tunableop_results<r>
 What the single-GPU checks cannot see: the real rank slices, the 2-rank all-reduce, the
 scheduler's batch composition under concurrency, and the MTP drafter inside a TP=2 step.
 A tuned row can change one rounding and flip a near-tie token (`tn_2048_12_2560` did on
-2026-11-06), so the row set is **not accepted until the gates below pass**; they were
-not run here because HIP 2,3 belong to the scoreboard queue.
+2026-11-06), so the row set was **not accepted until the gates below passed**; they were
+not run on HIP 4 because HIP 2,3 belonged to the scoreboard queue, and they ran there
+afterwards (status note at the top).
 
 **Preparation** (on `par1-cs25`). The arms need no model code, only the selection logic,
 the recipe line, the rows and the gate-A hook, so a tree that already runs the
@@ -524,12 +534,17 @@ time) and the agentic mix (0.4 %) stay within noise. PPL / top-k KL / decode KL 
 `base` should stay inside the `base2` floor: 57 of the 89 rows change a rounding, the
 model-level check saw at most 0.094 in a raw logit.
 
-### Gates that still need the TP=2 GPUs
+### Gate status
 
-1. Gate A, the deterministic concurrency probe, rows on vs off (not run).
-2. Gate B, scoreboard cells and quality, `tunable` vs `tunable-off` (not run).
-3. Gate B with `MTP=2` (the rows change nothing at M = 1033 .. 1045 except `ba`).
-4. The rows are **not accepted** until gate A passes; rollback is `TUNABLEOP_PREFER=`.
+1. Gate A, the deterministic concurrency probe, rows on vs off: **passed** (arms `conc-on`
+   and `conc-off`: 0 of 480 checks failing each, 0 of 288 in the `--no-ignore-eos` runs).
+2. Gate B, scoreboard cells and quality: arm `tunable` against `base` and `base2` (TTFT and
+   output in the status note; PPL 3.6636, prompt KL 7.33e-6, decode KL 6.44e-6 against a
+   floor of 2.37e-6). The same-tree `tunable-off` arm was not run: `base` is the reference.
+3. Gate B with `MTP=2`: the pair `tunable-mtp2` and `tunable-mtp2-off` was not run;
+   `final-mtp2` (the rows and the other switches, MTP=2) has PPL 3.6635, prompt KL 7.73e-6
+   and passes the acceptance probe at c=1 and c=4.
+4. Rollback is `TUNABLEOP_PREFER=`.
 
 ## Files
 

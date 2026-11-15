@@ -38,6 +38,7 @@ ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags bel
 | Qwen3.8-27B AWQ, W4A8 prefill | [`27b-awq`](../../tools/rdna/recipes/27b-awq.env) | TP=4 | `127.0.0.1:18210`, name `q27d` |
 | Qwen3.8-27B EXL3, codebook `mul1` | [`27b-exl3`](../../tools/rdna/recipes/27b-exl3.env) | TP=4 | `127.0.0.1:18105`, name `exl3-27b-mul1` |
 | Qwen3.8-27B HI2 3.0 bpw (`rdna_hint_flex`), two cards | [`27b-hi2-tp2`](../../tools/rdna/recipes/27b-hi2-tp2.env) | TP=2 | `127.0.0.1:18211`, name `q27hi2` |
+| Qwen3.8-27B HI2 3.0 bpw, two cards, MTP=2 (one to four concurrent requests) | [`27b-hi2-tp2-mtp2`](../../tools/rdna/recipes/27b-hi2-tp2-mtp2.env) | TP=2 | `127.0.0.1:18211`, name `q27hi2` |
 | DeepSeek-V4-Flash, K128 | [`dsv4-flash`](../../tools/rdna/recipes/dsv4-flash.env) | TP=4 | `127.0.0.1:18300`, name `dsv4-flash` |
 | HIP graphs, breakable capture, TP=2 | [`full`](../../tools/rdna/recipes/full.env) | TP=2 | launcher omits `--host`; port `18094`; no served name |
 
@@ -70,7 +71,7 @@ From [`rdna_launcher_common.sh`](../../tools/rdna/rdna_launcher_common.sh), unle
 | `VLLM_CACHE_ROOT` and the Triton / Inductor / extension caches | `<repo>/cache/...` | Stale `vllm serve` processes are killed only when they carry the same `VLLM_CACHE_ROOT`. |
 | `PYTHONPATH` | the repo root | So this checkout wins over an installed copy. |
 
-The command always includes `--dtype float16`. `TUNABLEOP` defaults to `1`: the launcher hashes `librocblas.so.5` and selects a profile under [`tunableop/`](../../tunableop/). `TUNABLEOP=0` turns that off. `TUNABLEOP_PROFILE=<name>` forces a named profile and refuses to start when the name is missing. `TUNABLEOP_PREFER=<name>` is the soft form: it applies only when that profile is registered for the loaded library's hash, otherwise the launcher warns and auto-selects (recipe `27b-hi2-tp2` sets it to its opt-in derived profile; `TUNABLEOP_PREFER=` empty gives the canonical rows). `P2P=0` turns the RDNA all-reduce off and sets `NCCL_P2P_DISABLE=1` (RCCL over host shared memory) for a host whose PCIe peer-to-peer is broken.
+The command always includes `--dtype float16`. `TUNABLEOP` defaults to `1`: the launcher hashes `librocblas.so.5` and selects a profile under [`tunableop/`](../../tunableop/). `TUNABLEOP=0` turns that off. `TUNABLEOP_PROFILE=<name>` forces a named profile and refuses to start when the name is missing. `TUNABLEOP_PREFER=<name>` is the soft form: it applies only when that profile is registered for the loaded library's hash, otherwise the launcher warns and auto-selects (recipes `27b-hi2-tp2` and `27b-hi2-tp2-mtp2` set it to their opt-in derived profile; `TUNABLEOP_PREFER=` empty gives the canonical rows). `P2P=0` turns the RDNA all-reduce off and sets `NCCL_P2P_DISABLE=1` (RCCL over host shared memory) for a host whose PCIe peer-to-peer is broken.
 
 `EXTRA_ARGS` is appended to the command. Example: `EXTRA_ARGS=--monokernel`. Quote it; the launcher splits it on spaces.
 
@@ -278,6 +279,17 @@ Qwen3.8-27B-exl3, 3.00 bpw, codebook `mul1`, TP=4. `SERVE_ENTRY=api`, port 18105
 
 AOT compile off. `RDNA_AR=1` with the 64 KiB one-shot gate. RCCL for the larger messages: `NCCL_P2P_LEVEL=pxb`, `RCCL_P2P_NET_DISABLE=1`, `RCCL_P2P_BATCH_ENABLE=1`, `NCCL_PROTO=Simple`, `RCCL_MSCCL_ENABLE=0`, `VLLM_FORCE_CUSTOM_ALL_REDUCE=0`. `VLLM_RDNA_DECODE_STALL_MS=250`. `HSA_ENABLE_SDMA` is unset here. `EAGER=1` or `CG_MODE=PIECEWISE` are the overrides the recipe comment names.
 
+### `27b-hi2-tp2` and `27b-hi2-tp2-mtp2`
+
+Qwen3.8-27B HI2 3.0 bpw (`rdna_hint_flex`, `BlivionIaG/Qwen3.8-27B-HI2-3.0bpw`), dense hybrid GDN, TP=2 on two gfx1030 cards. `SERVE_ENTRY=cli`, `HOST=127.0.0.1`, `PORT=18211`, `SERVED_NAME=q27hi2`. `ATTN=fa`, `EAGER=0`, `FULL_AND_PIECEWISE`. `MAXLEN=262144`, `BLOCK_SIZE=1024`, `SEQS=8`, `MAXBAT` derived (2048), `KV=17179869184`, `GMEM=0.9`. `RDNA_AR=1` with a 256 KiB one-shot gate. Features: `prefix-caching language-model-only`. AOT compile off. `27b-hi2-tp2` is `MTP=0`; `27b-hi2-tp2-mtp2` is the same file with `MTP=2`, for up to four concurrent requests (no throughput gain at eight and a long ITL tail there).
+
+Both recipes turn on the HI2 serving switches the scoreboard measured: `RDNA_HINT_FLEX_GEMV=auto`, `VLLM_FA_RDNA2_UNFUSED_PREFILL=1`, `VLLM_RDNA_GEMMA_RESIDUAL_DIRECT=1`, `VLLM_RDNA_GDN_DECODE_INPLACE=1`, `RDNA_HINT_FLEX_FUSE_SILU=1`, `VLLM_RDNA_LM_HEAD_GEMV_MAX_M=32` and `TUNABLEOP_PREFER=rocm7.14-rocblas5.5-hi2-27b-tp2`. Every one has an opt-out value that wins when it follows `RECIPE=` or comes from the caller's environment. [`docs/rdna2/hi2-27b-tp2-serving.md`](../rdna2/hi2-27b-tp2-serving.md) is the user document: switch table, memory, limits and the measured results.
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=27b-hi2-tp2 \
+  MODEL=/path/to/Qwen3.8-27B-HI2-3.0bpw
+```
+
 ### `dsv4-flash`
 
 DeepSeek-V4-Flash at K128: fp8 dense weights and MXFP4 experts, fp16 attention through the RDNA DeepSeek-V4 path. `ATTN=none`, so the launcher does not force `RDNA_ATTN`. `EXTRA_ARGS="--kv-cache-dtype fp8"`. `MAXLEN=32768`, `SEQS=8`, `MAXBAT=2048`, `KV=6000000000`, `GMEM=0.90`, TP=4, port 18300, `HOST=127.0.0.1`, `SERVED_NAME=dsv4-flash`, `MTP=0`.
@@ -330,6 +342,7 @@ To restore the defaults, remove both files, run
 ## Further reading
 
 - [`docs/rdna2/tuning.md`](../rdna2/tuning.md) — code defaults, subsystem flags, TunableOp, and the measurements already recorded there.
+- [`docs/rdna2/hi2-27b-tp2-serving.md`](../rdna2/hi2-27b-tp2-serving.md) — HI2 27B on two cards: serving guide, switch table, memory, limits and scoreboard results.
 - [`docs/rdna/monokernel/README.md`](monokernel/README.md) — MonoKernel scope on gfx1030.
 - [`docs/rdna2/mixed-batch-stall-probe.md`](../rdna2/mixed-batch-stall-probe.md) — decode-stall cap.
 - [gfx1030 wiki](https://blivioniag.github.io/gfx1030-wiki/) — host setup, the ROCm pin, and the published images.

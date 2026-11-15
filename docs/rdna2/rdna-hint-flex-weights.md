@@ -317,8 +317,8 @@ A call goes to v2 when R >= 1024 (the 48-row `in_proj_ba` keeps v1, which
 splits K over waves) and its code words are 16-byte aligned; anything else runs
 v1. v2 reads a pair-interleaved activation that the transform writes
 (`pair_interleaved`), so the two kernels of the op are always chosen together.
-**The default stays `v1`**: `auto` is recommended once it is verified end to
-end (see "End to end" below: it is not yet).
+**The code default stays `v1`** (unset = v1: every other recipe is unchanged). The recipes
+`27b-hi2-tp2` and `27b-hi2-tp2-mtp2` set `auto`, verified end to end ("End to end" below).
 
 Batch invariance: v1 gives a token the same bits whatever M is. `v2` does too
 (the eight pairs of a group are summed in the order 0..7 for every width and
@@ -565,28 +565,36 @@ INT4 branch (spills). The transform inside the GEMV was prototyped there
 
 #### End to end
 
-Verified end to end: **nothing of v2/auto yet.** The v1 baseline of the 27B
-TP=2 recipe (`27b-hi2-tp2`, from HiTp2Bring's branch) was booted and probed
-with an earlier build of this branch and the switch unset: READY in 180 s, greedy 3/3,
-PPL probe 5.73 (mean NLL 1.746 over 261 tokens), concurrency probe 47 of 48
-identical (1 near-tie), 0 KFD evictions; the prefix probe failed only because
-the default prompt is short (hit granularity 2048 tokens; use
-`PREFIX_WORDS=3000`). To A/B v2 on the same binary, only the environment
-differs (`serve_rdna.sh` passes the calling environment through):
+Verified end to end by the scoreboard (2026-11-15), arm `gemv` (`RDNA_HINT_FLEX_GEMV=auto`
+alone on the 27B TP=2 recipe, HIP 2,3) against arm `base`: 1k/512 c=8 output 92.5 to 117.8
+tok/s (x1.27), decode 13.8 to 18.8 tok/s per request, ITL p99 63.4 to 45.1 ms; 16k/1k c=8
+23.2 to 24.3 (x1.05); the c=1 cells are unchanged (M = 1 is v1). Long-context PPL 3.6633
+(equal), prompt KL 0, decode KL 6.18e-6 nats against 2.37e-6 between two baseline boots,
+19/32 identical decodes (the baseline pair: 28/32): the M = 1 against M >= 2 difference
+described above. Probes PASS; the concurrency probe has 3 near-ties in 48 checks (the
+baseline: 0) and no failure. Before any v2 run, the v1 baseline of the recipe (from
+HiTp2Bring's branch) was booted and probed with an earlier build of this branch and the
+switch unset: READY in 180 s, greedy 3/3, PPL probe 5.73 (mean NLL 1.746 over 261 tokens),
+concurrency probe 47 of 48 identical (1 near-tie), 0 KFD evictions; the prefix probe failed
+only because the default prompt is short (hit granularity 2048 tokens; use
+`PREFIX_WORDS=3000`). To A/B v2 on the same binary, only the environment differs
+(`serve_rdna.sh` passes the calling environment through; the recipe default is `auto`, so
+the v1 side names `v1`):
 
 ```text
-export RDNA_HINT_FLEX_GEMV=auto          # unset for the v1 baseline
-RECIPE=27b-hi2-tp2 MODEL=<snapshot> GPUS=4,5 PORT=18231 TAG=hi2k-auto \
+export RDNA_HINT_FLEX_GEMV=v1            # the recipes default to auto
+RECIPE=27b-hi2-tp2 MODEL=<snapshot> GPUS=4,5 PORT=18231 TAG=hi2k-v1 \
   PREFIX_WORDS=3000 CELLS="1024:512:1 1024:512:8 16384:1024:8:32" \
   BENCH_EXTRA="--temperature 0" SERVE_TREE=<tree> VENV=<venv> \
   bash tools/rdna/port_v031/serve_validate.sh
 # then: decode_kl.py collect against each server, compare auto and v1
 ```
 
-Expected [INFERENCE]: c=1 unchanged (M=1 is v1); at c=8 the GEMV time of a
-step falls by about 19 ms (39.77 to 20.62 ms by the table above; the step
-length itself was not measured here); the MTP verify batch at c=1 (M = 3) pays
-14.71 instead of 22.00 ms of GEMV. The MTP doc's cost model used v1's growth
+Expected [INFERENCE] before the run: c=1 unchanged (M=1 is v1); at c=8 the GEMV time of a
+step falls by about 19 ms (39.77 to 20.62 ms by the table above). The arm measured it: the
+c=8 step fell from 72.5 to 53.2 ms, 19.3 ms `[derived from the decode rate per request]`.
+The MTP verify batch at c=1 (M = 3) pays 14.71 instead of 22.00 ms of GEMV `[INFERENCE]`;
+no arm isolates it. The MTP doc's cost model used v1's growth
 with M (gate_up 1.77x of M=1 at M=3); with v2 it is 1.13x (93.4 against 82.5 us).
 
 Remaining: the head (T45 or smaller), norm and transform launches, M = 1 (at
@@ -712,8 +720,10 @@ slot (layers 0, 3, 31, 47, 63, K = 8704), `bench_tp2.py --m 1,2,3,8,48
 against `SiluAndMul` followed by the same op: all 25 cells equal bit for bit.
 The full test file in the default environment passes (1179 tests: 923 with
 `-k gemv2` and 256 without). The model hook in `Qwen2MoeMLP` and
-`RdnaHintFlexLinearMethod.fold_silu` were not run end to end (no TP=2 server
-was available to this work): the first A2 boot is their test.
+`RdnaHintFlexLinearMethod.fold_silu` were not run end to end by this work (no TP=2 server
+was available); they ran later in the scoreboard arms `stack` and `final`, never alone: the
+greedy, PPL, prefix and concurrency probes pass there, and the speed effect of the fold
+alone is not isolated (microbenchmark: 0.19 to 0.20 ms per step, 0.7% of a c=1 step).
 
 ### TunableOp
 
