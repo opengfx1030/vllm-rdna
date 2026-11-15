@@ -6,9 +6,6 @@
 // follow section 5 of the upstream LeapQuant RFC (vllm-project/vllm#64725,
 // lihaoyang-amd) and the reorthogonalization test of Daniel, Gragg, Kaufman
 // and Stewart (Math. Comp. 30, 1976); the code is ours.
-// NOT BUILT, NOT RUN: lq_orthonormalize, the warm start and the smoothing sum
-// in lq_fold are pending GPU validation; see docs/rdna2/
-// leapquant-gdn-numerics-and-isolation-2026-11-14.md. Delete this note then.
 // LeapQuant INT8 recurrent-state storage for GatedDeltaNet on AMD RDNA2
 // (gfx1030). arXiv 2609.38166; layout and FP32 oracle:
 // vllm/model_executor/layers/mamba/ops/leapquant_gdn.py.
