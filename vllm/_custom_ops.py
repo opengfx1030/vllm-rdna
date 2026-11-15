@@ -1602,10 +1602,42 @@ def rdna_hint_flex_dequant_rdna2(
     )  # fmt: skip
 
 
-def rdna_hint_flex_act_transform_rdna2(
-    x: torch.Tensor, col_scale: torch.Tensor, had: torch.Tensor, out: torch.Tensor
+def rdna_hint_flex_gemv2_rdna2(
+    x: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+    mt: int = 0,
+    rpw: int = 0,
+    wpb: int = 0,
+    x_pi: bool = False,
 ) -> None:
-    torch.ops._rocm_C.rdna_hint_flex_act_transform_rdna2(x, col_scale, had, out)
+    """GEMV v2 with an explicit (mt, rpw, wpb) configuration (0 = automatic).
+
+    x_pi: x is in the pair-interleaved layout written by
+    rdna_hint_flex_act_transform_rdna2(..., pair_interleaved=True).
+    """
+    torch.ops._rocm_C.rdna_hint_flex_gemv2_rdna2(
+        x, codes, code_off, blk_params, param_off, row_consts, row_nbits,
+        row_block, out, mt, rpw, wpb, x_pi,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_act_transform_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    out: torch.Tensor,
+    pair_interleaved: bool = False,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_act_transform_rdna2(
+        x, col_scale, had, out, pair_interleaved
+    )
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(
@@ -1709,9 +1741,31 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
     ) -> None:
         return
 
+    @register_fake("_rocm_C::rdna_hint_flex_gemv2_rdna2")
+    def _rdna_hint_flex_gemv2_rdna2_fake(
+        x: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+        mt: int,
+        rpw: int,
+        wpb: int,
+        x_pi: bool,
+    ) -> None:
+        return
+
     @register_fake("_rocm_C::rdna_hint_flex_act_transform_rdna2")
     def _rdna_hint_flex_act_transform_rdna2_fake(
-        x: torch.Tensor, col_scale: torch.Tensor, had: torch.Tensor, out: torch.Tensor
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        out: torch.Tensor,
+        pair_interleaved: bool = False,
     ) -> None:
         return
 
