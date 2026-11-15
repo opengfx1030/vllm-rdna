@@ -462,6 +462,13 @@ def main():
     ap.add_argument("--tol-abs", type=float, default=5e-3)
     ap.add_argument("--bench", action="store_true")
     ap.add_argument("--iters", type=int, default=100)
+    ap.add_argument(
+        "--splits",
+        type=int,
+        nargs="+",
+        default=[],
+        help="bench: also sweep VLLM_FA_RDNA2_DECODE_SPLITS over these values",
+    )
     ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"))
     ap.add_argument("--compare-bench", nargs=2, metavar=("OFF.json", "ON.json"))
     a = ap.parse_args()
@@ -481,8 +488,14 @@ def main():
     t0 = time.time()
     if a.bench:
         for c in bench_cases():
-            if a.only in c["name"]:
+            if a.only not in c["name"]:
+                continue
+            for s in a.splits or [None]:
+                if s is not None:
+                    os.environ["VLLM_FA_RDNA2_DECODE_SPLITS"] = str(s)
                 r = bench_case(c, a.seed, a.iters)
+                if s is not None:
+                    r["name"] = f"{r['name']}@s{s}"
                 results.append(r)
                 print(
                     f"{r['name']:36s} gate={r['gate']:3d} median "

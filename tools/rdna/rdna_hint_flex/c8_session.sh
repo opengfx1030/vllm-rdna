@@ -8,13 +8,16 @@
 # Steps:
 #   profile-c8      c8_run.sh final-c8 c8           final switch set, c=8 16k/1k workload
 #   profile-gemm    c8_run.sh final-gemm fast RDNA_HINT_FLEX_PREFILL_GEMM=hip
-#   profile-mb2056  c8_run.sh final-mb2056 fast MAXBAT=2056
+#   profile-hipmb2056  c8_run.sh final-hipmb2056 fast RDNA_HINT_FLEX_PREFILL_GEMM=hip
+#                   MAXBAT=2056 (mixed steps of 2048 + 7 rows)
 #   profile-vec     c8_run.sh final-vec c8 VLLM_FA_RDNA2_GQA_DECODE=2 (decode windows)
 #   allreduce       bench_allreduce.py sweep, RCCL defaults and NCCL_P2P_LEVEL=pxb
 #                   NCCL_PROTO=Simple (VPUSH=1 adds the 16-byte push instance)
 #   overlap         bench_allreduce.py overlap
 #   overlap-hp      the same with the collectives on a high-priority NCCL stream
-#   attn-check      gqa_decode_check.py with VLLM_FA_RDNA2_GQA_DECODE=1 and 2: bits, timing
+#   attn-check      gqa_decode_check.py with VLLM_FA_RDNA2_GQA_DECODE=1 and 2: bits, timing,
+#                   and a split-count sweep (VLLM_FA_RDNA2_DECODE_SPLITS)
+#   test-vpush      tests/distributed/test_rdna_ar_vpush_gpu.py (2 GPUs, needs the new _rocm_C)
 #   install-so      move $NEW_SO over vllm/_rocm_C.abi3.so (atomic; running servers keep
 #                   the old inode)
 # Output goes to $OUT (default ~/w4a8_runs/hi2-c8).
@@ -108,11 +111,24 @@ step_attn_check() {
         measured "attn-check-$mode" 600 "$OUT/gqa_check_m$mode.log" env \
             VLLM_FA_RDNA2_GQA_DECODE=$mode bash -c "\"$PY\" \"$chk\" --tag m$mode --repeat 2 \
             --out \"$OUT/gqa_m$mode.json\"; \"$PY\" \"$chk\" --tag m$mode --bench \
-            --only 27b_tp2_decode --out \"$OUT/gqa_bench_m$mode.json\""
+            --only 27b_tp2_decode --splits 16 12 13 8 6 --out \"$OUT/gqa_bench_m$mode.json\""
         grep -E "SUMMARY|FAIL" "$OUT/gqa_check_m$mode.log" | head -5
     done
+    # another split count: not bit-identical to 16 (the combine order changes) but in tolerance
+    measured attn-check-s12 400 "$OUT/gqa_check_m2s12.log" env VLLM_FA_RDNA2_GQA_DECODE=2 \
+        VLLM_FA_RDNA2_DECODE_SPLITS=12 "$PY" "$chk" --tag m2s12 --quick --repeat 2
+    grep -E "SUMMARY|FAIL" "$OUT/gqa_check_m2s12.log" | head -5
     "$PY" "$chk" --compare "$OUT/gqa_m1.json" "$OUT/gqa_m2.json" | tail -5
     "$PY" "$chk" --compare-bench "$OUT/gqa_bench_m1.json" "$OUT/gqa_bench_m2.json"
+}
+
+step_test_vpush() {
+    (
+        cd "$TREE" || exit 2
+        measured test-vpush 600 "$OUT/test_vpush.log" "$PY" -m pytest \
+            tests/distributed/test_rdna_ar_vpush_gpu.py -x -q -p no:cacheprovider
+    )
+    tail -8 "$OUT/test_vpush.log"
 }
 
 step_install_so() {
@@ -127,7 +143,10 @@ for step in "$@"; do
     case $step in
         profile-c8) HOLD_S=1500 bash "$HERE/c8_run.sh" final-c8 c8 ;;
         profile-gemm) HOLD_S=1000 bash "$HERE/c8_run.sh" final-gemm fast RDNA_HINT_FLEX_PREFILL_GEMM=hip ;;
-        profile-mb2056) HOLD_S=1000 bash "$HERE/c8_run.sh" final-mb2056 fast MAXBAT=2056 ;;
+        profile-hipmb2056)
+            HOLD_S=1000 bash "$HERE/c8_run.sh" final-hipmb2056 fast \
+                RDNA_HINT_FLEX_PREFILL_GEMM=hip MAXBAT=2056
+            ;;
         profile-vec)
             C8_ARGS="--windows decode" HOLD_S=1000 bash "$HERE/c8_run.sh" final-vec c8 \
                 VLLM_FA_RDNA2_GQA_DECODE=2
@@ -136,6 +155,7 @@ for step in "$@"; do
         overlap) step_overlap ;;
         overlap-hp) step_overlap_hp ;;
         attn-check) step_attn_check ;;
+        test-vpush) step_test_vpush ;;
         install-so) step_install_so ;;
         *) log "unknown step $step" ;;
     esac

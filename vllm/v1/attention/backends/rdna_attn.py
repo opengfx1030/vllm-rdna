@@ -99,6 +99,16 @@ def _split_decode_enabled() -> bool:
     return os.environ.get("VLLM_FA_RDNA2_SPLIT_DECODE", "1") == "1"
 
 
+def _decode_kv_splits() -> int:
+    """Split-K CTAs per (sequence, KV head) of the grouped decode kernels.
+
+    16 since the 2026-09-04 sweep (the grid is B x H_kv x splits CTAs on 72
+    CUs); VLLM_FA_RDNA2_DECODE_SPLITS (1-16) re-tunes it for a kernel or a
+    geometry.
+    """
+    return min(16, max(1, int(os.environ.get("VLLM_FA_RDNA2_DECODE_SPLITS", "16"))))
+
+
 _fa_rdna2_module = None
 
 
@@ -498,7 +508,7 @@ class RdnaAttentionImpl(AttentionImpl):
                 block_table,
                 seqused_k,
                 paged_block_size,
-                kv_splits=16,
+                kv_splits=_decode_kv_splits(),
                 sliding_window=sliding_window,
                 scale=self.scale,
                 out=dst,
@@ -517,7 +527,7 @@ class RdnaAttentionImpl(AttentionImpl):
                     block_table[:nd],
                     seqused_k[:nd],
                     paged_block_size,
-                    kv_splits=16,
+                    kv_splits=_decode_kv_splits(),
                     sliding_window=sliding_window,
                     scale=self.scale,
                     out=dst[:nd_tok],
