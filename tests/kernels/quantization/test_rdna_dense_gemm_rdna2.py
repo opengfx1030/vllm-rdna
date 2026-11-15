@@ -243,7 +243,7 @@ gfx1030_only = pytest.mark.skipif(
     reason="needs a gfx1030 GPU and the _rocm_C rdna_hint_flex_dense_gemm_rdna2 op",
 )
 
-DESIGN_BK = {0: 32, 1: 32, 2: 64, 3: 32, 4: 32, 5: 32}
+DESIGN_BK = {0: 32, 1: 32, 2: 64, 3: 32, 4: 64, 5: 64}
 
 
 def errs(c: torch.Tensor, ref: torch.Tensor) -> tuple[float, float]:

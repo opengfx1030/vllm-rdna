@@ -411,6 +411,12 @@ better rocBLAS row, i.e. the gain is efficiency per clock under the power cap, n
 
 ## Decision
 
+> **Superseded (round 2, `docs/rdna2/hi2-prefill-gemm2-2026-11-15.md`).** The +10 % bar below was an internal
+> contract; the user overruled it because the kernel already wins by the measured **+7.1 % geomean over the better
+> of heuristic and tuned rocBLAS (+13.5 % over the heuristic serving runs)** and never loses more than 3 %. The
+> kernel is wired behind `RDNA_HINT_FLEX_PREFILL_GEMM=hip` (default off) and was optimized further in round 2.
+> The "no-go" text below is kept as the record of the original decision against the old bar.
+
 **The bar is not met; this is a negative result and nothing is wired.**
 
 * Bar clause 2 (no cell more than 3 % slower than rocBLAS): **met** by D1 alone (worst cell 1.012).

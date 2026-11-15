@@ -61,10 +61,12 @@ using D3 = Design<128, 64, 64, 8, 8, 1, 8, 4, 8, false, 1, 0, 1, 0, 0, 1>;
 // 256x128 BK32, 8x16 per thread, swizzled LDS (48 KiB), grouped by 4.
 using D4 = Design<256, 128, 32, 8, 16, 2, 0, 4, 8, true, 1, 1, 1, 0, 0, 1>;
 // Tail designs for the last M % 128 rows (<= 32 and <= 64 rows): a 32x128 tile
-// with 4x8 and a 64x128 tile with 8x8 accumulators per thread, 128 threads, the
-// swizzled 128-row weight tile of D1. Not in the dispatch table: tail_design().
-using D5 = Design<32, 128, 32, 4, 8, 2, 0, 0, 8, true, 1, 0, 1, 0, 0, 1>;
-using D6 = Design<64, 128, 32, 8, 8, 2, 0, 0, 8, true, 1, 0, 1, 0, 0, 1>;
+// with 4x8 and a 64x128 tile with 8x8 accumulators per thread, 128 threads, BK
+// 64 (a whole 128-byte line of every weight row per stage: the standalone
+// kernel is latency-bound at BK 32), the swizzled 128-row weight tile of D1.
+// Not in the dispatch table: tail_design().
+using D5 = Design<32, 128, 64, 4, 8, 2, 0, 0, 8, true, 1, 0, 1, 0, 0, 1>;
+using D6 = Design<64, 128, 64, 8, 8, 2, 0, 0, 8, true, 1, 0, 1, 0, 0, 1>;
 
 namespace {
 
@@ -78,8 +80,8 @@ constexpr DesignInfo kDesigns[] = {
     {"128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf", 128, 128, 32},
     {"128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf", 128, 64, 64},
     {"256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf", 256, 128, 32},
-    {"32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf", 32, 128, 32},
-    {"64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf", 64, 128, 32},
+    {"32x128k64t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf", 32, 128, 64},
+    {"64x128k64t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf", 64, 128, 64},
 };
 constexpr int kNumDesigns = sizeof(kDesigns) / sizeof(kDesigns[0]);
 

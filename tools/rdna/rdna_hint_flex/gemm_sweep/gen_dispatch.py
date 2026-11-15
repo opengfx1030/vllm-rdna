@@ -41,8 +41,8 @@ DESIGNS = [
     "128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf",
     "128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf",
     "256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf",
-    "32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf",
-    "64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf",
+    "32x128k64t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf",
+    "64x128k64t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf",
 ]
 NUM_MAIN = 4
 DENSE_KINDS = ("dense", "hip")
