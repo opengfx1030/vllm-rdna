@@ -70,7 +70,7 @@ From [`rdna_launcher_common.sh`](../../tools/rdna/rdna_launcher_common.sh), unle
 | `VLLM_CACHE_ROOT` and the Triton / Inductor / extension caches | `<repo>/cache/...` | Stale `vllm serve` processes are killed only when they carry the same `VLLM_CACHE_ROOT`. |
 | `PYTHONPATH` | the repo root | So this checkout wins over an installed copy. |
 
-The command always includes `--dtype float16`. `TUNABLEOP` defaults to `1`: the launcher hashes `librocblas.so.5` and selects a profile under [`tunableop/`](../../tunableop/). `TUNABLEOP=0` turns that off. `TUNABLEOP_PROFILE=<name>` forces a named profile and refuses to start when the name is missing. `P2P=0` turns the RDNA all-reduce off and sets `NCCL_P2P_DISABLE=1` (RCCL over host shared memory) for a host whose PCIe peer-to-peer is broken.
+The command always includes `--dtype float16`. `TUNABLEOP` defaults to `1`: the launcher hashes `librocblas.so.5` and selects a profile under [`tunableop/`](../../tunableop/). `TUNABLEOP=0` turns that off. `TUNABLEOP_PROFILE=<name>` forces a named profile and refuses to start when the name is missing. `TUNABLEOP_PREFER=<name>` is the soft form: it applies only when that profile is registered for the loaded library's hash, otherwise the launcher warns and auto-selects (recipe `27b-hi2-tp2` sets it to its opt-in derived profile; `TUNABLEOP_PREFER=` empty gives the canonical rows). `P2P=0` turns the RDNA all-reduce off and sets `NCCL_P2P_DISABLE=1` (RCCL over host shared memory) for a host whose PCIe peer-to-peer is broken.
 
 `EXTRA_ARGS` is appended to the command. Example: `EXTRA_ARGS=--monokernel`. Quote it; the launcher splits it on spaces.
 
