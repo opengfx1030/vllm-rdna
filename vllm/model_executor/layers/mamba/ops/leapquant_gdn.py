@@ -56,11 +56,12 @@ the ROCm kernels; the reference is not on the serving path.
 from __future__ import annotations
 
 import functools
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
+
+from vllm import envs
 
 if TYPE_CHECKING:
     from vllm.config import CacheConfig, VllmConfig
@@ -216,7 +217,7 @@ def leapquant_gdn_pack_requested() -> bool:
     as many GDN layers into one KV-cache group as one block holds, so fewer
     groups (block tables) are resident per request. The planner applies it to
     LeapQuant Mamba buckets only (``MambaSpec.state_format``)."""
-    return os.environ.get("VLLM_RDNA_GDN_LEAPQUANT_PACK", "0") == "1"
+    return envs.VLLM_RDNA_GDN_LEAPQUANT_PACK
 
 
 def leapquant_gdn_pack_enabled(cache_config: CacheConfig) -> bool:
