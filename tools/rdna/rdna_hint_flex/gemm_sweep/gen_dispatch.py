@@ -15,6 +15,12 @@ Later files override earlier ones for the same
 table row; the kernel serves an M by its nearest anchor and leaves M outside
 [``--lo-frac`` x first anchor, ``--hi-factor`` x last anchor] to rocBLAS.
 
+``--composite`` takes ``bench_linear.py`` CSVs (the whole composite op against
+rocBLAS in one window): a cell where the op with ``prefill_gemm=1`` is not at
+least ``--min-gain`` faster than the better rocBLAS row stays on rocBLAS even
+when the kernel alone measured faster (after the dequant pass the fp16 scratch
+is hot, which favours rocBLAS at the smallest M).
+
     python gen_dispatch.py --csv confirm_f.csv --out ../../../../csrc/rocm/rdna_hint_flex_dense_gemm_table.cuh
     python gen_dispatch.py --check ...   # exit 1 when the checked-in header differs
 
@@ -81,6 +87,27 @@ def load(csvs: list[Path]) -> dict[tuple[int, int, int], dict[str, float]]:
     return cells
 
 
+def load_veto(csvs: list[Path], min_gain: float) -> set[tuple[int, int, int]]:
+    """(N, K, M) cells where the composite op is not min_gain faster than rocBLAS."""
+    seen: dict[tuple, float] = {}
+    for p in csvs:
+        with open(p, newline="") as fh:
+            for r in csv.DictReader(fh):
+                if not r.get("us"):
+                    continue
+                if r["kind"] in RB_KINDS or (
+                    r["kind"] == "hip" and r["variant"] == "prefill_gemm=1"
+                ):
+                    key = (r["kind"], int(r["N"]), int(r["K"]), int(r["M"]))
+                    seen[key] = float(r["us"])
+    veto = set()
+    for (kind, n, k, m), us in seen.items():
+        rb = [seen[(kk, n, k, m)] for kk in RB_KINDS if (kk, n, k, m) in seen]
+        if kind == "hip" and rb and us * min_gain > min(rb):
+            veto.add((n, k, m))
+    return veto
+
+
 def pick_cell(row: dict[str, float], min_gain: float) -> tuple[int, float, float]:
     """(design id or -1, best rocBLAS us, best design us) of one cell."""
     rb = min(row[k] for k in ("rb_heur", "rb_tuned") if k in row)
@@ -97,12 +124,14 @@ def pick_cell(row: dict[str, float], min_gain: float) -> tuple[int, float, float
     return best_id, rb, best_us
 
 
-def build(cells, min_gain: float, lo_frac: float, hi_factor: float):
+def build(cells, min_gain: float, lo_frac: float, hi_factor: float, veto=frozenset()):
     slots: dict[tuple[int, int], list[tuple[int, int, float, float]]] = {}
     for (n, k, m), row in sorted(cells.items()):
         if not any(kk in row for kk in ("rb_heur", "rb_tuned")):
             continue  # no rocBLAS reference: nothing to compare against
         d, rb, us = pick_cell(row, min_gain)
+        if (n, k, m) in veto:
+            d = -1
         slots.setdefault((n, k), []).append((m, d, rb, us))
     return slots
 
@@ -170,6 +199,7 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
     ap.add_argument("--csv", action="append", required=True, type=Path)
+    ap.add_argument("--composite", action="append", default=[], type=Path)
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--min-gain", type=float, default=1.01)
     ap.add_argument("--lo-frac", type=float, default=0.75)
@@ -178,10 +208,12 @@ def main() -> int:
     args = ap.parse_args()
     if kernel_design_names() != DESIGNS:
         sys.exit(f"DESIGNS differs from kDesigns in {KERNEL_CU}")
-    slots = build(load(args.csv), args.min_gain, args.lo_frac, args.hi_factor)
-    text = render(
-        slots, [p.name for p in args.csv], args.min_gain, args.lo_frac, args.hi_factor
-    )
+    veto = load_veto(args.composite, args.min_gain)
+    slots = build(load(args.csv), args.min_gain, args.lo_frac, args.hi_factor, veto)
+    names = [p.name for p in args.csv]
+    if args.composite:
+        names.append("vetoed by " + ", ".join(p.name for p in args.composite))
+    text = render(slots, names, args.min_gain, args.lo_frac, args.hi_factor)
     if args.check:
         same = args.out.exists() and args.out.read_text() == text
         print("table is current" if same else f"{args.out} differs from the CSVs")

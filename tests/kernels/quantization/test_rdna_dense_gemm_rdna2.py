@@ -133,6 +133,43 @@ def test_generator_pick_rule(tmp_path):
     assert got[700] == 0
 
 
+def test_generator_composite_veto(tmp_path):
+    d0 = gen.DESIGNS[0]
+
+    def write(name, rows):
+        p = tmp_path / name
+        with open(p, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        return p
+
+    kernel = write(
+        "k.csv",
+        [
+            _rows("rocblas_heur", "default", 64, 64, 512, 110.0),
+            _rows("hip", d0, 64, 64, 512, 100.0),
+            _rows("rocblas_heur", "default", 64, 64, 1024, 210.0),
+            _rows("hip", d0, 64, 64, 1024, 200.0),
+        ],
+    )
+    # the whole composite op: rocBLAS wins at M=512 (the dequant pass leaves the
+    # scratch hot), the kernel still wins at M=1024
+    comp = write(
+        "c.csv",
+        [
+            _rows("rocblas_heur", "default", 64, 64, 512, 130.0),
+            _rows("hip", "prefill_gemm=1", 64, 64, 512, 131.0),
+            _rows("rocblas_heur", "default", 64, 64, 1024, 230.0),
+            _rows("hip", "prefill_gemm=1", 64, 64, 1024, 215.0),
+        ],
+    )
+    veto = gen.load_veto([comp], 1.01)
+    assert veto == {(64, 64, 512)}
+    slots = gen.build(gen.load([kernel]), 1.01, 0.75, 2.0, veto)
+    assert {m: d for m, d, _, _ in slots[(64, 64)]} == {512: -1, 1024: 0}
+
+
 def test_env_switch_values(monkeypatch):
     from vllm.model_executor.layers.quantization import rdna_hint_flex as rhf
 

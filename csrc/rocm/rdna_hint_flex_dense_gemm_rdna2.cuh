@@ -27,12 +27,15 @@ constexpr int kRocblas = -1;  // not a design: leave the GEMM to rocBLAS
 // rows apart from the q tile rows (a padded tile row costs 1/q of the GEMM):
 // 2 on the decode GEMV (packed weights), 3 on the tail designs (fp16 scratch),
 // 4 on the GEMV up to kHybridGemvMaxRows rows (the GEMV is compute-bound in r,
-// the tail designs stream the whole scratch whatever r) and on the tail designs
-// beyond.
+// the tail designs stream the whole scratch whatever r) and, from
+// M = kDenseTailMinM on, on the tail designs beyond. Below that M the padded
+// tile row can sit in the idle slots of the last round (M = 700 gate_up: the
+// split is 6 % slower than padding).
 constexpr int64_t kModeDense = 1, kModeGemvTail = 2, kModeDenseTail = 3,
                   kModeHybrid = 4;
 constexpr int64_t kTileRows = 128;
 constexpr int64_t kHybridGemvMaxRows = 16;
+constexpr int64_t kDenseTailMinM = 1024;
 
 // The tail designs (32x128 and 64x128 tiles, not in the table) cover up to
 // kTailMaxRows rows; tail_design(rows) is kRocblas beyond that.
@@ -40,14 +43,18 @@ constexpr int64_t kTailMaxRows = 64;
 int tail_design(int64_t rows);
 
 enum class TailKind { kNone, kGemv, kDense };
-// How the r = M % kTileRows tail rows run in `mode` (gemv_max_rows: what the
-// GEMV can take): kNone = inside the main GEMM's last (padded) tile row.
-inline TailKind tail_kind(int64_t mode, int64_t r, int64_t gemv_max_rows) {
+// How the r = M % kTileRows tail rows of an M-row GEMM run in `mode`
+// (gemv_max_rows: what the GEMV can take): kNone = inside the main GEMM's last
+// (padded) tile row.
+inline TailKind tail_kind(int64_t mode, int64_t m, int64_t r,
+                          int64_t gemv_max_rows) {
   if (mode < kModeGemvTail || r <= 0) return TailKind::kNone;
   const bool gemv_ok = r <= gemv_max_rows;
   if (mode == kModeGemvTail) return gemv_ok ? TailKind::kGemv : TailKind::kNone;
-  if (mode == kModeHybrid && gemv_ok && r <= kHybridGemvMaxRows)
-    return TailKind::kGemv;
+  if (mode == kModeHybrid) {
+    if (gemv_ok && r <= kHybridGemvMaxRows) return TailKind::kGemv;
+    if (m < kDenseTailMinM) return TailKind::kNone;
+  }
   return r <= kTailMaxRows ? TailKind::kDense : TailKind::kNone;
 }
 

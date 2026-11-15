@@ -37,7 +37,8 @@ stated per table). "Better rocBLAS" = the faster of the heuristic and the Tunabl
   the design's BK, unaligned operand) falls back to `at::mm_out` on the same dequantized scratch.
 * **`prefill_gemm` modes** (`rdna_hint_flex_dense_gemm_rdna2.cuh`): 0 rocBLAS; 1 dense kernel, a short tail padded
   into one more tile row; 2 tail rows on the decode GEMV (packed weights); 3 tail rows on the 32x128 / 64x128 tail
-  designs (fp16 scratch); 4 (what `hip` sends) GEMV up to 16 tail rows, tail designs for 17..64, padded beyond.
+  designs (fp16 scratch); 4 (what `hip` sends) GEMV up to 16 tail rows, tail designs for 17..64 rows from M = 1024 on,
+  padded otherwise.
 
 ### Scoreboard arm (Main runs it on HIP 0,1 or 2,3)
 
@@ -130,25 +131,47 @@ everywhere else (the c=8 chunks 1031 / 1045 among them) the heuristic is what se
 The scheduler's c=8 chunks are 1024 + a few decode tokens (M = 1025..1031: 47-50 % of the c=8 steps) and MTP2 adds
 r up to 21; a padded last tile row costs 1/q of the GEMM (q = 8: +12.5 %; D4's 256-row tiles at M = 2049: +12.5 %).
 The composite op can instead run the `r` rows apart. `bench_linear.py` times the whole composite (input transform +
-dequant + GEMM [+ tail]) on synthetic HI2 weights; HIP 4 under `flock`, so the clocks are lower (1.42-1.56 GHz) and
-only the ratios inside a row are meaningful. Speed-up over the padded mode 1, per r (M = 1024 + r):
+dequant + GEMM [+ tail]) on synthetic HI2 weights. Final data, HIP 5, a8 build (SKIP in every design, BK 64 tail
+designs), M = 1024 + r, us and speed-up over the padded mode 1 (`lin3b_hip5.csv`; 175 W, the same rocBLAS heuristic
+row is 10650-10926 us at gate_up for scale):
 
-| r | GEMV tail (mode 2): gate_up / down / qkv / out_proj | tail designs (mode 3): gate_up / down / qkv / out_proj |
-| ---: | --- | --- |
-| 1 | 1.113 / 1.093 / 1.096 / 1.094 | 1.035 / 1.052 / 1.057 / 1.037 |
-| 7 | 1.093 / 1.071 / 1.074 / 1.078 | 1.037 / 1.053 / 1.058 / 1.041 |
-| 14 | 1.065 / 1.041 / 1.040 / 1.043 | 1.045 / 1.055 / 1.055 / 1.038 |
-| 21 | 1.036 / 1.009 / 1.013 / 1.010 | 1.041 / 1.054 / 1.056 / 1.037 |
-| 32 | 1.002 / 0.968 / 0.976 / 0.972 | 1.049 / 1.052 / 1.059 / 1.037 |
-| 48 | 0.948 / 0.914 / 0.919 / 0.915 | 1.033 / 1.031 / 1.035 / 1.017 |
+| shape | r | padded (mode 1) | GEMV tail (2) | tail designs (3) | 2 / 1 | 3 / 1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| gate_up | 1 | 8518 | 8119 | 8751 | 1.049 | 0.973 |
+| gate_up | 7 | 8473 | 8137 | 8718 | 1.041 | 0.972 |
+| gate_up | 14 | 8706 | 8422 | 8825 | 1.034 | 0.987 |
+| gate_up | 21 | 9012 | 8767 | 8874 | 1.028 | 1.015 |
+| gate_up | 32 | 9043 | 9082 | 8682 | 0.996 | 1.042 |
+| gate_up | 48 | 9055 | 9678 | 8644 | 0.936 | 1.048 |
+| down | 1 | 4028 | 3911 | 3960 | 1.030 | 1.017 |
+| down | 7 | 4131 | 4001 | 4077 | 1.033 | 1.013 |
+| down | 14 | 4312 | 4140 | 4081 | 1.041 | 1.057 |
+| down | 21 | 4321 | 4270 | 4082 | 1.012 | 1.059 |
+| down | 32 | 4317 | 4451 | 4082 | 0.970 | 1.057 |
+| down | 48 | 4344 | 4729 | 4174 | 0.919 | 1.041 |
+| out_proj | 1 | 1502 | 1440 | 1495 | 1.043 | 1.005 |
+| out_proj | 7 | 1518 | 1472 | 1535 | 1.031 | 0.989 |
+| out_proj | 14 | 1554 | 1520 | 1536 | 1.023 | 1.012 |
+| out_proj | 21 | 1558 | 1567 | 1538 | 0.994 | 1.013 |
+| out_proj | 32 | 1558 | 1633 | 1537 | 0.954 | 1.013 |
+| out_proj | 48 | 1560 | 1738 | 1569 | 0.898 | 0.995 |
 
-(M = 2048 + r: r = 7: GEMV 1.104 / 1.092 / 1.089 / 1.091, tail designs 1.077 / 1.083 / 1.083 / 1.083; r = 32: GEMV
-1.049 / 1.032 / 1.033 / 1.033, tail designs 1.081 / 1.081 / 1.083 / 1.083; `lin2_hip4.csv`.) The GEMV is
-compute-bound in r (~45 us per row at gate_up) and wins below r ~ 16; the tail designs stream the whole fp16 scratch
-whatever r, a flat +3.5..5.9 %. Mode 4 takes the better of the two (threshold 16, `kHybridGemvMaxRows`).
-Against the heuristic that serving runs, M = 1031 (r = 7) gets 1.30 (gate_up) to 1.17 (down) with the GEMV tail
-(`lin1_hip4.csv`). The tail designs are latency-bound (gate_up ~0.9 ms for 178 MB against a ~0.35 ms DRAM floor
-[derived]); see "What remains".
+SKIP (idle waves of the padded tile row skip their dot2s) already took most of the small-r cost out of the padded
+mode: before it (`lin1_hip4.csv` / `lin2_hip4.csv`, a7-era kernels on HIP 4, lower clocks) the GEMV tail gained +9..11 %
+at r = 1 and the tail designs a flat +3.5..5.9 % over padding. What the data now says: the **GEMV tail wins to
+r ~ 14..21** (it is compute-bound in r, ~45 us per row at gate_up, +3..5 % at r <= 14), the **tail designs win from
+r ~ 21..32** (+1.5..4.8 % gate_up, +4..6 % down, +-1 % out_proj; they stream the whole fp16 scratch whatever r and lose
+2-3 % to padding at small r on gate_up), and at M = 700 (r = 60, main 640 rows; `lin3a_hip5.csv`) the split is **6.3 %
+slower than padding on gate_up** (6031 against 5653 us; down -0.3 %, in_proj_qkvz +4.9 %, qkv_proj +2.0 %, out_proj
+0 %): below 1024 rows the padded tile row can sit in the idle slots of the last round. Mode 4 therefore takes the GEMV up
+to 16 rows (`kHybridGemvMaxRows`) and the tail designs for 17..64 rows **only from M = 1024** (`kDenseTailMinM`); below
+that the last tile row stays padded.
+
+The tail designs are latency-bound standalone: `tail1.csv` (BK 32) against `tail2.csv` (BK 64: a whole 128-byte line of
+each weight row per stage), HIP 4, cold weights, us for the 32x128 / 64x128 designs: gate_up r = 1..32 1664-1914 /
+1659-1802 -> 928-1043 / 799-896; down 397-424 / 420-474 -> 324-378 / 382-450; out_proj 276-311 / 260-299 -> 170-190 /
+187-196. BK 64 halves them, and they still reach only 130-190 GB/s of the ~500 GB/s [measured]; in the composite the
+scratch is warm. See "What remains".
 
 ## Levers tried (round 2)
 
@@ -203,8 +226,9 @@ dot2; BUF takes D1's VALU per dot2 from 1.062 to 1.031 and the DMA+BROT build to
 
 1. **Fuse the tail into the main launch.** The tail blocks (136 column tiles at gate_up) appended to the main grid
    would run in the idle slots of its last partial round (0.44 of a round at M = 1024 + r), hiding most of the
-   ~0.9 ms (gate_up) the separate tail-design launch costs; 3.5-5.9 % for r in 17..64 [derived, not built]. The tail
-   designs are latency-bound (one stage of prefetch, 128 threads): BN = 64 tiles or split-K would raise their memory
+   ~0.8-0.9 ms (gate_up) the separate tail-design launch costs: up to +4..6 % at r in 17..64, where the tail designs
+   already win by 1.5-5.9 % over padding [derived, not built]. The tail designs are latency-bound even at BK 64
+   (130-190 GB/s standalone, 128 threads, one stage of prefetch): BN = 64 tiles or split-K would raise their memory
    parallelism.
 2. **Energy per dot2** is the limiter (clock 1.6-1.7 GHz against 2.0 GHz dot-only): fewer LDS bytes per dot2 (a larger
    register tile needs a different accumulator scheme), a vectorized epilogue (the fp16 stores are 2-byte scalars, ~1 %

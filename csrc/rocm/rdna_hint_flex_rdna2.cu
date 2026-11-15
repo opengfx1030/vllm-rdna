@@ -2838,7 +2838,7 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
       // tail designs on the fp16 scratch), instead of one padded tile row that
       // costs 1/q of the GEMM. See hg::tail_kind for the modes.
       const int64_t r = M % hg::kTileRows;
-      const hg::TailKind want = hg::tail_kind(prefill_gemm, r, decode_max_m);
+      const hg::TailKind want = hg::tail_kind(prefill_gemm, M, r, decode_max_m);
       if (want != hg::TailKind::kNone) {
         const int d = hg::pick(M - r, R, K);
         if (d >= 0) {
