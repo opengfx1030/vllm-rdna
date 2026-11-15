@@ -239,11 +239,14 @@ case $phase in
         esac
         # the rows file to count hits against is always the tuned arm's
         rows_file=${rows_file:-${ROWS:+$ROWS/tunableop_results0.csv}}
+        # EMUL_SEQ=1: one request at a time (the chunks are the rows' aligned M);
+        # EMUL_TAG names the output files ($W/emul/<arm><tag>.json)
         gpu_run "$PY" "$H/tp2_emul_check.py" run "$MODEL" --arm "$arm" \
-            ${rows_file:+--rows "$rows_file"} --out "$W/emul/$arm.json" \
+            ${rows_file:+--rows "$rows_file"} --out "$W/emul/$arm${EMUL_TAG:-}.json" \
             ${EMUL_STEPS:+--steps "$EMUL_STEPS"} ${EMUL_LENGTHS:+--lengths "$EMUL_LENGTHS"} \
-            > "$W/emul/$arm.log" 2>&1
-        tail -2 "$W/emul/$arm.log"
+            ${EMUL_SEQ:+--sequential} \
+            > "$W/emul/$arm${EMUL_TAG:-}.log" 2>&1
+        tail -2 "$W/emul/$arm${EMUL_TAG:-}.log"
         ;;
     *)
         echo "unknown phase $phase" >&2

@@ -19,20 +19,20 @@
     "doc": "docs/rdna2/hi2-27b-tunableop-2026-11-15.md",
     "branch": "feat/hi2-tunableop",
     "tools": "tools/rdna/rdna_hint_flex/tunableop_hi2.sh (phases shapes, record, tune, gather, measure, check, curate, time, hit, emul), tunable_hi2.py, sched_census.py, tunable_report.py, tp2_emul_check.py",
-    "gpu_state": "HIP 4 at 79-81 C junction, 175 W package cap, sclk 1300-1750 MHz during the measurement passes (2 s rocm-smi sampler of the alternating passes)",
-    "tuning": "tune_missing_gemms.sh tune: PYTORCH_TUNABLEOP_ENABLED=1 TUNING=1 HIPBLASLT_ENABLED=0 TORCH_BLAS_PREFER_HIPBLASLT=0, TunableOp defaults (max 30 ms and 100 iterations per candidate), numerical check atol=rtol=2e-3, groups of 25 keys in 5 shards, one flock hold per shard",
+    "gpu_state": "HIP 4 (V620, bus 0xdf) while the alternating measurement passes ran, 2 s rocm-smi samples at >= 150 W: junction 76-81 C, package 169-176 W against a 175 W cap, sclk 1230-1955 MHz (median 1595)",
+    "tuning": "tune_missing_gemms.sh tune: PYTORCH_TUNABLEOP_ENABLED=1 TUNING=1 HIPBLASLT_ENABLED=0 TORCH_BLAS_PREFER_HIPBLASLT=0, TunableOp defaults (max 30 ms and 100 iterations per candidate, 4 MiB rotating buffer), numerical check atol=rtol=2e-3 (tune_missing_gemms.sh TUNE_ATOL/TUNE_RTOL), prefill group in 4 shards, sched groups of 25 keys in 5 shards of 5, one flock hold per shard",
     "groups": {
-      "prefill": "7 slots x M 1024, 2048 = 14 keys (10 adopted at the first measurement)",
+      "prefill": "7 slots x M 1024, 2048 = 14 keys (10 adopted: gate_up, qkvz, qkv, out/o, ba; down and fc dropped)",
       "sched0": "5 slots x M 1023, 1029, 1030, 1031, 2046 = 25 keys",
       "sched1": "5 slots x M 1025, 1026, 1027, 1028, 2047 = 25 keys",
       "sched2": "5 slots x M 1033, 1036, 1039, 1042, 1045 = 25 keys (MTP=2 mixed steps)"
     },
     "candidates": 89,
     "adopted": 36,
-    "curation": "cold-weight CUDA-graph timing, adopt >= 3 % faster than the heuristic; stage one on the median of the first pass and three alternating heuristic/tuned passes (34 borderline keys), stage two (sched2) on one pass",
-    "numerics": "rowcheck.py on 89 candidate rows (gaussian and outlier-channel inputs, eager and HIP graph, vs fp64): 0 rejected, worst error ratio 1.00, tuned bits equal the default's for 32 and differ for 57",
-    "lookup": "tunehit.py: 31 of 31 stage-one rows found with PYTORCH_TUNABLEOP_FILENAME at this folder (rows=3361 at that time)",
-    "model_level": "tp2_emul_check.py, 3 prompts x 64 greedy tokens: tokens identical, max |dlogit| 0.094 (top-20 raw fp16 logits); doc section 4.2",
+    "curation": "cold-weight CUDA-graph timing, adopt when the tuned time is under 97 % of the heuristic's; stage one on the median of the first pass and three alternating heuristic/tuned passes for the 34 keys near the margin (a first-pass-only curation adopts 25 rows instead of 31), stage two (sched2, 25 keys) on one pass; down and the MTP fc were tuned only at M 1024 and 2048 (no gain) and are timed twice, untuned, at the other scheduler M (noise floor -1.4..+0.5 %)",
+    "numerics": "rowcheck.py on 89 candidate rows (gaussian and outlier-channel inputs, eager and HIP graph, vs fp64): 0 rejected, worst error ratio 1.00, max |err|/max|ref| 2.1e-4..4.8e-4, relative L2 2.05e-4..2.09e-4, tuned bits equal the default's for 32 and differ for 57",
+    "lookup": "tunableop_hi2.sh hit: 36 of 36 new keys found in this folder's rank 0 file (rows=3366, missing=0)",
+    "model_level": "tp2_emul_check.py (real checkpoint at TP=1, the TP=2 per-rank GEMMs issued in place of each full-width one), 3 prompts x 64 greedy tokens, rows off vs on: tokens identical in both runs; batched (3361-row profile) max |dlogit| over the top-20 raw fp16 logits 0.094, one at a time (this folder) 0.043; doc section 4.2",
     "open_gate": "deterministic concurrency probe on HIP 2,3 (flat all-reduce) not run"
   },
   "missing_gemms": {

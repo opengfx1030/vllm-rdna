@@ -174,7 +174,11 @@ def cmd_run(args) -> int:
     params = SamplingParams(
         temperature=0.0, max_tokens=args.steps, logprobs=TOP, ignore_eos=True
     )
-    outs = llm.generate([{"prompt_token_ids": p} for p in ids], params)
+    if args.sequential:
+        # one request at a time (c=1): the chunks are the aligned M of the rows
+        outs = [llm.generate([{"prompt_token_ids": p}], params)[0] for p in ids]
+    else:
+        outs = llm.generate([{"prompt_token_ids": p} for p in ids], params)
     result = {
         "arm": args.arm,
         "tunableop": {
@@ -267,6 +271,11 @@ def main(argv=None) -> int:
     run.add_argument("--rows", default="", help="rows file to count hits against")
     run.add_argument("--kv-gib", type=int, default=8)
     run.add_argument("--steps", type=int, default=STEPS)
+    run.add_argument(
+        "--sequential",
+        action="store_true",
+        help="generate the prompts one at a time (c=1) instead of as one batch",
+    )
     run.add_argument(
         "--lengths",
         default=",".join(map(str, LENGTHS)),

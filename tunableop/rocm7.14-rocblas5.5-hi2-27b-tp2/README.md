@@ -33,12 +33,14 @@ measured heuristic and tuned time and TF/s of every candidate (adopted or not).
 
 ## Not adopted
 
-* `gate_up` and `out`/`o` at M = 1025..1031 and 1033..1045, `qkvz` / `qkv` at 1025..1031 and
-  1033..1045: the tuner returned the `Default` solver or a solver less than 3 % faster
-  than the heuristic (median of four alternating passes). An odd M one to a few rows past
-  a tile multiple costs a whole extra tile row, and no rocBLAS solution avoids that.
-* `down_proj` (5120 x 8704) and the MTP `fc` (2560 x 10240) at every census M: the
-  heuristic is as fast (-1.3 % .. +0.5 %).
+* `gate_up`, `out`/`o`, `qkvz` and `qkv` at M = 1025..1031 and 1033..1045, and `out`/`o`
+  at 1023: the tuner returned the `Default` solver (12 `gate_up` and 13 `out`/`o` keys) or
+  a solver under 3 % faster than the heuristic (best +2.8 %, median of four alternating
+  passes where repeated). This matches tile quantization: one to a few rows past a tile
+  multiple cost a whole extra tile row, which no rocBLAS solution avoids [INFERENCE].
+* `down_proj` (5120 x 8704) and the MTP `fc` (2560 x 10240): tuned at M = 1024 and 2048,
+  the heuristic is as fast (-1.3 .. +0.1 %); at the other scheduler M they were only
+  timed, twice, untuned (noise floor -1.4 .. +0.5 %).
 * Arbitrary chunk tails (probe 834 / 1015 / 1018 / 172, warm repeat 475 / 27, prompt
   logprobs 903 / 906 / 297), the unfused prefill attention GEMMs (`s_len` varies per chunk),
   the MTP drafter's dense layers at M = 9..24 and the LM head rows (cap 32 keeps the GEMV
@@ -49,14 +51,16 @@ measured heuristic and tuned time and TF/s of every candidate (adopted or not).
 `tools/rdna/rdna_hint_flex/tunableop_hi2.sh` on HIP 4 (V620, bus 0xdf), one shard per
 `flock` hold: offline tuner (TunableOp defaults: 30 ms and at most 100 iterations per
 candidate, hipBLASLt off) -> cold-weight CUDA-graph timing of the heuristic and the rows
-(median of 4 passes for the borderline keys) -> `rowcheck.py` (tuned vs rocBLAS default vs
-fp64: 89 rows, 0 rejected, worst error ratio 1.00) -> curate (adopt >= 3 %) -> harvest into
-this folder. `tunehit.py`: all 31 stage-one rows found at lookup on the box tree.
-`provenance.json` has the environment and the key list.
+(median of 4 passes for the 34 keys near the margin) -> `rowcheck.py` (tuned vs rocBLAS
+default vs fp64: 89 rows, 0 rejected, worst error ratio 1.00) -> curate (adopt when the
+tuned time is under 97 % of the heuristic's) -> harvest into this folder.
+`tunableop_hi2.sh hit`: all 36 new rows found at lookup (rows=3366). `provenance.json`
+has the environment and the key list.
 
 ## Gate status
 
 Single-GPU model-level check (real checkpoint, TP=2 GEMMs emulated at TP=1, 3 prompts x
-64 greedy tokens): tokens identical to the rows-off run, max |dlogit| 0.094 over the top-20
-raw fp16 logits. **Not yet run: the deterministic concurrency probe on the TP=2 pair**
-(HIP 2,3); the row set is not accepted until it passes (commands in the doc, section 7).
+64 greedy tokens, rows off vs on): tokens identical with the prompts batched and one at a
+time, max |dlogit| 0.094 / 0.043 over the top-20 raw fp16 logits. **Not yet run: the
+deterministic concurrency probe on the TP=2 pair** (HIP 2,3); the row set is not accepted
+until it passes (commands in the doc, section 7).
