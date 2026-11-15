@@ -94,6 +94,10 @@ struct FragT<8> {
   using type = u32x2;
 };
 
+#endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
+
+// The design is plain constants and static_asserts, so every pass sees it: the
+// host launch code in the .cu names it whatever the device arch is.
 // One compile-time design.
 template <int BM_, int BN_, int BK_, int TM_, int TN_, int NBUF_, int PAD_,
           int RAST_, int LW_, bool SWZ_, int KU_, int BROT_ = 0, int SKIP_ = 0,
@@ -140,6 +144,8 @@ struct Design {
                 "DMA 1: SWZ, NBUF 2, BK 32, BROT 0 or 1, whole waves per slab");
   static_assert(BUF == 0 || (BUF == 1 && DMA == 0), "BUF 1 excludes DMA");
 };
+
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
 
 using i32x4 = int __attribute__((ext_vector_type(4)));
 
@@ -499,6 +505,13 @@ __global__ void __launch_bounds__(P::T)
     }
   }
 }
+
+#else  // other device arch: an empty kernel, so the host launch code resolves
+
+template <class P>
+__global__ void __launch_bounds__(P::T)
+    gemm_kernel(const char* __restrict__, const char* __restrict__,
+                _Float16* __restrict__, int, int, int, int, int, int) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
