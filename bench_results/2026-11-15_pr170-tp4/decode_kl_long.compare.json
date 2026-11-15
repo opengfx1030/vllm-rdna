@@ -1,0 +1,26 @@
+{
+ "ref-cand": {
+  "positions": 202,
+  "kl_mean": 0.010183378462228205,
+  "kl_p50": 0.00022712456785638395,
+  "kl_p99": 0.1699290113471565,
+  "kl_max": 0.5156757754896824,
+  "coverage_mean": 0.9833058853596913,
+  "divergence_median": 5.5,
+  "identical": 0,
+  "passages": 8,
+  "confident_flips": 2
+ },
+ "ref-floor": {
+  "positions": 331,
+  "kl_mean": 0.009794595069351687,
+  "kl_p50": 0.0002552685217250583,
+  "kl_p99": 0.19130630482659786,
+  "kl_max": 0.3637523200906033,
+  "coverage_mean": 0.9827440074015851,
+  "divergence_median": 12.5,
+  "identical": 0,
+  "passages": 8,
+  "confident_flips": 4
+ }
+}

@@ -1,0 +1,142 @@
+run: /home/chenco_adm/w4a8_runs/leapquant/pr170-gpu/matrix-flashnext-20261115-195724
+== boot-level lines per arm
+-- A
+INFO 11-15 20:13:55 [kv_cache_utils.py:1147] GPU KV cache size: 266,945 tokens, Maximum concurrency for 262,144 tokens per request: 1.02x
+INFO 11-15 20:13:55 [kv_cache_utils.py:865] kv cache group sizes (1024, 1024, 1024, 1024, 8, 1024)
+   lines naming the retired switch VLLM_RDNA_GDN_LEAPQUANT: 0
+   WARNING lines naming leapquant or replayssm: 0
+   unknown-env warnings (names): VLLM_CAUSAL_CONV1D_RDNA2_FWD VLLM_CAUSAL_CONV1D_RDNA2_UPDATE VLLM_FA_RDNA2_GQA_DECODE VLLM_GDN_HIP_PREFILL VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA_AR_BLOCKS VLLM_RDNA_AR_MAX_KB VLLM_RDNA_AR_ONESHOT_KB VLLM_RDNA_AR_PACE VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_SMALLM_GEMM_MAX_BYTES VLLM_RDNA_W4A8_KBLOCK VLLM_TREE 
+replayssm_state_dtype="auto"
+-- B
+INFO 11-15 20:01:51 [kv_cache_utils.py:1147] GPU KV cache size: 273,456 tokens, Maximum concurrency for 262,144 tokens per request: 1.04x
+INFO 11-15 20:01:51 [kv_cache_utils.py:865] kv cache group sizes (512, 512, 512, 512, 8, 512)
+INFO 11-15 20:02:10 [scheduler.py:447] LeapQuant scheduling: bounded output admission=True, decoder-first FCFS
+(Worker_TP0_EP0 pid=933247) INFO 11-15 19:59:10 [qwen_gdn_linear_attn.py:1081] GDN recurrent state: LeapQuant INT8 (window 32, r 4, 37024 B/head)
+(Worker_TP0_EP0 pid=933247) INFO 11-15 20:01:52 [qwen_gdn_linear_attn.py:2266] LeapQuant GDN: one normalize launch per KV-cache group (12 layers)
+   lines naming the retired switch VLLM_RDNA_GDN_LEAPQUANT: 0
+   WARNING lines naming leapquant or replayssm: 0
+   unknown-env warnings (names): VLLM_CAUSAL_CONV1D_RDNA2_FWD VLLM_CAUSAL_CONV1D_RDNA2_UPDATE VLLM_DECODE_STALL_MAX_OVERHEAD VLLM_FA_RDNA2_GQA_DECODE VLLM_GDN_HIP_PREFILL VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA_AR_BLOCKS VLLM_RDNA_AR_MAX_KB VLLM_RDNA_AR_ONESHOT_KB VLLM_RDNA_AR_PACE VLLM_RDNA_DECODE_SHARE VLLM_RDNA_DECODE_STALL_MS VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_SMALLM_GEMM_MAX_BYTES VLLM_RDNA_W4A8_KBLOCK VLLM_TREE 
+replayssm_state_dtype="leapquant"
+-- A2
+INFO 11-15 20:25:52 [kv_cache_utils.py:1147] GPU KV cache size: 266,945 tokens, Maximum concurrency for 262,144 tokens per request: 1.02x
+INFO 11-15 20:25:52 [kv_cache_utils.py:865] kv cache group sizes (1024, 1024, 1024, 1024, 8, 1024)
+   lines naming the retired switch VLLM_RDNA_GDN_LEAPQUANT: 0
+   WARNING lines naming leapquant or replayssm: 0
+   unknown-env warnings (names): VLLM_CAUSAL_CONV1D_RDNA2_FWD VLLM_CAUSAL_CONV1D_RDNA2_UPDATE VLLM_FA_RDNA2_GQA_DECODE VLLM_GDN_HIP_PREFILL VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA_AR_BLOCKS VLLM_RDNA_AR_MAX_KB VLLM_RDNA_AR_ONESHOT_KB VLLM_RDNA_AR_PACE VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_SMALLM_GEMM_MAX_BYTES VLLM_RDNA_W4A8_KBLOCK VLLM_TREE 
+replayssm_state_dtype="auto"
+-- P
+INFO 11-15 20:37:45 [kv_cache_planning.py:1044] LeapQuant page packing: 36 Mamba layer(s) of 469888 bytes use 2 KV-cache group(s); one block holds 19 of them.
+INFO 11-15 20:38:54 [kv_cache_utils.py:1147] GPU KV cache size: 273,220 tokens, Maximum concurrency for 262,144 tokens per request: 1.04x
+INFO 11-15 20:38:54 [kv_cache_utils.py:865] kv cache group sizes (640, 640, 640, 8, 640)
+INFO 11-15 20:39:13 [scheduler.py:447] LeapQuant scheduling: bounded output admission=True, decoder-first FCFS
+(Worker_TP0_EP0 pid=969835) INFO 11-15 20:36:15 [qwen_gdn_linear_attn.py:1081] GDN recurrent state: LeapQuant INT8 (window 32, r 4, 37024 B/head)
+(Worker_TP0_EP0 pid=969835) INFO 11-15 20:38:55 [qwen_gdn_linear_attn.py:2266] LeapQuant GDN: one normalize launch per KV-cache group (18 layers)
+   lines naming the retired switch VLLM_RDNA_GDN_LEAPQUANT: 1
+   WARNING lines naming leapquant or replayssm: 1
+   unknown-env warnings (names): VLLM_CAUSAL_CONV1D_RDNA2_FWD VLLM_CAUSAL_CONV1D_RDNA2_UPDATE VLLM_DECODE_STALL_MAX_OVERHEAD VLLM_FA_RDNA2_GQA_DECODE VLLM_GDN_HIP_PREFILL VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA_AR_BLOCKS VLLM_RDNA_AR_MAX_KB VLLM_RDNA_AR_ONESHOT_KB VLLM_RDNA_AR_PACE VLLM_RDNA_DECODE_SHARE VLLM_RDNA_DECODE_STALL_MS VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_GDN_LEAPQUANT_PACK VLLM_RDNA_SMALLM_GEMM_MAX_BYTES VLLM_RDNA_W4A8_KBLOCK VLLM_TREE 
+replayssm_state_dtype="leapquant"
+== probes per arm
+-- A
+RESULT PASS (3/3)
+[20:14:40] PPL PROBE PASS
+    PPL 4.80 (mean NLL 1.570 over 261 tokens) PASS
+    RESULT PASS
+[20:14:46] PREFIX PASS
+    cold TTFT 1.02 s, warm TTFT 0.34 s, speedup 3.0x -> PASS
+    prefix cache: queries +5550, hits +2048, warm hit rate 73.8% (hit granularity 2048 tokens)
+[20:15:33] CONCURRENCY PASS
+    RESULT PASS: 0 failing, 13 near-tie, 2 soft, 0 solo-noise, 33 identical of 48 checks (28.1s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 2.04 nats, a flip fails if both runs are sure)
+[20:21:16] LOAD HOOK rc=0 PASS: quality collects
+    PASS: quality collects
+[20:21:23] PROBE-AFTER-LOAD PASS
+          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t
+          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo
+-- B
+RESULT PASS (3/3)
+[20:02:36] PPL PROBE PASS
+    PPL 4.80 (mean NLL 1.569 over 261 tokens) PASS
+    RESULT PASS
+[20:02:42] PREFIX PASS
+    cold TTFT 1.16 s, warm TTFT 0.21 s, speedup 5.6x -> PASS
+    prefix cache: queries +5550, hits +2560, warm hit rate 92.3% (hit granularity 2048 tokens)
+[20:03:30] CONCURRENCY PASS
+    RESULT PASS: 0 failing, 10 near-tie, 5 soft, 0 solo-noise, 33 identical of 48 checks (28.2s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 3.38 nats, a flip fails if both runs are sure)
+[20:09:17] LOAD HOOK rc=0 PASS: quality collects
+    PASS: quality collects
+[20:09:23] PROBE-AFTER-LOAD PASS
+          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t
+          1 GPU KV cache size: 273,456 tokens, Maximum concurrency fo
+-- A2
+RESULT PASS (3/3)
+[20:26:37] PPL PROBE PASS
+    PPL 4.87 (mean NLL 1.582 over 261 tokens) PASS
+    RESULT PASS
+[20:26:44] PREFIX PASS
+    cold TTFT 1.02 s, warm TTFT 0.33 s, speedup 3.1x -> PASS
+    prefix cache: queries +5550, hits +2048, warm hit rate 73.8% (hit granularity 2048 tokens)
+[20:27:29] CONCURRENCY PASS
+    RESULT PASS: 0 failing, 14 near-tie, 1 soft, 0 solo-noise, 33 identical of 48 checks (28.3s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 2.14 nats, a flip fails if both runs are sure)
+[20:33:10] LOAD HOOK rc=0 PASS: quality collects
+    PASS: quality collects
+[20:33:16] PROBE-AFTER-LOAD PASS
+          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t
+          1 GPU KV cache size: 266,945 tokens, Maximum concurrency fo
+-- P
+RESULT PASS (3/3)
+[20:39:40] PPL PROBE PASS
+    PPL 4.86 (mean NLL 1.581 over 261 tokens) PASS
+    RESULT PASS
+[20:39:46] PREFIX PASS
+    cold TTFT 1.10 s, warm TTFT 0.21 s, speedup 5.3x -> PASS
+    prefix cache: queries +5550, hits +2560, warm hit rate 92.3% (hit granularity 2048 tokens)
+[20:40:33] CONCURRENCY PASS
+    RESULT PASS: 0 failing, 14 near-tie, 2 soft, 0 solo-noise, 32 identical of 48 checks (27.0s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 2.33 nats, a flip fails if both runs are sure)
+[20:44:31] LOAD HOOK rc=0 PASS: quality collects
+    PASS: quality collects
+[20:44:36] PROBE-AFTER-LOAD PASS
+          2 rdna_ar: hierarchical all-reduce (VLLM_RDNA_AR_HIER=auto) does not apply, using t
+          1 GPU KV cache size: 273,220 tokens, Maximum concurrency fo
+== topk_kl (prompt-level KL / dNLL / top-1): floor = A vs A2, head = A vs B
+| pair | domain | windows | PPL ref | PPL cand | dNLL [95% CI] | KL nats/token [95% CI] | KL p99 | top-1 [95% CI] | abs dlogp p50 / p99 / max | identical tokens |
+|---|---|---:|---:|---:|---|---|---:|---|---|---:|
+| floor | docs | 64 | 2.7474 | 2.7493 | +0.00067 [-0.00060, +0.00201] | 0.01189 [0.00984, 0.01418] | 0.1878 | 0.9671 [0.9637, 0.9704] | 0.0033 / 0.9777 / 4.783 | 0.9% |
+| head | docs | 64 | 2.7474 | 2.7447 | -0.00098 [-0.00213, +0.00016] | 0.01194 [0.00994, 0.01420] | 0.1835 | 0.9673 [0.9639, 0.9706] | 0.0034 / 0.9685 / 5.331 | 0.9% |
+| pack | docs | 64 | 2.7447 | 2.7464 | +0.00060 [-0.00051, +0.00173] | 0.01142 [0.00954, 0.01348] | 0.1742 | 0.9678 [0.9645, 0.9709] | 0.0033 / 0.9668 / 7.311 | 0.9% |
+
+| pair | domain | windows | PPL ref | PPL cand | dNLL [95% CI] | KL nats/token [95% CI] | KL p99 | top-1 [95% CI] | abs dlogp p50 / p99 / max | identical tokens |
+|---|---|---:|---:|---:|---|---|---:|---|---|---:|
+| floor | docs | 64 | 2.7474 | 2.7493 | +0.00067 [-0.00060, +0.00201] | 0.01189 [0.00984, 0.01418] | 0.1878 | 0.9671 [0.9637, 0.9704] | 0.0033 / 0.9777 / 4.783 | 0.9% |
+| head | docs | 64 | 2.7474 | 2.7447 | -0.00098 [-0.00213, +0.00016] | 0.01194 [0.00994, 0.01420] | 0.1835 | 0.9673 [0.9639, 0.9706] | 0.0034 / 0.9685 / 5.331 | 0.9% |
+| pack | docs | 64 | 2.7447 | 2.7464 | +0.00060 [-0.00051, +0.00173] | 0.01142 [0.00954, 0.01348] | 0.1742 | 0.9678 [0.9645, 0.9709] | 0.0033 / 0.9668 / 7.311 | 0.9% |
+== decode_kl_512 (reference A; candidate B; floor A2)
+ref-cand: KL mean 6.735e-03 p50 2.840e-05 p99 1.046e-01 max 1.465e+00 over 2093 decode positions (coverage 0.992); divergence median 14.5 tokens, 0/32 identical, 3 confident flips
+ref-floor: KL mean 9.016e-03 p50 4.553e-05 p99 1.471e-01 max 1.358e+00 over 1832 decode positions (coverage 0.985); divergence median 13.5 tokens, 0/32 identical, 3 confident flips
+== decode_kl_512 (reference B; candidate P = packed pages)
+ref-cand: KL mean 1.045e-02 p50 2.718e-05 p99 1.126e-01 max 3.573e+00 over 1524 decode positions (coverage 0.990); divergence median 7.0 tokens, 0/32 identical, 4 confident flips
+== decode_kl_long (reference A; candidate B; floor A2)
+ref-cand: KL mean 1.018e-02 p50 2.271e-04 p99 1.699e-01 max 5.157e-01 over 202 decode positions (coverage 0.983); divergence median 5.5 tokens, 0/8 identical, 2 confident flips
+ref-floor: KL mean 9.795e-03 p50 2.553e-04 p99 1.913e-01 max 3.638e-01 over 331 decode positions (coverage 0.983); divergence median 12.5 tokens, 0/8 identical, 4 confident flips
+== quality_ab (long-context PPL): A -> B
+passage 0: PPL 2.141 -> 2.140 (-0.01%)  mean|dlogp| 0.0454  |dlogp|>0.1 12.75%  greedy first divergence none/256
+passage 1: PPL 2.829 -> 2.839 (+0.34%)  mean|dlogp| 0.1078  |dlogp|>0.1 24.07%  greedy first divergence 23/256
+passage 2: PPL 2.395 -> 2.393 (-0.09%)  mean|dlogp| 0.0529  |dlogp|>0.1 14.11%  greedy first divergence 1/256
+passage 3: PPL 4.709 -> 4.743 (+0.71%)  mean|dlogp| 0.1098  |dlogp|>0.1 27.93%  greedy first divergence none/1
+passage 4: PPL 4.338 -> 4.343 (+0.12%)  mean|dlogp| 0.1105  |dlogp|>0.1 28.49%  greedy first divergence 19/256
+passage 5: PPL 3.631 -> 3.628 (-0.08%)  mean|dlogp| 0.0666  |dlogp|>0.1 16.50%  greedy first divergence none/256
+TOTAL PPL 3.3319 -> 3.3377 (+0.173%)  mean|dlogp| 0.0835  greedy exact 3/6  mean first divergence 92.7 tokens  PASS
+== quality_ab: A -> A2 (floor)
+passage 0: PPL 2.141 -> 2.140 (-0.05%)  mean|dlogp| 0.0443  |dlogp|>0.1 12.25%  greedy first divergence none/256
+passage 1: PPL 2.829 -> 2.834 (+0.16%)  mean|dlogp| 0.1066  |dlogp|>0.1 24.17%  greedy first divergence 9/256
+passage 2: PPL 2.395 -> 2.390 (-0.23%)  mean|dlogp| 0.0547  |dlogp|>0.1 14.53%  greedy first divergence 12/256
+passage 3: PPL 4.709 -> 4.646 (-1.35%)  mean|dlogp| 0.1132  |dlogp|>0.1 27.88%  greedy first divergence none/1
+passage 4: PPL 4.338 -> 4.331 (-0.16%)  mean|dlogp| 0.1093  |dlogp|>0.1 28.66%  greedy first divergence 19/256
+passage 5: PPL 3.631 -> 3.626 (-0.13%)  mean|dlogp| 0.0679  |dlogp|>0.1 16.91%  greedy first divergence 137/256
+TOTAL PPL 3.3319 -> 3.3207 (-0.336%)  mean|dlogp| 0.0841  greedy exact 2/6  mean first divergence 72.3 tokens  PASS
+== quality_ab: B -> P (packed pages)
+passage 0: PPL 2.140 -> 2.142 (+0.08%)  mean|dlogp| 0.0440  |dlogp|>0.1 12.61%  greedy first divergence none/256
+passage 1: PPL 2.839 -> 2.833 (-0.22%)  mean|dlogp| 0.1092  |dlogp|>0.1 24.18%  greedy first divergence 23/256
+passage 2: PPL 2.393 -> 2.388 (-0.21%)  mean|dlogp| 0.0531  |dlogp|>0.1 14.58%  greedy first divergence 1/74
+passage 3: PPL 4.743 -> 4.692 (-1.06%)  mean|dlogp| 0.1116  |dlogp|>0.1 28.62%  greedy first divergence none/1
+passage 4: PPL 4.343 -> 4.327 (-0.37%)  mean|dlogp| 0.1134  |dlogp|>0.1 29.25%  greedy first divergence 19/256
+passage 5: PPL 3.628 -> 3.624 (-0.11%)  mean|dlogp| 0.0654  |dlogp|>0.1 16.42%  greedy first divergence none/256
+TOTAL PPL 3.3377 -> 3.3262 (-0.342%)  mean|dlogp| 0.0841  greedy exact 3/6  mean first divergence 92.7 tokens  PASS

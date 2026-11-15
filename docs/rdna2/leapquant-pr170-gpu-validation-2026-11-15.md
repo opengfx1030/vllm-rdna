@@ -1,14 +1,15 @@
-# LeapQuant PR 170: GPU validation on the 27B AWQ, TP2 (2026-11-15)
+# LeapQuant PR 170: GPU validation, 27B AWQ at TP2 and Flash-Next at TP4 (2026-11-15)
 
 Status: validation record for PR #170
 ([config flag, validator, numerics tests, page packing](leapquant-config-guards-2026-11-14.md)).
 Branch `feat/gdn-leapquant-pack-layers` at `791392e04b`. The three earlier notes
 of this PR say "no GPU ran this change". This note is the GPU run.
 
-Everything below ran on **two V620 GPUs (gfx1030, HIP 0,1 = PCI buses d1 and d4
-of the box par1-cs25, lease `a2`) with the Qwen3.8-27B AWQ model at TP2**. The
-Flash-Next TP4 checks need HIP 2-5 and did not run. Section
-[Still pending (TP4)](#still-pending-tp4) lists them with the commands.
+Sections 1 to 6 ran on **two V620 GPUs (gfx1030, HIP 0,1 = PCI buses d1 and d4
+of the box par1-cs25, lease `a2`) with the Qwen3.8-27B AWQ model at TP2**.
+Sections 7 to 11 are the Flash-Next TP4 matrix (HIP 2-5, lease `b4`, run
+`matrix-flashnext-20261115-195724`, five arms). Section 11 says what is not
+validated.
 
 All runs are correctness and function runs. No timed window was taken, no quiet
 file was written, and this note makes no throughput claim.
@@ -24,10 +25,13 @@ file was written, and this note makes no throughput claim.
 | Rejection at boot | 8 setups are refused in the API server before any worker starts, with the exact messages of section 5 |
 | Boot with the flag (27B, TP2, MTP2, `FULL_AND_PIECEWISE`) | boots and serves; greedy, PPL, prefix-cache (cold text equals warm text) and concurrency probes pass; no fault, no eviction |
 | KV capacity at block 1024 | flag off 328,658 tokens, flag on 325,019 (-1.1%): no gain at the recipe's block, as the planner said |
-| Quality, flag on against flag off | long-context PPL -0.014%; prompt-level KL 1.1e-4 nats/token, top-1 0.9977; decode KL 2.1e-4 and 1.0e-4 nats/position, no confident flip. The boot-to-boot floor (`A2`) is pending |
-| Page packing on the 27B | kernels: 4 packed-page tests pass. Planner: applies at block 1024 (3 groups of 16 become 2 of 24, 331,129 tokens, +0.75% against flag off) and is a no-op at block 512. The boots (`P`, `C512`, `C512P`) are pending |
-| Bugs found | none: all 72 GPU tests passed on the first build |
-| Pending | the floor and the packing boots on the 27B, and every Flash-Next TP4 item |
+| Quality, 27B flag on against flag off | long-context PPL -0.014%; prompt-level KL 1.1e-4 nats/token, top-1 0.9977; decode KL 2.1e-4 and 1.0e-4 nats/position, no confident flip. No floor on the 27B (`A2` collects were cut off) |
+| Page packing on the 27B | kernels: 4 packed-page tests pass. Planner: applies at block 1024 (3 groups of 16 become 2 of 24, 331,129 tokens, +0.75% against flag off) and is a no-op at block 512. The 27B packing boots are not run (dropped) |
+| Flash-Next TP4: boots and capacity (section 7) | `A`/`A2` 266,945 tokens, groups (1024 x4, 8, 1024); `B` and `BNM` 273,456, (512 x4, 8, 512), +2.44% against `A`; `P` (packing, block 640) 273,220, (640, 640, 640, 8, 640), -0.09% against `B`. All five arms: probes pass, 0 KFD evictions, 0 faults |
+| Flash-Next TP4: quality against the floor (section 8) | prompt-level KL 0.01194 against floor 0.01189 nats/token, dNLL -0.00098 [-0.00213, +0.00016] against floor +0.00067, top-1 0.9673 against 0.9671; decode KL (512 tokens) 6.7e-3 against floor 9.0e-3, long decode 1.02e-2 against 9.8e-3; long-context PPL +0.173% against floor -0.336%. Packed against padded: KL 0.01142, PPL -0.342% |
+| Flash-Next TP4: MonoKernel off, `BNM` (section 9) | boots with the same capacity, probes pass, 0 evictions, MonoKernel lines absent; quality at the floor except one open sign: `A` to `BNM` long decode KL 1.9e-2 against 9.8e-3 (175 positions) |
+| Bugs found | none in the GPU tests of the 27B run. The Flash-Next matrix found one cosmetic defect: `VLLM_RDNA_GDN_LEAPQUANT_PACK` was not registered in `vllm/envs.py` (unknown-variable warning); fixed in this PR |
+| Not validated | 27B floor and packing boots (dropped), any timed throughput, MTP drafter layers outside the recipes, V1 runner (section 11) |
 
 **Status of the arms.** `A` and `B` are complete. `A2` (the boot-to-boot
 floor) booted at 18:12 and passed the probes (section 3), but its quality
@@ -350,52 +354,250 @@ Then fill sections 3, 4 and 6 and tick the two 27B items of the PR body. The
 Triton and Inductor caches of this run were deleted, so the first boot compiles
 again.
 
-## Still pending (TP4)
+## 7. Flash-Next at TP4: boots and KV capacity
 
-These checks need HIP 2-5 (lease `b4`, PCI buses d9, dc, df, e2), which this
-session could not use. They are the items of the PR body that name Flash-Next.
-No Flash-Next number can come from the 27B:
+Run on HIP 2-5 (lease `b4`) of the same box, between 19:57 and 20:58 on
+2026-11-15, by `run_matrix_pr170.sh` (`PROFILE=flashnext`). Five arms booted one
+after the other through `serve_validate.sh`, each with the probes, the quality
+collects of section 8 and the greedy probe again. Run directory on the box:
+`~/w4a8_runs/leapquant/pr170-gpu/matrix-flashnext-20261115-195724/` (one
+directory per arm with `serve.log`, `summary.txt`, the probe files and the
+collects; `compare.txt`, `topk_compare.md|json`, `*.compare.json` at the top).
+The small result files are copied to
+[`bench_results/2026-11-15_pr170-tp4/`](../../bench_results/2026-11-15_pr170-tp4/)
+(`compare.txt`, `topk_compare.md`, `topk_compare.json`, the three
+`decode_kl_*.compare.json`, and `bnm_compare.txt` for the arm that
+`compare_pr170.sh` does not know). The files are unchanged copies, except that
+`topk_compare.md` has one heading line added for the markdown lint.
 
-- The MonoKernel GDN path (`vllm/models/qwen4_exp/amd/mono/rdna2/gdn.py`) belongs to
-  the Flash-Next model. The 27B does not use it. The kernel level is covered
-  (`mono_gdn_lq_rdna2`: 4 tests in the kernel file and 6 in the safety file
-  passed, also at the Flash-Next per-rank heads (4, 12), section 2), but a real
-  `--monokernel` worker is not.
-- The Flash-Next page, group sizes and capacities (273,456 tokens,
-  `(512, 512, 512, 512, 8, 512)`) come from its own geometry: TP4 with EP4, its
-  attention page and its extra layers.
+| | |
+|---|---|
+| Tree | `tree-pr170` on the box: `GIT_SHA` `791392e04b` with the `_rocm_C` of section 1. The commits after it change only docs and one comment, plus (in the commit that adds this section) the registration of `VLLM_RDNA_GDN_LEAPQUANT_PACK` in `vllm/envs.py`, which this run did not have |
+| Model | `wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16` (snapshot `0939125b`), served as `flash-next` |
+| Engine | TP4 with EP4, MTP2 (`num_spec_tokens` 2), `FULL_AND_PIECEWISE`, V2 model runner, prefix caching with `--mamba-cache-mode align`, `--max-num-seqs 8`, `--max-num-batched-tokens 2048` (2560 for `P`), `--kv-cache-memory-bytes 4026531840` per rank, `max_model_len` 262,144 |
+| Arms | `A`, `A2`: recipe `flashnext-mtp2` with `--monokernel`, flag off (`A2` is the boot-to-boot floor). `B`: recipe `flashnext-leapquant-mtp2` (flag on, MonoKernel on, block 512). `BNM`: `B` with `EXTRA_ARGS=` (MonoKernel off). `P`: `B` with `VLLM_RDNA_GDN_LEAPQUANT_PACK=1 BLOCK_SIZE=640 MAXBAT=2560` |
 
-| Pending item | Expected | How |
+**Capacity: the engine's own numbers.**
+
+| Arm | State | MonoKernel | Block | GPU KV cache size | Concurrency | Group sizes | GDN page padded by | GPU blocks | Model loading (GiB per rank) |
+|---|---|---|---:|---:|---:|---|---|---:|---:|
+| `A` | FP32 | on | 1024 | **266,945** | 1.02x | (1024, 1024, 1024, 1024, 8, 1024) | 29.13% | 278 | 20.56 |
+| `A2` | FP32 | on | 1024 | **266,945** | 1.02x | (1024, 1024, 1024, 1024, 8, 1024) | 29.13% | 278 | 20.56 |
+| `B` | LeapQuant | on | 512 | **273,456** | 1.04x | (512, 512, 512, 512, 8, 512) | 11.58% | 556 | 20.28 |
+| `BNM` | LeapQuant | off | 512 | **273,456** | 1.04x | (512, 512, 512, 512, 8, 512) | 11.58% | 556 | 20.28 |
+| `P` | LeapQuant, packed | on | 640 | **273,220** | 1.04x | (640, 640, 640, 8, 640) | none (no padding line) | 444 | 20.37 |
+
+`A` and `A2` give the same capacity and the same groups. `B` and `BNM` give the
+same capacity that PR 168 measured (273,456 at block 512). `A` and `B` differ in
+two things, the flag and the block of the recipe (1024 against 512), exactly as
+in PR 168. `P` prints the same capacity the CPU planner computed before the
+boot (273,220 at block 640, see the capacity analysis linked below): the planner
+and the engine agree to the digit.
+
+**Boot-level lines** (from `compare.txt` and `serve.log` of each arm).
+
+| Line | `A`, `A2` | `B` | `BNM` | `P` |
+|---|---|---|---|---|
+| `GDN recurrent state: LeapQuant INT8 (window 32, r 4, 37024 B/head)` | absent | present | present | present |
+| `LeapQuant GDN: one normalize launch per KV-cache group (N layers)` | absent | 12 layers | 12 layers | 18 layers |
+| `LeapQuant scheduling: bounded output admission=True, decoder-first FCFS` | absent | present | present | present |
+| `LeapQuant page packing: 36 Mamba layer(s) of 469888 bytes use 2 KV-cache group(s); one block holds 19 of them.` | absent | absent | absent | present |
+| `vllm:cache_config_info` `replayssm_state_dtype` | `"auto"` | `"leapquant"` | `"leapquant"` | `"leapquant"` |
+| `mono rdna2: --monokernel on TP rank N` lines | 4 | 4 | **0** | 4 |
+| lines naming the retired `VLLM_RDNA_GDN_LEAPQUANT` | 0 | 0 | 0 | 1 (see below) |
+| WARNING naming leapquant or replayssm | 0 | 0 | 0 | 1 (see below) |
+| fault markers in `serve.log`, new amdgpu dmesg faults | 0, 0 | 0, 0 | 0, 0 | 0, 0 |
+| KFD `evicted_ms` since READY (TP0, TP1, TP2, TP3) | +0 | +0 | +0 | +0 |
+| READY | 281 s | 281 s | 311 s | 280 s |
+
+The one line in `P` is the "Unknown vLLM environment variable detected:
+VLLM_RDNA_GDN_LEAPQUANT_PACK" warning. The `compare.txt` counters match it as a
+substring of the retired switch name `VLLM_RDNA_GDN_LEAPQUANT`; the engine did
+not read the retired switch. The cause is that the packing switch was read from
+`os.environ` and not registered in `vllm/envs.py`. The commit that adds this
+section registers it (`vllm/envs.py`, with a test in `tests/test_envs.py`; the
+switch is read through `envs` and is not a compile-cache factor). That change is
+Python only and was tested on CPU, not booted: no arm of this run has it. The
+other unknown-variable warnings are the RDNA variables of the launcher, the same
+set in every arm (`VLLM_RDNA_AR_*`, `VLLM_GDN_HIP_PREFILL`, and others); the
+three flag-on arms `B`, `BNM` and `P` also name `VLLM_RDNA_DECODE_SHARE`,
+`VLLM_RDNA_DECODE_STALL_MS` and `VLLM_DECODE_STALL_MAX_OVERHEAD`, which only the
+`flashnext-leapquant-mtp2` recipe sets.
+
+**Probes** (launcher probes after READY, same inputs in every arm).
+
+| Arm | greedy | PPL probe | prefix cache | concurrency (48 checks) |
+|---|---|---|---|---|
+| `A` | 3/3 | 4.80 (NLL 1.570) | cold 1.02 s, warm 0.34 s, 3.0x, hits +2048 of 5550 queries, warm hit rate 73.8% | 0 failing, 13 near-tie, 2 soft, 33 identical |
+| `B` | 3/3 | 4.80 (NLL 1.569) | cold 1.16 s, warm 0.21 s, 5.6x, hits +2560, 92.3% | 0 failing, 10 near-tie, 5 soft, 33 identical |
+| `A2` | 3/3 | 4.87 (NLL 1.582) | cold 1.02 s, warm 0.33 s, 3.1x, hits +2048, 73.8% | 0 failing, 14 near-tie, 1 soft, 33 identical |
+| `P` | 3/3 | 4.86 (NLL 1.581) | cold 1.10 s, warm 0.21 s, 5.3x, hits +2560, 92.3% | 0 failing, 14 near-tie, 2 soft, 32 identical |
+| `BNM` | 3/3 | 4.82 (NLL 1.572) | cold 1.09 s, warm 0.20 s, 5.5x, hits +2560, 92.3% | 0 failing, 15 near-tie, 0 soft, 33 identical |
+
+All probes pass in all five arms. The prefix probe confirms that a warm request
+resumes from LeapQuant state blocks (V2 align copy) with cold text equal to warm
+text, with and without MonoKernel and on packed pages. The warm hit rate differs
+between the flag-off arms (73.8%) and the flag-on arms (92.3%) because the hit
+grain is the block: the cache serves whole blocks of the shared prefix, 2 x 1024
+= 2048 tokens at block 1024 (`A`, `A2`), 5 x 512 = 2560 at block 512 (`B`,
+`BNM`) and 4 x 640 = 2560 at block 640 (`P`). The TTFTs are the probe's own
+output, not a measurement window.
+
+## 8. Flash-Next at TP4: quality against the boot-to-boot floor
+
+The collects of section 4 (same tools, same inputs) ran against each live
+server. The floor is `A` against `A2`: two boots of the same flag-off setup. The
+head is `A` against `B`. Confidence intervals are the 95% intervals of
+`topk_kl.py` over 64 windows of 2048 tokens.
+
+**Prompt level** (`topk_kl.py`, prefill path, top-20, docs of this tree):
+
+| Pair | PPL ref to cand | dNLL [95% CI] | KL nats/token [95% CI] | KL p99 | Top-1 [95% CI] |
+|---|---|---|---|---:|---|
+| floor: `A` to `A2` | 2.7474 to 2.7493 | +0.00067 [-0.00060, +0.00201] | 0.01189 [0.00984, 0.01418] | 0.1878 | 0.9671 [0.9637, 0.9704] |
+| **head: `A` to `B`** | 2.7474 to 2.7447 | **-0.00098** [-0.00213, +0.00016] | **0.01194** [0.00994, 0.01420] | 0.1835 | **0.9673** [0.9639, 0.9706] |
+| pack: `B` to `P` | 2.7447 to 2.7464 | +0.00060 [-0.00051, +0.00173] | 0.01142 [0.00954, 0.01348] | 0.1742 | 0.9678 [0.9645, 0.9709] |
+| MonoKernel: `B` to `BNM` | 2.7447 to 2.7489 | +0.00152 [+0.00031, +0.00285] | 0.01102 [0.00922, 0.01302] | 0.1733 | 0.9682 [0.9650, 0.9715] |
+| `A` to `BNM` | 2.7474 to 2.7489 | +0.00054 [-0.00061, +0.00168] | 0.01187 [0.00990, 0.01408] | 0.1830 | 0.9665 [0.9631, 0.9699] |
+
+The head KL (0.01194) equals the floor (0.01189): the flag adds nothing the
+boot-to-boot noise does not already have. Its dNLL interval contains zero and
+lies on the negative side of the floor's. Top-1 is 0.9673 against 0.9671. The
+pack row (packed pages against padded pages at the same format) is also at the
+floor. The `B` to `BNM` dNLL interval excludes zero by 0.0003: switching the
+MonoKernel changes the kernel path of the GDN decode, and its shift of +0.0015
+nats/token is of the size of the floor's interval half-width (0.0013), while its
+KL and top-1 are at the floor. [INFERENCE] That is kernel-path noise, not the
+LeapQuant state: `A` to `BNM` has dNLL +0.00054 [-0.00061, +0.00168], inside the
+floor.
+
+**Decode path** (`decode_kl.py`; KL per position up to the first token where
+the two greedy runs disagree, so each pair compares only a few positions per
+passage; the divergence median is 5 to 15 tokens and no pair has an identical
+passage, floor included):
+
+| Pair | 512 tokens, 32 passages: KL mean, positions, confident flips | Long, 2048 tokens, 8 passages of 15k-22k: KL mean, positions, confident flips |
 |---|---|---|
-| Boot `flashnext-leapquant-mtp2` with the flag | `GPU KV cache size: 273,456 tokens`, `kv cache group sizes (512, 512, 512, 512, 8, 512)`, the worker line `GDN recurrent state: LeapQuant INT8 (window 32, r 4, 37024 B/head)`, greedy 3/3, prefix probe cold equals warm, concurrency probe 0 failing | arm `B` below |
-| Validator in real workers with MTP2 and the MonoKernel; V2 align copy marker; `FULL_AND_PIECEWISE`, MTP2 and `--monokernel` unchanged | the same boot passes; compare `B` with the flag-off `A` | arms `B`, `A` |
-| #168 quality with the fold guard (PPL, decode-KL) | within the floor of `A` against `A2` | arms `B`, `A`, `A2` |
-| MonoKernel off | the same probes pass | arm `BNM` |
-| Page packing at block 640 (5 groups instead of 6) | `GPU KV cache size: 273,220 tokens`, concurrency 1.04x; log line `LeapQuant page packing: 36 Mamba layer(s) of 469888 bytes use 2 KV-cache group(s); one block holds 19 of them.` | arm `P` |
-| Packed-page kernels, graph replay, serving matrix versus #168 | packed output equals padded output (`B` against `P`: decode-KL and top-k KL near zero) | arm `P` |
+| floor: `A` to `A2` | 9.0e-3, 1832, 3 | 9.8e-3, 331, 4 |
+| **head: `A` to `B`** | **6.7e-3**, 2093, 3 | **1.02e-2**, 202, 2 |
+| pack: `B` to `P` | 1.05e-2, 1524, 4 | not collected for `P` |
+| MonoKernel: `B` to `BNM` | 9.4e-3, 1615, 4 | not compared |
+| `A` to `BNM` | 1.00e-2, 1730, 3 | 1.9e-2, 175, 2 (p50 6.9e-4 against 2.6e-4 of the floor) |
 
-Commands. The scripts are on the box in `~/w4a8_runs/leapquant/pr170-gpu/`
-and `~/w4a8_runs/leapquant/tree-pr170` is the built tree (the branch at
-`791392e04b` and the `_rocm_C` of section 1). The lease helper is sourced in
-the shell that starts the matrix, not inside it. Boots take the box boot lock
-and wait for fresh quiet files, as `serve_validate.sh` does.
+The head is at or below the floor on the 512-token set (6.7e-3 against 9.0e-3)
+and at the floor on the long set (1.02e-2 against 9.8e-3), with no more
+confident flips than the floor. The one value above the floor is `A` to `BNM`
+on the long set (1.9e-2 against 9.8e-3, from 175 positions of 8 passages, where
+one passage can move the mean); the same pair on the 512-token set is 1.0e-2
+against 9.0e-3. The tool gives no verdict for decode KL, so I do not call this a
+failure, and I do not call it noise either: it is the one open sign in this
+matrix, and it belongs to the MonoKernel-off path, not to the flag.
+
+**Long-context PPL** (`quality_ab.py`, 6 passages, 256 greedy tokens each; the
+gate of the tool is a PPL change of at most 2%):
+
+| Pair | PPL | Change | Greedy exact | Mean first divergence | Gate |
+|---|---|---|---:|---:|---|
+| floor: `A` to `A2` | 3.3319 to 3.3207 | -0.336% | 2 of 6 | 72.3 | PASS |
+| **head: `A` to `B`** | 3.3319 to 3.3377 | **+0.173%** | 3 of 6 | 92.7 | PASS |
+| pack: `B` to `P` | 3.3377 to 3.3262 | -0.342% | 3 of 6 | 92.7 | PASS |
+| MonoKernel: `B` to `BNM` | 3.3377 to 3.3239 | -0.412% | 1 of 6 | 50.3 | PASS |
+| `A` to `BNM` | 3.3319 to 3.3239 | -0.240% | 1 of 6 | 38.7 | PASS |
+
+The floor itself moves by 0.34%, larger than the head's 0.17%: the flag is
+inside the boot-to-boot spread. The MonoKernel-off arm diverges earlier in
+greedy decoding (exact 1 of 6; against `A`, first divergence at token 0 for two
+passages). With 6 passages and near-tie tokens that is not enough to call it more
+than a different kernel path, and its PPL is inside the gate and the floor.
+
+## 9. Flash-Next at TP4: MonoKernel off (`BNM`)
+
+`BNM` is `B` with `EXTRA_ARGS=` empty: the recipe runs without `--monokernel`.
+It is not in `compare.txt` (`compare_pr170.sh` knows `A`, `B`, `A2`, `P`); the
+boot, probe and eviction facts are in the tables of section 7 and the quality
+comparisons in `bench_results/2026-11-15_pr170-tp4/bnm_compare.txt`, computed
+afterwards on the box on CPU with the same tools from the collects of the run.
+
+- The MonoKernel is really off: the four `mono rdna2: --monokernel on TP rank N`
+  lines and the `mono gdn_rdna2: fused GDN decode core enabled` line are absent,
+  the non-default args do not name `monokernel`; `A`, `B` and `P` have all of
+  them.
+- The setup is accepted by the validator and boots: LeapQuant INT8 line,
+  `GPU KV cache size: 273,456 tokens`, groups `(512, 512, 512, 512, 8, 512)`, 12
+  layers per normalize launch: the same as `B`. The capacity does not depend on
+  the MonoKernel.
+- Probes pass (greedy 3/3, PPL 4.82, prefix 5.5x with cold text equal to warm
+  text, concurrency 0 failing), 0 KFD evictions, 0 faults.
+- Quality (section 8): prompt-level and long-context numbers are within the
+  floor; the long decode set is the one open sign.
+
+## 10. What #170 adds to capacity, honestly
+
+- The capacity gain that ships is #168's: 273,456 tokens at block 512 against
+  266,945 at block 1024 flag off, **+2.44%** (`B` against `A`, measured again
+  here). It comes from the flag and the recipe's smaller block together.
+- **Packing at block 640 gives 273,220 tokens: -0.09% against `B` at block 512**
+  (-236 tokens), +2.35% against `A`. At the block `B` already uses (512) packing
+  changes nothing: it is the same three groups of 12 layers. Packing pays only
+  where the block is large (on the 27B at block 1024 the planner gives +0.75%,
+  against -1.1% padded; that boot did not run). It also lets Flash-Next boot at
+  block 640 with five groups instead of six and no page padding, which is the
+  only effect `P` shows.
+- What #170 adds: the config flag `--replayssm-state-dtype` with its validator
+  (8 refused setups, section 5), the fold guard of the HIP kernel (tests and
+  control of section 2), and the opt-in packing. It does not add KV capacity on
+  the shipped Flash-Next recipe.
+- Why the capacity cannot be much larger: the attention KV is 92% of the pool and
+  the state a request needs is 2.1% of it, so even deleting all state gains
+  +6.64%. The options table is in the
+  [capacity analysis](https://github.com/opengfx1030/vllm-rdna/blob/feat/leapquant-capacity-analysis/docs/rdna2/leapquant-capacity-analysis-2026-11-15.md)
+  (branch `feat/leapquant-capacity-analysis` at `1baf9a7f37`, CPU only, built on
+  this PR's head `57c2c1c6f0`). It predicted 273,220 for block 640: the boot of
+  `P` agrees.
+
+## 11. What is not validated
+
+- **27B floor and packing boots.** `A2`, `P`, `C512` and `C512P` on the 27B at
+  TP2 never ran (section 3 and "Still pending on the 27B"). They are dropped: the
+  27B is not the subject of this PR, and the only 27B result about the flag is
+  `A` against `B` without a floor. The 27B packing numbers are planner values.
+- **No timed throughput window.** No tok/s, TTFT window or quiet file exists for
+  any arm. The probe TTFTs and the 5.5x prefix speedups are single probe
+  requests, not benchmarks. This PR makes no speed claim and none should be
+  taken from this run. The `Model loading` difference (20.28 against 20.56 GiB
+  per rank) is not a measurement of memory saved with utilization-based sizing:
+  every arm fixed `--kv-cache-memory-bytes`.
+- **MTP drafter layers** are exercised only through the `flashnext-mtp2` and
+  `flashnext-leapquant-mtp2` recipes: the probes and the quality collects ran
+  with speculative decoding on. No acceptance length or drafter-only check was
+  taken.
+- **V1 model runner** is out of scope by the decision of the user. The
+  validator refuses LeapQuant with align prefix caching on the V1 runner
+  (section 5); only the V2 runner was booted.
+- One boot per arm and one floor pair (`A`, `A2`); one packing block (640); TP4
+  with EP4 only; `max_num_seqs` 8; quality inputs are the repo's docs, not a
+  task benchmark.
+- The `vllm/envs.py` registration of `VLLM_RDNA_GDN_LEAPQUANT_PACK` was not
+  booted (CPU tests only).
+- #168's quality checks were re-run only through this matrix (arms `A`, `A2`,
+  `B`); there is no separate re-run.
+
+Commands of this run (the scripts are on the box in
+`~/w4a8_runs/leapquant/pr170-gpu/`; the lease helper is sourced in the shell
+that starts the matrix; boots take the box boot lock):
 
 ```bash
 export LEASE=b4 OWNER=<agent>
 source ~/w4a8_runs/leapquant/lease.sh
 lease_take "PR170 Flash-Next TP4 validation" 300 && lease_check_buses
 cd ~/w4a8_runs/leapquant/pr170-gpu
-# B (flag on, MonoKernel on by recipe), A and A2 (flag off, --monokernel): boot, probes, quality
 PROFILE=flashnext QUIET_OWN=<agent> ARMS="B A A2" bash run_matrix_pr170.sh
-# page packing at block 640 (MAXBAT 2560 is a multiple of the block)
 PROFILE=flashnext QUIET_OWN=<agent> ARMS="P" RUN=$(cat matrix-flashnext.path) bash run_matrix_pr170.sh
-# MonoKernel off (optional)
 PROFILE=flashnext QUIET_OWN=<agent> ARMS="BNM" RUN=$(cat matrix-flashnext.path) bash run_matrix_pr170.sh
 bash compare_pr170.sh "$(cat matrix-flashnext.path)"
 ```
 
-`DRY=1` prints the launches without booting. A boot that does not print the
-expected capacity is the finding: record it and do not edit the expectation.
+`DRY=1` prints the launches without booting.
 
 ## Commands
 
@@ -437,5 +639,5 @@ Its hook runs, per arm:
 
 `compare_pr170.sh` runs `topk_kl.py compare --pair floor=A,A2 --pair head=A,B`,
 `decode_kl.py compare A B --floor A2` and `quality_ab.py compare` (A to B, A to A2).
-`run_matrix_pr170.sh` is the same flow for either model, used for the TP4 list above.
+`run_matrix_pr170.sh` is the same flow for either model; it produced sections 7 to 10.
 `mutation_build.sh` builds the control `.so` of section 2.
