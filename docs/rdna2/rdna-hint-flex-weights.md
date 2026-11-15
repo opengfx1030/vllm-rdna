@@ -482,7 +482,9 @@ M = 1 / 2 / 3 / 4 / 8; v2 14.85 (M=2, `2:2:8`) / 15.25 (`3:4:4`) / 16.02
 (`4:4:4`) / 20.92 (`8:4:4`): x1.22 / 1.40 / 1.54 / 1.84. The activation
 transform alone is 3.6-3.7 us per launch (0.93 ms per step for these 256
 launches, 3.5 us for `in_proj_ba`'s 48): 304 launches, about 1.1 ms of a
-27 ms c=1 step.
+27 ms c=1 step. Writing the pair-interleaved order costs nothing
+(`transform_pi`, same tool: 3.5-3.8 us per launch for every slot at M = 1, 3,
+8; 0.93 / 0.93 / 0.94 ms per step, natural 0.93 / 0.93 / 0.94 ms).
 
 The `auto` configuration (`gemv2_auto`): MT = M up to 4, 6 for M = 5-6, 8
 above (larger M runs MT = 8 along `grid.y`); 2 rows per wave at M <= 2, 4 from
