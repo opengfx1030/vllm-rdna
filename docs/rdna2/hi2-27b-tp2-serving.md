@@ -260,7 +260,7 @@ greedy / PPL / prefix-cache / concurrency probes PASS. Arms without a suffix ran
 pair reads 1 to 3% faster, so compare arms only within one pair. Raw files:
 `bench_results/2026-11-15_hi2-scoreboard/<arm>/` in this repository (`meta.json` and
 `scoreboard.md` of every arm named below, `scoreboard.json` of `base`, `final`, `final-mtp2`,
-`gemm` and the five `-a2` arms, `runs.tsv` of the two concurrency arms) and
+`gemm` and the six `-a2` arms, `runs.tsv` of the two concurrency arms) and
 `~/w4a8_runs/scoreboard/<arm>/` on the box, which has every file of every arm. The first
 table is `scoreboard_report.py table` output with columns reduced (commands below); the other
 tables are read from the per-arm `scoreboard.md`.
@@ -322,26 +322,33 @@ These arms ran on the other card pair (HIP 0,1, PCI `d1 d4`), so they compare on
 other. `final-a2` is `final` again (the seven switches, no dense GEMM; tree `b47eb6c384`).
 `ship-a2` is the recipe `27b-hi2-tp2` of `15a4bc6f49` with no environment variable at all
 (before the dense GEMM was added to it): it reproduces `final-a2` within 0.1% on every cell,
-with equal PPL and prompt KL. `final2-a2` is `final-a2` plus `RDNA_HINT_FLEX_PREFILL_GEMM=hip`,
-which is the recipe as it is now.
+with equal PPL and prompt KL. `final2-a2` is `final-a2` plus `RDNA_HINT_FLEX_PREFILL_GEMM=hip`.
+`ship-gemm-a2` is the recipe of `15a4bc6f49` plus that switch from the environment, which is
+what the recipes set now: it reproduces `final2-a2` on every cell (output tok/s equal except
+147.6 against 147.7 at 1k/512 c=8, TTFT within 0.06 s, the same PPL and prompt KL).
 
 | Cell | Arm | Output tok/s | TTFT (s) | Prefill tok/s | Decode tok/s per request | ITL p50 / p99 (ms) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | 1k/512 c=1 | `final-a2` | 40.7 | 1.35 | 757 | 45.5 | 22.0 / 22.6 |
 | 1k/512 c=1 | `ship-a2` | 40.7 | 1.35 | 757 | 45.5 | 22.0 / 22.3 |
 | 1k/512 c=1 | `final2-a2` | 40.9 | 1.27 | 806 | 45.5 | 22.0 / 22.4 |
+| 1k/512 c=1 | `ship-gemm-a2` | 40.9 | 1.27 | 805 | 45.5 | 22.0 / 22.3 |
 | 1k/512 c=8 | `final-a2` | 137.7 | 6.76 | 215 | 22.7 | 34.9 / 36.4 |
 | 1k/512 c=8 | `ship-a2` | 137.8 | 6.77 | 215 | 22.7 | 34.9 / 36.1 |
 | 1k/512 c=8 | `final2-a2` | 147.7 | 5.72 | 250 | 23.5 | 34.9 / 36.2 |
+| 1k/512 c=8 | `ship-gemm-a2` | 147.6 | 5.72 | 250 | 23.5 | 34.9 / 36.3 |
 | 16k/1k c=1 | `final-a2` | 20.1 | 21.81 | 751 | 35.2 | 28.5 / 28.9 |
 | 16k/1k c=1 | `ship-a2` | 20.1 | 21.78 | 752 | 35.2 | 28.4 / 28.7 |
 | 16k/1k c=1 | `final2-a2` | 20.7 | 20.45 | 801 | 35.2 | 28.4 / 28.8 |
+| 16k/1k c=1 | `ship-gemm-a2` | 20.7 | 20.44 | 801 | 35.2 | 28.4 / 28.7 |
 | 16k/1k c=8 | `final-a2` | 30.3 | 75.95 | 333 | 6.2 | 63.0 / 1743.9 |
 | 16k/1k c=8 | `ship-a2` | 30.3 | 75.88 | 334 | 6.2 | 62.8 / 1741.0 |
 | 16k/1k c=8 | `final2-a2` | 34.8 | 64.08 | 394 | 6.9 | 62.9 / 1455.0 |
+| 16k/1k c=8 | `ship-gemm-a2` | 34.8 | 64.08 | 394 | 6.9 | 62.8 / 1455.9 |
 | 32k/2k c=1 | `final-a2` | 17.2 | 47.43 | 691 | 28.5 | 35.2 / 35.8 |
 | 32k/2k c=1 | `ship-a2` | 17.2 | 47.44 | 691 | 28.5 | 35.1 / 35.5 |
 | 32k/2k c=1 | `final2-a2` | 17.6 | 44.77 | 732 | 28.5 | 35.1 / 35.6 |
+| 32k/2k c=1 | `ship-gemm-a2` | 17.6 | 44.71 | 733 | 28.5 | 35.1 / 35.6 |
 
 With MTP=2: `ship-mtp2-a2` is the recipe `27b-hi2-tp2-mtp2` of `15a4bc6f49`, `final2-mtp2-a2` is
 `final2-a2` with `MTP=2`.
@@ -407,6 +414,7 @@ passages of 512 greedy tokens at 8 concurrent.
 | `final-a2` | 3.6635 | 7.73e-6 | 0.9986 | 8.04e-6 | 21/32 | 6/6 |
 | `ship-a2` | 3.6635 | 7.73e-6 | 0.9986 | 7.14e-6 | 20/32 | 6/6 |
 | `final2-a2` | 3.6631 | 7.80e-6 | 0.9987 | 8.13e-6 | 21/32 | 6/6 |
+| `ship-gemm-a2` | 3.6631 | 7.80e-6 | 0.9987 | 8.39e-6 | 20/32 | 6/6 |
 | `ship-mtp2-a2` | 3.6635 | 7.73e-6 | 0.9986 | 7.86e-6 | 18/32 | 6/6 |
 | `final2-mtp2-a2` | 3.6631 | 7.80e-6 | 0.9987 | 8.08e-6 | 21/32 | 5/6 |
 
@@ -417,12 +425,13 @@ against 96 for all six). The prompt KL is 0 for `gemv`, `residual` and `gdnglue`
 round differently (57 of the 89 candidate rows change a rounding, `hi2-27b-tunableop-2026-11-15.md`).
 The decode KL of `gemv` is `auto`'s M=1 against M >= 2 difference (table above).
 
-The dense prefill GEMM (`gemm`, `final2*`) moves the long PPL by -0.01% (3.6635 to 3.6631
-against `final`) and the prompt KL by +0.07e-6; `gemm` has 7.39e-6 against `base`, the order of
-the other switches. Quality does not depend on the card pair: `final-a2` has `final`'s PPL,
-prompt KL and top-1. The decode KL and the identical count vary from boot to boot of one
-configuration (`final` 7.0e-6 and 21/32, `final-a2` 8.0e-6 and 21/32, `ship-a2` 7.1e-6 and
-20/32; floor 2.4e-6 and 28/32). There is still no confident flip.
+The dense prefill GEMM (`gemm`, `final2*`, `ship-gemm-a2`) moves the long PPL by -0.01%
+(3.6635 to 3.6631 against `final`) and the prompt KL by +0.07e-6; `gemm` has 7.39e-6 against
+`base`, the order of the other switches. Quality does not depend on the card pair: `final-a2`
+has `final`'s PPL, prompt KL and top-1. The decode KL and the identical count vary from boot to
+boot of one configuration (`final` 7.0e-6 and 21/32, `final-a2` 8.0e-6 and 21/32, `ship-a2`
+7.1e-6 and 20/32; `final2-a2` 8.1e-6 and 21/32, `ship-gemm-a2` 8.4e-6 and 20/32; floor 2.4e-6
+and 28/32). There is still no confident flip.
 
 ### MTP arms
 
@@ -477,7 +486,7 @@ that tree name it, and `conc-off` empties it).
 | `final2-mtp2-a2` | `b47eb6c384` | as `final2-a2` and `MTP=2` |
 | `ship-a2` | `15a4bc6f49` | none: the recipe `27b-hi2-tp2` as it was at that commit (seven switches, no dense GEMM) |
 | `ship-mtp2-a2` | `15a4bc6f49` | `RECIPE=27b-hi2-tp2-mtp2`, nothing else |
-| `ship-gemm-a2` | `15a4bc6f49` | `RDNA_HINT_FLEX_PREFILL_GEMM=hip` over the recipe `27b-hi2-tp2`: the recipe as flipped. Pending |
+| `ship-gemm-a2` | `15a4bc6f49` | `RDNA_HINT_FLEX_PREFILL_GEMM=hip` over the recipe `27b-hi2-tp2`: the recipe as it is now |
 
 The scoreboard tools were synced to the box tree of `base` and `attn` as files (its `tree_sha`
 reads `ef0b99ea9b+scoreboard`). The box trees of `gemm`, `final-a2`, `final2-a2` and
@@ -508,8 +517,11 @@ evictions 0 and every probe PASS. The MTP recipe gains the same way (`final2-mtp
 `ship-mtp2-a2`, acceptance PASS), and so does the switch with the tuned rows on the other pair
 (`gemm` against `tunable`).
 
-`ship-gemm-a2` is the confirming arm of the flip: the recipe of `15a4bc6f49` with the switch
-set from the environment, which is the recipe as it is now. Result: pending.
+`ship-gemm-a2` confirms the flip: the recipe of `15a4bc6f49` with the switch set from the
+environment, which is what the recipes set now, reproduces `final2-a2` on every cell (tables
+above); KFD evictions 0, every probe PASS. The MTP recipe is covered by `final2-mtp2-a2` (the
+same switches set from the environment on top of `MTP=2`): the flipped `27b-hi2-tp2-mtp2` file
+differs from `27b-hi2-tp2` only in `MTP` (a test keeps it so) and was not booted as such.
 
 ## Related notes
 
