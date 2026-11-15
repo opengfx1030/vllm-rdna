@@ -1,0 +1,72 @@
+== 128x128k32t16x8n2p0r8g16b0w0s1m0u1l8z
+hot loop: 653 instructions, 512 v_dot2 (78.4%), 0 other FMA-class
+  v_dot2c_f32_f16                512
+  s_waitcnt                       26
+  ds_read2st64_b64                24
+  global_load_dwordx4             16
+  v_add_co_u32                     8
+  v_add_co_ci_u32_e64              8
+  ds_write_b128                    8
+  s_clause                         5
+  s_add_i32                        5
+  s_mov_b32                        4
+  v_xor_b32_e32                    4
+  v_lshlrev_b32_e32                4
+  v_add3_u32                       4
+  v_add_nc_u32_e32                 4
+  s_cbranch_scc1                   3
+  s_cmp_lt_i32                     2
+  s_barrier                        2
+  buffer_gl0_inv                   2
+  s_and_b32                        2
+  s_lshr_b32                       2
+  s_cmp_lt_u32                     2
+  s_cbranch_scc0                   1
+  s_lshl_b32                       1
+  s_cselect_b32                    1
+per v_dot2: ds_read 0.047  ds_write 0.016  global_load 0.031  other VALU 0.062  total instr 1.275
+VALU instructions per v_dot2: 1.062 -> issue-bound ceiling 17.35 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 256/512
+== 256x128k32t8x16n2p8r4g16b0w0s1m0u1l8
+hot loop: 638 instructions, 512 v_dot2 (80.3%), 0 other FMA-class
+  v_dot2c_f32_f16                512
+  s_waitcnt                       24
+  v_add_nc_u32_e32                18
+  ds_read2_b64                    16
+  global_load_dwordx4             12
+  ds_read2st64_b64                 8
+  v_add_co_u32                     6
+  v_add_co_ci_u32_e64              6
+  ds_write_b128                    6
+  s_clause                         4
+  s_mov_b32                        4
+  s_lshl_b32                       3
+  s_add_i32                        3
+  s_cbranch_scc1                   3
+  s_cmp_lt_i32                     2
+  s_barrier                        2
+  buffer_gl0_inv                   2
+  s_cmp_lt_u32                     2
+  s_cbranch_scc0                   1
+  s_cselect_b32                    1
+  s_cmp_ge_i32                     1
+  s_andn2_b32                      1
+  s_cbranch_vccnz                  1
+per v_dot2: ds_read 0.047  ds_write 0.012  global_load 0.023  other VALU 0.059  total instr 1.246
+VALU instructions per v_dot2: 1.059 -> issue-bound ceiling 17.41 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 256/512
+== 128x64k64t8x8n1p8r4g16b0w0s1m0u1l8
+hot loop: 155 instructions, 128 v_dot2 (82.6%), 0 other FMA-class
+  v_dot2c_f32_f16                128
+  ds_read_b64                      8
+  v_add_nc_u32_e32                 6
+  ds_read2_b64                     4
+  s_waitcnt                        4
+  s_lshl_b32                       1
+  s_add_i32                        1
+  s_cmp_lt_u32                     1
+  s_mov_b32                        1
+  s_cbranch_scc1                   1
+per v_dot2: ds_read 0.094  ds_write 0.000  global_load 0.000  other VALU 0.047  total instr 1.211
+VALU instructions per v_dot2: 1.047 -> issue-bound ceiling 17.61 TF/s per GHz (dot2 rate 18.43)
+dot src0/src1 in the same VGPR bank: 64/128

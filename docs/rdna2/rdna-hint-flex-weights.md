@@ -263,6 +263,13 @@ that serving rarely produces: decode goes to the GEMV, prefill chunks are 512 to
 tuned rows), the fused path lost: 1k/512 c=1 prefill 1809 vs 1932 tok/s, 16k/1k
 c=1 1334 vs 1407 tok/s (full table under "Serving").
 
+A dense fp16 `v_dot2` GEMM for the rocBLAS half (334 designs on the five 27B TP2 shapes, M = 512-2048 plus
+odd M, re-measured in one interleaved window) is +7 % geometric mean over the better of rocBLAS's heuristic and
+TunableOp-tuned solution (+13 % over the heuristic), never slower, but below the agreed +10 % bar on the three
+biggest shapes, so nothing is wired. The same data show the rocBLAS heuristic is 8-18 % slower than TunableOp rows
+in 13 of the 25 cells of those shapes, and the shipped rows do not cover them. Measurements, the block-order and
+register-bank findings and the decision: `hi2-prefill-gemm-2026-11-15.md`.
+
 ### I8 for prefill (not worth it on gfx1030 with this activation grouping)
 
 The spec's per-16-column activation scale (spec 5) forces a float rescale every

@@ -1,0 +1,94 @@
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+contender                                        TF/s   MHz     W TF/s per GHz % of dot2 rate
+rocblas_heur default                            21.46  1547   175        13.87           75.3
+probe         rocblas_heur:default                 in_proj_qkvz  M=2048     8004.4 us (min        )  21.46 TF/s  vs_rb         err           rep0 13.87 TF/s per GHz
+rocblas_tuned tunableop                         23.75  1601   175        14.84           80.5
+probe         rocblas_tuned:tunableop              in_proj_qkvz  M=2048     7232.7 us (min        )  23.75 TF/s  vs_rb         err           rep0 14.84 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u1q1      22.21  1848   175        12.02           65.2
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u1q1 in_proj_qkvz  M=2048     7736.3 us (min        )  22.21 TF/s  vs_rb         err           rep0 12.02 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u1q1o1    16.07  1999   175         8.04           43.6
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u1q1o1 in_proj_qkvz  M=2048    10692.7 us (min        )  16.07 TF/s  vs_rb         err           rep0 8.04 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u2q1      22.33  1835   175        12.17           66.0
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u2q1 in_proj_qkvz  M=2048     7693.3 us (min        )  22.33 TF/s  vs_rb         err           rep0 12.17 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u2q1o1    15.97  2005   175         7.97           43.2
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u2q1o1 in_proj_qkvz  M=2048    10755.6 us (min        )  15.97 TF/s  vs_rb         err           rep0 7.97 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u1l8      23.33  1575   175        14.81           80.4
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u1l8 in_proj_qkvz  M=2048     7362.9 us (min        )  23.33 TF/s  vs_rb         err           rep0 14.81 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u1l8o1    20.89  1722   175        12.13           65.8
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u1l8o1 in_proj_qkvz  M=2048     8222.2 us (min        )  20.89 TF/s  vs_rb         err           rep0 12.13 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u2l8      21.33  1845   175        11.56           62.7
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u2l8 in_proj_qkvz  M=2048     8055.6 us (min        )  21.33 TF/s  vs_rb         err           rep0 11.56 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u2l8o1    16.97  1934   175         8.77           47.6
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u2l8o1 in_proj_qkvz  M=2048    10126.0 us (min        )  16.97 TF/s  vs_rb         err           rep0 8.77 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u1l8q1    23.30  1572   175        14.82           80.4
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u1l8q1 in_proj_qkvz  M=2048     7373.5 us (min        )   23.3 TF/s  vs_rb         err           rep0 14.82 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u1l8q1o1  20.85  1719   175        12.13           65.8
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u1l8q1o1 in_proj_qkvz  M=2048     8241.4 us (min        )  20.85 TF/s  vs_rb         err           rep0 12.13 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u2l8q1    22.13  1837   175        12.05           65.4
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u2l8q1 in_proj_qkvz  M=2048     7764.0 us (min        )  22.13 TF/s  vs_rb         err           rep0 12.05 TF/s per GHz
+dense 128x128k32t16x8n2p8r0g16b0w0s1m0u2l8q1o1  17.14  1914   175         8.96           48.6
+probe         dense:128x128k32t16x8n2p8r0g16b0w0s1m0u2l8q1o1 in_proj_qkvz  M=2048    10022.8 us (min        )  17.14 TF/s  vs_rb         err           rep0 8.96 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u1q1      23.21  1840   175        12.62           68.4
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u1q1 in_proj_qkvz  M=2048     7401.4 us (min        )  23.21 TF/s  vs_rb         err           rep0 12.62 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u1q1o1    18.64  1922   175         9.70           52.6
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u1q1o1 in_proj_qkvz  M=2048     9217.1 us (min        )  18.64 TF/s  vs_rb         err           rep0 9.70 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u2q1      23.30  1835   175        12.70           68.9
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u2q1 in_proj_qkvz  M=2048     7372.3 us (min        )   23.3 TF/s  vs_rb         err           rep0 12.70 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u2q1o1    18.54  1928   175         9.62           52.2
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u2q1o1 in_proj_qkvz  M=2048     9265.7 us (min        )  18.54 TF/s  vs_rb         err           rep0 9.62 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u1l8      23.98  1676   175        14.31           77.6
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u1l8 in_proj_qkvz  M=2048     7165.7 us (min        )  23.98 TF/s  vs_rb         err           rep0 14.31 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u1l8o1    22.01  1720   175        12.80           69.4
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u1l8o1 in_proj_qkvz  M=2048     7805.8 us (min        )  22.01 TF/s  vs_rb         err           rep0 12.80 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u2l8      22.02  1859   175        11.85           64.3
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u2l8 in_proj_qkvz  M=2048     7801.7 us (min        )  22.02 TF/s  vs_rb         err           rep0 11.85 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u2l8o1    18.94  1873   175        10.11           54.9
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u2l8o1 in_proj_qkvz  M=2048     9071.2 us (min        )  18.94 TF/s  vs_rb         err           rep0 10.11 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u1l8q1    24.02  1679   175        14.31           77.6
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u1l8q1 in_proj_qkvz  M=2048     7152.3 us (min        )  24.02 TF/s  vs_rb         err           rep0 14.31 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u1l8q1o1  22.02  1714   175        12.85           69.7
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u1l8q1o1 in_proj_qkvz  M=2048     7801.6 us (min        )  22.02 TF/s  vs_rb         err           rep0 12.85 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u2l8q1    23.19  1842   175        12.59           68.3
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u2l8q1 in_proj_qkvz  M=2048     7408.2 us (min        )  23.19 TF/s  vs_rb         err           rep0 12.59 TF/s per GHz
+dense 256x128k32t16x8n2p8r0g16b0w0s1m0u2l8q1o1  19.07  1862   174        10.24           55.6
+probe         dense:256x128k32t16x8n2p8r0g16b0w0s1m0u2l8q1o1 in_proj_qkvz  M=2048     9011.0 us (min        )  19.07 TF/s  vs_rb         err           rep0 10.24 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u1q1      23.17  1804   175        12.84           69.7
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u1q1 in_proj_qkvz  M=2048     7415.0 us (min        )  23.17 TF/s  vs_rb         err           rep0 12.84 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u1q1o1    18.60  1895   175         9.82           53.3
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u1q1o1 in_proj_qkvz  M=2048     9235.6 us (min        )   18.6 TF/s  vs_rb         err           rep0 9.82 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u2q1      23.31  1798   175        12.97           70.3
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u2q1 in_proj_qkvz  M=2048     7369.2 us (min        )  23.31 TF/s  vs_rb         err           rep0 12.97 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u2q1o1    18.47  1899   175         9.73           52.8
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u2q1o1 in_proj_qkvz  M=2048     9302.0 us (min        )  18.47 TF/s  vs_rb         err           rep0 9.73 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u1l8      23.74  1634   175        14.53           78.8
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u1l8 in_proj_qkvz  M=2048     7235.8 us (min        )  23.74 TF/s  vs_rb         err           rep0 14.53 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u1l8o1    22.08  1691   175        13.06           70.8
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u1l8o1 in_proj_qkvz  M=2048     7780.4 us (min        )  22.08 TF/s  vs_rb         err           rep0 13.06 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u2l8      21.91  1826   175        12.00           65.1
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u2l8 in_proj_qkvz  M=2048     7842.8 us (min        )  21.91 TF/s  vs_rb         err           rep0 12.00 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u2l8o1    18.97  1844   175        10.29           55.8
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u2l8o1 in_proj_qkvz  M=2048     9055.4 us (min        )  18.97 TF/s  vs_rb         err           rep0 10.29 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u1l8q1    23.76  1627   175        14.60           79.2
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u1l8q1 in_proj_qkvz  M=2048     7230.7 us (min        )  23.76 TF/s  vs_rb         err           rep0 14.60 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u1l8q1o1  22.12  1680   175        13.17           71.4
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u1l8q1o1 in_proj_qkvz  M=2048     7765.8 us (min        )  22.12 TF/s  vs_rb         err           rep0 13.17 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u2l8q1    23.13  1802   175        12.84           69.6
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u2l8q1 in_proj_qkvz  M=2048     7427.2 us (min        )  23.13 TF/s  vs_rb         err           rep0 12.84 TF/s per GHz
+dense 128x256k32t16x8n2p8r0g16b0w0s1m0u2l8q1o1  18.99  1843   175        10.30           55.9
+probe         dense:128x256k32t16x8n2p8r0g16b0w0s1m0u2l8q1o1 in_proj_qkvz  M=2048     9047.2 us (min        )  18.99 TF/s  vs_rb         err           rep0 10.30 TF/s per GHz
+dense 128x128k32t8x8n2p8r0g16b0w0s1m0u1q1       21.97  1688   175        13.01           70.6
+probe         dense:128x128k32t8x8n2p8r0g16b0w0s1m0u1q1 in_proj_qkvz  M=2048     7820.6 us (min        )  21.97 TF/s  vs_rb         err           rep0 13.01 TF/s per GHz
+dense 128x128k64t8x8n1p0r0g16b0w6s1m0u1zq1      21.45  1725   175        12.44           67.5
+probe         dense:128x128k64t8x8n1p0r0g16b0w6s1m0u1zq1 in_proj_qkvz  M=2048     8007.4 us (min        )  21.45 TF/s  vs_rb         err           rep0 12.44 TF/s per GHz
+dense 128x64k64t8x8n1p8r0g16b0w0s1m0u1l8        22.63  1536   175        14.73           79.9
+probe         dense:128x64k64t8x8n1p8r0g16b0w0s1m0u1l8 in_proj_qkvz  M=2048     7592.4 us (min        )  22.63 TF/s  vs_rb         err           rep0 14.73 TF/s per GHz
+dense 128x64k64t8x8n1p8r0g16b0w0s1m0u1l8q1      22.63  1537   175        14.72           79.9
+probe         dense:128x64k64t8x8n1p8r0g16b0w0s1m0u1l8q1 in_proj_qkvz  M=2048     7592.2 us (min        )  22.63 TF/s  vs_rb         err           rep0 14.72 TF/s per GHz
+dense 128x128k32t8x8n2p8r0g16b0w0s1m0u1q1o1     20.27  1735   175        11.68           63.4
+probe         dense:128x128k32t8x8n2p8r0g16b0w0s1m0u1q1o1 in_proj_qkvz  M=2048     8475.8 us (min        )  20.27 TF/s  vs_rb         err           rep0 11.68 TF/s per GHz
+dense 128x128k64t8x8n1p0r0g16b0w6s1m0u1zq1o1    18.29  1623   175        11.27           61.1
+probe         dense:128x128k64t8x8n1p0r0g16b0w6s1m0u1zq1o1 in_proj_qkvz  M=2048     9394.7 us (min        )  18.29 TF/s  vs_rb         err           rep0 11.27 TF/s per GHz
+dense 128x64k64t8x8n1p8r0g16b0w0s1m0u1l8o1      21.34  1609   175        13.26           72.0
+probe         dense:128x64k64t8x8n1p8r0g16b0w0s1m0u1l8o1 in_proj_qkvz  M=2048     8050.8 us (min        )  21.34 TF/s  vs_rb         err           rep0 13.26 TF/s per GHz
+dense 128x64k64t8x8n1p8r0g16b0w0s1m0u1l8q1o1    21.31  1606   175        13.27           72.0
+probe         dense:128x64k64t8x8n1p8r0g16b0w0s1m0u1l8q1o1 in_proj_qkvz  M=2048     8060.4 us (min        )  21.31 TF/s  vs_rb         err           rep0 13.27 TF/s per GHz
