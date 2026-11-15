@@ -115,8 +115,12 @@ __device__ __forceinline__ int log2_block(int b) {
 // One thread per (row, group). PI = true writes the pair-interleaved layout
 // the v2 GEMV consumes (stored[2i] = x'[i], stored[2i+1] = x'[i+8] inside
 // each 16-group); the values are bit-identical, only their position differs.
+// SILU: x is the [M, 2K] gate | up output of the gate_up projection and the
+// transform's input is silu(gate) * up, evaluated as SiluAndMul does (silu in
+// fp32 rounded to fp16, then the fp16 product), so no activation launch is
+// needed in front of the down projection.
 // ---------------------------------------------------------------------------
-template <bool PI>
+template <bool PI, bool SILU = false>
 __global__ void act_transform_kernel(const half* __restrict__ x,
                                      const int64_t ldx,
                                      const half* __restrict__ col_scale,
@@ -131,7 +135,16 @@ __global__ void act_transform_kernel(const half* __restrict__ x,
   const half* xp = x + m * ldx + gi * kGroup;
   float v[kGroup];
   #pragma unroll
-  for (int i = 0; i < kGroup; ++i) v[i] = __half2float(xp[i]);
+  for (int i = 0; i < kGroup; ++i) {
+    if constexpr (SILU) {
+      const float g = __half2float(xp[i]);
+      const half a = __float2half_rn(g / (1.0f + expf(-g)));
+      v[i] = __half2float(
+          __float2half_rn(__half2float(a) * __half2float(xp[K + i])));
+    } else {
+      v[i] = __half2float(xp[i]);
+    }
+  }
   if (col_scale != nullptr) {
   #pragma unroll
     for (int i = 0; i < kGroup; ++i)
@@ -429,6 +442,95 @@ __device__ __forceinline__ void load_xp(const char* __restrict__ xb,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Fused activation transform (FT): the GEMV loads the raw activation and
+// transforms its own 16-column group in registers, so the op needs no separate
+// act_transform launch. The arithmetic is that of act_transform_kernel,
+// operation for operation (division by the column scale, in-place butterflies
+// in the same order, 1/4, one rounding to fp16): the pairs it produces are
+// bit-identical to the pair-interleaved output of that kernel.
+// ---------------------------------------------------------------------------
+struct FtCtx {
+  const char* sc;      // col_scale (K halves), nullptr: no scaling
+  const uint8_t* had;  // one Hadamard flag per 16-column group
+};
+
+template <int MT>
+struct FtRegs {
+  uint4 xlo[MT], xhi[MT];  // raw x of each token: columns 0-7 / 8-15
+  uint4 slo, shi;          // col_scale, columns 0-7 / 8-15
+  uint32_t hd;             // Hadamard flag of the group
+};
+
+template <int MT>
+__device__ __forceinline__ void load_ft(const char* __restrict__ xb,
+                                        const FtCtx& c, const int K,
+                                        const int m0, const int M,
+                                        const uint32_t g, FtRegs<MT>& r) {
+  #pragma unroll
+  for (int m = 0; m < MT; ++m) {
+    const uint32_t mm = static_cast<uint32_t>(min(m0 + m, M - 1));
+    const uint32_t off = (mm * static_cast<uint32_t>(K) + g * kGroup) * 2u;
+    r.xlo[m] = *reinterpret_cast<const uint4*>(xb + off);
+    r.xhi[m] = *reinterpret_cast<const uint4*>(xb + off + 16u);
+  }
+  if (c.sc != nullptr) {
+    r.slo = *reinterpret_cast<const uint4*>(c.sc + g * 32u);
+    r.shi = *reinterpret_cast<const uint4*>(c.sc + g * 32u + 16u);
+  }
+  r.hd = c.had[g];
+}
+
+__device__ __forceinline__ void unpack_h16(const uint4& lo, const uint4& hi,
+                                           float (&f)[kGroup]) {
+  const uint32_t w[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+  #pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    f[2 * i] =
+        __half2float(__ushort_as_half(static_cast<unsigned short>(w[i])));
+    f[2 * i + 1] =
+        __half2float(__ushort_as_half(static_cast<unsigned short>(w[i] >> 16)));
+  }
+}
+
+// One group of MT tokens: raw registers -> the 8 half2 pairs (x'_i, x'_{i+8})
+// the dots read.
+template <int MT>
+__device__ __forceinline__ void ft_group(const FtRegs<MT>& r, const bool scaled,
+                                         half2 (&xp)[MT][8]) {
+  float s[kGroup];
+  if (scaled) unpack_h16(r.slo, r.shi, s);
+  const bool flag = r.hd != 0;
+  #pragma unroll
+  for (int m = 0; m < MT; ++m) {
+    float v[kGroup];
+    unpack_h16(r.xlo[m], r.xhi[m], v);
+    if (scaled) {
+  #pragma unroll
+      for (int i = 0; i < kGroup; ++i) v[i] = v[i] / s[i];
+    }
+    if (flag) {
+  #pragma unroll
+      for (int len = 1; len < kGroup; len <<= 1) {
+  #pragma unroll
+        for (int i = 0; i < kGroup; ++i) {
+          if ((i & len) == 0) {
+            const float a = v[i], b = v[i + len];
+            v[i] = a + b;
+            v[i + len] = a - b;
+          }
+        }
+      }
+  #pragma unroll
+      for (int i = 0; i < kGroup; ++i) v[i] *= 0.25f;  // 1/sqrt(16)
+    }
+  #pragma unroll
+    for (int i = 0; i < 8; ++i)
+      xp[m][i] =
+          __halves2half2(__float2half_rn(v[i]), __float2half_rn(v[i + 8]));
+  }
+}
+
 // Wave-uniform state of one output row (lives in SGPRs).
 struct RowState {
   const char* words;   // code words of the row
@@ -468,16 +570,20 @@ struct WRegs {
   uint32_t q[RPW][NB == 0 ? 2 : NB / 2];
   uint32_t pr[RPW];
 };
-template <int MT, bool XS>
+template <int MT, bool XS, bool FT>
 struct XRegs {
   half2 xp[MT][8];
 };
+template <int MT, bool FT>
+struct XRegs<MT, false, FT> {};
 template <int MT>
-struct XRegs<MT, false> {};
-template <int NB, int RPW, int MT, bool XS>
+struct XRegs<MT, true, true> {
+  FtRegs<MT> ft;
+};
+template <int NB, int RPW, int MT, bool XS, bool FT>
 struct Stage {
   WRegs<NB, RPW> w;
-  XRegs<MT, XS> x;
+  XRegs<MT, XS, FT> x;
 };
 
 // All of a stage's weight loads are issued before any use. NB is uniform
@@ -580,20 +686,27 @@ __device__ __forceinline__ void group_dot(
 // The main loop over the row's 16-column groups for RPW rows that all have
 // code width NB (NB = 0: INT2 and INT4 rows mixed, decoded through mc). Stage
 // i+1 (weights, params and, when XS, the activation) is loaded before stage i
-// is consumed.
-template <int NB, int MT, int RPW, bool XPRE, bool XS>
+// is consumed. FT: the activation is the raw one and each lane transforms its
+// group (ft_group) before the dots.
+template <int NB, int MT, int RPW, bool XPRE, bool XS, bool FT>
 __device__ __forceinline__ void rows_loop(const char* __restrict__ xb,
                                           const int K, const int m0,
                                           const int M, const RowState* rs,
                                           const MixCtl* mc, const uint32_t lane,
-                                          float (*acc)[MT]) {
-  using St = Stage<NB, RPW, MT, XS>;
+                                          const FtCtx& ft, float (*acc)[MT]) {
+  static_assert(!FT || XS, "the fused transform stages the raw activation");
+  using St = Stage<NB, RPW, MT, XS, FT>;
   const uint32_t groups = static_cast<uint32_t>(K) / kGroup;
   const uint32_t full = groups / kWave;
   St a, b;
   auto load = [&](St& s, const uint32_t g) {
     load_w<NB, RPW>(s.w, rs, mc, g);
-    if constexpr (XS) load_xp<MT, XPRE>(xb, K, m0, M, g, s.x.xp);
+    if constexpr (XS) {
+      if constexpr (FT)
+        load_ft<MT>(xb, ft, K, m0, M, g, s.x.ft);
+      else
+        load_xp<MT, XPRE>(xb, K, m0, M, g, s.x.xp);
+    }
   };
   auto consume = [&](St& s, const uint32_t g) {
     auto dots = [&](const half2(&xp)[MT][8]) {
@@ -606,7 +719,13 @@ __device__ __forceinline__ void rows_loop(const char* __restrict__ xb,
       }
     };
     if constexpr (XS) {
-      dots(s.x.xp);
+      if constexpr (FT) {
+        half2 xp[MT][8];
+        ft_group<MT>(s.x.ft, ft.sc != nullptr, xp);
+        dots(xp);
+      } else {
+        dots(s.x.xp);
+      }
     } else {
       half2 xp[MT][8];
       load_xp<MT, XPRE>(xb, K, m0, M, g, xp);
@@ -630,7 +749,7 @@ __device__ __forceinline__ void rows_loop(const char* __restrict__ xb,
   }
 }
 
-template <int MT, int RPW, int WPB, bool XPRE>
+template <int MT, int RPW, int WPB, bool XPRE, bool FT = false>
 __global__ void __launch_bounds__(WPB* kWave)
     gemv2_kernel(const half* __restrict__ x, const int M, const int K,
                  const int32_t* __restrict__ codes,
@@ -640,8 +759,11 @@ __global__ void __launch_bounds__(WPB* kWave)
                  const half* __restrict__ row_consts,
                  const uint8_t* __restrict__ row_nbits,
                  const uint8_t* __restrict__ row_block, half* __restrict__ out,
-                 const int64_t ldo, const int R) {
+                 const int64_t ldo, const int R,
+                 const half* __restrict__ col_scale,
+                 const uint8_t* __restrict__ had) {
   constexpr bool kStageX = MT <= 4;  // register budget of the staged x
+  static_assert(!FT || kStageX, "the fused transform stages the activation");
   const uint32_t lane = threadIdx.x % kWave;
   const int wave =
       __builtin_amdgcn_readfirstlane(static_cast<int>(threadIdx.x) / kWave);
@@ -694,6 +816,7 @@ __global__ void __launch_bounds__(WPB* kWave)
   }
 
   const char* xb = reinterpret_cast<const char*>(x);
+  const FtCtx ft{reinterpret_cast<const char*>(col_scale), had};
   bool same = true, has8 = false;
   #pragma unroll
   for (int j = 1; j < RPW; ++j) same = same && rs[j].nb == rs[0].nb;
@@ -701,32 +824,33 @@ __global__ void __launch_bounds__(WPB* kWave)
   for (int j = 0; j < RPW; ++j) has8 = has8 || rs[j].nb == 8;
   if (same) {
     if (rs[0].nb == 2)
-      rows_loop<2, MT, RPW, XPRE, kStageX>(xb, K, m0, M, rs, nullptr, lane,
-                                           acc);
+      rows_loop<2, MT, RPW, XPRE, kStageX, FT>(xb, K, m0, M, rs, nullptr, lane,
+                                               ft, acc);
     else if (rs[0].nb == 4)
-      rows_loop<4, MT, RPW, XPRE, kStageX>(xb, K, m0, M, rs, nullptr, lane,
-                                           acc);
+      rows_loop<4, MT, RPW, XPRE, kStageX, FT>(xb, K, m0, M, rs, nullptr, lane,
+                                               ft, acc);
     else
-      rows_loop<8, MT, RPW, XPRE, kStageX>(xb, K, m0, M, rs, nullptr, lane,
-                                           acc);
+      rows_loop<8, MT, RPW, XPRE, kStageX, FT>(xb, K, m0, M, rs, nullptr, lane,
+                                               ft, acc);
   } else if (!has8) {
     // A boundary between runs of INT2 and INT4 rows.
     MixCtl mc[RPW];
   #pragma unroll
     for (int j = 0; j < RPW; ++j) mc[j] = make_mixctl(rs[j].nb);
-    rows_loop<0, MT, RPW, XPRE, kStageX>(xb, K, m0, M, rs, mc, lane, acc);
+    rows_loop<0, MT, RPW, XPRE, kStageX, FT>(xb, K, m0, M, rs, mc, lane, ft,
+                                             acc);
   } else {
     // An INT8 row among others (the released checkpoints have none): the
     // rows go through the loop one at a time.
   #pragma unroll
     for (int j = 0; j < RPW; ++j) {
       if (rs[j].nb == 8) {
-        rows_loop<8, MT, 1, XPRE, kStageX>(xb, K, m0, M, rs + j, nullptr, lane,
-                                           acc + j);
+        rows_loop<8, MT, 1, XPRE, kStageX, FT>(xb, K, m0, M, rs + j, nullptr,
+                                               lane, ft, acc + j);
       } else {
         const MixCtl c = make_mixctl(rs[j].nb);
-        rows_loop<0, MT, 1, XPRE, kStageX>(xb, K, m0, M, rs + j, &c, lane,
-                                           acc + j);
+        rows_loop<0, MT, 1, XPRE, kStageX, FT>(xb, K, m0, M, rs + j, &c, lane,
+                                               ft, acc + j);
       }
     }
   }
@@ -1842,7 +1966,7 @@ __global__ void gemv_i8_kernel(const int8_t*, const half*, const int32_t*,
                                const half*, const uint8_t*, const uint8_t*,
                                half*, const int64_t, const int) {}
 
-template <bool PI>
+template <bool PI, bool SILU = false>
 __global__ void act_transform_kernel(const half*, const int64_t, const half*,
                                      const uint8_t*, half*, const int,
                                      const int) {}
@@ -1851,11 +1975,12 @@ __global__ void gemv_kernel(const half*, const int, const int, const int32_t*,
                             const int32_t*, const uint8_t*, const int32_t*,
                             const half*, const uint8_t*, const uint8_t*, half*,
                             const int64_t, const int) {}
-template <int MT, int RPW, int WPB, bool XPRE>
+template <int MT, int RPW, int WPB, bool XPRE, bool FT = false>
 __global__ void gemv2_kernel(const half*, const int, const int, const int32_t*,
                              const int32_t*, const uint8_t*, const int32_t*,
                              const half*, const uint8_t*, const uint8_t*, half*,
-                             const int64_t, const int) {}
+                             const int64_t, const int, const half*,
+                             const uint8_t*) {}
 __global__ void dequant_kernel(const int32_t*, const int32_t*, const uint8_t*,
                                const int32_t*, const half*, const uint8_t*,
                                const uint8_t*, half*, const int) {}
@@ -1920,8 +2045,10 @@ void check_act(const torch::Tensor& x, int64_t K) {
 
 void launch_transform(const torch::Tensor& x, const torch::Tensor& col_scale,
                       const torch::Tensor& had, torch::Tensor& y,
-                      cudaStream_t stream, bool pair_interleaved = false) {
-  const int64_t M = x.size(0), K = x.size(1);
+                      cudaStream_t stream, bool pair_interleaved = false,
+                      bool silu_mul = false) {
+  // silu_mul: x is [M, 2K] (gate | up), y [M, K].
+  const int64_t M = x.size(0), K = silu_mul ? x.size(1) / 2 : x.size(1);
   const half* s = nullptr;
   if (col_scale.numel() > 0) {
     check_dev(col_scale, "col_scale", torch::kHalf);
@@ -1937,13 +2064,21 @@ void launch_transform(const torch::Tensor& x, const torch::Tensor& col_scale,
   const half* xp = reinterpret_cast<const half*>(x.data_ptr());
   half* yp = reinterpret_cast<half*>(y.data_ptr());
   const uint8_t* hp = had.data_ptr<uint8_t>();
+#define HI2_TRANSFORM(PI, SILU)                                       \
+  hf::act_transform_kernel<PI, SILU><<<blocks, threads, 0, stream>>>( \
+      xp, x.stride(0), s, hp, yp, static_cast<int>(M), static_cast<int>(K))
   if (pair_interleaved) {
-    hf::act_transform_kernel<true><<<blocks, threads, 0, stream>>>(
-        xp, x.stride(0), s, hp, yp, static_cast<int>(M), static_cast<int>(K));
+    if (silu_mul)
+      HI2_TRANSFORM(true, true);
+    else
+      HI2_TRANSFORM(true, false);
   } else {
-    hf::act_transform_kernel<false><<<blocks, threads, 0, stream>>>(
-        xp, x.stride(0), s, hp, yp, static_cast<int>(M), static_cast<int>(K));
+    if (silu_mul)
+      HI2_TRANSFORM(false, true);
+    else
+      HI2_TRANSFORM(false, false);
   }
+#undef HI2_TRANSFORM
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -2072,21 +2207,24 @@ Gemv2Cfg gemv2_auto(int64_t M, int64_t R) {
   return {8, rpw, 4};
 }
 
-template <int MT, int RPW, int WPB, bool XPRE>
+template <int MT, int RPW, int WPB, bool XPRE, bool FT = false>
 void launch_gemv2_cfg(const torch::Tensor& x, const Hi2Weight& w,
-                      torch::Tensor& out, int64_t R, cudaStream_t stream) {
+                      torch::Tensor& out, int64_t R, cudaStream_t stream,
+                      const half* col_scale = nullptr,
+                      const uint8_t* had = nullptr) {
   const int64_t M = x.size(0), K = x.size(1);
   constexpr int kRowsPerGrid = RPW * WPB;
   dim3 grid((R + kRowsPerGrid - 1) / kRowsPerGrid, (M + MT - 1) / MT);
-  hf::gemv2_kernel<MT, RPW, WPB, XPRE><<<grid, WPB * hf::kWave, 0, stream>>>(
-      reinterpret_cast<const half*>(x.data_ptr()), static_cast<int>(M),
-      static_cast<int>(K), w.codes.data_ptr<int32_t>(),
-      w.code_off.data_ptr<int32_t>(), w.blk_params.data_ptr<uint8_t>(),
-      w.param_off.data_ptr<int32_t>(),
-      reinterpret_cast<const half*>(w.row_consts.data_ptr()),
-      w.row_nbits.data_ptr<uint8_t>(), w.row_block.data_ptr<uint8_t>(),
-      reinterpret_cast<half*>(out.data_ptr()), out.stride(0),
-      static_cast<int>(R));
+  hf::gemv2_kernel<MT, RPW, WPB, XPRE, FT>
+      <<<grid, WPB * hf::kWave, 0, stream>>>(
+          reinterpret_cast<const half*>(x.data_ptr()), static_cast<int>(M),
+          static_cast<int>(K), w.codes.data_ptr<int32_t>(),
+          w.code_off.data_ptr<int32_t>(), w.blk_params.data_ptr<uint8_t>(),
+          w.param_off.data_ptr<int32_t>(),
+          reinterpret_cast<const half*>(w.row_consts.data_ptr()),
+          w.row_nbits.data_ptr<uint8_t>(), w.row_block.data_ptr<uint8_t>(),
+          reinterpret_cast<half*>(out.data_ptr()), out.stride(0),
+          static_cast<int>(R), col_scale, had);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -2132,6 +2270,69 @@ void launch_gemv2(const torch::Tensor& x, const Hi2Weight& w,
   if (cfg.mt == 0) cfg = gemv2_auto(M, R);
   TORCH_CHECK(gemv2_dispatch(cfg, x_pi, x, w, out, R, stream),
               "hi2: gemv2 config (mt=", cfg.mt, ", rpw=", cfg.rpw,
+              ", wpb=", cfg.wpb, ") is not instantiated");
+}
+
+// ---------------------------------------------------------------------------
+// GEMV v2 with the fused activation transform (FtCtx): x is the raw [M, K]
+// activation; the GEMV divides by col_scale, applies the Hadamard of the
+// flagged groups and rounds, as the transform kernel would have. Up to 3
+// tokens per block (the transform is redone by every wave, so its cost grows
+// with MT; the registers of the staged raw tile too).
+// RDNA_HINT_FLEX_FUSE_TRANSFORM = N makes rdna_hint_flex_linear_rdna2 take
+// this path for M <= N (N <= 3; unset or 0: the transform kernel and v1/v2 as
+// selected by RDNA_HINT_FLEX_GEMV).
+// ---------------------------------------------------------------------------
+int fuse_transform_max_m() {
+  static const int n = [] {
+    const char* e = std::getenv("RDNA_HINT_FLEX_FUSE_TRANSFORM");
+    const int v = e ? std::atoi(e) : 0;
+    return v < 0 ? 0 : (v > 3 ? 3 : v);
+  }();
+  return n;
+}
+
+Gemv2Cfg gemv2ft_auto(int64_t M, int64_t R) {
+  return {static_cast<int>(std::min<int64_t>(M, 3)), R >= 2048 ? 4 : 2, 4};
+}
+
+template <int MT, int RPW, int WPB>
+bool gemv2ft_try(const Gemv2Cfg& c, const torch::Tensor& x, const half* sc,
+                 const uint8_t* had, const Hi2Weight& w, torch::Tensor& out,
+                 int64_t R, cudaStream_t stream) {
+  if (c.mt != MT || c.rpw != RPW || c.wpb != WPB) return false;
+  launch_gemv2_cfg<MT, RPW, WPB, false, true>(x, w, out, R, stream, sc, had);
+  return true;
+}
+
+void launch_gemv2_ft(const torch::Tensor& x, const torch::Tensor& col_scale,
+                     const torch::Tensor& had, const Hi2Weight& w,
+                     torch::Tensor& out, int64_t R, cudaStream_t stream,
+                     Gemv2Cfg cfg = {0, 0, 0}) {
+  const int64_t M = x.size(0), K = x.size(1);
+  if (M == 0 || R == 0) return;
+  TORCH_CHECK(x.is_contiguous() && aligned16(x.data_ptr()),
+              "hi2: fused gemv2 input must be contiguous, 16-byte aligned");
+  TORCH_CHECK(aligned16(w.codes.data_ptr()),
+              "hi2: gemv2 needs 16-byte aligned code words");
+  const half* sc = nullptr;
+  if (col_scale.numel() > 0) {
+    check_dev(col_scale, "col_scale", torch::kHalf);
+    TORCH_CHECK(col_scale.numel() == K && aligned16(col_scale.data_ptr()),
+                "hi2: col_scale must have K entries, 16-byte aligned");
+    sc = reinterpret_cast<const half*>(col_scale.data_ptr());
+  }
+  check_dev(had, "had", torch::kUInt8);
+  TORCH_CHECK(had.numel() == K / hf::kGroup, "hi2: had must have K/16 entries");
+  const uint8_t* hp = had.data_ptr<uint8_t>();
+  if (cfg.mt == 0) cfg = gemv2ft_auto(M, R);
+#define F2(MT, RPW, WPB) \
+  gemv2ft_try<MT, RPW, WPB>(cfg, x, sc, hp, w, out, R, stream)
+  const bool ok = F2(1, 2, 4) || F2(1, 4, 4) || F2(2, 2, 4) || F2(2, 4, 4) ||
+                  F2(3, 2, 4) || F2(3, 4, 4) || F2(1, 2, 8) || F2(1, 4, 8) ||
+                  F2(2, 2, 8) || F2(2, 4, 8) || F2(3, 2, 8) || F2(3, 4, 8);
+#undef F2
+  TORCH_CHECK(ok, "hi2: fused gemv2 config (mt=", cfg.mt, ", rpw=", cfg.rpw,
               ", wpb=", cfg.wpb, ") is not instantiated");
 }
 
@@ -2426,13 +2627,17 @@ void launch_moe_gemm(const torch::Tensor& x, const torch::Tensor& sorted_ids,
 void rdna_hint_flex_act_transform_rdna2(torch::Tensor x,
                                         torch::Tensor col_scale,
                                         torch::Tensor had, torch::Tensor out,
-                                        bool pair_interleaved) {
+                                        bool pair_interleaved, bool silu_mul) {
   check_act(x, x.size(1));
   check_dev(out, "out", torch::kHalf);
-  TORCH_CHECK(out.sizes() == x.sizes(), "hi2: out must match x");
+  const int64_t K = silu_mul ? x.size(1) / 2 : x.size(1);
+  TORCH_CHECK(!silu_mul || x.size(1) % 128 == 0,
+              "hi2: silu_mul needs x = [M, 2K] with K a multiple of 64");
+  TORCH_CHECK(out.dim() == 2 && out.size(0) == x.size(0) && out.size(1) == K,
+              "hi2: out must be [M, K]");
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream();
-  launch_transform(x, col_scale, had, out, stream, pair_interleaved);
+  launch_transform(x, col_scale, had, out, stream, pair_interleaved, silu_mul);
 }
 
 // x [M, K] fp16 (already transformed) -> out [M, R] fp16 (written, not
@@ -2478,6 +2683,31 @@ void rdna_hint_flex_gemv2_rdna2(
   auto stream = at::cuda::getCurrentCUDAStream();
   launch_gemv2(
       x.contiguous(), w, out, R, stream, x_pi,
+      {static_cast<int>(mt), static_cast<int>(rpw), static_cast<int>(wpb)});
+}
+
+// GEMV v2 with the fused activation transform and an explicit configuration
+// (tests, benchmarks): x is the raw [M, K] activation, col_scale [K] (or an
+// empty tensor) and had [K / 16] those of the weight; mt in 1..3 (0 =
+// automatic), rpw 2 or 4, wpb 4 or 8.
+void rdna_hint_flex_gemv2_ft_rdna2(
+    torch::Tensor x, torch::Tensor col_scale, torch::Tensor had,
+    torch::Tensor codes, torch::Tensor code_off, torch::Tensor blk_params,
+    torch::Tensor param_off, torch::Tensor row_consts, torch::Tensor row_nbits,
+    torch::Tensor row_block, torch::Tensor out, int64_t mt, int64_t rpw,
+    int64_t wpb) {
+  const Hi2Weight w{codes,      code_off,  blk_params, param_off,
+                    row_consts, row_nbits, row_block};
+  const int64_t R = check_weight(w);
+  check_act(x, x.size(1));
+  TORCH_CHECK(out.is_cuda() && out.scalar_type() == torch::kHalf &&
+                  out.dim() == 2 && out.size(0) == x.size(0) &&
+                  out.size(1) == R && out.stride(1) == 1,
+              "hi2: out must be fp16 [M, R] with unit column stride");
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  launch_gemv2_ft(
+      x, col_scale, had, w, out, R, stream,
       {static_cast<int>(mt), static_cast<int>(rpw), static_cast<int>(wpb)});
 }
 
@@ -2740,13 +2970,17 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
     torch::Tensor x, torch::Tensor col_scale, torch::Tensor had,
     torch::Tensor codes, torch::Tensor code_off, torch::Tensor blk_params,
     torch::Tensor param_off, torch::Tensor row_consts, torch::Tensor row_nbits,
-    torch::Tensor row_block, bool transform, int64_t decode_max_m,
-    int64_t mode) {
+    torch::Tensor row_block, bool transform, int64_t decode_max_m, int64_t mode,
+    bool silu_mul) {
   const Hi2Weight w{codes,      code_off,  blk_params, param_off,
                     row_consts, row_nbits, row_block};
   const int64_t R = check_weight(w);
-  const int64_t K = x.size(1);
-  check_act(x, K);
+  check_act(x, x.size(1));
+  // silu_mul: x is the [M, 2K] gate | up output and the op applies
+  // silu(gate) * up inside the input transform (RDNA_HINT_FLEX_FUSE_SILU).
+  const int64_t K = silu_mul ? x.size(1) / 2 : x.size(1);
+  TORCH_CHECK(!silu_mul || (transform && mode == 0 && K % 64 == 0),
+              "hi2: silu_mul needs the transform, F16 mode and K % 64 == 0");
   TORCH_CHECK(mode >= 0 && mode <= 2, "hi2: mode must be 0, 1 or 2");
   const int64_t M = x.size(0);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
@@ -2764,13 +2998,25 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
     return out;
   }
 
+  // Fused transform (RDNA_HINT_FLEX_FUSE_TRANSFORM): the GEMV transforms its
+  // own activation groups, no transform launch and no intermediate tensor.
+  if (transform && !silu_mul && M <= decode_max_m &&
+      M <= fuse_transform_max_m() && R >= kGemv2MinRows && x.is_contiguous() &&
+      aligned16(x.data_ptr()) && aligned16(w.codes.data_ptr()) &&
+      (reinterpret_cast<uintptr_t>(w.blk_params.data_ptr()) & 1u) == 0 &&
+      (col_scale.numel() == 0 || aligned16(col_scale.data_ptr()))) {
+    launch_gemv2_ft(x, col_scale, had, w, out, R, stream);
+    return out;
+  }
+
   // v2 consumes a pair-interleaved activation: the transform writes it.
   const bool v2 = M <= decode_max_m && gemv2_weight_ok(w, M, R) &&
                   (transform || aligned16(x.data_ptr()));
   torch::Tensor xt;
   if (transform) {
     xt = torch::empty({M, K}, x.options());
-    launch_transform(x, col_scale, had, xt, stream, /*pair_interleaved=*/v2);
+    launch_transform(x, col_scale, had, xt, stream, /*pair_interleaved=*/v2,
+                     silu_mul);
   } else {
     xt = x.contiguous();
   }

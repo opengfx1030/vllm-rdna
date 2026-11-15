@@ -1416,6 +1416,7 @@ def rdna_hint_flex_linear_rdna2(
     transform: bool,
     decode_max_m: int,
     mode: int = 0,
+    silu_mul: bool = False,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(
         x,
@@ -1431,6 +1432,7 @@ def rdna_hint_flex_linear_rdna2(
         transform,
         decode_max_m,
         mode,
+        silu_mul,
     )
 
 
@@ -1628,15 +1630,43 @@ def rdna_hint_flex_gemv2_rdna2(
     )  # fmt: skip
 
 
+def rdna_hint_flex_gemv2_ft_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+    mt: int = 0,
+    rpw: int = 0,
+    wpb: int = 0,
+) -> None:
+    """GEMV v2 on the RAW activation x [M, K]: the kernel applies the column
+    scale and the Hadamard of the flagged groups itself (what
+    rdna_hint_flex_act_transform_rdna2 + rdna_hint_flex_gemv2_rdna2 do in two
+    launches, with the same bits). col_scale may be an empty tensor. mt 1..3,
+    rpw 2 or 4, wpb 4 or 8 (0 = automatic)."""
+    torch.ops._rocm_C.rdna_hint_flex_gemv2_ft_rdna2(
+        x, col_scale, had, codes, code_off, blk_params, param_off, row_consts,
+        row_nbits, row_block, out, mt, rpw, wpb,
+    )  # fmt: skip
+
+
 def rdna_hint_flex_act_transform_rdna2(
     x: torch.Tensor,
     col_scale: torch.Tensor,
     had: torch.Tensor,
     out: torch.Tensor,
     pair_interleaved: bool = False,
+    silu_mul: bool = False,
 ) -> None:
     torch.ops._rocm_C.rdna_hint_flex_act_transform_rdna2(
-        x, col_scale, had, out, pair_interleaved
+        x, col_scale, had, out, pair_interleaved, silu_mul
     )
 
 
@@ -1659,6 +1689,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         transform: bool,
         decode_max_m: int,
         mode: int,
+        silu_mul: bool = False,
     ) -> torch.Tensor:
         return x.new_empty((x.size(0), row_nbits.size(0)))
 
@@ -1759,6 +1790,25 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
     ) -> None:
         return
 
+    @register_fake("_rocm_C::rdna_hint_flex_gemv2_ft_rdna2")
+    def _rdna_hint_flex_gemv2_ft_rdna2_fake(
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+        mt: int,
+        rpw: int,
+        wpb: int,
+    ) -> None:
+        return
+
     @register_fake("_rocm_C::rdna_hint_flex_act_transform_rdna2")
     def _rdna_hint_flex_act_transform_rdna2_fake(
         x: torch.Tensor,
@@ -1766,6 +1816,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         had: torch.Tensor,
         out: torch.Tensor,
         pair_interleaved: bool = False,
+        silu_mul: bool = False,
     ) -> None:
         return
 

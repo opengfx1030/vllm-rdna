@@ -274,6 +274,61 @@ def make_l2(d: dict, x: torch.Tensor, mt=0, rpw=0, wpb=0):
     return call
 
 
+def make_silu_mul(d: dict, x: torch.Tensor):
+    """SiluAndMul alone on a [M, 2K] gate | up activation (K = the slot's K):
+    the launch that RDNA_HINT_FLEX_FUSE_SILU folds into the down transform."""
+    gu = torch.randn(x.shape[0], 2 * x.shape[1], dtype=torch.float16, device="cuda")
+    out = torch.empty_like(x)
+    return functools.partial(torch.ops._C.silu_and_mul, out, gu)
+
+
+def make_transform_silu(d: dict, x: torch.Tensor):
+    """The pair-interleaving transform with SiluAndMul folded in."""
+    gu = torch.randn(x.shape[0], 2 * x.shape[1], dtype=torch.float16, device="cuda")
+    out = torch.empty_like(x)
+    return functools.partial(
+        ops.rdna_hint_flex_act_transform_rdna2,
+        gu, d["col_scale"], d["had"], out, True, True,
+    )  # fmt: skip
+
+
+def make_ft(d: dict, x: torch.Tensor, mt=0, rpw=0, wpb=0):
+    """GEMV v2 with the transform fused in (explicit config): reads the raw
+    activation, no transform launch. Only for slots that have a transform."""
+    out = torch.empty(x.shape[0], d["R"], dtype=torch.float16, device="cuda")
+    return functools.partial(
+        ops.rdna_hint_flex_gemv2_ft_rdna2,
+        x, d["col_scale"], d["had"], *weights(d), out, mt, rpw, wpb,
+    )  # fmt: skip
+
+
+def check_ft_slot(d: dict, ms: list[int], cfgs: list[str]) -> None:
+    """The fused-transform GEMV against the two-launch path it replaces (the
+    transform kernel writing the pair-interleaved layout, then GEMV v2 with
+    the same configuration), on the real tensors of one layer: the outputs
+    must be identical, bit for bit."""
+    if not d["transform"]:
+        print("  (no transform on this tensor)")
+        return
+    for m in ms:
+        x = torch.randn(m, d["K"], dtype=torch.float16, device="cuda")
+        xt = torch.empty_like(x)
+        ops.rdna_hint_flex_act_transform_rdna2(x, d["col_scale"], d["had"], xt, True)
+        for c in cfgs:
+            mt, rpw, wpb = (int(v) for v in c.split(":"))
+            ref = torch.empty(m, d["R"], dtype=torch.float16, device="cuda")
+            y = torch.full_like(ref, float("nan"))
+            ops.rdna_hint_flex_gemv2_rdna2(xt, *weights(d), ref, mt, rpw, wpb, True)
+            ops.rdna_hint_flex_gemv2_ft_rdna2(
+                x, d["col_scale"], d["had"], *weights(d), y, mt, rpw, wpb
+            )
+            torch.accelerator.synchronize()
+            print(
+                f"  check-ft M={m:2d} cfg {c:7s} fused == transform + gemv2: "
+                f"{torch.equal(ref, y)}"
+            )
+
+
 def get_variant(name: str):
     """`linear`, `gemv`, ... or `g2[p]:MT:RPW:WPB` / `l2:MT:RPW:WPB` (v2 with
     an explicit configuration; g2p reads a pair-interleaved activation)."""
@@ -285,6 +340,8 @@ def get_variant(name: str):
         return lambda d, x: make_g2(d, x, mt, rpw, wpb, kind == "g2p")
     if kind == "l2":
         return lambda d, x: make_l2(d, x, mt, rpw, wpb)
+    if kind == "ft":
+        return lambda d, x: make_ft(d, x, mt, rpw, wpb)
     raise SystemExit(f"unknown variant {name}")
 
 
@@ -295,6 +352,8 @@ VARIANTS = {
     "gemv": make_gemv,
     "transform": make_transform,
     "transform_pi": lambda d, x: make_transform(d, x, True),
+    "silu_mul": make_silu_mul,
+    "transform_silu_pi": make_transform_silu,
 }
 
 
@@ -354,6 +413,12 @@ def run() -> None:
         "--check-layers",
         default="",
         help="real layer indices for --check (default: the first in bench order)",
+    )
+    ap.add_argument(
+        "--check-ft",
+        default="",
+        help="compare the fused-transform GEMV with transform + GEMV v2 for these "
+        "configs (';'-separated MT:RPW:WPB), bitwise, on the real tensors",
     )
     args = ap.parse_args()
     ms = [int(v) for v in args.m.split(",")]
@@ -424,7 +489,7 @@ def run() -> None:
         if want and slot not in want:
             continue
         order = sorted(layers, key=lambda i: (i * 0.6180339887498949) % 1.0)
-        if args.check:
+        if args.check or args.check_ft:
             ids = [int(v) for v in args.check_layers.split(",") if v] or order[:1]
             for layer in ids:
                 if layer not in layers:
@@ -435,7 +500,10 @@ def run() -> None:
                 seg = build_segments(rd, spec, args.rank)[0]
                 d = to_device(seg)
                 print(f"\n{slot} layer {layer}: R={d['R']} K={d['K']}")
-                check_slot(seg, d, ms, args.check.split(";"))
+                if args.check:
+                    check_slot(seg, d, ms, args.check.split(";"))
+                if args.check_ft:
+                    check_ft_slot(d, ms, args.check_ft.split(";"))
                 del d
             torch.accelerator.empty_cache()
             continue

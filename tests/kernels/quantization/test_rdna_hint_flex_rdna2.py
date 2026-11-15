@@ -22,6 +22,7 @@ Run ``pytest tests/kernels/quantization/test_rdna_hint_flex_rdna2.py``.
 """
 
 import math
+import os
 
 import pytest
 import torch
@@ -939,3 +940,180 @@ def test_linear_kernel_decode_rows(m, had, smooth):
     torch.accelerator.synchronize()
     assert y.shape == (m, r)
     assert rel_err(y, ref_linear(x, t)) < 2e-3
+
+
+# ---- fused activation transform (gemv2_ft; RDNA_HINT_FLEX_FUSE_TRANSFORM) ----
+_FT_CONFIGS = [
+    (0, 0, 0),
+    (1, 2, 4),
+    (1, 4, 4),
+    (2, 2, 4),
+    (2, 4, 8),
+    (3, 4, 4),
+    (3, 2, 8),
+]
+_FT_CASES: dict[tuple, tuple] = {}
+
+
+def _ft_case(nbits, blocks, had, smooth, r=203):
+    """K = 1088 (68 groups: two full wave iterations and a 4-lane tail)."""
+    key = (nbits, blocks, had, smooth, r)
+    if key not in _FT_CASES:
+        t = make_hi2(
+            r, 1088, nbits=nbits, blocks=blocks, had=had, smooth=smooth, seed=93
+        )
+        _FT_CASES[key] = (t, _dev(t))
+    return _FT_CASES[key]
+
+
+def _two_launches(x, d, cfg):
+    """The path the fused kernel replaces: the transform kernel writing the
+    pair-interleaved layout, then GEMV v2."""
+    from vllm import _custom_ops as ops
+
+    xt = torch.empty_like(x)
+    ops.rdna_hint_flex_act_transform_rdna2(x, d["col_scale"], d["had"], xt, True)
+    out = torch.empty(x.shape[0], d["row_nbits"].numel(), dtype=x.dtype, device="cuda")
+    _gemv2(xt, d, out, cfg, True)
+    return out
+
+
+@gfx1030_only
+@pytest.mark.parametrize("cfg", _FT_CONFIGS)
+@pytest.mark.parametrize("m", [1, 2, 3, 4, 7])
+@pytest.mark.parametrize(
+    "had,smooth",
+    [("none", False), ("none", True), ("all", True), ("mixed", True), ("mixed", False)],
+)
+@pytest.mark.parametrize(
+    "nbits,blocks",
+    [((2,), (32,)), ((4,), (64,)), ((2, 4, 8), (16, 32, 64))],
+)
+def test_gemv2_fused_transform_equals_two_launches(m, nbits, blocks, had, smooth, cfg):
+    """Transforming inside the GEMV gives the bits of the transform kernel
+    followed by the same GEMV (the arithmetic is the same operation for
+    operation; every config sums a row in the same order)."""
+    from vllm import _custom_ops as ops
+
+    t, d = _ft_case(nbits, blocks, had, smooth)
+    x = torch.randn(m, 1088, dtype=torch.float16, device="cuda") * 3
+    out = torch.full((m, 203), float("nan"), dtype=torch.float16, device="cuda")
+    ops.rdna_hint_flex_gemv2_ft_rdna2(
+        x, d["col_scale"], d["had"], d["codes"], d["code_off"], d["blk_params"],
+        d["param_off"], d["row_consts"], d["row_nbits"], d["row_block"], out, *cfg,
+    )  # fmt: skip
+    torch.accelerator.synchronize()
+    assert not torch.isnan(out).any(), "unwritten outputs"
+    assert torch.equal(out, _two_launches(x, d, cfg)), (m, nbits, had, smooth, cfg)
+
+
+@gfx1030_only
+@pytest.mark.parametrize("m", [1, 3])
+def test_gemv2_fused_transform_vs_reference(m):
+    """And against the float64 reference of the whole linear."""
+    from vllm import _custom_ops as ops
+
+    t, d = _ft_case((2, 4, 8), (16, 32, 64), "mixed", True)
+    x = torch.randn(m, 1088, dtype=torch.float16)
+    out = torch.empty(m, 203, dtype=torch.float16, device="cuda")
+    ops.rdna_hint_flex_gemv2_ft_rdna2(
+        x.cuda(), d["col_scale"], d["had"], d["codes"], d["code_off"],
+        d["blk_params"], d["param_off"], d["row_consts"], d["row_nbits"],
+        d["row_block"], out, 0, 0, 0,
+    )  # fmt: skip
+    torch.accelerator.synchronize()
+    assert rel_err(out, ref_linear(x, t)) < 1e-3
+
+
+@gfx1030_only
+@pytest.mark.skipif(
+    os.environ.get("RDNA_HINT_FLEX_FUSE_TRANSFORM", "0") in ("", "0"),
+    reason="the switch is read once per process: run with "
+    "RDNA_HINT_FLEX_FUSE_TRANSFORM=3",
+)
+@pytest.mark.parametrize("m", [1, 2, 3, 4, 8])
+@pytest.mark.parametrize("had,smooth", [("none", False), ("mixed", True)])
+def test_linear_fused_transform_switch(m, had, smooth):
+    """With the switch on, the production op (R >= 1024) gives the bits of the
+    two-launch path for M <= the switch value, and stays correct above it."""
+    t, d = _ft_case((2, 4, 8), (16, 32, 64), had, smooth, r=1056)
+    x = torch.randn(m, 1088, dtype=torch.float16, device="cuda")
+    out = _linear(x, d, True)
+    torch.accelerator.synchronize()
+    assert rel_err(out, ref_linear(x.cpu(), t)) < 1e-3
+    if m <= int(os.environ["RDNA_HINT_FLEX_FUSE_TRANSFORM"]):
+        assert torch.equal(out, _two_launches(x, d, (m, 4, 4)))
+
+
+# ---- SiluAndMul folded into the transform (silu_mul) -----------------------
+def _silu_and_mul(gu: torch.Tensor) -> torch.Tensor:
+    out = torch.empty(gu.shape[0], gu.shape[1] // 2, dtype=gu.dtype, device=gu.device)
+    torch.ops._C.silu_and_mul(out, gu)
+    return out
+
+
+@gfx1030_only
+@pytest.mark.parametrize("pi", [False, True])
+@pytest.mark.parametrize("m", [1, 3, 9])
+@pytest.mark.parametrize("had,smooth", [("none", False), ("mixed", True)])
+def test_act_transform_silu_mul_equals_silu_and_mul(m, pi, had, smooth):
+    from vllm import _custom_ops as ops
+
+    k = 1088
+    d = _dev(make_hi2(1, k, had=had, smooth=smooth, seed=14))
+    gu = torch.randn(m, 2 * k, dtype=torch.float16, device="cuda") * 4
+    ref = torch.empty(m, k, dtype=torch.float16, device="cuda")
+    got = torch.empty_like(ref)
+    act = _silu_and_mul(gu)
+    ops.rdna_hint_flex_act_transform_rdna2(act, d["col_scale"], d["had"], ref, pi)
+    ops.rdna_hint_flex_act_transform_rdna2(gu, d["col_scale"], d["had"], got, pi, True)
+    torch.accelerator.synchronize()
+    assert torch.equal(ref, got)
+
+
+@gfx1030_only
+def test_silu_mul_bit_exact_over_all_gate_values():
+    """Every finite fp16 gate value, against a random up value, gives the bits
+    of SiluAndMul (no column scale, no Hadamard: the transform is the identity)."""
+    from vllm import _custom_ops as ops
+
+    k = 32768
+    bits = torch.arange(65536, dtype=torch.int32).to(torch.int16)
+    gate = bits.view(torch.float16).reshape(2, k)
+    up = torch.randn(2, k, dtype=torch.float16)
+    gu = torch.cat([gate, up], dim=1).cuda().contiguous()
+    had = torch.zeros(k // GROUP, dtype=torch.uint8, device="cuda")
+    no_scale = torch.empty(0, dtype=torch.float16, device="cuda")
+    ref = _silu_and_mul(gu)
+    got = torch.empty_like(ref)
+    ops.rdna_hint_flex_act_transform_rdna2(gu, no_scale, had, got, False, True)
+    torch.accelerator.synchronize()
+    fin = torch.isfinite(ref)
+    assert torch.equal(ref[fin], got[fin])
+    assert torch.equal(torch.isnan(ref), torch.isnan(got))
+
+
+@gfx1030_only
+@pytest.mark.parametrize("m", [1, 3, 9, 48, 130])
+@pytest.mark.parametrize("had,smooth", [("none", False), ("mixed", True)])
+def test_linear_silu_mul_equals_unfused(m, had, smooth):
+    """silu_mul: the op takes gate | up and gives the bits of SiluAndMul
+    followed by the same op (GEMV up to M = 48, dequant + GEMM above)."""
+    from vllm import _custom_ops as ops
+
+    t, d = _ft_case((2, 4, 8), (16, 32, 64), had, smooth, r=1056)
+    gu = torch.randn(m, 2 * 1088, dtype=torch.float16, device="cuda") * 2
+    fused = ops.rdna_hint_flex_linear_rdna2(
+        gu, d["col_scale"], d["had"], d["codes"], d["code_off"], d["blk_params"],
+        d["param_off"], d["row_consts"], d["row_nbits"], d["row_block"], True, 48,
+        0, True,
+    )  # fmt: skip
+    ref = _linear(_silu_and_mul(gu), d, True, 48)
+    torch.accelerator.synchronize()
+    if m <= int(os.environ.get("RDNA_HINT_FLEX_FUSE_TRANSFORM", "0") or 0):
+        # The unfused reference runs the fused-transform GEMV (v2); the silu
+        # path runs the transform kernel and the GEMV the other switches pick:
+        # the same values summed in another order.
+        assert rel_err(fused, ref) < 2e-3
+    else:
+        assert torch.equal(fused, ref)

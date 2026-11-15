@@ -1193,7 +1193,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.def(
       "rdna_hint_flex_act_transform_rdna2(Tensor x, Tensor col_scale, Tensor "
       "had, "
-      "Tensor! out, bool pair_interleaved=False) -> ()");
+      "Tensor! out, bool pair_interleaved=False, bool silu_mul=False) -> ()");
   rocm_ops.impl("rdna_hint_flex_act_transform_rdna2", torch::kCUDA,
                 &rdna_hint_flex_act_transform_rdna2);
   rocm_ops.def(
@@ -1210,6 +1210,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("rdna_hint_flex_gemv2_rdna2", torch::kCUDA,
                 &rdna_hint_flex_gemv2_rdna2);
   rocm_ops.def(
+      "rdna_hint_flex_gemv2_ft_rdna2(Tensor x, Tensor col_scale, Tensor had, "
+      "Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, "
+      "Tensor row_consts, Tensor row_nbits, Tensor row_block, Tensor! out, "
+      "int mt, int rpw, int wpb) -> ()");
+  rocm_ops.impl("rdna_hint_flex_gemv2_ft_rdna2", torch::kCUDA,
+                &rdna_hint_flex_gemv2_ft_rdna2);
+  rocm_ops.def(
       "rdna_hint_flex_dequant_rdna2(Tensor codes, Tensor code_off, Tensor "
       "blk_params, "
       "Tensor param_off, Tensor row_consts, Tensor row_nbits, "
@@ -1220,7 +1227,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "rdna_hint_flex_linear_rdna2(Tensor x, Tensor col_scale, Tensor had, "
       "Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, "
       "Tensor row_consts, Tensor row_nbits, Tensor row_block, "
-      "bool transform, int decode_max_m, int mode) -> Tensor");
+      "bool transform, int decode_max_m, int mode, bool silu_mul=False) -> "
+      "Tensor");
   rocm_ops.impl("rdna_hint_flex_linear_rdna2", torch::kCUDA,
                 &rdna_hint_flex_linear_rdna2);
   rocm_ops.def(
