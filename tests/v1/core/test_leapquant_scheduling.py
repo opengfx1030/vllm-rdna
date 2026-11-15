@@ -40,11 +40,13 @@ def make_scheduler(tmp_path, monkeypatch, request):
         architectures=["OPTForCausalLM"], max_position_embeddings=262144
     ).save_pretrained(tmp_path)
 
-    def make(*, hybrid=False, block_size=16, **kwargs):
+    def make(*, hybrid=False, block_size=16, leapquant=None, **kwargs):
         class HybridScheduler(Scheduler):
             def __init__(self, vllm_config, kv_cache_config, **scheduler_kwargs):
                 vllm_config.cache_config.mamba_cache_mode = "align"
                 vllm_config.cache_config.mamba_block_size = block_size
+                if leapquant:
+                    vllm_config.cache_config.replayssm_state_dtype = "leapquant"
                 page_bytes = block_size * 1024
                 state = MambaSpec(
                     block_size=block_size,
@@ -100,9 +102,10 @@ def make_scheduler(tmp_path, monkeypatch, request):
             ),
             **kwargs,
         )
-        # Exercise the policy with real allocators, without requiring a GPU or
-        # model weights. Production enables it only for RDNA LeapQuant.
-        scheduler._lq_decode_growth_admission = True
+        if leapquant is None:
+            # Exercise the policy with real allocators, without requiring a GPU
+            # or model weights. Production enables it only for RDNA LeapQuant.
+            scheduler._lq_decode_growth_admission = True
         if hybrid:
             scheduler.need_mamba_block_aligned_split = True
             scheduler.mamba_state_block_size = block_size
@@ -343,14 +346,10 @@ def test_async_inflight_verifies_keep_their_growth_promise(make_scheduler):
     assert requests[1].request_id in scheduler.schedule().num_scheduled_tokens
 
 
-def test_concurrent_prefill_chunks_reserve_live_recurrent_states(
-    make_scheduler, monkeypatch
-):
-    from vllm.model_executor.layers.mamba.ops import leapquant_gdn
-
-    monkeypatch.setattr(leapquant_gdn, "leapquant_gdn_enabled", lambda: True)
+def test_concurrent_prefill_chunks_reserve_live_recurrent_states(make_scheduler):
     scheduler = make_scheduler(
         hybrid=True,
+        leapquant=True,
         block_size=512,
         num_blocks=53,
         max_num_seqs=8,
@@ -385,3 +384,20 @@ def test_concurrent_prefill_chunks_reserve_live_recurrent_states(
     _update(scheduler, chunk2, {first_id: []})
     _update(scheduler, chunk3, {first_id: []})
     assert requests[0].num_preemptions == 0
+
+
+@pytest.mark.parametrize("leapquant", [False, True])
+def test_growth_admission_follows_the_state_dtype_flag(make_scheduler, leapquant):
+    # `--replayssm-state-dtype leapquant` is the only switch; nothing else turns
+    # the bounded-growth admission on.
+    scheduler = make_scheduler(
+        hybrid=True,
+        leapquant=leapquant,
+        block_size=512,
+        num_blocks=53,
+        max_num_seqs=8,
+        max_num_batched_tokens=8192,
+        max_model_len=16384,
+        num_speculative_tokens=2,
+    )
+    assert scheduler._lq_decode_growth_admission is leapquant

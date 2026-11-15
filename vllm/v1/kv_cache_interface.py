@@ -1109,6 +1109,12 @@ class MambaSpec(KVCacheSpec):
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
+    # None: the state tensors keep the model's own dtypes and shapes. Otherwise
+    # the identity of a quantized state format (LeapQuant GDN state:
+    # LeapQuantLayout.state_format). It is part of the spec key, so layers with
+    # different formats never share a KV cache group, and
+    # KVConnectorFactory refuses to build a connector over such a spec.
+    state_format: str | None = None
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -1138,14 +1144,12 @@ class MambaSpec(KVCacheSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "align":
-            from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
-                leapquant_gdn_enabled,
-            )
-
             # LeapQuant admission accounts for retained inputs of unresolved
             # batches. Startup capacity checks must use the same physical peak.
             concurrent_batches = (
-                vllm_config.max_concurrent_batches if leapquant_gdn_enabled() else 1
+                vllm_config.max_concurrent_batches
+                if vllm_config.cache_config.replayssm_state_dtype == "leapquant"
+                else 1
             )
             return self.page_size_bytes * (
                 1
@@ -1177,6 +1181,7 @@ class MambaSpec(KVCacheSpec):
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
             and spec.tp_replicated == self.tp_replicated
+            and spec.state_format == self.state_format
             for spec in kv_cache_specs.values()
         )
 
@@ -1647,6 +1652,16 @@ class KVCacheConfig:
             isinstance(spec, MambaSpec)
             for group in self.kv_cache_groups
             for spec in iter_layer_specs(group.kv_cache_spec)
+        )
+
+    @property
+    def mamba_state_formats(self) -> frozenset[str]:
+        """Identities of the quantized Mamba state formats in this config."""
+        return frozenset(
+            spec.state_format
+            for group in self.kv_cache_groups
+            for spec in iter_layer_specs(group.kv_cache_spec)
+            if isinstance(spec, MambaSpec) and spec.state_format is not None
         )
 
     @property

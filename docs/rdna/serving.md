@@ -91,6 +91,7 @@ These are shell variables in the `.env` files. They become flags. They are not e
 | `MAXLEN` | `--max-model-len`. Empty uses the model's own context. | Lower it when KV memory is tight. |
 | `MIN_MAXLEN` | Refuse to start when `MAXLEN` is set below this. | `full` sets 32768. |
 | `BLOCK_SIZE` | `--block-size`. | 1024 on Flash-Next and 27B recipes, except 512 on `flashnext-leapquant-mtp2`; 16 on `full`. |
+| `REPLAYSSM_STATE_DTYPE` | `--replayssm-state-dtype`. Empty passes no flag (`auto`: the model's own GDN state). `leapquant` stores the GDN state as an INT8 blob: lossy, gfx10x only. It replaces the environment variable `VLLM_RDNA_GDN_LEAPQUANT`; the launcher stops when that variable is `1`, because the engine no longer reads it. | `leapquant` on `flashnext-leapquant-mtp2` only. See [LeapQuant config guards](../rdna2/leapquant-config-guards-2026-11-14.md). |
 | `SEQS` | `--max-num-seqs`. | Lower it when a long context does not fit. |
 | `MAXBAT` | `--max-num-batched-tokens`. Empty: the launcher derives it from the KV and SSM dtypes (2048 for an FP16 KV cache, 4096 for `int4_fp16_block` with an FP16 SSM state, 6144 with the model's FP32 SSM state). A prefill chunk ends on a mamba block, so the budget covers two blocks. | Leave `27b-awq` empty. Pinning it puts a packed KV cache back on a one-block budget (see that recipe). |
 | `LPTH` | `--long-prefill-token-threshold`. `0` disables the long-prefill split. | The recipes that set it use 0. |

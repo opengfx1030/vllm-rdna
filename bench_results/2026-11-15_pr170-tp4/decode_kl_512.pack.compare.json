@@ -1,0 +1,14 @@
+{
+ "ref-cand": {
+  "positions": 1524,
+  "kl_mean": 0.010452683530027526,
+  "kl_p50": 2.7177941434496997e-05,
+  "kl_p99": 0.11258380057815229,
+  "kl_max": 3.572703756239002,
+  "coverage_mean": 0.9899778895163283,
+  "divergence_median": 7.0,
+  "identical": 0,
+  "passages": 32,
+  "confident_flips": 4
+ }
+}

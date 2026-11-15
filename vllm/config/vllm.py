@@ -1559,6 +1559,14 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        if self.cache_config.replayssm_state_dtype == "leapquant":
+            # After the model hooks above: `mamba_cache_mode` is resolved only
+            # there. Imported here so the flag-off start-up loads nothing new.
+            from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
+                verify_leapquant_gdn,
+            )
+
+            verify_leapquant_gdn(self)
         self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
 

@@ -376,6 +376,10 @@ if TYPE_CHECKING:
     # vision pos-embed). Default on: gfx10x runs the HIP set; set 0 to fall
     # back to the Triton kernels as before the port.
     VLLM_RDNA_ALL_HIP: bool = True
+    # Opt-in page packing of LeapQuant GDN layers (needs --replayssm-state-dtype
+    # leapquant): a GDN page keeps its natural size and one KV-cache group holds
+    # as many GDN layers as one block fits, so a request holds fewer block tables.
+    VLLM_RDNA_GDN_LEAPQUANT_PACK: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2313,6 +2317,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_QSA_DECODE_MODE": lambda: os.getenv("VLLM_RDNA_QSA_DECODE_MODE", "auto"),
     "VLLM_RDNA_PLE_CONV_HIP": lambda: os.getenv("VLLM_RDNA_PLE_CONV_HIP", "0") == "1",
     "VLLM_RDNA_ALL_HIP": lambda: os.getenv("VLLM_RDNA_ALL_HIP", "1") == "1",
+    "VLLM_RDNA_GDN_LEAPQUANT_PACK": lambda: (
+        os.getenv("VLLM_RDNA_GDN_LEAPQUANT_PACK", "0") == "1"
+    ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.
@@ -2610,6 +2617,9 @@ def compile_factors() -> dict[str, object]:
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
+        # LeapQuant page packing changes the KV-cache page layout, not the
+        # compiled graph (same reason replayssm_state_dtype is not hashed).
+        "VLLM_RDNA_GDN_LEAPQUANT_PACK",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
     }
 
