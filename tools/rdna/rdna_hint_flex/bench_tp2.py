@@ -23,7 +23,8 @@ rate these kernels can actually stream at is lower, see the weights doc).
 
 Variants: ``linear`` (the serving op: transform + GEMV, mode 0), ``gemv`` (GEMV
 on a pre-transformed activation, with the kernel RDNA_HINT_FLEX_GEMV selects),
-``transform`` (the activation transform alone), ``linear_i8`` (mode 1),
+``transform`` (the activation transform alone), ``transform_pi`` (the same,
+writing the pair-interleaved order v2 reads), ``linear_i8`` (mode 1),
 ``g2:MT:RPW:WPB`` / ``g2p:MT:RPW:WPB`` (GEMV v2 with an explicit config on a
 natural / pair-interleaved activation), ``l2:MT:RPW:WPB`` (what the serving op
 runs with v2: the pair-interleaving transform, then GEMV v2), plus any
@@ -239,10 +240,10 @@ def check_slot(seg0: hu.Hi2, d: dict, ms: list[int], cfgs: list[str]) -> None:
             )
 
 
-def make_transform(d: dict, x: torch.Tensor):
+def make_transform(d: dict, x: torch.Tensor, pi: bool = False):
     out = torch.empty_like(x)
     return functools.partial(
-        ops.rdna_hint_flex_act_transform_rdna2, x, d["col_scale"], d["had"], out
+        ops.rdna_hint_flex_act_transform_rdna2, x, d["col_scale"], d["had"], out, pi
     )
 
 
@@ -293,6 +294,7 @@ VARIANTS = {
     "linear_i8": lambda d, x: make_linear(d, x, 1),
     "gemv": make_gemv,
     "transform": make_transform,
+    "transform_pi": lambda d, x: make_transform(d, x, True),
 }
 
 
