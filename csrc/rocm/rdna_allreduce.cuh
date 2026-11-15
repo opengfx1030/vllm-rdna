@@ -231,6 +231,43 @@ __device__ __forceinline__ bool rdna_ar_peer_announced(const RdnaArPeers& peers,
 
 #define RDNA_AR_POLL_PAUSE() __builtin_amdgcn_s_sleep(8)
 
+template <typename T>
+struct RdnaArLoadDirect {
+  const T* in;
+  __device__ __forceinline__ T operator()(int i) const { return in[i]; }
+};
+
+// Push of our payload into one peer's staging slot. The generic form goes
+// element by element through `load` (the argmax packs (value, index) pairs).
+// A contiguous source can leave as 16-byte stores when `vpush` is set
+// (rdna_ar_copy, which falls back to the scalar loop when unaligned or paced):
+// a wave of 2-byte stores is one 64-byte PCIe write, a wave of 16-byte
+// stores is 512 bytes of back-to-back full-size TLPs. The payload and the
+// result are the same either way.
+template <typename T, typename Load>
+__device__ __forceinline__ void rdna_ar_push(const Load& load, T* dst, int n,
+                                             int gid, int gstride, int pace,
+                                             int vpush) {
+  (void)vpush;
+  for (int i = gid; i < n; i += gstride) {
+    dst[i] = load(i);
+    for (int q = 0; q < pace; q++) __builtin_amdgcn_s_sleep(1);
+  }
+}
+template <typename T>
+__device__ __forceinline__ void rdna_ar_push(const RdnaArLoadDirect<T>& load,
+                                             T* dst, int n, int gid,
+                                             int gstride, int pace, int vpush) {
+  if (vpush) {
+    rdna_ar_copy<T>(dst, load.in, n, gid, gstride, pace);
+    return;
+  }
+  for (int i = gid; i < n; i += gstride) {
+    dst[i] = load.in[i];
+    for (int q = 0; q < pace; q++) __builtin_amdgcn_s_sleep(1);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Phases 1-2 of the protocol, shared by every one-shot collective: push our
 // payload into every peer's staging slot, grid barrier, announce, wait for
@@ -247,7 +284,7 @@ __device__ __forceinline__ bool rdna_ar_exchange(
     const Load& load, const RdnaArPeers& peers, unsigned int* arrive,
     int* seqbuf, unsigned* timeout, unsigned long long* report, int rank,
     int world, int n, long long max_elems, int nblocks, int pace,
-    long long wait_ticks, long long ticks_per_ms, int& p) {
+    long long wait_ticks, long long ticks_per_ms, int& p, int vpush = 0) {
   __shared__ int s_seq;
   __shared__ int s_abort;
   const int t = threadIdx.x, nt = blockDim.x, b = blockIdx.x;
@@ -288,10 +325,7 @@ __device__ __forceinline__ bool rdna_ar_exchange(
     const int j = (rank + k) % world;
     T* dst = reinterpret_cast<T*>(peers.stage[j]) +
              ((long long)p * world + rank) * max_elems;
-    for (int i = gid; i < n; i += gstride) {
-      dst[i] = load(i);
-      for (int q = 0; q < pace; q++) __builtin_amdgcn_s_sleep(1);
-    }
+    rdna_ar_push<T>(load, dst, n, gid, gstride, pace, vpush);
   }
   __syncthreads();
 
@@ -385,12 +419,6 @@ __device__ __forceinline__ bool rdna_ar_exchange(
   return s_abort != 0;
 }
 
-template <typename T>
-struct RdnaArLoadDirect {
-  const T* in;
-  __device__ __forceinline__ T operator()(int i) const { return in[i]; }
-};
-
 // All-reduce finisher, vector path: one 16-byte load per rank slice, the
 // fixed-order fp32 sum (rank 0 .. W-1, starting from 0.f, exactly the scalar
 // loop's order, so the result is bit-equal to it and identical on every rank),
@@ -444,13 +472,14 @@ __global__ void rdna_ar_oneshot(
     int rank, int world, int n, long long max_elems, int nblocks, int pace,
     long long wait_ticks,    // wall-clock bound per wait
     long long ticks_per_ms,  // wall_clock64 rate
-    int vec) {               // 0: scalar finisher (VLLM_RDNA_AR_VEC=0)
+    int vec,                 // 0: scalar finisher (VLLM_RDNA_AR_VEC=0)
+    int vpush) {             // 1: 16-byte pushes (VLLM_RDNA_AR_VPUSH=1)
   const int gid = blockIdx.x * blockDim.x + threadIdx.x;
   const int gstride = nblocks * blockDim.x;
   int p = 0;
   if (rdna_ar_exchange<T>(RdnaArLoadDirect<T>{in}, peers, arrive, seqbuf,
                           timeout, report, rank, world, n, max_elems, nblocks,
-                          pace, wait_ticks, ticks_per_ms, p)) {
+                          pace, wait_ticks, ticks_per_ms, p, vpush)) {
     // Timed out (or sticky abort): leave a finite (wrong) value, never stale
     // memory.
     for (int i = gid; i < n; i += gstride) out[i] = in[i];
