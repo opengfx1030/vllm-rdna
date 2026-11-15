@@ -1,0 +1,216 @@
+Sun Nov 15 02:05:35 AM CET 2026
+no docker buildx build (start)
+ 02:05:35 up 4 days, 17:26, 12 users,  load average: 9.55, 9.22, 13.22
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+ok   128x128k32t8x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w0s1m0u2              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x4n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t4x4n2p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t16x8n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t8x8n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p0r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b1w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g8b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g4b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w0s1m0u1cu            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w3s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w2s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k16t8x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t8x8n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t8x8n1p0r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r1g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r2g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r4g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r8g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r16g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w0s2m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w0s3m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w0s4m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t4x8n2p8r0g16b0w0s2m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t4x8n2p8r0g16b0w0s3m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t8x4n2p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t4x8n2p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t8x8n2p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t16x4n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t4x16n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t4x4n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t8x4n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t4x8n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t16x4n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t4x16n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t16x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t8x16n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t4x4n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t8x4n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t4x8n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t8x8n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t16x4n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t4x16n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t16x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t8x16n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t4x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t16x4n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t4x16n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x16n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t8x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t16x4n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t4x16n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t16x8n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t8x16n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t8x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t16x4n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t4x16n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t16x8n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t8x16n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k16t4x4n2p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t4x4n1p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k64t4x4n1p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k16t8x4n2p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t8x4n1p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k64t8x4n1p8r0g16b0w0s1m0u1                cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k16t8x4n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t8x4n1p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k64t8x4n1p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k16t4x8n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t4x8n1p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k64t4x8n1p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k16t8x8n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t8x8n1p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k64t8x8n1p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k16t8x8n2p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t8x8n1p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k64t8x8n1p8r0g16b0w0s1m0u1               cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k16t8x4n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x4n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t8x4n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k16t4x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t4x8n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t4x8n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k16t8x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t8x8n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k64t8x8n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k16t8x8n2p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t8x8n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k64t8x8n1p8r0g16b0w0s1m0u1              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k16t16x8n2p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t16x8n1p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t16x8n1p8r0g16b0w0s1m0u1             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t4x4n2p8r0g16b0w0s1m0u1l8              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k64t4x4n1p8r0g16b0w0s1m0u1l8              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k32t8x4n2p8r0g16b0w0s1m0u1l8              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x64k64t8x4n1p8r0g16b0w0s1m0u1l8              cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t8x4n2p8r0g16b0w0s1m0u1l8             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k64t8x4n1p8r0g16b0w0s1m0u1l8             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t4x8n2p8r0g16b0w0s1m0u1l8             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k64t4x8n1p8r0g16b0w0s1m0u1l8             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k32t8x8n2p8r0g16b0w0s1m0u1l8             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x64k64t8x8n1p8r0g16b0w0s1m0u1l8             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k32t8x8n2p8r0g16b0w0s1m0u1l8             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   64x128k64t8x8n1p8r0g16b0w0s1m0u1l8             cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t8x8n1p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x4n2p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t8x4n1p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t4x8n2p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t4x8n1p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k32t8x8n2p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x256k64t8x8n1p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k32t8x8n2p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   256x128k64t8x8n1p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t16x8n2p8r0g16b0w0s1m0u1l8           cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t16x8n1p8r0g16b0w0s1m0u1l8           cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w0s1m0u0l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k32t8x8n2p8r0g16b0w0s1m0u2l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k64t8x8n1p8r0g16b0w0s1m0u2l8            cases  65 worst abs 0.0078 rel 2.12e-04
+ok   128x128k16t8x8n2p8r0g16b0w0s1m0u1l8            cases  65 worst abs 0.0078 rel 2.12e-04
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+rocblas_heur  default                              gate_up       M=2048    18462.7 us (min 18400.0)  19.77 TF/s  vs_rb  0.878  err           
+rocblas_tuned tunableop                            gate_up       M=2048    16204.8 us (min 16161.5)  22.53 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326079
+rocblas_heur_hot default                              gate_up       M=2048    18471.8 us (min 18405.4)  19.76 TF/s  vs_rb  0.877  err           
+rocblas_tuned_hot tunableop                            gate_up       M=2048    16281.6 us (min 15583.9)  22.42 TF/s  vs_rb  0.995  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m0u1    gate_up       M=2048    19554.0 us (min 19435.4)  18.67 TF/s  vs_rb  0.829  err  0.01562  
+dense         128x128k32t8x8n2p8r0g16b0w0s1m1u1    gate_up       M=2048    15809.7 us (min 15509.9)  23.09 TF/s  vs_rb  1.025  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m2u1    gate_up       M=2048     8391.8 us (min  8349.9)   43.5 TF/s  vs_rb  1.931  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m3u1    gate_up       M=2048    14392.7 us (min 13620.1)  25.37 TF/s  vs_rb  1.126  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m4u1    gate_up       M=2048    15258.1 us (min 15137.1)  23.93 TF/s  vs_rb  1.062  err           
+rocblas_heur  default                              gate_up       M=512      4084.5 us (min  4058.1)  22.34 TF/s  vs_rb    1.0  err           
+rocblas_tuned tunableop                            gate_up       M=512      4094.3 us (min  4084.5)  22.29 TF/s  vs_rb  0.998  err           Default
+rocblas_heur_hot default                              gate_up       M=512      4088.6 us (min  4070.8)  22.32 TF/s  vs_rb  0.999  err           
+rocblas_tuned_hot tunableop                            gate_up       M=512      4067.1 us (min  3978.4)  22.44 TF/s  vs_rb  1.004  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m0u1    gate_up       M=512      5417.8 us (min  5329.5)  16.85 TF/s  vs_rb  0.754  err  0.01562  
+dense         128x128k32t8x8n2p8r0g16b0w0s1m1u1    gate_up       M=512      4045.3 us (min  3957.4)  22.56 TF/s  vs_rb   1.01  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m2u1    gate_up       M=512      2240.3 us (min  2198.8)  40.74 TF/s  vs_rb  1.823  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m3u1    gate_up       M=512      3669.5 us (min  3400.4)  24.87 TF/s  vs_rb  1.113  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m4u1    gate_up       M=512      6312.6 us (min  6285.7)  14.46 TF/s  vs_rb  0.647  err           
+rocblas_heur  default                              in_proj_qkvz  M=2048     7880.2 us (min  7791.3)   21.8 TF/s  vs_rb  0.924  err           
+rocblas_tuned tunableop                            in_proj_qkvz  M=2048     7279.4 us (min  7274.7)   23.6 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047
+rocblas_heur_hot default                              in_proj_qkvz  M=2048     7734.1 us (min  7677.1)  22.21 TF/s  vs_rb  0.941  err           
+rocblas_tuned_hot tunableop                            in_proj_qkvz  M=2048     7187.9 us (min  7074.8)   23.9 TF/s  vs_rb  1.013  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m0u1    in_proj_qkvz  M=2048     8686.0 us (min  8663.7)  19.78 TF/s  vs_rb  0.838  err  0.00781  
+dense         128x128k32t8x8n2p8r0g16b0w0s1m1u1    in_proj_qkvz  M=2048     7471.7 us (min  7368.9)  22.99 TF/s  vs_rb  0.974  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m2u1    in_proj_qkvz  M=2048     4101.7 us (min  4098.1)  41.88 TF/s  vs_rb  1.775  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m3u1    in_proj_qkvz  M=2048     6836.9 us (min  6611.5)  25.13 TF/s  vs_rb  1.065  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m4u1    in_proj_qkvz  M=2048     3763.2 us (min  3735.7)  45.65 TF/s  vs_rb  1.934  err           
+rocblas_heur  default                              in_proj_qkvz  M=512      2097.4 us (min  2088.7)  20.48 TF/s  vs_rb    1.0  err           
+rocblas_tuned tunableop                            in_proj_qkvz  M=512      2099.5 us (min  2091.7)  20.46 TF/s  vs_rb  0.999  err           Default
+rocblas_heur_hot default                              in_proj_qkvz  M=512      2060.5 us (min  2056.8)  20.84 TF/s  vs_rb  1.018  err           
+rocblas_tuned_hot tunableop                            in_proj_qkvz  M=512      2049.2 us (min  2036.2)  20.96 TF/s  vs_rb  1.024  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m0u1    in_proj_qkvz  M=512      2492.4 us (min  2474.3)  17.23 TF/s  vs_rb  0.842  err  0.00781  
+dense         128x128k32t8x8n2p8r0g16b0w0s1m1u1    in_proj_qkvz  M=512      2005.7 us (min  1958.7)  21.41 TF/s  vs_rb  1.046  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m2u1    in_proj_qkvz  M=512      1107.9 us (min  1092.7)  38.77 TF/s  vs_rb  1.893  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m3u1    in_proj_qkvz  M=512      1810.6 us (min  1718.6)  23.72 TF/s  vs_rb  1.158  err           
+dense         128x128k32t8x8n2p8r0g16b0w0s1m4u1    in_proj_qkvz  M=512      1726.0 us (min  1691.0)  24.88 TF/s  vs_rb  1.215  err           
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+64x64k32t4x4n2p8r0g16b0w0s1m5u1              vgpr  71 lds 20480 B  hip-API blk/WGP 3  measured: WGPs 1 blocks 4096 max-conc/WGP 216 mid-run mean 216.00  -> waves/SIMD 432.0 (max) 432.0 (mid-run)
+64x64k64t4x4n1p8r0g16b0w0s1m5u1              vgpr  79 lds 18432 B  hip-API blk/WGP 3  measured: WGPs 1 blocks 4096 max-conc/WGP 216 mid-run mean 216.00  -> waves/SIMD 432.0 (max) 432.0 (mid-run)
+64x64k32t8x4n2p8r0g16b0w0s1m5u1              vgpr 120 lds 20480 B  hip-API blk/WGP 3  measured: WGPs 1 blocks 4096 max-conc/WGP 216 mid-run mean 216.00  -> waves/SIMD 216.0 (max) 216.0 (mid-run)
+64x64k64t8x4n1p8r0g16b0w0s1m5u1              vgpr 138 lds 18432 B  hip-API blk/WGP 3  measured: WGPs 1 blocks 4096 max-conc/WGP 252 mid-run mean 252.00  -> waves/SIMD 252.0 (max) 252.0 (mid-run)
+128x64k32t8x4n2p8r0g16b0w0s1m5u1             vgpr 112 lds 30720 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 2048 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x64k64t8x4n1p8r0g16b0w0s1m5u1             vgpr 126 lds 27648 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 2048 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+64x128k32t4x8n2p8r0g16b0w0s1m5u1             vgpr 112 lds 30720 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 2048 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+64x128k64t4x8n1p8r0g16b0w0s1m5u1             vgpr 126 lds 27648 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 2048 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x64k32t8x8n2p8r0g16b0w0s1m5u1             vgpr 186 lds 30720 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 2048 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x64k64t8x8n1p8r0g16b0w0s1m5u1             vgpr 214 lds 27648 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 2048 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+64x128k32t8x8n2p8r0g16b0w0s1m5u1             vgpr 186 lds 30720 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 2048 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+64x128k64t8x8n1p8r0g16b0w0s1m5u1             vgpr 214 lds 27648 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 2048 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x128k32t8x8n2p8r0g16b0w0s1m5u1            vgpr 168 lds 40960 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 1024 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x128k64t8x8n1p8r0g16b0w0s1m5u1            vgpr 186 lds 36864 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 1024 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x128k32t8x4n2p8r0g16b0w0s1m5u1            vgpr 103 lds 40960 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 1024 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x128k64t8x4n1p8r0g16b0w0s1m5u1            vgpr 105 lds 36864 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 1024 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x128k32t4x8n2p8r0g16b0w0s1m5u1            vgpr 103 lds 40960 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 1024 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x128k64t4x8n1p8r0g16b0w0s1m5u1            vgpr 105 lds 36864 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 1024 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x256k32t8x8n2p8r0g16b0w0s1m5u1            vgpr 154 lds 61440 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 512 max-conc/WGP 36 mid-run mean 36.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x256k64t8x8n1p8r0g16b0w0s1m5u1            vgpr 173 lds 55296 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 512 max-conc/WGP 36 mid-run mean 36.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+256x128k32t8x8n2p8r0g16b0w0s1m5u1            vgpr 154 lds 61440 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 512 max-conc/WGP 36 mid-run mean 36.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+256x128k64t8x8n1p8r0g16b0w0s1m5u1            vgpr 173 lds 55296 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 512 max-conc/WGP 36 mid-run mean 36.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x128k32t16x8n2p8r0g16b0w0s1m5u1           vgpr 239 lds 40960 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 1024 max-conc/WGP 108 mid-run mean 108.00  -> waves/SIMD 108.0 (max) 108.0 (mid-run)
+128x128k64t16x8n1p8r0g16b0w0s1m5u1           vgpr 256 lds 36864 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 1024 max-conc/WGP 108 mid-run mean 108.00  -> waves/SIMD 108.0 (max) 108.0 (mid-run)
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+64x64k32t4x4n2p8r0g16b0w0s1m5u1              vgpr  71 lds 20480 B  hip-API blk/WGP 3  measured: WGPs 1 blocks 640 max-conc/WGP 216 mid-run mean 214.00  -> waves/SIMD 432.0 (max) 428.0 (mid-run)
+64x64k64t4x4n1p8r0g16b0w0s1m5u1              vgpr  79 lds 18432 B  hip-API blk/WGP 3  measured: WGPs 1 blocks 640 max-conc/WGP 216 mid-run mean 216.00  -> waves/SIMD 432.0 (max) 432.0 (mid-run)
+64x64k32t8x4n2p8r0g16b0w0s1m5u1              vgpr 120 lds 20480 B  hip-API blk/WGP 3  measured: WGPs 1 blocks 640 max-conc/WGP 216 mid-run mean 216.00  -> waves/SIMD 216.0 (max) 216.0 (mid-run)
+64x64k64t8x4n1p8r0g16b0w0s1m5u1              vgpr 138 lds 18432 B  hip-API blk/WGP 3  measured: WGPs 1 blocks 640 max-conc/WGP 252 mid-run mean 252.00  -> waves/SIMD 252.0 (max) 252.0 (mid-run)
+128x64k32t8x4n2p8r0g16b0w0s1m5u1             vgpr 112 lds 30720 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 320 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x64k64t8x4n1p8r0g16b0w0s1m5u1             vgpr 126 lds 27648 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 320 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+64x128k32t4x8n2p8r0g16b0w0s1m5u1             vgpr 112 lds 30720 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 320 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+64x128k64t4x8n1p8r0g16b0w0s1m5u1             vgpr 126 lds 27648 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 320 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x64k32t8x8n2p8r0g16b0w0s1m5u1             vgpr 186 lds 30720 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 320 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x64k64t8x8n1p8r0g16b0w0s1m5u1             vgpr 214 lds 27648 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 320 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+64x128k32t8x8n2p8r0g16b0w0s1m5u1             vgpr 186 lds 30720 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 320 max-conc/WGP 144 mid-run mean 144.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+64x128k64t8x8n1p8r0g16b0w0s1m5u1             vgpr 214 lds 27648 B  hip-API blk/WGP 2  measured: WGPs 1 blocks 320 max-conc/WGP 144 mid-run mean 138.00  -> waves/SIMD 144.0 (max) 138.0 (mid-run)
+128x128k32t8x8n2p8r0g16b0w0s1m5u1            vgpr 168 lds 40960 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 160 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x128k64t8x8n1p8r0g16b0w0s1m5u1            vgpr 186 lds 36864 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 160 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x128k32t8x4n2p8r0g16b0w0s1m5u1            vgpr 103 lds 40960 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 160 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x128k64t8x4n1p8r0g16b0w0s1m5u1            vgpr 105 lds 36864 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 160 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x128k32t4x8n2p8r0g16b0w0s1m5u1            vgpr 103 lds 40960 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 160 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x128k64t4x8n1p8r0g16b0w0s1m5u1            vgpr 105 lds 36864 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 160 max-conc/WGP 72 mid-run mean 72.00  -> waves/SIMD 288.0 (max) 288.0 (mid-run)
+128x256k32t8x8n2p8r0g16b0w0s1m5u1            vgpr 154 lds 61440 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 80 max-conc/WGP 36 mid-run mean 36.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x256k64t8x8n1p8r0g16b0w0s1m5u1            vgpr 173 lds 55296 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 80 max-conc/WGP 36 mid-run mean 36.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+256x128k32t8x8n2p8r0g16b0w0s1m5u1            vgpr 154 lds 61440 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 80 max-conc/WGP 36 mid-run mean 36.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+256x128k64t8x8n1p8r0g16b0w0s1m5u1            vgpr 173 lds 55296 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 80 max-conc/WGP 36 mid-run mean 36.00  -> waves/SIMD 144.0 (max) 144.0 (mid-run)
+128x128k32t16x8n2p8r0g16b0w0s1m5u1           vgpr 239 lds 40960 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 160 max-conc/WGP 108 mid-run mean 107.00  -> waves/SIMD 108.0 (max) 107.0 (mid-run)
+128x128k64t16x8n1p8r0g16b0w0s1m5u1           vgpr 256 lds 36864 B  hip-API blk/WGP 1  measured: WGPs 1 blocks 160 max-conc/WGP 108 mid-run mean 108.00  -> waves/SIMD 108.0 (max) 108.0 (mid-run)
+Sun Nov 15 02:06:36 AM CET 2026
+no docker buildx build (end)
+ 02:06:37 up 4 days, 17:27, 11 users,  load average: 15.32, 10.38, 13.34
