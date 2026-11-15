@@ -144,9 +144,21 @@ def main() -> int:
         out = torch.empty_like(q)
 
         def flash() -> torch.Tensor:
-            return fa.fa_rdna2_prefill_paged_varlen(
-                q, kc, vc, table, cu, sl, a.block_size, True, 0, None, out
+            # The kernel RdnaAttentionImpl calls for fp16 prefill (GQA subgroup mode).
+            fa.fa_rdna2_prefill_paged_varlen_gqa(
+                q,
+                kc,
+                vc,
+                table,
+                cu,
+                sl,
+                a.block_size,
+                causal=True,
+                sliding_window=0,
+                scale=d**-0.5,
+                out=out,
             )
+            return out
 
         k = gather_contiguous(kc, total).contiguous()
         v = gather_contiguous(vc, total).contiguous()
