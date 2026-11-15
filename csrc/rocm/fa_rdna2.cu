@@ -1135,6 +1135,267 @@ __global__ __launch_bounds__(256) void fa_decode_paged_splitk_gqa_kernel_256(
 }
 
 // =====================================================================
+// DECODE STAGE 1c: the GQA kernel above with 16-byte shared-memory traffic
+// =====================================================================
+// Same grid, split layout, partials and per-element arithmetic order as
+// fa_decode_paged_splitk_gqa_kernel_256, so the output is bit-identical
+// (VLLM_FA_RDNA2_GQA_DECODE=2 selects it;
+// docs/rdna2/hi2-c8-profile-2026-11-15.md). What changes is how the tile moves
+// through LDS. The kernel above spends about 700 LDS instructions per thread
+// per 32-token tile, most of them bank-conflicted 2-byte accesses, which makes
+// it LDS-bound at 16k context
+// (~1.2 ms per layer for 8 rows x 2 KV heads x 16k tokens, 226 GB/s of a
+// 512 GB/s card):
+//   * S phase: lane k reads its K row and the Q row as 16-byte vectors (the
+//     row stride of 264 halves is 33 x 16 bytes, so 8 lanes cover 8 distinct
+//     bank groups) instead of 128 b32 reads each;
+//   * V is staged transposed, sVt[d][token] with a row of GQA_VT halves:
+//     the cache holds 8 consecutive tokens of one d contiguously, so one
+//     16-byte load becomes one 16-byte store (the old layout needed eight
+//     2-byte stores with a 4-way bank conflict), and a thread's PV column is
+//     four 16-byte reads shared by all G heads (G x 32 two-byte reads before);
+//   * P is read as float4.
+// A partial last tile (fewer than GQA_BC tokens) takes the scalar loop of
+// the original over the same transposed rows.
+#define GQA_VT (GQA_BC + 8)
+
+__global__
+__launch_bounds__(256) void fa_decode_paged_splitk_gqa_vec_kernel_256(
+    const half* __restrict__ Q, const half* __restrict__ key_cache,
+    const half* __restrict__ value_cache, const int* __restrict__ block_table,
+    const int* __restrict__ seq_lens, const int stride_kc0,
+    const int stride_kc1, const int stride_kc2, const int stride_kc3,
+    const int stride_vc0, const int stride_vc1, const int stride_vc2,
+    const int stride_vc3, const int stride_vc4, const int max_blocks,
+    const int block_size, float* __restrict__ O_partial,
+    float* __restrict__ M_partial, float* __restrict__ L_partial,
+    const int num_tokens, const int H_q, const int H_kv, const int kv_splits,
+    const float scale, const int sliding_window,
+    const int* __restrict__ cu_query_lens, const int num_seqs) {
+  const int token_idx = blockIdx.x;
+  const int h_kv = blockIdx.y;
+  const int split = blockIdx.z;
+  const int t = threadIdx.x;
+  const int G = H_q / H_kv;
+  if (token_idx >= num_tokens || h_kv >= H_kv || split >= kv_splits) return;
+  int seq_len;
+  const int seq = fa_decode_token_seq(cu_query_lens, num_seqs, token_idx,
+                                      seq_lens, seq_len);
+  if (seq_len <= 0) {
+    for (int g = 0; g < G; ++g) {
+      const int h_q = h_kv * G + g;
+      O_partial[(((int64_t)token_idx * H_q + h_q) * kv_splits + split) * 256 +
+                t] = 0.0f;
+    }
+    if (t == 0) {
+      for (int g = 0; g < G; ++g) {
+        const int h_q = h_kv * G + g;
+        M_partial[(token_idx * H_q + h_q) * kv_splits + split] = -INFINITY;
+        L_partial[(token_idx * H_q + h_q) * kv_splits + split] = 0.0f;
+      }
+    }
+    return;
+  }
+
+  extern __shared__ unsigned char smem_raw[];
+  half* sQ = reinterpret_cast<half*>(smem_raw);              // [G][256]
+  half* sK = sQ + GQA_MAX_G * 256;                           // [BC][DSK]
+  half* sVt = sK + GQA_BC * GQA_DSK;                         // [256][VT]
+  float* sP = reinterpret_cast<float*>(sVt + 256 * GQA_VT);  // [G][BC]
+  float* sMnew = sP + GQA_MAX_G * GQA_BC;                    // [G]
+  float* sLnew = sMnew + GQA_MAX_G;                          // [G]
+  __shared__ int s_blk[GQA_BC];
+  __shared__ int s_slot[GQA_BC];
+
+  for (int g = 0; g < G; ++g) {
+    sQ[g * 256 + t] = Q[((int64_t)token_idx * H_q + h_kv * G + g) * 256 + t];
+  }
+  __syncthreads();
+
+  const int* my_bt = block_table + (int64_t)seq * max_blocks;
+  float m_i[GQA_MAX_G], l_i[GQA_MAX_G], o_acc[GQA_MAX_G];
+#pragma unroll
+  for (int g = 0; g < GQA_MAX_G; ++g) {
+    m_i[g] = -INFINITY;
+    l_i[g] = 0.0f;
+    o_acc[g] = 0.0f;
+  }
+
+  const int kv_lo = sliding_window > 0
+                        ? max(0, seq_len - sliding_window) / GQA_BC * GQA_BC
+                        : 0;
+  const int tokens_per_split =
+      ((seq_len - kv_lo + kv_splits - 1) / kv_splits + GQA_BC - 1) / GQA_BC *
+      GQA_BC;
+  const int tok_start = kv_lo + split * tokens_per_split;
+  const int tok_end = min(tok_start + tokens_per_split, seq_len);
+  constexpr int NX = 256 / 8;
+  constexpr int NSG = GQA_BC / 8;
+
+  for (int n = tok_start; n < tok_end; n += GQA_BC) {
+    const int blk_size = min(GQA_BC, tok_end - n);
+    if (t < GQA_BC) {
+      const int n_global = n + t;
+      const bool ok = (t < blk_size);
+      s_blk[t] = ok ? my_bt[n_global / block_size] : 0;
+      s_slot[t] = ok ? (n_global % block_size) : 0;
+    }
+    __syncthreads();
+
+    // K: x-packed rows (8 contiguous d per (slot, d_sub)).
+    for (int i = t; i < GQA_BC * NX; i += 256) {
+      const int n_local = i % GQA_BC;
+      const int d_sub = i / GQA_BC;
+      if (n_local < blk_size) {
+        const half* kp = key_cache + (int64_t)s_blk[n_local] * stride_kc0 +
+                         h_kv * stride_kc1 + d_sub * stride_kc2 +
+                         s_slot[n_local] * stride_kc3;
+        *reinterpret_cast<uint4*>(&sK[n_local * GQA_DSK + d_sub * 8]) =
+            *reinterpret_cast<const uint4*>(kp);
+      }
+    }
+    // V: slot-innermost (8 contiguous slots per d), kept that way in LDS.
+    for (int i = t; i < 256 * NSG; i += 256) {
+      const int sg = i % NSG;
+      const int d = i / NSG;
+      const int n_local = sg * 8;
+      if (n_local < blk_size) {
+        const half* vp = value_cache + (int64_t)s_blk[n_local] * stride_vc0 +
+                         h_kv * stride_vc1 + (d / 8) * stride_vc2 +
+                         (d % 8) * stride_vc4 + s_slot[n_local] * stride_vc3;
+        if ((s_slot[n_local] & 7) == 0) {
+          *reinterpret_cast<uint4*>(&sVt[d * GQA_VT + n_local]) =
+              *reinterpret_cast<const uint4*>(vp);
+        } else {
+#pragma unroll
+          for (int j = 0; j < 8; ++j) {
+            const int nl = n_local + j;
+            if (nl < blk_size) {
+              sVt[d * GQA_VT + nl] =
+                  *(value_cache + (int64_t)s_blk[nl] * stride_vc0 +
+                    h_kv * stride_vc1 + (d / 8) * stride_vc2 +
+                    (d % 8) * stride_vc4 + s_slot[nl] * stride_vc3);
+            }
+          }
+        }
+      }
+    }
+    __syncthreads();
+
+    // S phase: wave w computes head g=w for its 32 k-lanes. The d loop runs
+    // in the same order as the scalar kernel (half2 0..127).
+    const int wlane = t & 31;
+    const int g = t >> 5;
+    float s_k = -INFINITY;
+    if (g < G && wlane < blk_size) {
+      const int kv_idx = n + wlane;
+      const bool in_window =
+          (sliding_window <= 0) || (kv_idx >= seq_len - sliding_window);
+      if (in_window) {
+        float acc = 0.0f;
+        const uint4* k4 = reinterpret_cast<const uint4*>(sK + wlane * GQA_DSK);
+        const uint4* q4 = reinterpret_cast<const uint4*>(sQ + g * 256);
+#pragma unroll
+        for (int v = 0; v < 256 / 8; ++v) {
+          const uint4 kk = k4[v];
+          const uint4 qq = q4[v];
+          const half2* kh = reinterpret_cast<const half2*>(&kk);
+          const half2* qh = reinterpret_cast<const half2*>(&qq);
+#pragma unroll
+          for (int j = 0; j < 4; ++j) acc = fdot2(qh[j], kh[j], acc);
+        }
+        s_k = acc * scale;
+      }
+    }
+    float mx = s_k;
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) mx = fmaxf(mx, __shfl_xor(mx, off));
+    const float m_new_g = (g < G) ? fmaxf(m_i[g], mx) : -INFINITY;
+    const float p_k = (g < G && wlane < blk_size && s_k > -INFINITY)
+                          ? expf(s_k - m_new_g)
+                          : 0.0f;
+    float sm = p_k;
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) sm += __shfl_xor(sm, off);
+    if (wlane == 0 && g < G) {
+      sMnew[g] = m_new_g;
+      sLnew[g] = sm;
+    }
+    if (g < G) sP[g * GQA_BC + wlane] = p_k;
+    __syncthreads();
+
+    // PV phase: thread t owns output column t for all G heads. Same update
+    // and the same k order as the scalar kernel; the V column is read once.
+    if (blk_size == GQA_BC) {
+      float vf[GQA_BC];
+      {
+        const uint4* v4 = reinterpret_cast<const uint4*>(&sVt[t * GQA_VT]);
+#pragma unroll
+        for (int q = 0; q < GQA_BC / 8; ++q) {
+          const uint4 w = v4[q];
+          const half* h = reinterpret_cast<const half*>(&w);
+#pragma unroll
+          for (int j = 0; j < 8; ++j) vf[q * 8 + j] = __half2float(h[j]);
+        }
+      }
+#pragma unroll
+      for (int gg = 0; gg < GQA_MAX_G; ++gg) {
+        if (gg < G) {
+          const float m_new = sMnew[gg];
+          if (m_new > -INFINITY) {
+            const float en = expf(m_i[gg] - m_new);
+            float pv = 0.0f;
+            const float4* p4 =
+                reinterpret_cast<const float4*>(&sP[gg * GQA_BC]);
+#pragma unroll
+            for (int q = 0; q < GQA_BC / 4; ++q) {
+              const float4 p = p4[q];
+              pv += p.x * vf[q * 4 + 0];
+              pv += p.y * vf[q * 4 + 1];
+              pv += p.z * vf[q * 4 + 2];
+              pv += p.w * vf[q * 4 + 3];
+            }
+            o_acc[gg] = en * o_acc[gg] + pv;
+            l_i[gg] = en * l_i[gg] + sLnew[gg];
+            m_i[gg] = m_new;
+          }
+        }
+      }
+    } else {
+#pragma unroll
+      for (int gg = 0; gg < GQA_MAX_G; ++gg) {
+        if (gg < G) {
+          const float m_new = sMnew[gg];
+          if (m_new > -INFINITY) {
+            const float en = expf(m_i[gg] - m_new);
+            float pv = 0.0f;
+            for (int k = 0; k < blk_size; ++k)
+              pv += sP[gg * GQA_BC + k] * __half2float(sVt[t * GQA_VT + k]);
+            o_acc[gg] = en * o_acc[gg] + pv;
+            l_i[gg] = en * l_i[gg] + sLnew[gg];
+            m_i[gg] = m_new;
+          }
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  for (int g = 0; g < G; ++g) {
+    const int h_q = h_kv * G + g;
+    O_partial[(((int64_t)token_idx * H_q + h_q) * kv_splits + split) * 256 +
+              t] = o_acc[g];
+  }
+  if (t == 0) {
+    for (int g = 0; g < G; ++g) {
+      const int h_q = h_kv * G + g;
+      M_partial[((int64_t)token_idx * H_q + h_q) * kv_splits + split] = m_i[g];
+      L_partial[((int64_t)token_idx * H_q + h_q) * kv_splits + split] = l_i[g];
+    }
+  }
+}
+
+// =====================================================================
 // DECODE STAGE 2: combine partials across splits
 // =====================================================================
 
@@ -3108,13 +3369,16 @@ std::vector<torch::Tensor> fa_rdna2_prefill_splitk_workspaces(bool int8) {
   return out;
 }
 
-// Opt-in switch for fa_decode_paged_splitk_gqa_kernel_256 (read once).
-static bool fa_gqa_decode_enabled() {
-  static const bool enabled = [] {
+// Opt-in switch for the grouped decode kernels (read once): 0 = per-head
+// kernel, 1 = fa_decode_paged_splitk_gqa_kernel_256, 2 = the same arithmetic
+// with 16-byte LDS traffic (fa_decode_paged_splitk_gqa_vec_kernel_256).
+static int fa_gqa_decode_mode() {
+  static const int mode = [] {
     const char* v = std::getenv("VLLM_FA_RDNA2_GQA_DECODE");
-    return v != nullptr && v[0] == '1';
+    if (v == nullptr || v[0] < '1' || v[0] > '2') return 0;
+    return (int)(v[0] - '0');
   }();
-  return enabled;
+  return mode;
 }
 
 // The entry points write the attention output straight into the caller's
@@ -3232,7 +3496,7 @@ void fa_rdna2_decode_paged(torch::Tensor Q, torch::Tensor key_cache,
             num_tokens, H_q, H_kv, (int)kv_splits, kv_group_num, scale,
             (int)sliding_window, 0.0f, 0.0f, nullptr, nullptr, cu_ptr,
             num_seqs);
-  } else if (fa_gqa_decode_enabled() && (int64_t)num_tokens * H_kv >= 4 &&
+  } else if (fa_gqa_decode_mode() > 0 && (int64_t)num_tokens * H_kv >= 4 &&
              x_dim == 8 && kv_group_num > 1 && kv_group_num <= GQA_MAX_G &&
              (block_size & 7) == 0 && key_cache.stride(4) == 1 &&
              value_cache.stride(3) == 1) {
@@ -3244,26 +3508,49 @@ void fa_rdna2_decode_paged(torch::Tensor Q, torch::Tensor key_cache,
     // Requires G = H_q/H_kv in (1, GQA_MAX_G]; G==1 is the per-head kernel.
     dim3 grid_gqa(num_tokens, H_kv, (int)kv_splits);
     dim3 block_gqa(256);
-    size_t smem_gqa = GQA_MAX_G * 256 * sizeof(half) +
-                      2 * (size_t)GQA_BC * GQA_DSK * sizeof(half) +
-                      GQA_MAX_G * GQA_BC * sizeof(float) +
-                      2 * GQA_MAX_G * sizeof(float);
-    hipFuncSetAttribute(
-        reinterpret_cast<const void*>(fa_decode_paged_splitk_gqa_kernel_256),
-        hipFuncAttributeMaxDynamicSharedMemorySize, smem_gqa);
-    fa_decode_paged_splitk_gqa_kernel_256<<<grid_gqa, block_gqa, smem_gqa,
-                                            stream.stream()>>>(
-        (const half*)Q.data_ptr(), (const half*)key_cache.data_ptr(),
-        (const half*)value_cache.data_ptr(), (const int*)block_table.data_ptr(),
-        (const int*)seq_lens.data_ptr(), (int)key_cache.stride(0),
-        (int)key_cache.stride(1), (int)key_cache.stride(2),
-        (int)key_cache.stride(3), (int)value_cache.stride(0),
-        (int)value_cache.stride(1), (int)value_cache.stride(2),
-        (int)value_cache.stride(3), (int)value_cache.stride(4), max_blocks,
-        (int)block_size, (float*)O_partial.data_ptr(),
-        (float*)M_partial.data_ptr(), (float*)L_partial.data_ptr(), num_tokens,
-        H_q, H_kv, (int)kv_splits, scale, (int)sliding_window, cu_ptr,
-        num_seqs);
+    if (fa_gqa_decode_mode() == 2) {
+      const size_t smem_vec =
+          GQA_MAX_G * 256 * sizeof(half) +
+          ((size_t)GQA_BC * GQA_DSK + 256 * (size_t)GQA_VT) * sizeof(half) +
+          GQA_MAX_G * GQA_BC * sizeof(float) + 2 * GQA_MAX_G * sizeof(float);
+      hipFuncSetAttribute(reinterpret_cast<const void*>(
+                              fa_decode_paged_splitk_gqa_vec_kernel_256),
+                          hipFuncAttributeMaxDynamicSharedMemorySize, smem_vec);
+      fa_decode_paged_splitk_gqa_vec_kernel_256<<<grid_gqa, block_gqa, smem_vec,
+                                                  stream.stream()>>>(
+          (const half*)Q.data_ptr(), (const half*)key_cache.data_ptr(),
+          (const half*)value_cache.data_ptr(),
+          (const int*)block_table.data_ptr(), (const int*)seq_lens.data_ptr(),
+          (int)key_cache.stride(0), (int)key_cache.stride(1),
+          (int)key_cache.stride(2), (int)key_cache.stride(3),
+          (int)value_cache.stride(0), (int)value_cache.stride(1),
+          (int)value_cache.stride(2), (int)value_cache.stride(3),
+          (int)value_cache.stride(4), max_blocks, (int)block_size,
+          (float*)O_partial.data_ptr(), (float*)M_partial.data_ptr(),
+          (float*)L_partial.data_ptr(), num_tokens, H_q, H_kv, (int)kv_splits,
+          scale, (int)sliding_window, cu_ptr, num_seqs);
+    } else {
+      size_t smem_gqa = GQA_MAX_G * 256 * sizeof(half) +
+                        2 * (size_t)GQA_BC * GQA_DSK * sizeof(half) +
+                        GQA_MAX_G * GQA_BC * sizeof(float) +
+                        2 * GQA_MAX_G * sizeof(float);
+      hipFuncSetAttribute(
+          reinterpret_cast<const void*>(fa_decode_paged_splitk_gqa_kernel_256),
+          hipFuncAttributeMaxDynamicSharedMemorySize, smem_gqa);
+      fa_decode_paged_splitk_gqa_kernel_256<<<grid_gqa, block_gqa, smem_gqa,
+                                              stream.stream()>>>(
+          (const half*)Q.data_ptr(), (const half*)key_cache.data_ptr(),
+          (const half*)value_cache.data_ptr(),
+          (const int*)block_table.data_ptr(), (const int*)seq_lens.data_ptr(),
+          (int)key_cache.stride(0), (int)key_cache.stride(1),
+          (int)key_cache.stride(2), (int)key_cache.stride(3),
+          (int)value_cache.stride(0), (int)value_cache.stride(1),
+          (int)value_cache.stride(2), (int)value_cache.stride(3),
+          (int)value_cache.stride(4), max_blocks, (int)block_size,
+          (float*)O_partial.data_ptr(), (float*)M_partial.data_ptr(),
+          (float*)L_partial.data_ptr(), num_tokens, H_q, H_kv, (int)kv_splits,
+          scale, (int)sliding_window, cu_ptr, num_seqs);
+    }
   } else {
     constexpr int HEAD_DIM = 256;
     constexpr int THREADS = 256;
