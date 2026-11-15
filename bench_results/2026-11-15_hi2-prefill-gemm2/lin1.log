@@ -1,0 +1,167 @@
+device AMD Radeon Pro V620 gfx1030 bus 0xdf CUs 36
+no image build at start: 
+Sun Nov 15 03:16:12 PM CET 2026
+device: AMD Radeon Pro V620 gfx1030 bus df CUs 36 (WGPs)
+gate_up: 38.3 MB packed (3.61 bits/weight), 17 sets
+rocblas_heur  default                              gate_up       M=1024     9694.3 us (min  9636.9)  18.83 TF/s  vs_rb  0.866  err            vs_heur 1.000
+rocblas_tuned tunableop                            gate_up       M=1024     8399.6 us (min  8347.6)  21.73 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326063 vs_heur 1.154
+hip           prefill_gemm=1                       gate_up       M=1024     7817.8 us (min  7787.0)  23.35 TF/s  vs_rb  1.074  err           mode 1 vs_heur 1.240
+hip_tail      prefill_gemm=2                       gate_up       M=1024     7822.9 us (min  7781.4)  23.33 TF/s  vs_rb  1.074  err           mode 2 vs_heur 1.239
+rocblas_heur  default                              gate_up       M=1025    10610.3 us (min 10506.2)  17.22 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=1025     8937.3 us (min  8891.9)  20.44 TF/s  vs_rb  1.187  err           mode 1 vs_heur 1.187
+hip_tail      prefill_gemm=2                       gate_up       M=1025     8035.5 us (min  8015.6)  22.74 TF/s  vs_rb   1.32  err           mode 2 vs_heur 1.320
+rocblas_heur  default                              gate_up       M=1031    10840.0 us (min 10717.2)  16.95 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=1031     9064.7 us (min  9017.0)  20.27 TF/s  vs_rb  1.196  err           mode 1 vs_heur 1.196
+hip_tail      prefill_gemm=2                       gate_up       M=1031     8334.8 us (min  8281.5)  22.05 TF/s  vs_rb  1.301  err           mode 2 vs_heur 1.301
+rocblas_heur  default                              gate_up       M=1038    10942.6 us (min 10836.7)  16.91 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=1038     9175.3 us (min  9131.8)  20.17 TF/s  vs_rb  1.193  err           mode 1 vs_heur 1.193
+hip_tail      prefill_gemm=2                       gate_up       M=1038     8644.2 us (min  8574.9)  21.41 TF/s  vs_rb  1.266  err           mode 2 vs_heur 1.266
+rocblas_heur  default                              gate_up       M=1045    11099.4 us (min 10981.0)  16.78 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=1045     9235.8 us (min  9226.6)  20.17 TF/s  vs_rb  1.202  err           mode 1 vs_heur 1.202
+hip_tail      prefill_gemm=2                       gate_up       M=1045     8964.9 us (min  8869.7)  20.78 TF/s  vs_rb  1.238  err           mode 2 vs_heur 1.238
+rocblas_heur  default                              gate_up       M=1060    11229.3 us (min 11112.0)  16.83 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=1060     9369.2 us (min  9353.6)  20.17 TF/s  vs_rb  1.199  err           mode 1 vs_heur 1.199
+hip_tail      prefill_gemm=2                       gate_up       M=1060     9538.1 us (min  9494.0)  19.81 TF/s  vs_rb  1.177  err           mode 2 vs_heur 1.177
+rocblas_heur  default                              gate_up       M=1072    11318.1 us (min 11245.1)  16.88 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=1072     9437.9 us (min  9406.7)  20.25 TF/s  vs_rb  1.199  err           mode 1 vs_heur 1.199
+hip_tail      prefill_gemm=2                       gate_up       M=1072     9939.5 us (min  9893.0)  19.23 TF/s  vs_rb  1.139  err           mode 2 vs_heur 1.139
+rocblas_heur  default                              gate_up       M=1073    11402.0 us (min 11320.6)  16.78 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=1073     9527.7 us (min  9498.8)  20.08 TF/s  vs_rb  1.197  err           mode 1 vs_heur 1.197
+hip_tail      prefill_gemm=2                       gate_up       M=1073     9514.2 us (min  9483.6)   20.1 TF/s  vs_rb  1.198  err           mode 2 vs_heur 1.198
+rocblas_heur  default                              gate_up       M=2049    21483.9 us (min 21414.2)   17.0 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=2049    17634.7 us (min 17574.5)  20.71 TF/s  vs_rb  1.218  err           mode 1 vs_heur 1.218
+hip_tail      prefill_gemm=2                       gate_up       M=2049    15856.4 us (min 15819.2)  23.03 TF/s  vs_rb  1.355  err           mode 2 vs_heur 1.355
+rocblas_heur  default                              gate_up       M=2056    21660.5 us (min 21521.6)  16.92 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       gate_up       M=2056    17786.2 us (min 17702.7)  20.61 TF/s  vs_rb  1.218  err           mode 1 vs_heur 1.218
+hip_tail      prefill_gemm=2                       gate_up       M=2056    16216.0 us (min 16102.2)   22.6 TF/s  vs_rb  1.336  err           mode 2 vs_heur 1.336
+down: 19.2 MB packed (3.61 bits/weight), 34 sets
+rocblas_heur  default                              down          M=1024     4364.8 us (min  4358.9)  20.91 TF/s  vs_rb    1.0  err            vs_heur 1.000
+rocblas_tuned tunableop                            down          M=1024     4378.5 us (min  4367.4)  20.84 TF/s  vs_rb  0.997  err           Default vs_heur 0.997
+hip           prefill_gemm=1                       down          M=1024     4093.4 us (min  4082.9)   22.3 TF/s  vs_rb  1.066  err           mode 1 vs_heur 1.066
+hip_tail      prefill_gemm=2                       down          M=1024     4112.8 us (min  4106.1)  22.19 TF/s  vs_rb  1.061  err           mode 2 vs_heur 1.061
+rocblas_heur  default                              down          M=1025     5114.0 us (min  5080.5)  17.86 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=1025     4560.6 us (min  4551.2)  20.03 TF/s  vs_rb  1.121  err           mode 1 vs_heur 1.121
+hip_tail      prefill_gemm=2                       down          M=1025     4177.2 us (min  4167.7)  21.87 TF/s  vs_rb  1.224  err           mode 2 vs_heur 1.224
+rocblas_heur  default                              down          M=1031     5118.1 us (min  5096.8)  17.95 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=1031     4575.8 us (min  4564.2)  20.08 TF/s  vs_rb  1.119  err           mode 1 vs_heur 1.119
+hip_tail      prefill_gemm=2                       down          M=1031     4272.2 us (min  4261.4)  21.51 TF/s  vs_rb  1.198  err           mode 2 vs_heur 1.198
+rocblas_heur  default                              down          M=1038     5126.7 us (min  5093.6)  18.05 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=1038     4591.0 us (min  4578.4)  20.15 TF/s  vs_rb  1.117  err           mode 1 vs_heur 1.117
+hip_tail      prefill_gemm=2                       down          M=1038     4409.4 us (min  4403.6)  20.98 TF/s  vs_rb  1.163  err           mode 2 vs_heur 1.163
+rocblas_heur  default                              down          M=1045     5146.0 us (min  5109.5)   18.1 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=1045     4603.0 us (min  4591.2)  20.23 TF/s  vs_rb  1.118  err           mode 1 vs_heur 1.118
+hip_tail      prefill_gemm=2                       down          M=1045     4552.8 us (min  4546.5)  20.46 TF/s  vs_rb   1.13  err           mode 2 vs_heur 1.130
+rocblas_heur  default                              down          M=1060     5158.7 us (min  5129.5)  18.31 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=1060     4615.1 us (min  4598.1)  20.47 TF/s  vs_rb  1.118  err           mode 1 vs_heur 1.118
+hip_tail      prefill_gemm=2                       down          M=1060     4842.2 us (min  4834.4)  19.51 TF/s  vs_rb  1.065  err           mode 2 vs_heur 1.065
+rocblas_heur  default                              down          M=1072     5176.3 us (min  5150.9)  18.46 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=1072     4625.5 us (min  4613.0)  20.66 TF/s  vs_rb  1.119  err           mode 1 vs_heur 1.119
+hip_tail      prefill_gemm=2                       down          M=1072     5055.8 us (min  5032.9)   18.9 TF/s  vs_rb  1.024  err           mode 2 vs_heur 1.024
+rocblas_heur  default                              down          M=1073     5183.6 us (min  5158.9)  18.45 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=1073     4628.3 us (min  4621.1)  20.66 TF/s  vs_rb   1.12  err           mode 1 vs_heur 1.120
+hip_tail      prefill_gemm=2                       down          M=1073     4653.5 us (min  4646.5)  20.55 TF/s  vs_rb  1.114  err           mode 2 vs_heur 1.114
+rocblas_heur  default                              down          M=2049     9328.6 us (min  9271.0)  19.58 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=2049     8743.6 us (min  8728.1)  20.89 TF/s  vs_rb  1.067  err           mode 1 vs_heur 1.067
+hip_tail      prefill_gemm=2                       down          M=2049     7933.7 us (min  7924.3)  23.02 TF/s  vs_rb  1.176  err           mode 2 vs_heur 1.176
+rocblas_heur  default                              down          M=2056     9346.0 us (min  9280.8)  19.61 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       down          M=2056     8753.6 us (min  8725.3)  20.93 TF/s  vs_rb  1.068  err           mode 1 vs_heur 1.068
+hip_tail      prefill_gemm=2                       down          M=2056     8036.9 us (min  8014.9)   22.8 TF/s  vs_rb  1.163  err           mode 2 vs_heur 1.163
+in_proj_qkvz: 18.1 MB packed (3.61 bits/weight), 36 sets
+rocblas_heur  default                              in_proj_qkvz  M=1024     4270.1 us (min  4262.0)  20.12 TF/s  vs_rb  0.962  err            vs_heur 1.000
+rocblas_tuned tunableop                            in_proj_qkvz  M=1024     4106.9 us (min  4095.6)  20.92 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047 vs_heur 1.040
+hip           prefill_gemm=1                       in_proj_qkvz  M=1024     3974.5 us (min  3957.6)  21.61 TF/s  vs_rb  1.033  err           mode 1 vs_heur 1.074
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=1024     3992.1 us (min  3981.6)  21.52 TF/s  vs_rb  1.029  err           mode 2 vs_heur 1.070
+rocblas_heur  default                              in_proj_qkvz  M=1025     4858.7 us (min  4829.6)   17.7 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=1025     4423.0 us (min  4407.3)  19.44 TF/s  vs_rb  1.099  err           mode 1 vs_heur 1.099
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=1025     4037.2 us (min  4030.1)   21.3 TF/s  vs_rb  1.203  err           mode 2 vs_heur 1.203
+rocblas_heur  default                              in_proj_qkvz  M=1031     4859.8 us (min  4837.4)   17.8 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=1031     4433.2 us (min  4401.0)  19.51 TF/s  vs_rb  1.096  err           mode 1 vs_heur 1.096
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=1031     4122.2 us (min  4114.9)  20.98 TF/s  vs_rb  1.179  err           mode 2 vs_heur 1.179
+rocblas_heur  default                              in_proj_qkvz  M=1038     4864.3 us (min  4830.0)   17.9 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=1038     4437.5 us (min  4423.3)  19.62 TF/s  vs_rb  1.096  err           mode 1 vs_heur 1.096
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=1038     4234.2 us (min  4231.6)  20.56 TF/s  vs_rb  1.149  err           mode 2 vs_heur 1.149
+rocblas_heur  default                              in_proj_qkvz  M=1045     4888.7 us (min  4860.8)  17.93 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=1045     4431.6 us (min  4415.9)  19.78 TF/s  vs_rb  1.103  err           mode 1 vs_heur 1.103
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=1045     4346.6 us (min  4334.3)  20.17 TF/s  vs_rb  1.125  err           mode 2 vs_heur 1.125
+rocblas_heur  default                              in_proj_qkvz  M=1060     4902.6 us (min  4863.4)  18.14 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=1060     4444.1 us (min  4425.1)  20.01 TF/s  vs_rb  1.103  err           mode 1 vs_heur 1.103
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=1060     4595.2 us (min  4582.4)  19.35 TF/s  vs_rb  1.067  err           mode 2 vs_heur 1.067
+rocblas_heur  default                              in_proj_qkvz  M=1072     4933.8 us (min  4903.1)  18.23 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=1072     4453.6 us (min  4440.4)  20.19 TF/s  vs_rb  1.108  err           mode 1 vs_heur 1.108
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=1072     4773.4 us (min  4755.5)  18.84 TF/s  vs_rb  1.034  err           mode 2 vs_heur 1.034
+rocblas_heur  default                              in_proj_qkvz  M=1073     4936.2 us (min  4917.4)  18.23 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=1073     4456.6 us (min  4441.5)   20.2 TF/s  vs_rb  1.108  err           mode 1 vs_heur 1.108
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=1073     4470.5 us (min  4460.6)  20.13 TF/s  vs_rb  1.104  err           mode 2 vs_heur 1.104
+rocblas_heur  default                              in_proj_qkvz  M=2049     9310.0 us (min  9236.1)  18.46 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=2049     8338.9 us (min  8314.7)  20.61 TF/s  vs_rb  1.116  err           mode 1 vs_heur 1.116
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=2049     7579.0 us (min  7546.2)  22.68 TF/s  vs_rb  1.228  err           mode 2 vs_heur 1.228
+rocblas_heur  default                              in_proj_qkvz  M=2056     9315.8 us (min  9281.8)  18.51 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       in_proj_qkvz  M=2056     8359.1 us (min  8343.9)  20.63 TF/s  vs_rb  1.114  err           mode 1 vs_heur 1.114
+hip_tail      prefill_gemm=2                       in_proj_qkvz  M=2056     7675.2 us (min  7641.5)  22.47 TF/s  vs_rb  1.214  err           mode 2 vs_heur 1.214
+out_proj: 6.8 MB packed (3.64 bits/weight), 94 sets
+rocblas_heur  default                              out_proj      M=1024     1719.9 us (min  1709.1)  18.73 TF/s  vs_rb  0.914  err            vs_heur 1.000
+rocblas_tuned tunableop                            out_proj      M=1024     1572.2 us (min  1568.5)  20.49 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326079 vs_heur 1.094
+hip           prefill_gemm=1                       out_proj      M=1024     1512.0 us (min  1508.5)   21.3 TF/s  vs_rb   1.04  err           mode 1 vs_heur 1.137
+hip_tail      prefill_gemm=2                       out_proj      M=1024     1510.6 us (min  1507.2)  21.32 TF/s  vs_rb  1.041  err           mode 2 vs_heur 1.139
+rocblas_heur  default                              out_proj      M=1025     1858.6 us (min  1845.1)  17.35 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=1025     1683.7 us (min  1681.3)  19.15 TF/s  vs_rb  1.104  err           mode 1 vs_heur 1.104
+hip_tail      prefill_gemm=2                       out_proj      M=1025     1536.0 us (min  1533.1)  20.99 TF/s  vs_rb   1.21  err           mode 2 vs_heur 1.210
+rocblas_heur  default                              out_proj      M=1031     1861.4 us (min  1849.2)  17.42 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=1031     1684.1 us (min  1682.0)  19.26 TF/s  vs_rb  1.105  err           mode 1 vs_heur 1.105
+hip_tail      prefill_gemm=2                       out_proj      M=1031     1568.2 us (min  1562.0)  20.68 TF/s  vs_rb  1.187  err           mode 2 vs_heur 1.187
+rocblas_heur  default                              out_proj      M=1038     1865.1 us (min  1854.0)  17.51 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=1038     1685.0 us (min  1684.1)  19.38 TF/s  vs_rb  1.107  err           mode 1 vs_heur 1.107
+hip_tail      prefill_gemm=2                       out_proj      M=1038     1613.6 us (min  1611.0)  20.24 TF/s  vs_rb  1.156  err           mode 2 vs_heur 1.156
+rocblas_heur  default                              out_proj      M=1045     1867.4 us (min  1848.7)   17.6 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=1045     1685.9 us (min  1680.4)   19.5 TF/s  vs_rb  1.108  err           mode 1 vs_heur 1.108
+hip_tail      prefill_gemm=2                       out_proj      M=1045     1663.7 us (min  1658.4)  19.76 TF/s  vs_rb  1.122  err           mode 2 vs_heur 1.122
+rocblas_heur  default                              out_proj      M=1060     1876.5 us (min  1856.0)  17.77 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=1060     1685.2 us (min  1680.1)  19.79 TF/s  vs_rb  1.114  err           mode 1 vs_heur 1.114
+hip_tail      prefill_gemm=2                       out_proj      M=1060     1769.7 us (min  1762.0)  18.84 TF/s  vs_rb   1.06  err           mode 2 vs_heur 1.060
+rocblas_heur  default                              out_proj      M=1072     1884.2 us (min  1869.4)   17.9 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=1072     1689.7 us (min  1685.1)  19.96 TF/s  vs_rb  1.115  err           mode 1 vs_heur 1.115
+hip_tail      prefill_gemm=2                       out_proj      M=1072     1844.5 us (min  1840.8)  18.28 TF/s  vs_rb  1.022  err           mode 2 vs_heur 1.022
+rocblas_heur  default                              out_proj      M=1073     1886.5 us (min  1874.5)  17.89 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=1073     1692.1 us (min  1685.1)  19.95 TF/s  vs_rb  1.115  err           mode 1 vs_heur 1.115
+hip_tail      prefill_gemm=2                       out_proj      M=1073     1694.0 us (min  1689.7)  19.93 TF/s  vs_rb  1.114  err           mode 2 vs_heur 1.114
+rocblas_heur  default                              out_proj      M=2049     3429.0 us (min  3414.1)   18.8 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=2049     3187.6 us (min  3181.3)  20.22 TF/s  vs_rb  1.076  err           mode 1 vs_heur 1.076
+hip_tail      prefill_gemm=2                       out_proj      M=2049     2892.6 us (min  2888.3)  22.28 TF/s  vs_rb  1.185  err           mode 2 vs_heur 1.185
+rocblas_heur  default                              out_proj      M=2056     3426.4 us (min  3419.7)  18.88 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       out_proj      M=2056     3188.9 us (min  3183.0)  20.28 TF/s  vs_rb  1.074  err           mode 1 vs_heur 1.074
+hip_tail      prefill_gemm=2                       out_proj      M=2056     2930.0 us (min  2924.9)  22.07 TF/s  vs_rb  1.169  err           mode 2 vs_heur 1.169
+qkv_proj: 15.8 MB packed (3.61 bits/weight), 41 sets
+rocblas_heur  default                              qkv_proj      M=1024     3777.3 us (min  3755.8)   19.9 TF/s  vs_rb  0.962  err            vs_heur 1.000
+rocblas_tuned tunableop                            qkv_proj      M=1024     3635.1 us (min  3619.6)  20.68 TF/s  vs_rb    1.0  err           Gemm_Rocblas_-1086326047 vs_heur 1.039
+hip           prefill_gemm=1                       qkv_proj      M=1024     3514.5 us (min  3509.3)  21.39 TF/s  vs_rb  1.034  err           mode 1 vs_heur 1.075
+hip_tail      prefill_gemm=2                       qkv_proj      M=1024     3526.0 us (min  3521.2)  21.32 TF/s  vs_rb  1.031  err           mode 2 vs_heur 1.071
+rocblas_heur  default                              qkv_proj      M=1025     4316.4 us (min  4294.8)  17.43 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=1025     3909.3 us (min  3899.6)  19.24 TF/s  vs_rb  1.104  err           mode 1 vs_heur 1.104
+hip_tail      prefill_gemm=2                       qkv_proj      M=1025     3579.0 us (min  3568.6)  21.02 TF/s  vs_rb  1.206  err           mode 2 vs_heur 1.206
+rocblas_heur  default                              qkv_proj      M=1031     4325.1 us (min  4309.0)   17.5 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=1031     3910.2 us (min  3901.5)  19.35 TF/s  vs_rb  1.106  err           mode 1 vs_heur 1.106
+hip_tail      prefill_gemm=2                       qkv_proj      M=1031     3646.8 us (min  3637.0)  20.75 TF/s  vs_rb  1.186  err           mode 2 vs_heur 1.186
+rocblas_heur  default                              qkv_proj      M=1038     4325.6 us (min  4314.4)  17.61 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=1038     3906.7 us (min  3903.7)   19.5 TF/s  vs_rb  1.107  err           mode 1 vs_heur 1.107
+hip_tail      prefill_gemm=2                       qkv_proj      M=1038     3748.2 us (min  3742.2)  20.33 TF/s  vs_rb  1.154  err           mode 2 vs_heur 1.154
+rocblas_heur  default                              qkv_proj      M=1045     4330.5 us (min  4312.4)  17.71 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=1045     3916.3 us (min  3904.1)  19.59 TF/s  vs_rb  1.106  err           mode 1 vs_heur 1.106
+hip_tail      prefill_gemm=2                       qkv_proj      M=1045     3873.6 us (min  3861.1)   19.8 TF/s  vs_rb  1.118  err           mode 2 vs_heur 1.118
+rocblas_heur  default                              qkv_proj      M=1060     4351.3 us (min  4323.4)  17.88 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=1060     3921.9 us (min  3905.8)  19.84 TF/s  vs_rb   1.11  err           mode 1 vs_heur 1.110
+hip_tail      prefill_gemm=2                       qkv_proj      M=1060     4111.7 us (min  4095.9)  18.92 TF/s  vs_rb  1.058  err           mode 2 vs_heur 1.058
+rocblas_heur  default                              qkv_proj      M=1072     4356.4 us (min  4337.5)  18.06 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=1072     3920.3 us (min  3913.4)  20.07 TF/s  vs_rb  1.111  err           mode 1 vs_heur 1.111
+hip_tail      prefill_gemm=2                       qkv_proj      M=1072     4272.3 us (min  4268.4)  18.42 TF/s  vs_rb   1.02  err           mode 2 vs_heur 1.020
+rocblas_heur  default                              qkv_proj      M=1073     4346.4 us (min  4327.9)  18.12 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=1073     3931.5 us (min  3917.7)  20.03 TF/s  vs_rb  1.106  err           mode 1 vs_heur 1.106
+hip_tail      prefill_gemm=2                       qkv_proj      M=1073     3939.5 us (min  3929.9)  19.99 TF/s  vs_rb  1.103  err           mode 2 vs_heur 1.103
+rocblas_heur  default                              qkv_proj      M=2049     8234.2 us (min  8211.1)  18.26 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=2049     7357.4 us (min  7338.4)  20.44 TF/s  vs_rb  1.119  err           mode 1 vs_heur 1.119
+hip_tail      prefill_gemm=2                       qkv_proj      M=2049     6676.6 us (min  6659.1)  22.53 TF/s  vs_rb  1.233  err           mode 2 vs_heur 1.233
+rocblas_heur  default                              qkv_proj      M=2056     8246.6 us (min  8199.5)   18.3 TF/s  vs_rb    1.0  err            vs_heur 1.000
+hip           prefill_gemm=1                       qkv_proj      M=2056     7360.8 us (min  7349.0)   20.5 TF/s  vs_rb   1.12  err           mode 1 vs_heur 1.120
+hip_tail      prefill_gemm=2                       qkv_proj      M=2056     6747.6 us (min  6737.4)  22.37 TF/s  vs_rb  1.222  err           mode 2 vs_heur 1.222
+Sun Nov 15 03:23:43 PM CET 2026
+no image build at end: 
+bench_exit=0

@@ -29,10 +29,13 @@ rocBLAS row / this row).
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
+import ctypes
 import importlib
 import os
 import statistics
+import subprocess
 import sys
 from pathlib import Path
 
@@ -71,6 +74,93 @@ def has_row(tunable, n: int, m: int, k: int) -> str | None:
     return None
 
 
+# The shipped designs (kDesigns in rdna_hint_flex_dense_gemm_rdna2.cu) as the
+# -DDEV_* values of dense_dev.hip; "D1+brot=1+rast=4" is D1 with BROT on and RAST 4.
+DEV_BASES = {
+    "D1": dict(bm=128, bn=128, bk=32, tm=8, tn=16, nbuf=2, pad=0, rast=8, lw=8, swz=1, ku=1),
+    "D2": dict(bm=128, bn=128, bk=32, tm=8, tn=16, nbuf=2, pad=0, rast=4, lw=8, swz=1, ku=1),
+    "D3": dict(bm=128, bn=64, bk=64, tm=8, tn=8, nbuf=1, pad=8, rast=4, lw=8, swz=0, ku=1),
+    "D4": dict(bm=256, bn=128, bk=32, tm=8, tn=16, nbuf=2, pad=8, rast=4, lw=8, swz=0, ku=1),
+}  # fmt: skip
+DEV_KNOBS = dict(brot=0, skip=0, prio=0, dma=0, buf=0)
+
+
+def parse_dev(spec: str) -> dict[str, int]:
+    base, *kv = spec.split("+")
+    d = {**DEV_BASES[base], **DEV_KNOBS}
+    for item in kv:
+        key, val = item.split("=")
+        if key not in d:
+            raise SystemExit(f"{spec}: unknown knob {key}")
+        d[key] = int(val)
+    return d
+
+
+def compile_dev(spec: str, d: dict[str, int], so: Path) -> tuple[str, int, str]:
+    """The library and, next to it, the device ISA (<name>.s) for isa_mix.py."""
+    base = [
+        "nice", "-n", "19", sweep.HIPCC, "-O3", "-std=c++17", "--offload-arch=gfx1030",
+        "-Rpass-analysis=kernel-resource-usage",
+        *[f"-DDEV_{k.upper()}={v}" for k, v in d.items()],
+        str(HERE / "dense_dev.hip"),
+    ]  # fmt: skip
+    p = subprocess.run(
+        [*base, "-shared", "-fPIC", "-o", str(so)], capture_output=True, text=True
+    )
+    so.with_suffix(".remarks").write_text(p.stderr)
+    if p.returncode == 0:
+        subprocess.run(
+            [*base, "--offload-device-only", "-S", "-o", str(so.with_suffix(".s"))],
+            capture_output=True,
+            text=True,
+        )
+    return spec, p.returncode, p.stderr[-2000:] if p.returncode else ""
+
+
+class DevLib:
+    """A dense_dev.hip build: the design ``spec`` through ctypes."""
+
+    def __init__(self, torch, spec: str, d: dict[str, int], so: Path):
+        self.torch, self.spec, self.bk = torch, spec, d["bk"]
+        self.lib = ctypes.CDLL(str(so))
+        self.lib.variant_launch.argtypes = (
+            [ctypes.c_void_p] * 3 + [ctypes.c_int] * 6 + [ctypes.c_void_p]
+        )
+        self.lib.variant_launch.restype = ctypes.c_int
+        info = (ctypes.c_int * 8)()
+        self.lib.variant_info(info)
+        self.vgpr, self.lds, self.scratch, self.threads, self.blocks = list(info)[:5]
+
+    def launch(self, a, w, c) -> None:
+        m, k = a.shape
+        rc = self.lib.variant_launch(
+            a.data_ptr(), w.data_ptr(), c.data_ptr(), m, w.shape[0], k,
+            a.stride(0), w.stride(0), c.stride(0),
+            self.torch.cuda.current_stream().cuda_stream,
+        )  # fmt: skip
+        if rc != 0:
+            raise RuntimeError(f"{self.spec}: launch rc={rc}")
+
+
+def build_devs(torch, specs: list[str], force: bool) -> list[DevLib]:
+    out = Path(os.environ.get("SWEEP_OUT", str(sweep.OUT))) / "dev"
+    out.mkdir(parents=True, exist_ok=True)
+    items = []
+    for spec in specs:
+        so = out / (spec.replace("+", "_").replace("=", "") + ".so")
+        items.append((spec, parse_dev(spec), so))
+    todo = [it for it in items if force or not it[2].exists()]
+    if todo:
+        print(f"{len(items)} dev designs, {len(todo)} to compile", flush=True)
+        with (
+            sweep.build_lock(),
+            concurrent.futures.ThreadPoolExecutor(max_workers=min(len(todo), 8)) as ex,
+        ):
+            for spec, rc, msg in ex.map(lambda it: compile_dev(*it), todo):
+                print(f"{'ok  ' if rc == 0 else 'FAIL'} {spec} {msg}", flush=True)
+    return [DevLib(torch, spec, d, so) for spec, d, so in items if so.exists()]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
@@ -83,6 +173,13 @@ def main() -> None:
         "--designs", default="0,1,2,3", help="forced designs to time ('' = none)"
     )
     ap.add_argument("--no-auto", action="store_true")
+    ap.add_argument(
+        "--dev", default="", help="comma list of dense_dev.hip designs, e.g. D1+brot=1"
+    )
+    ap.add_argument("--dev-force", action="store_true", help="recompile the --dev libs")
+    ap.add_argument(
+        "--build-only", action="store_true", help="compile the --dev libs and exit"
+    )
     ap.add_argument(
         "--rows", default="", help="comma list of TunableOp CSVs to merge and read"
     )
@@ -124,6 +221,9 @@ def main() -> None:
     )
 
     designs = [int(d) for d in args.designs.split(",") if d != ""]
+    devs = build_devs(torch, [s for s in args.dev.split(",") if s], args.dev_force)
+    if args.build_only:
+        return
     wr = sweep.Writer(args.csv)
     shapes = {
         k: s
@@ -202,6 +302,29 @@ def main() -> None:
                 )  # fmt: skip
                 con.err = (None, None, vs32(c))
                 cons.append(con)
+            for dv in devs:
+                if k % dv.bk:
+                    continue
+                try:
+                    dv.launch(x, wsets[0], c)
+                    torch.accelerator.synchronize()
+                except RuntimeError as ex:
+                    wr.add(
+                        phase=args.label,
+                        kind="dev",
+                        variant=dv.spec,
+                        note=f"ERR {ex}",
+                        **common,
+                    )
+                    continue
+                con = sweep.Contender(
+                    "dev", dv.spec,
+                    [lambda w=w, dv=dv, x=x, c=c: dv.launch(x, w, c) for w in wsets],
+                    flop, vgpr=dv.vgpr, lds=dv.lds, scratch=dv.scratch, threads=dv.threads,
+                    blocks_per_wgp=dv.blocks, note=f"vgpr {dv.vgpr} lds {dv.lds}",
+                )  # fmt: skip
+                con.err = (None, None, vs32(c))
+                cons.append(con)
             if not args.no_auto:
                 pick = ops.rdna_hint_flex_dense_gemm_pick_rdna2(m, n, k)
                 ops.rdna_hint_flex_dense_gemm_rdna2(x, wsets[0], c, -1)
@@ -243,7 +366,7 @@ def main() -> None:
                         else None
                     )
                     row.update(con.extra)
-                    if con.kind in ("hip", "hip_auto"):
+                    if con.kind in ("hip", "hip_auto", "dev"):
                         row["note"] = (
                             f"{con.extra.get('note', '')} vs_heur {heur_us / med:.3f}"
                         )

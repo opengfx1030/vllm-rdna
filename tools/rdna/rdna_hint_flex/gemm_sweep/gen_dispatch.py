@@ -7,9 +7,10 @@ Input: interleaved-window CSVs in the ``sweep.py`` format (``kind``, ``variant``
 ``shape``, ``N``, ``K``, ``M``, ``us``): rocBLAS rows (``rocblas_heur`` and
 ``rocblas_tuned``) and dense rows of the designs in ``csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu``
 (``dense`` from ``sweep.py run`` or ``hip`` from ``bench_prod.py``). Per (N, K, M)
-cell: the design with the lowest time is the pick, unless it is not at least
-``--min-gain`` faster than the better of the two rocBLAS rows, in which case the
-cell stays on rocBLAS (-1). Later files override earlier ones for the same
+cell: the design with the lowest time is the pick (the first design when it is
+within 1 % of the lowest), unless it is not at least ``--min-gain`` faster than
+the better of the two rocBLAS rows, in which case the cell stays on rocBLAS (-1).
+Later files override earlier ones for the same
 (kind, variant, N, K, M). The cells of one (N, K) slot become the anchors of its
 table row; the kernel serves an M by its nearest anchor and leaves M outside
 [``--lo-frac`` x first anchor, ``--hi-factor`` x last anchor] to rocBLAS.
@@ -32,15 +33,21 @@ REPO = HERE.parents[3]
 KERNEL_CU = REPO / "csrc" / "rocm" / "rdna_hint_flex_dense_gemm_rdna2.cu"
 DEFAULT_OUT = REPO / "csrc" / "rocm" / "rdna_hint_flex_dense_gemm_table.cuh"
 
-# design id = index; same order as kDesigns in rdna_hint_flex_dense_gemm_rdna2.cu
+# design id = index; same order as kDesigns in rdna_hint_flex_dense_gemm_rdna2.cu.
+# The table picks among the first NUM_MAIN (full-size tiles); the rest are the
+# tail designs (tail_design() in the .cu).
 DESIGNS = [
-    "128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z",
-    "128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z",
-    "128x64k64t8x8n1p8r4g16b0w0s1m0u1l8",
-    "256x128k32t8x16n2p8r4g16b0w0s1m0u1l8",
+    "128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf",
+    "128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf",
+    "128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf",
+    "256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf",
+    "32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf",
+    "64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf",
 ]
+NUM_MAIN = 4
 DENSE_KINDS = ("dense", "hip")
 RB_KINDS = ("rocblas_heur", "rocblas_tuned")
+TIE = 1.01
 
 
 def kernel_design_names(path: Path = KERNEL_CU) -> list[str]:
@@ -78,9 +85,13 @@ def pick_cell(row: dict[str, float], min_gain: float) -> tuple[int, float, float
     """(design id or -1, best rocBLAS us, best design us) of one cell."""
     rb = min(row[k] for k in ("rb_heur", "rb_tuned") if k in row)
     best_id, best_us = -1, float("inf")
-    for i, d in enumerate(DESIGNS):
+    for i, d in enumerate(DESIGNS[:NUM_MAIN]):
         if d in row and row[d] < best_us:
             best_id, best_us = i, row[d]
+    # within TIE of the best: keep the first design (fewer kernels in play, and
+    # the measurement noise between two near-equal designs is a coin flip)
+    if best_id > 0 and DESIGNS[0] in row and row[DESIGNS[0]] <= best_us * TIE:
+        best_id, best_us = 0, row[DESIGNS[0]]
     if best_id < 0 or best_us * min_gain > rb:
         return -1, rb, best_us
     return best_id, rb, best_us

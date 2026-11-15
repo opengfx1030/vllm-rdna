@@ -67,8 +67,19 @@ DECODE_MAX_M = 48
 # environment variable selects it ("" / "0" / "off" / "rocblas" = rocBLAS, the
 # default; "hip" = the dense HIP kernel of csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu
 # wherever its (N, K, M) dispatch table measured it faster than rocBLAS, rocBLAS
-# everywhere else). Takes effect on the RDNA2 kernels only (gfx10x).
-PREFILL_GEMM_MODES = {"": 0, "0": 0, "off": 0, "rocblas": 0, "hip": 1}
+# everywhere else, and the 1..64 rows of a short tail M % 128 (the scheduler's
+# 1024 + a few decode tokens) apart from the whole tile rows; "hip-notail" = the
+# same kernel with the tail rows padded into one more tile row). The values are
+# the op's prefill_gemm modes (rdna_hint_flex_dense_gemm_rdna2.cuh). Takes effect
+# on the RDNA2 kernels only (gfx10x).
+PREFILL_GEMM_MODES = {
+    "": 0,
+    "0": 0,
+    "off": 0,
+    "rocblas": 0,
+    "hip": 4,
+    "hip-notail": 1,
+}
 _FIELD_PREFIX = "hi2_"
 
 

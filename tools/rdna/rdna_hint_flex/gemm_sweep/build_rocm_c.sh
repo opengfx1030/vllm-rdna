@@ -38,6 +38,12 @@ if [[ ! -f build.ninja ]]; then
     -DROCM_PATH=$ROCM_PATH
 fi
 flock "$LOCK" nice -n 19 cmake --build . -j "$JOBS" --target _rocm_C
-cmake --install . --prefix "$TREE" --component _rocm_C
+# Install into a staging prefix, then rename over the tree's .so: a process that
+# still has the old library mapped keeps its inode (cmake --install into the tree
+# would rewrite the mapped file in place).
+STAGE=$BLD/stage
+rm -rf "$STAGE"
+cmake --install . --prefix "$STAGE" --component _rocm_C
+mv -f "$STAGE/vllm/_rocm_C.abi3.so" "$TREE/vllm/_rocm_C.abi3.so"
 echo "build_exit=0 after $(( $(date +%s) - t0 ))s"
 ls -la "$TREE/vllm/_rocm_C.abi3.so"

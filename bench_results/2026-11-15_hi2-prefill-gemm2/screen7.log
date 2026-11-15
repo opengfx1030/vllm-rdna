@@ -1,0 +1,96 @@
+device AMD Radeon Pro V620 gfx1030 bus 0xe2 CUs 36
+no image build at start: 
+Sun Nov 15 03:45:18 PM CET 2026
+device: AMD Radeon Pro V620 gfx1030 bus e2 CUs 36 (WGPs)
+0 TunableOp rows merged from 0 files -> /home/chenco_adm/w4a8_runs/hi2-gemm2/tunableop_prod_rows.csv
+4 dev designs, 3 to compile
+ok   D2+buf=1+brot=1+skip=1 
+ok   D3+buf=1+skip=1 
+ok   D3+buf=1+brot=1+skip=1 
+rocblas_heur  default                              down          M=512      2242.2 us (min  2217.2)  20.35 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=512      1901.9 us (min  1897.8)  23.99 TF/s  vs_rb  1.179  err           design 1 vs_heur 1.179
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   down          M=512      1924.4 us (min  1919.7)  23.71 TF/s  vs_rb  1.165  err           design 2 vs_heur 1.165
+dev           D2+buf=1+brot=1+skip=1               down          M=512      1898.0 us (min  1894.0)  24.04 TF/s  vs_rb  1.181  err           vgpr 232 lds 32768 vs_heur 1.181
+dev           D3+buf=1+skip=1                      down          M=512      1909.9 us (min  1905.7)  23.89 TF/s  vs_rb  1.174  err           vgpr 168 lds 27648 vs_heur 1.174
+dev           D3+buf=1+brot=1+skip=1               down          M=512      1927.5 us (min  1894.6)  23.68 TF/s  vs_rb  1.163  err           vgpr 168 lds 27648 vs_heur 1.163
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   down          M=512      2055.3 us (min  2017.9)   22.2 TF/s  vs_rb  1.091  err           vgpr 222 lds 49152 vs_heur 1.091
+rocblas_heur  default                              down          M=700      3065.3 us (min  3039.1)  20.35 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=700      2709.5 us (min  2702.4)  23.03 TF/s  vs_rb  1.131  err           design 1 vs_heur 1.131
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   down          M=700      2916.2 us (min  2909.8)  21.39 TF/s  vs_rb  1.051  err           design 2 vs_heur 1.051
+dev           D2+buf=1+brot=1+skip=1               down          M=700      2692.0 us (min  2684.8)  23.18 TF/s  vs_rb  1.139  err           vgpr 232 lds 32768 vs_heur 1.139
+dev           D3+buf=1+skip=1                      down          M=700      2894.8 us (min  2887.3)  21.55 TF/s  vs_rb  1.059  err           vgpr 168 lds 27648 vs_heur 1.059
+dev           D3+buf=1+brot=1+skip=1               down          M=700      2882.1 us (min  2874.7)  21.65 TF/s  vs_rb  1.064  err           vgpr 168 lds 27648 vs_heur 1.064
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   down          M=700      2845.1 us (min  2826.8)  21.93 TF/s  vs_rb  1.077  err           vgpr 222 lds 49152 vs_heur 1.077
+rocblas_heur  default                              down          M=1024     3993.1 us (min  3943.2)  22.86 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=1024     3541.3 us (min  3529.5)  25.77 TF/s  vs_rb  1.128  err           design 1 vs_heur 1.128
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   down          M=1024     3808.4 us (min  3798.7)  23.96 TF/s  vs_rb  1.048  err           design 2 vs_heur 1.048
+dev           D2+buf=1+brot=1+skip=1               down          M=1024     3521.0 us (min  3510.4)  25.92 TF/s  vs_rb  1.134  err           vgpr 232 lds 32768 vs_heur 1.134
+dev           D3+buf=1+skip=1                      down          M=1024     3782.9 us (min  3777.4)  24.13 TF/s  vs_rb  1.056  err           vgpr 168 lds 27648 vs_heur 1.056
+dev           D3+buf=1+brot=1+skip=1               down          M=1024     3765.2 us (min  3747.8)  24.24 TF/s  vs_rb  1.061  err           vgpr 168 lds 27648 vs_heur 1.061
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   down          M=1024     3665.7 us (min  3653.9)   24.9 TF/s  vs_rb  1.089  err           vgpr 222 lds 49152 vs_heur 1.089
+rocblas_heur  default                              down          M=2048     7672.7 us (min  7581.3)  23.79 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z down          M=2048     7074.3 us (min  7060.0)   25.8 TF/s  vs_rb  1.085  err           design 1 vs_heur 1.085
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   down          M=2048     7610.9 us (min  7561.7)  23.98 TF/s  vs_rb  1.008  err           design 2 vs_heur 1.008
+dev           D2+buf=1+brot=1+skip=1               down          M=2048     7053.9 us (min  7024.6)  25.88 TF/s  vs_rb  1.088  err           vgpr 232 lds 32768 vs_heur 1.088
+dev           D3+buf=1+skip=1                      down          M=2048     7566.6 us (min  7454.4)  24.12 TF/s  vs_rb  1.014  err           vgpr 168 lds 27648 vs_heur 1.014
+dev           D3+buf=1+brot=1+skip=1               down          M=2048     7473.7 us (min  7456.2)  24.42 TF/s  vs_rb  1.027  err           vgpr 168 lds 27648 vs_heur 1.027
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   down          M=2048     6881.7 us (min  6871.0)  26.52 TF/s  vs_rb  1.115  err           vgpr 222 lds 49152 vs_heur 1.115
+rocblas_heur  default                              out_proj      M=512       836.3 us (min   827.1)  19.26 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=512       746.7 us (min   743.7)  21.57 TF/s  vs_rb   1.12  err           design 1 vs_heur 1.120
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   out_proj      M=512       705.8 us (min   704.4)  22.82 TF/s  vs_rb  1.185  err           design 2 vs_heur 1.185
+dev           D2+buf=1+brot=1+skip=1               out_proj      M=512       740.3 us (min   737.7)  21.76 TF/s  vs_rb   1.13  err           vgpr 232 lds 32768 vs_heur 1.130
+dev           D3+buf=1+skip=1                      out_proj      M=512       699.0 us (min   697.3)  23.04 TF/s  vs_rb  1.196  err           vgpr 168 lds 27648 vs_heur 1.196
+dev           D3+buf=1+brot=1+skip=1               out_proj      M=512       706.1 us (min   696.3)  22.81 TF/s  vs_rb  1.184  err           vgpr 168 lds 27648 vs_heur 1.184
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   out_proj      M=512       779.9 us (min   770.6)  20.65 TF/s  vs_rb  1.072  err           vgpr 222 lds 49152 vs_heur 1.072
+rocblas_heur  default                              out_proj      M=700      1113.5 us (min  1108.9)  19.78 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=700      1106.3 us (min  1103.7)   19.9 TF/s  vs_rb  1.007  err           design 1 vs_heur 1.007
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   out_proj      M=700      1048.8 us (min  1046.7)   21.0 TF/s  vs_rb  1.062  err           design 2 vs_heur 1.062
+dev           D2+buf=1+brot=1+skip=1               out_proj      M=700      1092.9 us (min  1088.1)  20.15 TF/s  vs_rb  1.019  err           vgpr 232 lds 32768 vs_heur 1.019
+dev           D3+buf=1+skip=1                      out_proj      M=700      1044.0 us (min  1040.6)  21.09 TF/s  vs_rb  1.067  err           vgpr 168 lds 27648 vs_heur 1.067
+dev           D3+buf=1+brot=1+skip=1               out_proj      M=700      1046.4 us (min  1041.1)  21.04 TF/s  vs_rb  1.064  err           vgpr 168 lds 27648 vs_heur 1.064
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   out_proj      M=700      1069.5 us (min  1061.8)  20.59 TF/s  vs_rb  1.041  err           vgpr 222 lds 49152 vs_heur 1.041
+rocblas_heur  default                              out_proj      M=1024     1525.1 us (min  1515.5)  21.12 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=1024     1397.6 us (min  1392.5)  23.05 TF/s  vs_rb  1.091  err           design 1 vs_heur 1.091
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   out_proj      M=1024     1377.3 us (min  1375.2)  23.39 TF/s  vs_rb  1.107  err           design 2 vs_heur 1.107
+dev           D2+buf=1+brot=1+skip=1               out_proj      M=1024     1386.3 us (min  1381.6)  23.24 TF/s  vs_rb    1.1  err           vgpr 232 lds 32768 vs_heur 1.100
+dev           D3+buf=1+skip=1                      out_proj      M=1024     1368.9 us (min  1366.4)  23.53 TF/s  vs_rb  1.114  err           vgpr 168 lds 27648 vs_heur 1.114
+dev           D3+buf=1+brot=1+skip=1               out_proj      M=1024     1372.0 us (min  1365.3)  23.48 TF/s  vs_rb  1.112  err           vgpr 168 lds 27648 vs_heur 1.112
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   out_proj      M=1024     1363.2 us (min  1350.5)  23.63 TF/s  vs_rb  1.119  err           vgpr 222 lds 49152 vs_heur 1.119
+rocblas_heur  default                              out_proj      M=2048     2932.5 us (min  2896.3)  21.97 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z out_proj      M=2048     2609.8 us (min  2603.8)  24.69 TF/s  vs_rb  1.124  err           design 1 vs_heur 1.124
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   out_proj      M=2048     2726.0 us (min  2718.0)  23.63 TF/s  vs_rb  1.076  err           design 2 vs_heur 1.076
+dev           D2+buf=1+brot=1+skip=1               out_proj      M=2048     2593.4 us (min  2586.7)  24.84 TF/s  vs_rb  1.131  err           vgpr 232 lds 32768 vs_heur 1.131
+dev           D3+buf=1+skip=1                      out_proj      M=2048     2708.9 us (min  2703.0)  23.78 TF/s  vs_rb  1.083  err           vgpr 168 lds 27648 vs_heur 1.083
+dev           D3+buf=1+brot=1+skip=1               out_proj      M=2048     2710.2 us (min  2702.6)  23.77 TF/s  vs_rb  1.082  err           vgpr 168 lds 27648 vs_heur 1.082
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   out_proj      M=2048     2540.0 us (min  2533.5)  25.36 TF/s  vs_rb  1.155  err           vgpr 222 lds 49152 vs_heur 1.155
+rocblas_heur  default                              qkv_proj      M=512      1859.5 us (min  1843.7)  20.21 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=512      1667.9 us (min  1662.2)  22.53 TF/s  vs_rb  1.115  err           design 1 vs_heur 1.115
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   qkv_proj      M=512      1637.1 us (min  1634.9)  22.96 TF/s  vs_rb  1.136  err           design 2 vs_heur 1.136
+dev           D2+buf=1+brot=1+skip=1               qkv_proj      M=512      1649.5 us (min  1642.9)  22.78 TF/s  vs_rb  1.127  err           vgpr 232 lds 32768 vs_heur 1.127
+dev           D3+buf=1+skip=1                      qkv_proj      M=512      1625.9 us (min  1623.5)  23.11 TF/s  vs_rb  1.144  err           vgpr 168 lds 27648 vs_heur 1.144
+dev           D3+buf=1+brot=1+skip=1               qkv_proj      M=512      1633.0 us (min  1622.3)  23.01 TF/s  vs_rb  1.139  err           vgpr 168 lds 27648 vs_heur 1.139
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   qkv_proj      M=512      1698.9 us (min  1680.2)  22.12 TF/s  vs_rb  1.095  err           vgpr 222 lds 49152 vs_heur 1.095
+rocblas_heur  default                              qkv_proj      M=700      2646.7 us (min  2623.1)  19.41 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=700      2367.5 us (min  2351.6)   21.7 TF/s  vs_rb  1.118  err           design 1 vs_heur 1.118
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   qkv_proj      M=700      2411.8 us (min  2407.5)   21.3 TF/s  vs_rb  1.097  err           design 2 vs_heur 1.097
+dev           D2+buf=1+brot=1+skip=1               qkv_proj      M=700      2342.4 us (min  2332.0)  21.94 TF/s  vs_rb   1.13  err           vgpr 232 lds 32768 vs_heur 1.130
+dev           D3+buf=1+skip=1                      qkv_proj      M=700      2393.8 us (min  2385.8)  21.46 TF/s  vs_rb  1.106  err           vgpr 168 lds 27648 vs_heur 1.106
+dev           D3+buf=1+brot=1+skip=1               qkv_proj      M=700      2406.5 us (min  2393.4)  21.35 TF/s  vs_rb    1.1  err           vgpr 168 lds 27648 vs_heur 1.100
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   qkv_proj      M=700      2310.3 us (min  2299.2)  22.24 TF/s  vs_rb  1.146  err           vgpr 222 lds 49152 vs_heur 1.146
+rocblas_heur  default                              qkv_proj      M=1024     3499.1 us (min  3457.8)  21.48 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=1024     3100.4 us (min  3087.8)  24.24 TF/s  vs_rb  1.129  err           design 1 vs_heur 1.129
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   qkv_proj      M=1024     3218.4 us (min  3210.3)  23.35 TF/s  vs_rb  1.087  err           design 2 vs_heur 1.087
+dev           D2+buf=1+brot=1+skip=1               qkv_proj      M=1024     3094.0 us (min  3084.7)  24.29 TF/s  vs_rb  1.131  err           vgpr 232 lds 32768 vs_heur 1.131
+dev           D3+buf=1+skip=1                      qkv_proj      M=1024     3203.5 us (min  3191.1)  23.46 TF/s  vs_rb  1.092  err           vgpr 168 lds 27648 vs_heur 1.092
+dev           D3+buf=1+brot=1+skip=1               qkv_proj      M=1024     3178.8 us (min  3143.5)  23.64 TF/s  vs_rb  1.101  err           vgpr 168 lds 27648 vs_heur 1.101
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   qkv_proj      M=1024     3109.9 us (min  3069.5)  24.17 TF/s  vs_rb  1.125  err           vgpr 222 lds 49152 vs_heur 1.125
+rocblas_heur  default                              qkv_proj      M=2048     7035.3 us (min  6867.3)  21.37 TF/s  vs_rb    1.0  err           
+hip           128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z qkv_proj      M=2048     6091.1 us (min  6057.3)  24.68 TF/s  vs_rb  1.155  err           design 1 vs_heur 1.155
+hip           128x64k64t8x8n1p8r4g16b0w0s1m0u1l8   qkv_proj      M=2048     6397.9 us (min  6377.3)   23.5 TF/s  vs_rb    1.1  err           design 2 vs_heur 1.100
+dev           D2+buf=1+brot=1+skip=1               qkv_proj      M=2048     6046.3 us (min  6030.1)  24.86 TF/s  vs_rb  1.164  err           vgpr 232 lds 32768 vs_heur 1.164
+dev           D3+buf=1+skip=1                      qkv_proj      M=2048     6402.4 us (min  6348.8)  23.48 TF/s  vs_rb  1.099  err           vgpr 168 lds 27648 vs_heur 1.099
+dev           D3+buf=1+brot=1+skip=1               qkv_proj      M=2048     6278.2 us (min  6239.4)  23.94 TF/s  vs_rb  1.121  err           vgpr 168 lds 27648 vs_heur 1.121
+dev           D4+swz=1+pad=0+buf=1+brot=1+skip=1   qkv_proj      M=2048     5887.7 us (min  5856.8)  25.53 TF/s  vs_rb  1.195  err           vgpr 222 lds 49152 vs_heur 1.195
+Sun Nov 15 03:46:56 PM CET 2026
+no image build at end: 
+bench_exit=0

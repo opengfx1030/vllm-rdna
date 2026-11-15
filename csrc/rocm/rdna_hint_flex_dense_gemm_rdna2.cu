@@ -8,24 +8,15 @@
 // fp32 accumulation, one fp16 rounding at the store (what rocBLAS does for
 // these operands). It is the GEMM after the rdna_hint_flex dequant pass of the
 // HI2 prefill path (A = transformed activation, W = dequantized scratch).
-// Four designs of one kernel template, all measured against rocBLAS (heuristic
-// and TunableOp-tuned) on the Qwen3.8-27B HI2 TP2 shapes; see
+// Designs of one kernel template (rdna_hint_flex_dense_gemm_kernel.cuh: the
+// design axes and knobs are described there), all measured against rocBLAS
+// (heuristic and TunableOp-tuned) on the Qwen3.8-27B HI2 TP2 shapes; see
 // docs/rdna2/hi2-prefill-gemm-2026-11-15.md and
 // docs/rdna2/hi2-prefill-gemm2-2026-11-15.md. The sweep sources they come from
 // are tools/rdna/rdna_hint_flex/gemm_sweep/gemm_variant.hip (the design name
-// grammar of that tool is quoted next to every design below).
-//
-// Design axes (compile time): BM x BN block tile, TM x TN accumulators per
-// thread (thread (ty, tx) owns rows ty + TY i and columns tx + TX j of the
-// tile, so the lanes of a row group read one LDS row and the other operand is
-// one distinct row per lane), BK K elements per stage, NBUF LDS stages (2 = one
-// barrier per tile, double buffered through registers; 1 = two barriers), PAD
-// halves of LDS row padding or SWZ = XOR-swizzled 16-byte chunks without
-// padding (conflict-free like PAD 8, with the pad's bytes back: the 128x128 BK
-// 32 two-stage tile fits four blocks in a WGP's 128 KiB), RAST block order (0 =
-// N fastest, >= 2 = groups of RAST M tiles walk the N tiles, so concurrently
-// resident blocks share the weight tiles), LW LDS fragment read width (8 bytes
-// = ds_read_b64), KU k-step unroll inside a stage.
+// grammar of that tool is quoted next to every design below); the benchmark
+// harness tools/rdna/rdna_hint_flex/gemm_sweep/dense_dev.hip compiles the same
+// kernel header.
 //
 // Tails: M and N may be anything (row loads clamp to the last row, stores are
 // guarded); K must be a multiple of the design's BK; operands need 16-byte
@@ -45,278 +36,9 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+#include "rdna_hint_flex_dense_gemm_kernel.cuh"
 #include "rdna_hint_flex_dense_gemm_rdna2.cuh"
 #include "rdna_hint_flex_dense_gemm_table.cuh"
-
-#if defined(__HIPCC__) && defined(__gfx1030__)
-  #define __HIP__RDNA2__
-#endif
-
-namespace vllm {
-namespace rdna_hint_flex {
-namespace gemm {
-
-#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
-
-using f16x2 = _Float16 __attribute__((ext_vector_type(2)));
-using u32x4 = unsigned int __attribute__((ext_vector_type(4)));
-using u32x2 = unsigned int __attribute__((ext_vector_type(2)));
-
-// One dword = two fp16 values: fp32 a.x*b.x + a.y*b.y + c (v_dot2c_f32_f16).
-// The operands are taken by value on purpose: __builtin_bit_cast applied to a
-// vector-element lvalue (v[t]) reads the vector's first element for every t
-// (clang 23, gfx1030).
-__device__ __forceinline__ float dot2u(unsigned a, unsigned b, float c) {
-  return __builtin_amdgcn_fdot2(__builtin_bit_cast(f16x2, a),
-                                __builtin_bit_cast(f16x2, b), c, false);
-}
-
-template <int BYTES>
-struct FragT;
-template <>
-struct FragT<16> {
-  using type = u32x4;
-};
-template <>
-struct FragT<8> {
-  using type = u32x2;
-};
-
-// One compile-time design.
-template <int BM_, int BN_, int BK_, int TM_, int TN_, int NBUF_, int PAD_,
-          int RAST_, int LW_, bool SWZ_, int KU_>
-struct Design {
-  static constexpr int BM = BM_, BN = BN_, BK = BK_, TM = TM_, TN = TN_;
-  static constexpr int NBUF = NBUF_, PAD = PAD_, RAST = RAST_, LW = LW_;
-  static constexpr bool SWZ = SWZ_;
-  static constexpr int KU = KU_;  // 0 = fully unrolled k steps
-  static constexpr int TX = BN / TN, TY = BM / TM, T = TX * TY;
-  static constexpr int LD = BK + PAD;  // halves per LDS row
-  static constexpr int CH = 8;         // halves per 16-byte global chunk
-  static constexpr int CPR = BK / CH;  // chunks per tile row
-  static constexpr int A_CHUNKS = BM * CPR, B_CHUNKS = BN * CPR;
-  static constexpr int A_PER_T = (A_CHUNKS + T - 1) / T;
-  static constexpr int B_PER_T = (B_CHUNKS + T - 1) / T;
-  static constexpr int A_LDS = BM * LD, B_LDS = BN * LD;  // halves
-  static constexpr int STAGE = A_LDS + B_LDS;             // halves per buffer
-  static constexpr int KS = LW / 2;                       // halves per k step
-  static constexpr int ND = LW / 4;                       // dwords per fragment
-  static constexpr int SRP = CPR <= 8 ? 8 / CPR : 1;  // rows per swizzle step
-  static constexpr int LDS_BYTES = NBUF * STAGE * 2;
-  static_assert(!SWZ || (PAD == 0 && (CPR == 2 || CPR == 4 || CPR == 8) &&
-                         TX % 8 == 0 && TY % 8 == 0),
-                "SWZ: PAD 0, BK 16/32/64, TX and TY multiples of 8");
-  static_assert(LW == 8 || LW == 16, "LDS fragment width: 8 or 16 bytes");
-  static_assert(
-      BK % KS == 0 && BK % CH == 0 && LD % 8 == 0,
-      "BK: whole fragment steps and chunks; LDS rows 16-byte aligned");
-  static_assert(BM % TM == 0 && BN % TN == 0,
-                "micro-tile must divide the tile");
-  static_assert(T >= 32 && T <= 1024 && T % 32 == 0, "block size");
-  static_assert(NBUF == 1 || NBUF == 2, "NBUF");
-  static_assert(LDS_BYTES <= 65536, "LDS over 64 KiB per block");
-};
-
-// 128x128 BK32, 8x16 per thread (128 accumulators), swizzled LDS, 8-byte
-// fragments. 255 VGPR, 4 waves/SIMD, 4 blocks per WGP (sweep name
-// 128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z).
-using D1 = Design<128, 128, 32, 8, 16, 2, 0, 8, 8, true, 1>;
-// D1 with blocks grouped by 4 (…r4…z).
-using D2 = Design<128, 128, 32, 8, 16, 2, 0, 4, 8, true, 1>;
-// 128x64 BK64, 8x8 per thread, one stage, pad 8
-// (128x64k64t8x8n1p8r4g16b0w0s1m0u1l8).
-using D3 = Design<128, 64, 64, 8, 8, 1, 8, 4, 8, false, 1>;
-// 256x128 BK32, 8x16 per thread, padded LDS (60 KiB), grouped by 4
-// (256x128k32t8x16n2p8r4g16b0w0s1m0u1l8).
-using D4 = Design<256, 128, 32, 8, 16, 2, 8, 4, 8, false, 1>;
-
-template <class P>
-__global__ void __launch_bounds__(P::T)
-    gemm_kernel(const char* __restrict__ A, const char* __restrict__ W,
-                _Float16* __restrict__ Cout, int M, int N, int K, int lda,
-                int ldw, int ldc) {
-  using Chunk = u32x4;  // 16-byte global chunk
-  using Frag = typename FragT<P::LW>::type;
-  constexpr int BM = P::BM, BN = P::BN, BK = P::BK, TM = P::TM, TN = P::TN;
-  constexpr int TX = P::TX, TY = P::TY, T = P::T, LD = P::LD, CH = P::CH;
-  constexpr int CPR = P::CPR, NBUF = P::NBUF;
-  constexpr int A_PER_T = P::A_PER_T, B_PER_T = P::B_PER_T;
-
-  __shared__ __attribute__((aligned(16))) char lds[P::LDS_BYTES];
-
-  const int tid = threadIdx.x;
-  const int tx = tid % TX, ty = tid / TX;
-  // XOR swizzle of the 16-byte chunk index inside an LDS row (SWZ): the rows of
-  // one 8-lane read phase land in 8 different bank groups without the PAD
-  // halves. TX and TY are multiples of 8, so every row an operand thread reads
-  // has the same swizzle value.
-  const int swa = P::SWZ ? (ty / P::SRP) & (CPR - 1) : 0;
-  const int swb = P::SWZ ? (tx / P::SRP) & (CPR - 1) : 0;
-  auto store_off = [](int r,
-                      int kcc) {  // byte offset of chunk kcc of LDS row r
-    if constexpr (P::SWZ)
-      return r * LD * 2 + ((kcc ^ ((r / P::SRP) & (CPR - 1))) << 4);
-    else
-      return (r * LD + kcc * CH) * 2;
-  };
-  auto frag_off = [](int kk, int sw) {  // byte offset of halves kk.. in a row
-    if constexpr (P::SWZ)
-      return (((kk >> 3) ^ sw) << 4) + ((kk & 7) << 1);
-    else
-      return kk * 2;
-  };
-
-  // ---- block -> tile (rasterization)
-  const int ntm = (M + BM - 1) / BM, ntn = (N + BN - 1) / BN;
-  int tm, tn;
-  const int bid = blockIdx.x;
-  if constexpr (P::RAST == 0) {
-    tn = bid % ntn;
-    tm = bid / ntn;
-  } else {
-    constexpr int GM = P::RAST;
-    const int per_group = GM * ntn;
-    const int group = bid / per_group;
-    const int first_m = group * GM;
-    const int gsz = min(ntm - first_m, GM);
-    tm = first_m + (bid % per_group) % gsz;
-    tn = (bid % per_group) / gsz;
-  }
-  const int m0 = tm * BM, n0 = tn * BN;
-  const int nk = K / BK;
-
-  // ---- global -> register chunk bookkeeping (byte offsets, 32-bit)
-  uint32_t aoff[A_PER_T], boff[B_PER_T];
-  #pragma unroll
-  for (int v = 0; v < A_PER_T; ++v) {
-    const int c = tid + v * T;
-    const int row = min(c / CPR, BM - 1);
-    const int kc = (c % CPR) * CH;
-    const int grow = min(m0 + row, M - 1);
-    aoff[v] = static_cast<uint32_t>((grow * lda + kc) * 2);
-  }
-  #pragma unroll
-  for (int v = 0; v < B_PER_T; ++v) {
-    const int c = tid + v * T;
-    const int row = min(c / CPR, BN - 1);
-    const int kc = (c % CPR) * CH;
-    const int grow = min(n0 + row, N - 1);
-    boff[v] = static_cast<uint32_t>((grow * ldw + kc) * 2);
-  }
-
-  Chunk ra[A_PER_T], rb[B_PER_T];
-  auto gload = [&](int kt) {
-    const uint32_t kb = static_cast<uint32_t>(kt * BK * 2);
-  #pragma unroll
-    for (int v = 0; v < A_PER_T; ++v)
-      if (A_PER_T * T == P::A_CHUNKS || tid + v * T < P::A_CHUNKS)
-        ra[v] = *reinterpret_cast<const Chunk*>(A + aoff[v] + kb);
-  #pragma unroll
-    for (int v = 0; v < B_PER_T; ++v)
-      if (B_PER_T * T == P::B_CHUNKS || tid + v * T < P::B_CHUNKS)
-        rb[v] = *reinterpret_cast<const Chunk*>(W + boff[v] + kb);
-  };
-  auto lstore = [&](int buf) {
-    char* as = lds + buf * P::STAGE * 2;
-    char* bs = as + P::A_LDS * 2;
-  #pragma unroll
-    for (int v = 0; v < A_PER_T; ++v) {
-      const int c = tid + v * T;
-      if (A_PER_T * T == P::A_CHUNKS || c < P::A_CHUNKS)
-        *reinterpret_cast<Chunk*>(as + store_off(c / CPR, c % CPR)) = ra[v];
-    }
-  #pragma unroll
-    for (int v = 0; v < B_PER_T; ++v) {
-      const int c = tid + v * T;
-      if (B_PER_T * T == P::B_CHUNKS || c < P::B_CHUNKS)
-        *reinterpret_cast<Chunk*>(bs + store_off(c / CPR, c % CPR)) = rb[v];
-    }
-  };
-
-  float acc[TM][TN];
-  #pragma unroll
-  for (int i = 0; i < TM; ++i)
-  #pragma unroll
-    for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
-
-  auto compute = [&](int buf) {
-    const char* as = lds + buf * P::STAGE * 2;
-    const char* bs = as + P::A_LDS * 2;
-    auto kstep = [&](int kk) {
-      Frag af[TM], bf[TN];
-  #pragma unroll
-      for (int i = 0; i < TM; ++i)
-        af[i] = *reinterpret_cast<const Frag*>(as + (ty + TY * i) * LD * 2 +
-                                               frag_off(kk, swa));
-  #pragma unroll
-      for (int j = 0; j < TN; ++j)
-        bf[j] = *reinterpret_cast<const Frag*>(bs + (tx + TX * j) * LD * 2 +
-                                               frag_off(kk, swb));
-  #pragma unroll
-      for (int i = 0; i < TM; ++i)
-  #pragma unroll
-        for (int j = 0; j < TN; ++j)
-  #pragma unroll
-          for (int t = 0; t < P::ND; ++t)
-            acc[i][j] = dot2u(af[i][t], bf[j][t], acc[i][j]);
-    };
-    if constexpr (P::KU == 0) {
-  #pragma unroll
-      for (int kk = 0; kk < BK; kk += P::KS) kstep(kk);
-    } else {
-  #pragma unroll P::KU
-      for (int kk = 0; kk < BK; kk += P::KS) kstep(kk);
-    }
-  };
-
-  if constexpr (NBUF == 2) {
-    gload(0);
-    lstore(0);
-    __syncthreads();
-    int kt = 0;
-    for (; kt + 1 < nk; kt += 2) {
-      gload(kt + 1);
-      compute(0);
-      lstore(1);
-      __syncthreads();
-      if (kt + 2 < nk) gload(kt + 2);
-      compute(1);
-      if (kt + 2 < nk) lstore(0);
-      __syncthreads();
-    }
-    if (kt < nk) compute(0);
-  } else {
-    gload(0);
-    for (int kt = 0; kt < nk; ++kt) {
-      __syncthreads();
-      lstore(0);
-      __syncthreads();
-      if (kt + 1 < nk) gload(kt + 1);
-      compute(0);
-    }
-  }
-
-  // ---- epilogue: fp32 accumulators -> fp16
-  #pragma unroll
-  for (int i = 0; i < TM; ++i) {
-    const int row = m0 + ty + TY * i;
-    if (row < M) {
-  #pragma unroll
-      for (int j = 0; j < TN; ++j) {
-        const int col = n0 + tx + TX * j;
-        if (col < N)
-          Cout[static_cast<size_t>(row) * ldc + col] =
-              static_cast<_Float16>(acc[i][j]);
-      }
-    }
-  }
-}
-
-#endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
-
-}  // namespace gemm
-}  // namespace rdna_hint_flex
-}  // namespace vllm
 
 // ---------------------------------------------------------------------------
 // Host side.
@@ -324,6 +46,25 @@ __global__ void __launch_bounds__(P::T)
 namespace vllm {
 namespace rdna_hint_flex {
 namespace gemm {
+
+// The shipped designs (sweep names in kDesigns below; the sweep grammar has no
+// letters for the knobs the kernel header adds: +brot +skip +buf, see there).
+// 128x128 BK32, 8x16 per thread (128 accumulators), swizzled LDS, 8-byte
+// fragments, B fragment dwords rotated in LDS (no same-bank dot2 sources),
+// idle tail waves skipped, buffer-descriptor global loads (no 64-bit address
+// adds). 232 VGPR, 4 waves/SIMD, 4 blocks per WGP.
+using D1 = Design<128, 128, 32, 8, 16, 2, 0, 8, 8, true, 1, 1, 1, 0, 0, 1>;
+// D1 with blocks grouped by 4.
+using D2 = Design<128, 128, 32, 8, 16, 2, 0, 4, 8, true, 1, 1, 1, 0, 0, 1>;
+// 128x64 BK64, 8x8 per thread, one stage, pad 8, skip + buffer loads.
+using D3 = Design<128, 64, 64, 8, 8, 1, 8, 4, 8, false, 1, 0, 1, 0, 0, 1>;
+// 256x128 BK32, 8x16 per thread, swizzled LDS (48 KiB), grouped by 4.
+using D4 = Design<256, 128, 32, 8, 16, 2, 0, 4, 8, true, 1, 1, 1, 0, 0, 1>;
+// Tail designs for the last M % 128 rows (<= 32 and <= 64 rows): a 32x128 tile
+// with 4x8 and a 64x128 tile with 8x8 accumulators per thread, 128 threads, the
+// swizzled 128-row weight tile of D1. Not in the dispatch table: tail_design().
+using D5 = Design<32, 128, 32, 4, 8, 2, 0, 0, 8, true, 1, 0, 1, 0, 0, 1>;
+using D6 = Design<64, 128, 32, 8, 8, 2, 0, 0, 8, true, 1, 0, 1, 0, 0, 1>;
 
 namespace {
 
@@ -333,10 +74,12 @@ struct DesignInfo {
 };
 
 constexpr DesignInfo kDesigns[] = {
-    {"128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z", 128, 128, 32},
-    {"128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z", 128, 128, 32},
-    {"128x64k64t8x8n1p8r4g16b0w0s1m0u1l8", 128, 64, 64},
-    {"256x128k32t8x16n2p8r4g16b0w0s1m0u1l8", 256, 128, 32},
+    {"128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf", 128, 128, 32},
+    {"128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf", 128, 128, 32},
+    {"128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf", 128, 64, 64},
+    {"256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf", 256, 128, 32},
+    {"32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf", 32, 128, 32},
+    {"64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf", 64, 128, 32},
 };
 constexpr int kNumDesigns = sizeof(kDesigns) / sizeof(kDesigns[0]);
 
@@ -364,6 +107,11 @@ bool aligned16(const void* p) {
 }
 
 }  // namespace
+
+int tail_design(int64_t rows) {
+  if (rows <= 0 || rows > kTailMaxRows) return kRocblas;
+  return rows <= 32 ? 4 : 5;
+}
 
 int pick(int64_t M, int64_t N, int64_t K) {
   for (const Slot& s : kSlots) {
@@ -408,8 +156,14 @@ bool launch(int design, const void* A, const void* W, void* C, int64_t M,
     case 2:
       launch_design<D3>(A, W, C, M, N, K, lda, ldw, ldc, stream);
       break;
-    default:
+    case 3:
       launch_design<D4>(A, W, C, M, N, K, lda, ldw, ldc, stream);
+      break;
+    case 4:
+      launch_design<D5>(A, W, C, M, N, K, lda, ldw, ldc, stream);
+      break;
+    default:
+      launch_design<D6>(A, W, C, M, N, K, lda, ldw, ldc, stream);
       break;
   }
   return true;

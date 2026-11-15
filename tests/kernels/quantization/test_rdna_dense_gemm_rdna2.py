@@ -143,8 +143,9 @@ def test_env_switch_values(monkeypatch):
         ("0", 0),
         ("off", 0),
         ("rocblas", 0),
-        ("hip", 1),
-        (" HIP ", 1),
+        ("hip", 4),
+        (" HIP ", 4),
+        ("hip-notail", 1),
     ):
         monkeypatch.setenv("RDNA_HINT_FLEX_PREFILL_GEMM", v)
         assert rhf._prefill_gemm_from_env() == want, v
@@ -161,10 +162,12 @@ def _fake_segment():
     }  # fmt: skip
 
 
-@pytest.mark.parametrize("env, extra", [(None, 0), ("off", 0), ("hip", 1)])
-def test_apply_hands_the_op_the_switch(monkeypatch, env, extra):
+@pytest.mark.parametrize(
+    "env, mode", [(None, 0), ("off", 0), ("hip", 4), ("hip-notail", 1)]
+)
+def test_apply_hands_the_op_the_switch(monkeypatch, env, mode):
     """What apply() passes to the op: nothing extra when off (the call older
-    builds take), prefill_gemm=1 with the switch on."""
+    builds take), the prefill_gemm mode with the switch on."""
     from vllm.model_executor.layers.quantization import rdna_hint_flex as rhf
 
     if env is None:
@@ -177,7 +180,7 @@ def test_apply_hands_the_op_the_switch(monkeypatch, env, extra):
     monkeypatch.setattr(rhf, "_rdna2_kernels_available", lambda: True)
     monkeypatch.setattr(torch.ops, "_rocm_C", ns, raising=False)
     method = rhf.RdnaHintFlexLinearMethod(False)
-    assert method.use_kernels and method.prefill_gemm == extra
+    assert method.use_kernels and method.prefill_gemm == mode
 
     seen: list[tuple] = []
 
@@ -190,9 +193,9 @@ def test_apply_hands_the_op_the_switch(monkeypatch, env, extra):
     method.apply(layer, torch.zeros(3, 64))
     (args,) = seen
     # decode_max_m, mode, silu_mul are always there; prefill_gemm only when on
-    assert len(args) == 14 + extra, len(args)
-    if extra:
-        assert args[-1] == 1
+    assert len(args) == 14 + bool(mode), len(args)
+    if mode:
+        assert args[-1] == mode
 
 
 def test_switch_off_without_the_op(monkeypatch):
@@ -240,7 +243,7 @@ gfx1030_only = pytest.mark.skipif(
     reason="needs a gfx1030 GPU and the _rocm_C rdna_hint_flex_dense_gemm_rdna2 op",
 )
 
-DESIGN_BK = {0: 32, 1: 32, 2: 64, 3: 32}
+DESIGN_BK = {0: 32, 1: 32, 2: 64, 3: 32, 4: 32, 5: 32}
 
 
 def errs(c: torch.Tensor, ref: torch.Tensor) -> tuple[float, float]:
@@ -431,3 +434,38 @@ def test_composite_switch_off_is_dequant_plus_mm_and_on_matches(m):
         assert not torch.equal(on, ref)
     else:
         assert torch.equal(on, ref)  # table says rocBLAS: identical call
+
+
+@gfx1030_only
+@pytest.mark.parametrize("m", [130, 1025, 1031, 1045, 1072, 1073, 1100, 2049])
+def test_composite_tail_split(m):
+    """prefill_gemm 2 (GEMV tail), 3 (tail designs), 4 (hybrid): the r = M % 128
+    tail rows run apart from the whole tile rows. Every row matches the fp32
+    product of the activation and the dequantized weights; where no split is
+    possible (no table design at M - r, r = 0, r above the mode's limit) the
+    result is bit-identical to mode 1."""
+    from vllm import _custom_ops as ops
+
+    n, k = TP2_SLOTS["out_proj"]
+    t = _hi2(n, k, seed=6)
+    g = torch.Generator(device="cuda").manual_seed(7)
+    x = torch.randn(m, k, device="cuda", generator=g).half()
+    lin = (t["col_scale"], t["had"], t["codes"], t["code_off"], t["blk_params"],
+           t["param_off"], t["row_consts"], t["row_nbits"], t["row_block"], False, 48)  # fmt: skip
+    wd = torch.empty(n, k, device="cuda", dtype=torch.float16)
+    ops.rdna_hint_flex_dequant_rdna2(
+        t["codes"], t["code_off"], t["blk_params"], t["param_off"],
+        t["row_consts"], t["row_nbits"], t["row_block"], wd,
+    )  # fmt: skip
+    ref = x.float() @ wd.float().T
+    one = ops.rdna_hint_flex_linear_rdna2(x, *lin, 0, False, 1)
+    r = m % 128
+    can_split = r > 0 and ops.rdna_hint_flex_dense_gemm_pick_rdna2(m - r, n, k) >= 0
+    for mode, r_max in ((2, 48), (3, 64), (4, 64)):
+        got = ops.rdna_hint_flex_linear_rdna2(x, *lin, 0, False, mode)
+        assert torch.isfinite(got).all(), (m, mode)
+        assert errs(got, ref)[1] <= REL_FRO_TOL, (m, mode)
+        if can_split and r <= r_max:
+            assert errs(got[m - r :], ref[m - r :])[1] <= REL_FRO_TOL, (m, mode)
+        else:
+            assert torch.equal(got, one), (m, mode)

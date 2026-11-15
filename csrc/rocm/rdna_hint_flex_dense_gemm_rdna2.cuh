@@ -21,6 +21,36 @@ namespace gemm {
 // Design ids (kDesigns in the .cu holds their names).
 constexpr int kRocblas = -1;  // not a design: leave the GEMM to rocBLAS
 
+// Modes of the composite op's `prefill_gemm` argument. 0: rocBLAS. 1: the
+// dense kernel wherever the dispatch table beats rocBLAS, a short tail
+// (M = kTileRows q + r) padded to a whole tile row. 2, 3, 4 also run the r tail
+// rows apart from the q tile rows (a padded tile row costs 1/q of the GEMM):
+// 2 on the decode GEMV (packed weights), 3 on the tail designs (fp16 scratch),
+// 4 on the GEMV up to kHybridGemvMaxRows rows (the GEMV is compute-bound in r,
+// the tail designs stream the whole scratch whatever r) and on the tail designs
+// beyond.
+constexpr int64_t kModeDense = 1, kModeGemvTail = 2, kModeDenseTail = 3,
+                  kModeHybrid = 4;
+constexpr int64_t kTileRows = 128;
+constexpr int64_t kHybridGemvMaxRows = 16;
+
+// The tail designs (32x128 and 64x128 tiles, not in the table) cover up to
+// kTailMaxRows rows; tail_design(rows) is kRocblas beyond that.
+constexpr int64_t kTailMaxRows = 64;
+int tail_design(int64_t rows);
+
+enum class TailKind { kNone, kGemv, kDense };
+// How the r = M % kTileRows tail rows run in `mode` (gemv_max_rows: what the
+// GEMV can take): kNone = inside the main GEMM's last (padded) tile row.
+inline TailKind tail_kind(int64_t mode, int64_t r, int64_t gemv_max_rows) {
+  if (mode < kModeGemvTail || r <= 0) return TailKind::kNone;
+  const bool gemv_ok = r <= gemv_max_rows;
+  if (mode == kModeGemvTail) return gemv_ok ? TailKind::kGemv : TailKind::kNone;
+  if (mode == kModeHybrid && gemv_ok && r <= kHybridGemvMaxRows)
+    return TailKind::kGemv;
+  return r <= kTailMaxRows ? TailKind::kDense : TailKind::kNone;
+}
+
 // The design the dispatch table picks for (M, N, K), or kRocblas when the
 // shape is outside the validated set or rocBLAS measured faster. M is free
 // (any tail), N and K select the table row.

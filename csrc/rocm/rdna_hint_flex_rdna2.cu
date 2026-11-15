@@ -2767,8 +2767,10 @@ void rdna_hint_flex_gemv_i8_rdna2(
 // `transform`). mode 0 (F16): M <= decode_max_m runs the F16 GEMV, otherwise
 // dequant + GEMM (rocBLAS; with prefill_gemm > 0 the dense HIP GEMM of
 // rdna_hint_flex_dense_gemm_rdna2.cu wherever its dispatch table beats rocBLAS
-// for (M, R, K)). mode 1 (I8 decode): M <= decode_max_m runs the I8 path,
-// larger M as mode 0. mode 2 (I8 everywhere): the I8 path for every M.
+// for (M, R, K), and with prefill_gemm >= 2 a short tail M % 128 apart from the
+// whole tile rows; the modes are in rdna_hint_flex_dense_gemm_rdna2.cuh).
+// mode 1 (I8 decode): M <= decode_max_m runs the I8 path, larger M as mode 0.
+// mode 2 (I8 everywhere): the I8 path for every M.
 torch::Tensor rdna_hint_flex_linear_rdna2(
     torch::Tensor x, torch::Tensor col_scale, torch::Tensor had,
     torch::Tensor codes, torch::Tensor code_off, torch::Tensor blk_params,
@@ -2785,6 +2787,8 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
   TORCH_CHECK(!silu_mul || (transform && mode == 0 && K % 64 == 0),
               "hi2: silu_mul needs the transform, F16 mode and K % 64 == 0");
   TORCH_CHECK(mode >= 0 && mode <= 2, "hi2: mode must be 0, 1 or 2");
+  TORCH_CHECK(prefill_gemm >= 0 && prefill_gemm <= 4,
+              "hi2: prefill_gemm must be 0 (rocBLAS) or 1..4 (dense kernel)");
   const int64_t M = x.size(0);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -2823,11 +2827,59 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
     auto wd = torch::empty({R, K}, x.options());
     launch_dequant(w, wd, R, K, stream);
     namespace hg = vllm::rdna_hint_flex::gemm;
-    const int design = prefill_gemm > 0 ? hg::pick(M, R, K) : hg::kRocblas;
-    if (design < 0 ||
-        !hg::launch(design, xt.data_ptr(), wd.data_ptr(), out.data_ptr(), M, R,
-                    K, xt.stride(0), wd.stride(0), out.stride(0), stream))
+    int64_t m_main = M;  // rows the dense / rocBLAS GEMM takes
+    int design = hg::kRocblas;
+    hg::TailKind tail = hg::TailKind::kNone;
+    if (prefill_gemm > 0) {
+      design = hg::pick(M, R, K);
+      // prefill_gemm >= 2: M = 128 q + r with a short tail (the scheduler's
+      // 1024 prefill tokens + a few decode tokens, M = 1025..1031): the GEMM
+      // takes the q tile rows and the r rows run apart (the decode GEMV, or the
+      // tail designs on the fp16 scratch), instead of one padded tile row that
+      // costs 1/q of the GEMM. See hg::tail_kind for the modes.
+      const int64_t r = M % hg::kTileRows;
+      const hg::TailKind want = hg::tail_kind(prefill_gemm, r, decode_max_m);
+      if (want != hg::TailKind::kNone) {
+        const int d = hg::pick(M - r, R, K);
+        if (d >= 0) {
+          design = d;
+          m_main = M - r;
+          tail = want;
+        }
+      }
+    }
+    if (design < 0 || !hg::launch(design, xt.data_ptr(), wd.data_ptr(),
+                                  out.data_ptr(), m_main, R, K, xt.stride(0),
+                                  wd.stride(0), out.stride(0), stream)) {
       at::mm_out(out, xt, wd.t());
+      m_main = M;
+    }
+    if (m_main < M) {
+      const int64_t r = M - m_main;
+      auto out_rows = out.narrow(0, m_main, r);
+      if (tail == hg::TailKind::kDense) {
+        auto xr = xt.narrow(0, m_main, r);
+        if (!hg::launch(hg::tail_design(r), xr.data_ptr(), wd.data_ptr(),
+                        out_rows.data_ptr(), r, R, K, xr.stride(0),
+                        wd.stride(0), out_rows.stride(0), stream))
+          at::mm_out(out_rows, xr, wd.t());
+      } else {
+        auto x_rows = x.narrow(0, m_main, r);
+        const bool v2t = gemv2_weight_ok(w, r, R) &&
+                         (transform || aligned16(x_rows.data_ptr()));
+        if (v2t) {  // v2 reads a pair-interleaved activation: transform again
+          torch::Tensor xr = x_rows.contiguous();
+          if (transform) {
+            xr = torch::empty({r, K}, x.options());
+            launch_transform(x_rows, col_scale, had, xr, stream,
+                             /*pair_interleaved=*/true, silu_mul);
+          }
+          launch_gemv2(xr, w, out_rows, R, stream, /*x_pi=*/transform);
+        } else {
+          launch_gemv(xt.narrow(0, m_main, r), w, out_rows, R, stream);
+        }
+      }
+    }
   }
   return out;
 }
