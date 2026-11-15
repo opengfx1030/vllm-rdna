@@ -29,7 +29,7 @@
       "lib_sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
       "rows_per_rank": 3366,
       "venv": "venv-7.14.0_0.32.0",
-      "status": "opt-in (auto: false): the canonical rocm7.14-rocblas5.5 rows plus the Qwen3.8-27B HI2 TP=2 prefill rows; selected by TUNABLEOP_PREFER in recipe 27b-hi2-tp2 only",
+      "status": "opt-in (auto: false): the canonical rocm7.14-rocblas5.5 rows plus the Qwen3.8-27B HI2 TP=2 prefill rows; selected by TUNABLEOP_PREFER in recipes 27b-hi2-tp2 and 27b-hi2-tp2-mtp2 only",
       "auto": false,
       "derived_from": "rocm7.14-rocblas5.5",
       "covers": [

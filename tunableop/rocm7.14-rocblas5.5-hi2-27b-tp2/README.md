@@ -1,6 +1,6 @@
 # rocm7.14-rocblas5.5-hi2-27b-tp2
 
-Opt-in derived profile for **Qwen3.8-27B-HI2-3.0bpw at TP=2** (recipe `27b-hi2-tp2`):
+Opt-in derived profile for **Qwen3.8-27B-HI2-3.0bpw at TP=2** (recipes `27b-hi2-tp2` and `27b-hi2-tp2-mtp2`):
 the canonical `rocm7.14-rocblas5.5` rank files 0-3 byte-for-byte (3330 rows) plus
 **36 new rows per rank = 3366**, identical on every rank (a TP=2 worker on device
 ordinal `r` reads `tunableop_results<r>.csv`; ranks 0 and 1 serve, 2 and 3 exist for the
@@ -8,7 +8,7 @@ helper's four-file check). Same rocBLAS build as the canonical profile
 (`5.5.0.cd957402`, `librocblas.so.5` sha256 `f30bb442e9b5...`).
 
 * **Selection.** Registered with `"auto": false` in `tunableop/profiles.json`: auto-select
-  never picks it. `tools/rdna/recipes/27b-hi2-tp2.env` sets
+  never picks it. `tools/rdna/recipes/27b-hi2-tp2.env` and `27b-hi2-tp2-mtp2.env` set
   `TUNABLEOP_PREFER=rocm7.14-rocblas5.5-hi2-27b-tp2`; no other recipe does, so their rows
   stay byte-identical. `TUNABLEOP_PREFER=` (empty) or
   `TUNABLEOP_PROFILE=rocm7.14-rocblas5.5` is the rows-off arm of the same tree. The boot
@@ -61,6 +61,12 @@ has the environment and the key list.
 
 Single-GPU model-level check (real checkpoint, TP=2 GEMMs emulated at TP=1, 3 prompts x
 64 greedy tokens, rows off vs on): tokens identical with the prompts batched and one at a
-time, max |dlogit| 0.094 / 0.043 over the top-20 raw fp16 logits. **Not yet run: the
-deterministic concurrency probe on the TP=2 pair** (HIP 2,3); the row set is not accepted
-until it passes (commands in the doc, section 7).
+time, max |dlogit| 0.094 / 0.043 over the top-20 raw fp16 logits.
+
+TP=2 pair (HIP 2,3), scoreboard arms `conc-on` and `conc-off` (2026-11-15, quiet protocol):
+the deterministic concurrency probe fails 0 of 480 checks with the rows and 0 of 480 without
+them (0 of 288 each in the `--no-ignore-eos` runs). Arm `tunable` against `base`: TTFT
+16k/1k c=1 30.54 to 28.68 s and 1k/512 c=1 1.51 to 1.41 s, output x1.03 and x1.01, c=8 within
+noise; long-context PPL 3.6633 to 3.6636. The rows are the default of the recipes
+`27b-hi2-tp2` and `27b-hi2-tp2-mtp2`; `docs/rdna2/hi2-27b-tp2-serving.md` has the tables.
+Rollback: `TUNABLEOP_PREFER=`.

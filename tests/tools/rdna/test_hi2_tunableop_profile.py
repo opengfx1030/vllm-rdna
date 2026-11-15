@@ -25,6 +25,7 @@ RANKS = range(4)
 # per-rank (R, K) of the rows the campaign adds:
 # gate_up, in_proj_qkvz, qkv, out / o_proj, ba
 NEW_SHAPES = {(17408, 5120), (8192, 5120), (7168, 5120), (5120, 3072), (48, 5120)}
+HI2_RECIPES = ("27b-hi2-tp2", "27b-hi2-tp2-mtp2")
 
 
 def registry():
@@ -85,13 +86,13 @@ def test_new_rows_are_identical_on_every_rank():
         assert {k: v for k, v in rows.items() if k not in canon_r} == new0
 
 
-def test_only_the_27b_hi2_tp2_recipe_prefers_the_profile():
+def test_only_the_hi2_tp2_recipes_prefer_the_profile():
     preferring = {}
     for recipe in sorted(RECIPES.glob("*.env")):
         for line in recipe.read_text().splitlines():
             if line.startswith("TUNABLEOP_PREFER="):
                 preferring[recipe.name] = line.partition("=")[2].strip()
-    assert preferring == {"27b-hi2-tp2.env": DERIVED}
+    assert preferring == {f"{name}.env": DERIVED for name in HI2_RECIPES}
     assert DERIVED in registry()
 
 
@@ -151,25 +152,36 @@ def tunableop_line(result):
     return line
 
 
-def test_recipe_prefers_the_hi2_profile(stub):
+@pytest.mark.parametrize("recipe", HI2_RECIPES)
+def test_recipe_prefers_the_hi2_profile(stub, recipe):
     venv, root, sha = stub
-    line = tunableop_line(plan(venv, root, "RECIPE=27b-hi2-tp2"))
+    line = tunableop_line(plan(venv, root, f"RECIPE={recipe}"))
     assert (
         f"{DERIVED} (preferred via TUNABLEOP_PREFER for librocblas.so.5 {sha})" in line
     )
 
 
-def test_empty_prefer_is_the_canonical_rows_arm(stub):
+@pytest.mark.parametrize("recipe", HI2_RECIPES)
+def test_empty_prefer_is_the_canonical_rows_arm(stub, recipe):
     venv, root, sha = stub
-    line = tunableop_line(plan(venv, root, "RECIPE=27b-hi2-tp2", "TUNABLEOP_PREFER="))
+    line = tunableop_line(plan(venv, root, f"RECIPE={recipe}", "TUNABLEOP_PREFER="))
     assert f"{CANON} (auto-selected for librocblas.so.5 {sha})" in line
     assert DERIVED not in line
 
 
-def test_explicit_profile_wins_over_the_preference(stub):
+@pytest.mark.parametrize("recipe", HI2_RECIPES)
+def test_caller_environment_empty_prefer_wins(stub, recipe):
+    venv, root, sha = stub
+    line = tunableop_line(plan(venv, root, f"RECIPE={recipe}", TUNABLEOP_PREFER=""))
+    assert f"{CANON} (auto-selected for librocblas.so.5 {sha})" in line
+    assert DERIVED not in line
+
+
+@pytest.mark.parametrize("recipe", HI2_RECIPES)
+def test_explicit_profile_wins_over_the_preference(stub, recipe):
     venv, root, _ = stub
     line = tunableop_line(
-        plan(venv, root, "RECIPE=27b-hi2-tp2", f"TUNABLEOP_PROFILE={CANON}")
+        plan(venv, root, f"RECIPE={recipe}", f"TUNABLEOP_PROFILE={CANON}")
     )
     assert f"{CANON} (requested" in line
 
