@@ -115,8 +115,12 @@ __device__ __forceinline__ int log2_block(int b) {
 // One thread per (row, group). PI = true writes the pair-interleaved layout
 // the v2 GEMV consumes (stored[2i] = x'[i], stored[2i+1] = x'[i+8] inside
 // each 16-group); the values are bit-identical, only their position differs.
+// SILU: x is the [M, 2K] gate | up output of the gate_up projection and the
+// transform's input is silu(gate) * up, evaluated as SiluAndMul does (silu in
+// fp32 rounded to fp16, then the fp16 product), so no activation launch is
+// needed in front of the down projection.
 // ---------------------------------------------------------------------------
-template <bool PI>
+template <bool PI, bool SILU = false>
 __global__ void act_transform_kernel(const half* __restrict__ x,
                                      const int64_t ldx,
                                      const half* __restrict__ col_scale,
@@ -131,7 +135,16 @@ __global__ void act_transform_kernel(const half* __restrict__ x,
   const half* xp = x + m * ldx + gi * kGroup;
   float v[kGroup];
   #pragma unroll
-  for (int i = 0; i < kGroup; ++i) v[i] = __half2float(xp[i]);
+  for (int i = 0; i < kGroup; ++i) {
+    if constexpr (SILU) {
+      const float g = __half2float(xp[i]);
+      const half a = __float2half_rn(g / (1.0f + expf(-g)));
+      v[i] = __half2float(
+          __float2half_rn(__half2float(a) * __half2float(xp[K + i])));
+    } else {
+      v[i] = __half2float(xp[i]);
+    }
+  }
   if (col_scale != nullptr) {
   #pragma unroll
     for (int i = 0; i < kGroup; ++i)
@@ -1842,7 +1855,7 @@ __global__ void gemv_i8_kernel(const int8_t*, const half*, const int32_t*,
                                const half*, const uint8_t*, const uint8_t*,
                                half*, const int64_t, const int) {}
 
-template <bool PI>
+template <bool PI, bool SILU = false>
 __global__ void act_transform_kernel(const half*, const int64_t, const half*,
                                      const uint8_t*, half*, const int,
                                      const int) {}
@@ -1920,8 +1933,10 @@ void check_act(const torch::Tensor& x, int64_t K) {
 
 void launch_transform(const torch::Tensor& x, const torch::Tensor& col_scale,
                       const torch::Tensor& had, torch::Tensor& y,
-                      cudaStream_t stream, bool pair_interleaved = false) {
-  const int64_t M = x.size(0), K = x.size(1);
+                      cudaStream_t stream, bool pair_interleaved = false,
+                      bool silu_mul = false) {
+  // silu_mul: x is [M, 2K] (gate | up), y [M, K].
+  const int64_t M = x.size(0), K = silu_mul ? x.size(1) / 2 : x.size(1);
   const half* s = nullptr;
   if (col_scale.numel() > 0) {
     check_dev(col_scale, "col_scale", torch::kHalf);
@@ -1937,13 +1952,21 @@ void launch_transform(const torch::Tensor& x, const torch::Tensor& col_scale,
   const half* xp = reinterpret_cast<const half*>(x.data_ptr());
   half* yp = reinterpret_cast<half*>(y.data_ptr());
   const uint8_t* hp = had.data_ptr<uint8_t>();
+#define HI2_TRANSFORM(PI, SILU)                                       \
+  hf::act_transform_kernel<PI, SILU><<<blocks, threads, 0, stream>>>( \
+      xp, x.stride(0), s, hp, yp, static_cast<int>(M), static_cast<int>(K))
   if (pair_interleaved) {
-    hf::act_transform_kernel<true><<<blocks, threads, 0, stream>>>(
-        xp, x.stride(0), s, hp, yp, static_cast<int>(M), static_cast<int>(K));
+    if (silu_mul)
+      HI2_TRANSFORM(true, true);
+    else
+      HI2_TRANSFORM(true, false);
   } else {
-    hf::act_transform_kernel<false><<<blocks, threads, 0, stream>>>(
-        xp, x.stride(0), s, hp, yp, static_cast<int>(M), static_cast<int>(K));
+    if (silu_mul)
+      HI2_TRANSFORM(false, true);
+    else
+      HI2_TRANSFORM(false, false);
   }
+#undef HI2_TRANSFORM
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -2423,16 +2446,22 @@ void launch_moe_gemm(const torch::Tensor& x, const torch::Tensor& sorted_ids,
 // x [M, K] fp16 -> out [M, K] fp16 = H16(x / s) on flagged groups.
 // pair_interleaved: write the layout the v2 GEMV consumes (same values,
 // stored[2i] = x'[i], stored[2i+1] = x'[i+8] inside each 16-group).
+// silu_mul: x is [M, 2K] (gate | up) and the transform's input is
+// silu(gate) * up as SiluAndMul computes it.
 void rdna_hint_flex_act_transform_rdna2(torch::Tensor x,
                                         torch::Tensor col_scale,
                                         torch::Tensor had, torch::Tensor out,
-                                        bool pair_interleaved) {
+                                        bool pair_interleaved, bool silu_mul) {
   check_act(x, x.size(1));
   check_dev(out, "out", torch::kHalf);
-  TORCH_CHECK(out.sizes() == x.sizes(), "hi2: out must match x");
+  const int64_t K = silu_mul ? x.size(1) / 2 : x.size(1);
+  TORCH_CHECK(!silu_mul || x.size(1) % 128 == 0,
+              "hi2: silu_mul needs x = [M, 2K] with K a multiple of 64");
+  TORCH_CHECK(out.dim() == 2 && out.size(0) == x.size(0) && out.size(1) == K,
+              "hi2: out must be [M, K]");
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream();
-  launch_transform(x, col_scale, had, out, stream, pair_interleaved);
+  launch_transform(x, col_scale, had, out, stream, pair_interleaved, silu_mul);
 }
 
 // x [M, K] fp16 (already transformed) -> out [M, R] fp16 (written, not
@@ -2740,13 +2769,17 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
     torch::Tensor x, torch::Tensor col_scale, torch::Tensor had,
     torch::Tensor codes, torch::Tensor code_off, torch::Tensor blk_params,
     torch::Tensor param_off, torch::Tensor row_consts, torch::Tensor row_nbits,
-    torch::Tensor row_block, bool transform, int64_t decode_max_m,
-    int64_t mode) {
+    torch::Tensor row_block, bool transform, int64_t decode_max_m, int64_t mode,
+    bool silu_mul) {
   const Hi2Weight w{codes,      code_off,  blk_params, param_off,
                     row_consts, row_nbits, row_block};
   const int64_t R = check_weight(w);
-  const int64_t K = x.size(1);
-  check_act(x, K);
+  check_act(x, x.size(1));
+  // silu_mul: x is the [M, 2K] gate | up output and the op applies
+  // silu(gate) * up inside the input transform (RDNA_HINT_FLEX_FUSE_SILU).
+  const int64_t K = silu_mul ? x.size(1) / 2 : x.size(1);
+  TORCH_CHECK(!silu_mul || (transform && mode == 0 && K % 64 == 0),
+              "hi2: silu_mul needs the transform, F16 mode and K % 64 == 0");
   TORCH_CHECK(mode >= 0 && mode <= 2, "hi2: mode must be 0, 1 or 2");
   const int64_t M = x.size(0);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
@@ -2770,7 +2803,8 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
   torch::Tensor xt;
   if (transform) {
     xt = torch::empty({M, K}, x.options());
-    launch_transform(x, col_scale, had, xt, stream, /*pair_interleaved=*/v2);
+    launch_transform(x, col_scale, had, xt, stream, /*pair_interleaved=*/v2,
+                     silu_mul);
   } else {
     xt = x.contiguous();
   }
