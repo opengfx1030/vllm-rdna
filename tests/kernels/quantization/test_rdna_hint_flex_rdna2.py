@@ -107,11 +107,16 @@ def make_hi2(
     had: str = "mixed",
     smooth: bool = True,
     seed: int = 0,
+    row_nbits: torch.Tensor | None = None,
 ) -> dict:
     """Random tensor in the checkpoint layout (spec 2.4), built with the
-    reference packer. Row widths and block sizes are drawn per row."""
+    reference packer. Row widths and block sizes are drawn per row; row_nbits
+    fixes the widths instead (the draw still happens, so seeds keep their
+    meaning)."""
     g = torch.Generator().manual_seed(seed)
     nb = torch.tensor(nbits)[torch.randint(len(nbits), (r,), generator=g)]
+    if row_nbits is not None:
+        nb = row_nbits.to(nb.dtype)
     bl = torch.tensor(blocks)[torch.randint(len(blocks), (r,), generator=g)]
     words, params = [], []
     code_off, param_off = [0], [0]
@@ -739,3 +744,198 @@ def test_i8gemm_vs_reference(m, nbits, blocks, tile):
     assert rel_err(out, hu.i8g64_reference(xq, sx, t)) < 1e-3
     # Per-64 int8 activations stay within the spec 5 error budget.
     assert rel_err(out, ref_linear(x, t)) < 2e-2
+
+
+# ---- GEMV v2 (RDNA_HINT_FLEX_GEMV=v2 | auto): rows per wave, pair-interleaved x ----
+def _pi(x: torch.Tensor) -> torch.Tensor:
+    """Natural -> pair-interleaved activation order: stored[2i] = x[i],
+    stored[2i + 1] = x[i + 8] inside every 16-column group."""
+    g = x.reshape(*x.shape[:-1], -1, GROUP)
+    return torch.stack([g[..., :8], g[..., 8:]], dim=-1).reshape(x.shape)
+
+
+def _gemv2(x, d, out, cfg=(0, 0, 0), x_pi=False):
+    """GEMV v2 with cfg = (tokens per block, rows per wave, waves per block);
+    0 selects automatically."""
+    from vllm import _custom_ops as ops
+
+    ops.rdna_hint_flex_gemv2_rdna2(
+        x,
+        d["codes"],
+        d["code_off"],
+        d["blk_params"],
+        d["param_off"],
+        d["row_consts"],
+        d["row_nbits"],
+        d["row_block"],
+        out,
+        cfg[0],
+        cfg[1],
+        cfg[2],
+        x_pi,
+    )
+
+
+_V2_CASES: dict[tuple, tuple] = {}
+
+
+def _v2_case(nbits, blocks):
+    """R = 203 rows (not a multiple of any rows-per-block) and K = 1088 (68
+    groups: two full wave iterations and a 4-lane tail)."""
+    key = (nbits, blocks)
+    if key not in _V2_CASES:
+        t = make_hi2(
+            203, 1088, nbits=nbits, blocks=blocks, had="none", smooth=False, seed=91
+        )
+        _V2_CASES[key] = (t, _dev(t))
+    return _V2_CASES[key]
+
+
+_V2_CONFIGS = [
+    (0, 0, 0),
+    (1, 4, 4),
+    (2, 2, 8),
+    (3, 4, 4),
+    (4, 2, 4),
+    (6, 2, 4),
+    (8, 2, 8),
+    (8, 1, 4),
+]
+
+
+@gfx1030_only
+@pytest.mark.parametrize("smooth", [False, True])
+@pytest.mark.parametrize("had", ["none", "all", "mixed"])
+def test_act_transform_pair_interleaved(smooth, had):
+    from vllm import _custom_ops as ops
+
+    t = make_hi2(1, 1024, had=had, smooth=smooth, seed=8)
+    d = _dev(t)
+    x = torch.randn(6, 1024, dtype=torch.float16, device="cuda")
+    nat = torch.empty(6, 1024, dtype=torch.float16, device="cuda")
+    pi = torch.empty_like(nat)
+    ops.rdna_hint_flex_act_transform_rdna2(x, d["col_scale"], d["had"], nat)
+    ops.rdna_hint_flex_act_transform_rdna2(x, d["col_scale"], d["had"], pi, True)
+    torch.accelerator.synchronize()
+    assert torch.equal(pi, _pi(nat))
+
+
+@gfx1030_only
+@pytest.mark.parametrize("x_pi", [False, True])
+@pytest.mark.parametrize("cfg", _V2_CONFIGS)
+@pytest.mark.parametrize("m", [1, 2, 3, 4, 5, 7, 8, 9, 16])
+@pytest.mark.parametrize(
+    "nbits,blocks",
+    [((2,), (32,)), ((4,), (64,)), ((8,), (16,)), ((2, 4, 8), (16, 32, 64))],
+)
+def test_gemv2_vs_reference(m, nbits, blocks, cfg, x_pi):
+    t, d = _v2_case(nbits, blocks)
+    x = torch.randn(m, 1088, dtype=torch.float16)
+    out = torch.full((m, 203), float("nan"), dtype=torch.float16, device="cuda")
+    xd = _pi(x) if x_pi else x
+    _gemv2(xd.cuda(), d, out, cfg, x_pi)
+    torch.accelerator.synchronize()
+    assert not torch.isnan(out).any(), "unwritten outputs"
+    # fp32 accumulation + one fp16 output rounding (<= 2^-11 relative)
+    assert rel_err(out, ref_linear(x, t)) < 1e-3, (m, nbits, blocks, cfg, x_pi)
+
+
+@gfx1030_only
+@pytest.mark.parametrize("cfg", _V2_CONFIGS)
+@pytest.mark.parametrize("m", [1, 3, 8, 13])
+def test_gemv2_pair_interleaved_equals_natural(m, cfg):
+    """The two activation layouts feed the same pairs to the same dots."""
+    t, d = _v2_case((2, 4, 8), (16, 32, 64))
+    x = torch.randn(m, 1088, dtype=torch.float16, device="cuda")
+    a = torch.empty(m, 203, dtype=torch.float16, device="cuda")
+    b = torch.empty_like(a)
+    _gemv2(x, d, a, cfg, False)
+    _gemv2(_pi(x), d, b, cfg, True)
+    torch.accelerator.synchronize()
+    assert torch.equal(a, b)
+
+
+# Rows of INT2 / INT4 (/ INT8) in runs of `run`: waves of RPW rows straddle the
+# run boundaries, which is where the mixed-width loop (or, with an INT8 row in
+# the wave, the row-at-a-time fallback) runs.
+_MIXED_PATTERNS = [
+    ((2, 4), 1),
+    ((2, 4), 2),
+    ((4, 2), 3),
+    ((2, 4), 7),
+    ((2, 4, 8), 1),
+    ((8, 2, 4), 3),
+    ((4, 8), 2),
+]
+_MIXED_K = [512, 1088, 1600]  # 1, 2 and 3 full wave iterations (+ tails)
+
+
+def _mixed_case(widths, run, k):
+    key = ("mixed", widths, run, k)
+    if key not in _V2_CASES:
+        nb = torch.tensor(widths)[(torch.arange(203) // run) % len(widths)]
+        t = make_hi2(203, k, had="none", smooth=False, seed=93, row_nbits=nb)
+        _V2_CASES[key] = (t, _dev(t))
+    return _V2_CASES[key]
+
+
+@gfx1030_only
+@pytest.mark.parametrize("k", _MIXED_K)
+@pytest.mark.parametrize("cfg", [(0, 0, 0), (1, 4, 4), (4, 2, 4), (8, 4, 8)])
+@pytest.mark.parametrize("m", [1, 3, 9])
+@pytest.mark.parametrize("widths,run", _MIXED_PATTERNS)
+def test_gemv2_mixed_width_vs_reference(m, widths, run, cfg, k):
+    t, d = _mixed_case(widths, run, k)
+    x = torch.randn(m, k, dtype=torch.float16)
+    out = torch.full((m, 203), float("nan"), dtype=torch.float16, device="cuda")
+    _gemv2(_pi(x).cuda(), d, out, cfg, True)
+    torch.accelerator.synchronize()
+    assert not torch.isnan(out).any(), "unwritten outputs"
+    assert rel_err(out, ref_linear(x, t)) < 1e-3, (m, widths, run, cfg, k)
+
+
+@gfx1030_only
+@pytest.mark.parametrize("k", _MIXED_K)
+@pytest.mark.parametrize("m", [1, 3, 8])
+@pytest.mark.parametrize("widths,run", _MIXED_PATTERNS)
+def test_gemv2_result_independent_of_row_grouping(m, widths, run, k):
+    """The lanes of a row sum the same products in the same order whatever the
+    wave holds (one row, or several rows of other widths) and whatever MT, so
+    the outputs of all configs are bit-identical."""
+    t, d = _mixed_case(widths, run, k)
+    x = _pi(torch.randn(m, k, dtype=torch.float16, device="cuda"))
+    cfgs = [
+        (8, 1, 4),
+        (8, 2, 4),
+        (8, 4, 4),
+        (8, 4, 8),
+        (6, 2, 8),
+        (1, 4, 4),
+        (2, 2, 4),
+        (4, 4, 4),
+    ]
+    outs = []
+    for cfg in cfgs:
+        o = torch.empty(m, 203, dtype=torch.float16, device="cuda")
+        _gemv2(x, d, o, cfg, True)
+        outs.append(o)
+    torch.accelerator.synchronize()
+    for cfg, o in zip(cfgs[1:], outs[1:]):
+        assert torch.equal(o, outs[0]), cfg
+
+
+@gfx1030_only
+@pytest.mark.parametrize("m", [1, 2, 3, 4, 5, 8, 9, 24, 48])
+@pytest.mark.parametrize("had,smooth", [("none", False), ("mixed", True)])
+def test_linear_kernel_decode_rows(m, had, smooth):
+    """R >= 1024 rows reach the v2 path through the production op when
+    RDNA_HINT_FLEX_GEMV=v2 (all M) or auto (M >= 2); v1 otherwise.
+    `transform` False takes the natural-order activation."""
+    r, k = 1030, 1088
+    t = make_hi2(r, k, had=had, smooth=smooth, seed=92 + m)
+    d = _dev(t)
+    x = torch.randn(m, k, dtype=torch.float16)
+    y = _linear(x.cuda(), d, hu.needs_transform(t))
+    torch.accelerator.synchronize()
+    assert y.shape == (m, r)
+    assert rel_err(y, ref_linear(x, t)) < 2e-3
