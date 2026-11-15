@@ -1,8 +1,10 @@
 # LeapQuant page packing: fewer GDN groups per request (draft, default off)
 
-Status: draft. The flag is off by default. Every number below comes from the
-real KV-cache planner on a CPU or from a byte computation shown here. No GPU ran
-this change. The section "Pending GPU validation" lists what is not proven.
+Status: draft. The flag is off by default. The numbers below come from the
+real KV-cache planner on a CPU or from a byte computation shown here. A GPU run
+of 2026-11-15 ([validation note](leapquant-pr170-gpu-validation-2026-11-15.md))
+passed the four packed-page kernel tests. No packed engine boot has run yet.
+The section "Pending GPU validation" lists what is not proven.
 
 This is the second LeapQuant change for the RDNA2 fork. The first change
 (PR #168, [LeapQuant GDN](leapquant-gdn-2026-11-13.md)) stores one GDN value
@@ -367,21 +369,25 @@ python tests/v1/core/test_leapquant_page_packing.py   # prints the tables
 
 ## Pending GPU validation
 
-Nothing below ran. No GPU was used for this change.
+Status after the GPU run of 2026-11-15 on two V620 with the 27B AWQ at TP2
+([validation note](leapquant-pr170-gpu-validation-2026-11-15.md)). The kernel
+item is done. The 27B packed boot (arm `P`, block 1024) was queued behind the
+quiet windows of another job and had not booted when this was written, and the
+Flash-Next items need four GPUs, so the other items are open.
 
 - [ ] Boot with `REPLAYSSM_STATE_DTYPE=leapquant VLLM_RDNA_GDN_LEAPQUANT_PACK=1` at
   block 640. The log shows 5 KV-cache groups instead of 6 and the line
   `use 2 KV-cache group(s); one block holds 19 of them`. It prints
   `GPU KV cache size: 273,220 tokens` and a concurrency of 1.04x. These are the
   CPU planner values [INFERENCE until booted].
-- [ ] LeapQuant kernels on packed pages with layers at `k x 469,888` bytes
+- [x] LeapQuant kernels on packed pages with layers at `k x 469,888` bytes
   inside one block. Check equality with isolated blobs. Check that the bytes
   of the neighbor layers and of the slack stay unchanged. The GPU tests
   `test_packed_pages_match_isolated_blobs` (store, normalize, decode) and
   `test_grouped_normalize_on_packed_pages` (grouped normalize) in
-  `tests/kernels/mamba/test_gdn_leapquant_rdna2.py` are written for this. They
-  were not run. Their view arithmetic was checked on a CPU only.
-  `mono_gdn_lq_rdna2` and the materialize kernel have no packed-page test yet.
+  `tests/kernels/mamba/test_gdn_leapquant_rdna2.py` passed on gfx1030 on
+  2026-11-15, two parametrizations each. `mono_gdn_lq_rdna2` and the
+  materialize kernel have no packed-page test yet.
 - [ ] Grouped normalize with two groups of 18 layers (`_LqNormalizeGroup`
   offsets) under `FULL_AND_PIECEWISE` capture and replay.
 - [ ] Align-mode state copies (`v1_mamba_rdna2.cu`) with unpadded 469,888-byte

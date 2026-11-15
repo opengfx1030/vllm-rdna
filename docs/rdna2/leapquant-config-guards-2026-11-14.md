@@ -14,9 +14,11 @@ The LeapQuant RFC ([vllm#64725](https://github.com/vllm-project/vllm/issues/6472
 lists these checks. This document says which ones this fork takes, which ones it
 changes, and why.
 
-**Status.** CPU unit tests pass (see [Tests](#tests)). No part of this change
-ran on a GPU. [Pending GPU validation](#pending-gpu-validation) lists the checks
-that need a gfx103 host.
+**Status.** CPU unit tests pass (see [Tests](#tests)). The GPU run of 2026-11-15
+(two V620, Qwen3.8-27B AWQ at TP2) is in
+[leapquant-pr170-gpu-validation-2026-11-15.md](leapquant-pr170-gpu-validation-2026-11-15.md).
+[Pending GPU validation](#pending-gpu-validation) says what it covered and what
+still needs Flash-Next on four GPUs.
 
 ## Credits
 
@@ -192,8 +194,10 @@ Notes:
 | Window = `--replayssm-buffer-len` | Window 32, fixed | See [Why the window is 32](#why-the-window-is-32). |
 
 Mamba align prefix caching on the V2 model runner and FULL_AND_PIECEWISE also
-stay supported. The align copy marker now comes from the spec (see below). That
-path has no GPU run yet. [INFERENCE: it must behave as before.]
+stay supported. The align copy marker now comes from the spec (see below). On
+the 27B at TP2 with the V2 runner, the prefix probe hits 2,048 tokens and the
+warm output equals the cold output
+([GPU validation note](leapquant-pr170-gpu-validation-2026-11-15.md)).
 
 ## State format identity
 
@@ -358,7 +362,7 @@ HIP_VISIBLE_DEVICES= pytest -q -rs \
 | `tests/v1/kv_connector/unit/test_leapquant_state_refused.py` (new) | The connector factory refusal. | 6 passed |
 | `tests/v1/core/test_leapquant_scheduling.py` (changed) | The growth gate follows the flag. | 25 passed, 1 skipped. The skip pre-dates this change: it needs two concurrent batches. |
 | `tests/tools/rdna/test_serve_replayssm_state_dtype.py` (new) | The launcher key and the retired switch, in print mode. | 7 passed. Against the launcher of the first PR head, 6 of the 7 fail. |
-| `tests/kernels/mamba/test_gdn_leapquant_rdna2.py` (not changed) | The GPU kernels. | 22 skipped: it needs a gfx103 GPU. Pending GPU validation. |
+| `tests/kernels/mamba/test_gdn_leapquant_rdna2.py` (not changed) | The GPU kernels. | 26 passed on gfx1030 (2026-11-15). The file has 26 tests since the packing change added four. Skipped without a GPU. |
 
 The three CPU test files for the engine together: 69 passed, 1 skipped. The
 launcher test file and `tests/tools/rdna/test_serve_pci_buses.py` together:
@@ -383,7 +387,7 @@ The failing tests are the same tests in both trees.
 | 11 files: connector, offloading, KV cache utils and planning, contiguous packing, mamba align chunk split, single-type manager (`tests/v1/kv_connector/unit/*`, `tests/v1/core/*`) | 8 failed, 442 passed, 1 skipped | 8 failed, 442 passed, 1 skipped |
 | 13 files: engine arguments, KV cache dtype, config utils, GDN and mamba kernels, GDN metadata builder, mamba align block table, KDA metadata, Alice-AI, Qwen4Exp PLE, GLM-5 KDA state dtype | 173 failed, 246 passed, 204 skipped | 173 failed, 246 passed, 204 skipped |
 
-The box has no GPU. Two causes were read from the output: a failed model
+These runs had no GPU visible. Two causes were read from the output: a failed model
 download (`test_multi_example_connector_consistency`) and an assertion on a
 chunk boundary (`test_flash_next_tp4_materializes_replay_state`). The other
 failures were not investigated one by one. [INFERENCE: most need a GPU.] These
@@ -391,30 +395,47 @@ tests do not give evidence for this change. Run them again on a GPU host.
 
 ## Pending GPU validation
 
-Nothing in this change ran on a GPU. These checks must run on a gfx103 host
-before the change is accepted as equal to the environment-variable path:
+Status after the GPU run of 2026-11-15 on two V620 (gfx1030) with the 27B AWQ at
+TP2, MTP2 and `FULL_AND_PIECEWISE`
+([validation note](leapquant-pr170-gpu-validation-2026-11-15.md)). The
+checks that name Flash-Next or `--monokernel` need HIP 2-5 and stay open.
 
 1. **Boot and serve.** Start `RECIPE=flashnext-leapquant-mtp2` with the flag.
    Compare with the first document: the KV capacity (273,456 tokens), the
    group sizes `(512, 512, 512, 512, 8, 512)`, the worker log line, and the
    greedy, prefix-cache, and concurrency probes.
+   **Open for Flash-Next.** Done on the 27B: the flag boots, the worker line is
+   printed, and the greedy (3/3), PPL, prefix-cache (cold text equals warm
+   text) and concurrency probes pass.
 2. **Layer check in a worker.** The layer-time validator call runs in each GDN
    layer of each rank, including the MTP drafter layers and the MonoKernel
    path.
+   **Done on the 27B** for the GDN layers of both ranks (its MTP layer is an
+   attention layer). **Open** for the MonoKernel path, which only Flash-Next
+   uses.
 3. **Align copy marker.** On the V2 runner, prefix-cache hits must use
    `get_leapquant_copy_spec` through `select_state_copy_funcs`. Before this
    change the environment variable set it.
+   **Done.** With the flag on the V2 runner, the prefix probe hits 2,048 tokens
+   and the warm output equals the cold output.
 4. **Graphs and speculation.** FULL_AND_PIECEWISE capture and replay, MTP2,
    and `--monokernel` must behave as before with the flag.
+   **Done** for `FULL_AND_PIECEWISE` and MTP2 on the 27B (quality against the
+   floor: see the validation note). **Open** for `--monokernel`.
 5. **Kernel tests.** Run `tests/kernels/mamba/test_gdn_leapquant_rdna2.py` on
    gfx103. The layer constructor path changed.
+   **Done:** 26 passed.
 6. **Rejection at boot.** Start with `--kv-transfer-config` or
    `--kv-offloading-size` and the flag. The server must stop before it loads
    weights. CPU tests cover the config point only.
+   **Done.** Both stop in the API server, before any worker starts (messages in
+   section 5 of the validation note).
 7. **Dynamic speculation.** The error text changed. The behavior must not.
+   **Not run.**
 8. **Tests that failed in both trees.** The 8 and 173 tests under
    [Regression runs](#regression-runs) fail on a CPU host with and without
    this change. Run them on a GPU host.
+   **Not run.**
 
 ## Not done
 

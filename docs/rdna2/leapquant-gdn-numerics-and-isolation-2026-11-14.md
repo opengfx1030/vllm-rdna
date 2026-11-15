@@ -7,10 +7,12 @@ second LeapQuant PR. The first PR is #168 of this fork. Its doc is
 [leapquant-gdn-2026-11-13.md](leapquant-gdn-2026-11-13.md).
 
 **Status.** The author had no GPU for this work. The CPU results come from the
-FP32 oracle and from host-only checks on a CPU box. Nothing in this note was
-run on a GPU. Each GPU claim is *pending GPU validation*. The section "Pending
-GPU checklist" lists the open steps. `[INFERENCE]` marks a claim that nobody
-measured.
+FP32 oracle and from host-only checks on a CPU box. The GPU tests ran later, on
+2026-11-15, on two V620 (gfx1030): all 26 + 46 tests pass, see
+[leapquant-pr170-gpu-validation-2026-11-15.md](leapquant-pr170-gpu-validation-2026-11-15.md).
+Text below that says "pending GPU validation" or "not built" is the state at the
+time of writing; the section "Pending GPU checklist" holds the current state.
+`[INFERENCE]` marks a claim that nobody measured.
 
 ## Credits
 
@@ -29,18 +31,18 @@ measured.
 
 ## Summary
 
-| # | Item | RFC | CPU-verified | Pending GPU |
+| # | Item | RFC | CPU-verified | GPU (gfx1030, 2026-11-15) |
 |---|---|---|---|---|
-| 1 | NaN guard in the fold | 2.2, 4 (11), 5 | 92 oracle tests, old-vs-new probes | kernel build, 3 tests |
-| 2 | Determinism under load | 2.2, 4 (11), 5 | nothing (needs a GPU) | 2 tests, 200 repeats each |
-| 3 | Stale state of recycled blocks | 5 | 30 oracle tests | 31 tests |
-| 4 | Flush race | 2.2, 5 | code review only | 10 tests |
-| 5 | End-to-end decode benchmark | 4 (13) | 17 tests, `--help`, `--dry-run` | the benchmark run |
+| 1 | NaN guard in the fold | 2.2, 4 (11), 5 | 92 oracle tests, old-vs-new probes | kernel built, 3 tests pass |
+| 2 | Determinism under load | 2.2, 4 (11), 5 | nothing (needs a GPU) | 2 tests pass, 200 repeats each, 3 runs |
+| 3 | Stale state of recycled blocks | 5 | 30 oracle tests | 31 tests pass |
+| 4 | Flush race | 2.2, 5 | code review only | 10 tests pass |
+| 5 | End-to-end decode benchmark | 4 (13) | 17 tests, `--help`, `--dry-run` | the benchmark run: not done |
 
 Files:
 
 - `vllm/model_executor/layers/mamba/ops/leapquant_gdn.py`: oracle fix.
-- `csrc/rocm/gdn_leapquant_rdna2.cu`: the same fix in the HIP fold. Not built.
+- `csrc/rocm/gdn_leapquant_rdna2.cu`: the same fix in the HIP fold. Built and run on gfx1030.
 - `tests/kernels/mamba/test_gdn_leapquant_oracle.py`: 122 CPU tests.
 - `tests/kernels/mamba/test_gdn_leapquant_safety_rdna2.py`: 46 GPU tests. They
   skip without a gfx103x GPU.
@@ -170,10 +172,11 @@ Two earlier designs failed on the CPU and were dropped:
 `_sane_header` (new, item 3) reads a header that fails `lq_header_ok` as empty,
 like the kernels.
 
-### The HIP mirror (not built)
+### The HIP mirror
 
-`csrc/rocm/gdn_leapquant_rdna2.cu` has the same logic. **No HIP compiler was
-used.** The file header says "NOT BUILT, NOT RUN".
+`csrc/rocm/gdn_leapquant_rdna2.cu` has the same logic. It was written without a
+HIP compiler, and its header said "NOT BUILT, NOT RUN". It was built and run on
+gfx1030 on 2026-11-15, and the note is removed.
 
 - `lq_orthonormalize`: wave 0 only. It keeps the column in registers, uses the
   new `lq_wmax` and the same two sweeps and test. A NaN entry fails
@@ -216,7 +219,7 @@ It was not measured.
   `_orthonormalize` unit tests and the rank-1 trajectory. 92 tests.
 - GPU, `test_gdn_leapquant_safety_rdna2.py`: the same state list through the
   `store` and `materialize` kernels, a neighbour-head check, and the rank-1
-  trajectory with window flushes. 3 tests. Pending GPU validation.
+  trajectory with window flushes. 3 tests, passed on gfx1030 (2026-11-15).
 
 ## 2. Determinism under load
 
@@ -230,7 +233,7 @@ All other reductions use shuffles and shared-memory sums in a fixed order
 (`lq_ksum`, `lq_wsum`, `lq_reduce_over_v`). A comment at lines 94 to 99 of the
 file says the same. This does not replace the test.
 
-GPU tests (pending GPU validation), 200 repeats each (`N_REPEATS`):
+GPU tests, 200 repeats each (`N_REPEATS`). Both passed on gfx1030 on 2026-11-15, alone and twice with an external matmul loop on the same GPU:
 
 - `test_store_normalize_decode_are_bitwise_reproducible_under_load`: cold fold
   (`store`), warm fold (`normalize`), replay and decode on identical inputs.
@@ -241,8 +244,8 @@ GPU tests (pending GPU validation), 200 repeats each (`N_REPEATS`):
 - `test_mono_gdn_lq_is_bitwise_reproducible_under_load`: the same for the
   MonoKernel LeapQuant path, with the scratch buffer reused.
 
-**Status: not yet run.** The tests are written and skip without a gfx103x GPU.
-CPU-verified: nothing. A CPU run cannot show a GPU race.
+**Status: run on gfx1030 (2026-11-15), 3 runs, 0 failures.** A pass shows no
+difference in 200 repeats per run. It does not show that no race exists.
 
 ## 3. Stale state of recycled blocks
 
@@ -321,7 +324,7 @@ same with NaN in every section, and a valid-looking header with stale records.
 `prefill_pass` adds the `normalize` and `materialize` that the serving prefill
 path runs on the leftovers before the store.
 
-GPU, `test_gdn_leapquant_safety_rdna2.py` (31 tests, pending GPU validation):
+GPU, `test_gdn_leapquant_safety_rdna2.py` (31 tests, all passed on gfx1030, 2026-11-15):
 
 - `test_new_tenant_is_independent_of_the_leftovers_of_a_recycled_block[kind, prefill_pass]`:
   store, first decode, flush and later reads equal those of a clean block, bit
@@ -401,7 +404,7 @@ valid header and a different cursor. See section 3.
 
 ### Tests
 
-GPU, `test_gdn_leapquant_safety_rdna2.py` (10 tests, pending GPU validation):
+GPU, `test_gdn_leapquant_safety_rdna2.py` (10 tests, all passed on gfx1030, 2026-11-15):
 
 - `test_grouped_flush_of_full_windows_equals_per_layer_launches[window, mixed, load]`:
   32 requests and 6 layers reach the window in the same launch with MTP
@@ -475,8 +478,8 @@ pytest -v -s tests/kernels/mamba/test_gdn_leapquant_rdna2.py
 pytest -v -s tests/kernels/mamba/test_gdn_leapquant_safety_rdna2.py
 ```
 
-On a CPU host the GPU tests skip: 68 skipped for the two files together (46 new
-tests and 22 from the first PR).
+On a CPU host the GPU tests skip: 72 for the two files together (46 new tests
+and 26 in the first file: the 22 of the first PR and 4 packed-page tests).
 
 The author also ran the new GPU test file once on a CPU box. The FP32 oracle
 stood in for the HIP ops and the MonoKernel ops were stubs: 46 passed. This
@@ -485,21 +488,34 @@ the tree. It says nothing about the kernels.
 
 ## Pending GPU checklist
 
-Nothing below was done. Each step needs a GPU or a build.
+State after the GPU run of 2026-11-15 on two V620 (gfx1030) at the head of this
+branch ([validation note](leapquant-pr170-gpu-validation-2026-11-15.md)).
 
-- [ ] Build `_rocm_C` with the changed `gdn_leapquant_rdna2.cu`. The build uses
-      `-Werror=unused-variable`.
-- [ ] Run `test_gdn_leapquant_rdna2.py`. The fold changed for every blob, so the
-      first PR tests must pass again.
-- [ ] Run `test_gdn_leapquant_safety_rdna2.py` (46 tests). The tests never ran
-      on a GPU. A failure is a kernel bug or a test bug. Find out which one.
-- [ ] Run the determinism tests (200 repeats) on a GPU that has other work. Run
-      them more than once.
-- [ ] Run the grouped-flush and batched-decode tests on the target GPU.
-- [ ] Re-run the quality checks of the first PR (decode-path KL, gated checks).
-      The new fold gives other compensators for rank-deficient heads.
+- [x] Build `_rocm_C` with the changed `gdn_leapquant_rdna2.cu`. Built
+      (817 s). The build log has no warning for the file, and
+      `-Werror=unused-variable` did not fire.
+- [x] Run `test_gdn_leapquant_rdna2.py`: 26 passed (the 22 of the first PR and
+      the 4 packed-page tests).
+- [x] Run `test_gdn_leapquant_safety_rdna2.py`: 46 passed on the first run, so
+      there was no failure to sort into kernel bug or test bug. The same file
+      against a `_rocm_C` built from the kernel source before the fold guard
+      gives 44 passed and 2 failed (the two tests with an exactly rank-deficient
+      state), so the tests see the defect that the guard fixes.
+- [x] Run the determinism tests (200 repeats) on a GPU that has other work, more
+      than once. Passed in three runs of the file (the tests run a second
+      stream of matmuls; two of the runs also had an external FP16 matmul loop
+      on the same GPU).
+- [x] Run the grouped-flush and batched-decode tests on the target GPU. 10
+      passed, in the same three runs.
+- [ ] Re-run the quality checks of the first PR (decode-path KL, gated checks)
+      with the fold guard. Partly done on the 27B AWQ at TP2, flag off against
+      flag on: long-context PPL 3.4140 to 3.4135 (-0.014%), decode-path KL 2.1e-4
+      and 1.0e-4 nats per position with no confident flip, prompt-level KL
+      1.1e-4. Open: the boot-to-boot floor (a second flag-off boot) and the
+      Flash-Next TP4 re-run.
 - [ ] Measure the fold time before and after. [INFERENCE] The change is small.
-- [ ] Remove the "NOT BUILT, NOT RUN" note in `gdn_leapquant_rdna2.cu`.
+      Not measured: the run took no timed window.
+- [x] Remove the "NOT BUILT, NOT RUN" note in `gdn_leapquant_rdna2.cu`.
 - [ ] Run the benchmark arms on the target GPU and record the numbers here.
 - [ ] Confirm that the smoothing factor of a normal state is bit-identical to
       the first PR. The CPU check compared `mean()` with divide-then-sum in
@@ -509,7 +525,8 @@ Nothing below was done. Each step needs a GPU or a build.
 
 ## Not done
 
-- GPU validation of every item above. No GPU was available.
+- The Flash-Next geometry on four GPUs (TP4) and the unticked items above. The
+  GPU run covered the 27B AWQ at TP2 only.
 - The 16-bit per-window baseline arm (section 5).
 - A new kernel or a change to the decode and MonoKernel header logic.
 - Config flags, startup refusals, the format identifier and page packing. They
