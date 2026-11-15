@@ -203,8 +203,8 @@ def _fake_segment():
     "env, mode", [(None, 0), ("off", 0), ("hip", 4), ("hip-notail", 1)]
 )
 def test_apply_hands_the_op_the_switch(monkeypatch, env, mode):
-    """What apply() passes to the op: nothing extra when off (the call older
-    builds take), the prefill_gemm mode with the switch on."""
+    """What apply() passes to the op: nothing extra when off, the prefill_gemm mode
+    with the switch on."""
     from vllm.model_executor.layers.quantization import rdna_hint_flex as rhf
 
     if env is None:

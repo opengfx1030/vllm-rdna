@@ -1422,7 +1422,7 @@ def rdna_hint_flex_linear_rdna2(
     """prefill_gemm > 0: above decode_max_m the dequantized GEMM runs the dense
     HIP kernel wherever its dispatch table beats rocBLAS (see
     csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu); 0 is the rocBLAS path (the
-    argument is then not passed at all, so the call is the one older builds take)."""
+    argument is then not passed at all)."""
     args: list[Any] = [
         x,
         col_scale,
@@ -1691,12 +1691,6 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
     ) -> torch.Tensor:
         return x.new_empty((x.size(0), row_nbits.size(0)))
 
-    @register_fake("_rocm_C::rdna_hint_flex_dense_gemm_rdna2")
-    def _rdna_hint_flex_dense_gemm_rdna2_fake(
-        x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, design: int = -1
-    ) -> None:
-        return
-
     @register_fake("_rocm_C::rdna_hint_flex_moe_rdna2")
     def _rdna_hint_flex_moe_rdna2_fake(x: torch.Tensor, *args) -> torch.Tensor:
         return torch.empty_like(x)
@@ -1776,6 +1770,35 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
     ) -> None:
         return
 
+    @register_fake("_rocm_C::rdna_hint_flex_act_transform_rdna2")
+    def _rdna_hint_flex_act_transform_rdna2_fake(
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        out: torch.Tensor,
+        pair_interleaved: bool = False,
+        silu_mul: bool = False,
+    ) -> None:
+        return
+
+
+# Own guards: a _rocm_C built before these ops existed still has the ops above, and
+# register_fake on a missing op raises at import, which would break every model.
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "rdna_hint_flex_dense_gemm_rdna2"
+):
+
+    @register_fake("_rocm_C::rdna_hint_flex_dense_gemm_rdna2")
+    def _rdna_hint_flex_dense_gemm_rdna2_fake(
+        x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, design: int = -1
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "rdna_hint_flex_gemv2_rdna2"
+):
+
     @register_fake("_rocm_C::rdna_hint_flex_gemv2_rdna2")
     def _rdna_hint_flex_gemv2_rdna2_fake(
         x: torch.Tensor,
@@ -1791,17 +1814,6 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         rpw: int,
         wpb: int,
         x_pi: bool,
-    ) -> None:
-        return
-
-    @register_fake("_rocm_C::rdna_hint_flex_act_transform_rdna2")
-    def _rdna_hint_flex_act_transform_rdna2_fake(
-        x: torch.Tensor,
-        col_scale: torch.Tensor,
-        had: torch.Tensor,
-        out: torch.Tensor,
-        pair_interleaved: bool = False,
-        silu_mul: bool = False,
     ) -> None:
         return
 
