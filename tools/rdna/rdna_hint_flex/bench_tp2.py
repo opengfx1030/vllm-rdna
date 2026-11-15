@@ -240,6 +240,68 @@ def check_slot(seg0: hu.Hi2, d: dict, ms: list[int], cfgs: list[str]) -> None:
             )
 
 
+def make_silu_mul(d: dict, x: torch.Tensor):
+    """SiluAndMul alone on a [M, 2K] gate | up activation (K = the slot's K):
+    the launch that RDNA_HINT_FLEX_FUSE_SILU folds into the down transform."""
+    gu = torch.randn(x.shape[0], 2 * x.shape[1], dtype=torch.float16, device="cuda")
+    out = torch.empty_like(x)
+    return functools.partial(torch.ops._C.silu_and_mul, out, gu)
+
+
+def make_transform_silu(d: dict, x: torch.Tensor):
+    """The pair-interleaving transform with SiluAndMul folded in."""
+    gu = torch.randn(x.shape[0], 2 * x.shape[1], dtype=torch.float16, device="cuda")
+    out = torch.empty_like(x)
+    return functools.partial(
+        ops.rdna_hint_flex_act_transform_rdna2,
+        gu, d["col_scale"], d["had"], out, True, True,
+    )  # fmt: skip
+
+
+def check_silu_slot(d: dict, ms: list[int]) -> None:
+    """The silu_mul op against SiluAndMul followed by the same op, on the real
+    tensors of one layer (down_proj: K is the rank's intermediate size): the
+    outputs must be identical, bit for bit."""
+    if not d["transform"]:
+        print("  (no transform on this tensor)")
+        return
+    for m in ms:
+        gu = torch.randn(m, 2 * d["K"], dtype=torch.float16, device="cuda") * 2
+        act = torch.empty(m, d["K"], dtype=torch.float16, device="cuda")
+        torch.ops._C.silu_and_mul(act, gu)
+        rest = (*weights(d), True, 48, 0)
+        ref = ops.rdna_hint_flex_linear_rdna2(act, d["col_scale"], d["had"], *rest)
+        y = ops.rdna_hint_flex_linear_rdna2(gu, d["col_scale"], d["had"], *rest, True)
+        torch.accelerator.synchronize()
+        print(
+            f"  check-silu M={m:2d} silu_mul == SiluAndMul + linear: "
+            f"{torch.equal(ref, y)}"
+        )
+
+
+def make_silu_linear(d: dict, x: torch.Tensor):
+    """What the MLP launches without the fold: SiluAndMul, then the linear op
+    (x gives the slot's [M, K] shape; the gate | up input is random)."""
+    gu = torch.randn(x.shape[0], 2 * x.shape[1], dtype=torch.float16, device="cuda")
+    act = torch.empty_like(x)
+    rest = (d["col_scale"], d["had"], *weights(d), d["transform"], 48, 0)
+
+    def call():
+        torch.ops._C.silu_and_mul(act, gu)
+        return ops.rdna_hint_flex_linear_rdna2(act, *rest)
+
+    return call
+
+
+def make_linear_silu(d: dict, x: torch.Tensor):
+    """The linear op with SiluAndMul folded into its transform."""
+    gu = torch.randn(x.shape[0], 2 * x.shape[1], dtype=torch.float16, device="cuda")
+    return functools.partial(
+        ops.rdna_hint_flex_linear_rdna2,
+        gu, d["col_scale"], d["had"], *weights(d), d["transform"], 48, 0, True,
+    )  # fmt: skip
+
+
 def make_transform(d: dict, x: torch.Tensor, pi: bool = False):
     out = torch.empty_like(x)
     return functools.partial(
@@ -295,6 +357,10 @@ VARIANTS = {
     "gemv": make_gemv,
     "transform": make_transform,
     "transform_pi": lambda d, x: make_transform(d, x, True),
+    "silu_mul": make_silu_mul,
+    "transform_silu_pi": make_transform_silu,
+    "silu_linear": make_silu_linear,
+    "linear_silu": make_linear_silu,
 }
 
 
@@ -354,6 +420,12 @@ def run() -> None:
         "--check-layers",
         default="",
         help="real layer indices for --check (default: the first in bench order)",
+    )
+    ap.add_argument(
+        "--check-silu",
+        action="store_true",
+        help="compare the silu_mul op with SiluAndMul + the same op, bitwise, on "
+        "the real tensors of the slots that have a transform (down_proj)",
     )
     args = ap.parse_args()
     ms = [int(v) for v in args.m.split(",")]
@@ -424,7 +496,7 @@ def run() -> None:
         if want and slot not in want:
             continue
         order = sorted(layers, key=lambda i: (i * 0.6180339887498949) % 1.0)
-        if args.check:
+        if args.check or args.check_silu:
             ids = [int(v) for v in args.check_layers.split(",") if v] or order[:1]
             for layer in ids:
                 if layer not in layers:
@@ -435,7 +507,10 @@ def run() -> None:
                 seg = build_segments(rd, spec, args.rank)[0]
                 d = to_device(seg)
                 print(f"\n{slot} layer {layer}: R={d['R']} K={d['K']}")
-                check_slot(seg, d, ms, args.check.split(";"))
+                if args.check:
+                    check_slot(seg, d, ms, args.check.split(";"))
+                if args.check_silu:
+                    check_silu_slot(d, ms)
                 del d
             torch.accelerator.empty_cache()
             continue

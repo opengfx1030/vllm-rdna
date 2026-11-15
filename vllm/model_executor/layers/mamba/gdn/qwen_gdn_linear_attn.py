@@ -93,6 +93,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     gather_gdn_state_arenas,
     gdn_arenas_ready_for_capture,
     gdn_decode_arena_max_bs,
+    gdn_decode_inplace_enabled,
     scatter_gdn_state_arenas,
     static_gdn_cache_slots,
 )
@@ -312,6 +313,38 @@ def _timed_call(fn, *args, **kwargs):
     """Run fn under the GDN prefill timer (see _GdnPrefillTimer)."""
     with _GdnPrefillTimer("prep"):
         return fn(*args, **kwargs)
+
+
+_GATED_NORM_STRIDED_Z: dict[torch.device, bool] = {}
+
+
+def _gated_rms_norm_takes_strided_z(device: torch.device) -> bool:
+    """Whether the built ``_rocm_C.gated_rms_norm`` takes a [T, H, N] z with a
+    token stride (a view into the packed qkvz projection). Released builds
+    declare 2D inputs only and raise, so the first call per device probes it;
+    never while a graph is being captured (the caller then flattens z, and the
+    probe runs on a later eager step)."""
+    known = _GATED_NORM_STRIDED_Z.get(device)
+    if known is not None:
+        return known
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    try:
+        x = torch.zeros(2, 128, dtype=torch.float16, device=device)
+        z = torch.zeros(2, 256, dtype=torch.float16, device=device)[:, :128]
+        torch.ops._rocm_C.gated_rms_norm(
+            torch.empty_like(x),
+            x,
+            z.unsqueeze(1),
+            torch.ones(128, dtype=torch.float16, device=device),
+            1e-6,
+            0,
+        )
+        ok = True
+    except (AttributeError, RuntimeError):
+        ok = False
+    _GATED_NORM_STRIDED_Z[device] = ok
+    return ok
 
 
 def _gdn_prefill_chain_rdna2(
@@ -1045,10 +1078,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._gdn_arena_max_bs = gdn_decode_arena_max_bs(vllm_config, self.num_spec)
         self._conv_state_arena: torch.Tensor | None = None
         self._ssm_state_arena: torch.Tensor | None = None
+        # VLLM_RDNA_GDN_DECODE_INPLACE=1: decode runs on the paged state (see
+        # gdn_decode_inplace_enabled), so there are no arenas to allocate, and
+        # the decode glue drops the copies around them and the fill/copies the
+        # arena path left in (forward_cuda, _forward_core_decode_non_spec).
+        self._rdna_decode_inplace = gdn_decode_inplace_enabled(vllm_config)
         # Allocate before any decode / BeginCapture. Lazy alloc on first
         # decode can run under capture and bake a new data_ptr into the graph.
         mode = vllm_config.compilation_config.cudagraph_mode
-        if mode is not None and bool(mode) and on_rdna_family():
+        if (
+            mode is not None
+            and bool(mode)
+            and on_rdna_family()
+            and not self._rdna_decode_inplace
+        ):
             self._init_gdn_state_arenas()
 
         mono = MONO_GDN_HOOK(self, vllm_config) if MONO_GDN_HOOK else None
@@ -1182,6 +1225,89 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             cache_slots,
             num,
         )
+
+    def _use_gdn_decode_rdna2(
+        self,
+        x_dtype: torch.dtype,
+        ssm_dtype: torch.dtype,
+        out_dtype: torch.dtype,
+    ) -> bool:
+        """Whether the non-spec decode runs ``gdn_decode_rdna2`` (gfx10x HIP)
+        rather than the Triton packed decode."""
+        if not (
+            current_platform.is_rocm()
+            and self.head_k_dim == 128
+            and x_dtype == torch.float16
+            and ssm_dtype in (torch.float32, torch.float16)
+            and out_dtype == torch.float16
+        ):
+            return False
+        from vllm.platforms.rocm import on_gfx10x
+
+        return (
+            on_gfx10x()
+            and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
+            and hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
+        )
+
+    def _decode_step_in_place(self, num_tokens: int, dtype: torch.dtype) -> bool:
+        """VLLM_RDNA_GDN_DECODE_INPLACE=1 and this call is the pure non-spec
+        decode (``_forward_core_decode_non_spec``) over exactly ``num_tokens``
+        rows, run by ``gdn_decode_rdna2``: it writes every row (zeros for a NULL
+        slot) and reads b, a and z in place at their token strides."""
+        if not (self._rdna_decode_inplace and self._rdna_strided_decode_inputs):
+            return False
+        raw = get_forward_context().attn_metadata
+        md = raw.get(self.prefix) if isinstance(raw, dict) else None
+        if not isinstance(md, GDNAttentionMetadata):
+            return False
+        return (
+            self.enable_packed_recurrent_decode
+            and self._lq_layout is None
+            and md.spec_sequence_masks is None
+            and md.num_prefills == 0
+            and md.num_decodes > 0
+            and md.num_actual_tokens == num_tokens
+            and self._use_gdn_decode_rdna2(dtype, self.kv_cache[1].dtype, dtype)
+        )
+
+    def _gated_norm_strided_z(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """``self.norm(x, z)`` with z read in place at its token stride.
+
+        ``RMSNormGated.forward_hip`` flattens z to [T * HV, V] rows, which for
+        T > 1 copies the z slice of the packed qkvz projection (its token
+        stride is the whole projection width). ``_rocm_C.gated_rms_norm`` takes
+        a [T, HV, V] z with any token stride, so decode passes it as is: the same
+        kernel on the same values, one launch less."""
+        norm = self.norm
+        if (
+            norm._forward_method == norm.forward_hip
+            and x.dim() == 3
+            and x.is_contiguous()
+            and x.dtype == torch.float16
+            and z.dtype == torch.float16
+            and z.shape == x.shape
+            and z.stride(2) == 1
+            and z.stride(1) == z.size(2)
+            and norm.group_size is None
+            and norm.norm_before_gate
+            and norm.activation in ("silu", "swish", "sigmoid")
+            and norm.weight.dtype == torch.float16
+            and _gated_rms_norm_takes_strided_z(x.device)
+        ):
+            n = x.size(-1)
+            out = torch.empty_like(x)
+            torch.ops._rocm_C.gated_rms_norm(
+                out.view(-1, n),
+                x.view(-1, n),
+                z,
+                norm.weight.data,
+                norm.eps,
+                1 if norm.activation == "sigmoid" else 0,
+            )
+            return out
+        return norm(x, z)
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
@@ -1588,13 +1714,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         core_attn_out: torch.Tensor,
         z: torch.Tensor,
+        strided_z: bool = False,
     ) -> torch.Tensor:
         """Part 3: RMSNormGated + output linear projection.
 
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
+        ``strided_z`` reads z at its token stride instead of copying it (the
+        in-place decode step).
         """
-        core_attn_out = self.norm(core_attn_out, z)
+        if strided_z:
+            core_attn_out = self._gated_norm_strided_z(core_attn_out, z)
+        else:
+            core_attn_out = self.norm(core_attn_out, z)
         output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
@@ -1710,9 +1842,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
+        # In-place decode: gdn_decode_rdna2 writes every row, zeros for NULL
+        # slots, so the fill is dead. Every other step keeps it.
+        in_place_step = self._decode_step_in_place(num_tokens, hidden_states.dtype)
         # Note: we should not use torch.empty here like other attention backends,
         # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
+        core_attn_out = (torch.empty if in_place_step else torch.zeros)(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -1733,7 +1868,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         if self._rdna_pack_z:
             z = z.contiguous()
-        return self._output_projection(core_attn_out, z)
+        return self._output_projection(core_attn_out, z, strided_z=in_place_step)
 
     def forward_xpu(
         self,
@@ -2988,8 +3123,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
-        b = b[:num_actual_tokens].contiguous()
-        a = a[:num_actual_tokens].contiguous()
+        out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
+        use_rdna2 = self._use_gdn_decode_rdna2(
+            mixed_qkv.dtype, ssm_state.dtype, out_buf.dtype
+        )
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
+        if not (use_rdna2 and self._rdna_decode_inplace):
+            # gdn_decode_rdna2 reads b and a at their token strides (views of
+            # the ba projection); the Triton kernel wants them dense.
+            b = b.contiguous()
+            a = a.contiguous()
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
@@ -3003,41 +3147,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             validate_data=False,
         )
-        out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-        if (
-            current_platform.is_rocm()
-            and self.head_k_dim == 128
-            and mixed_qkv_non_spec.dtype == torch.float16
-            and ssm_state.dtype in (torch.float32, torch.float16)
-            and out_buf.dtype == torch.float16
-        ):
-            from vllm.platforms.rocm import on_gfx10x
-
-            if (
-                on_gfx10x()
-                and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
-                and hasattr(torch.ops, "_rocm_C")
-                and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
-            ):
-                torch.ops._rocm_C.gdn_decode_rdna2(
-                    mixed_qkv_non_spec,
-                    a,
-                    b,
-                    self.A_log,
-                    self.dt_bias,
-                    out_buf,
-                    ssm_state,
-                    non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
-                    self.head_k_dim**-0.5,
-                    True,
-                )
-                self._unbind_decode_state_arenas(
-                    paged_conv_state,
-                    paged_ssm_state,
-                    attn_metadata,
-                    attn_metadata.num_decodes,
-                )
-                return
+        if use_rdna2:
+            torch.ops._rocm_C.gdn_decode_rdna2(
+                mixed_qkv_non_spec,
+                a,
+                b,
+                self.A_log,
+                self.dt_bias,
+                out_buf,
+                ssm_state,
+                non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+                self.head_k_dim**-0.5,
+                True,
+            )
+            self._unbind_decode_state_arenas(
+                paged_conv_state,
+                paged_ssm_state,
+                attn_metadata,
+                attn_metadata.num_decodes,
+            )
+            return
         fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv_non_spec,
             a=a,

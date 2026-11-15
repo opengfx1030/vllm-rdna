@@ -120,7 +120,9 @@ Routed experts follow the same mode (I8 for batches up to 48 tokens with
   `RDNA_HINT_FLEX_GEMV` asks for it (default `v1`: unchanged); the op itself
   takes an explicit `(mt, rpw, wpb)` and is what the tests and
   `bench_tp2.py` call. `rdna_hint_flex_act_transform_rdna2` takes
-  `pair_interleaved`, the activation order v2 reads.
+  `pair_interleaved`, the activation order v2 reads, and `silu_mul` (`x` is
+  the `[M, 2K]` gate | up output and the transform's input is
+  `silu(gate) * up`; see "S5").
 * `rdna_hint_flex_dequant_rdna2`: stored-basis fp16 `W [R, K]`, one 16-column
   group per thread, 16-byte stores.
 * `rdna_hint_flex_act_quant_rdna2` + `rdna_hint_flex_gemv_i8_rdna2` (I8):
@@ -197,8 +199,8 @@ OLMoE-1B-7B"); the points below were the requirements and still hold:
 ## Checks
 
 Unit tests: `bash tools/rdna/rdna_hint_flex/run_tests.sh <hip_device>`,
-**1156 passed** on a V620 (209 before GEMV v2; its tests are listed under "GEMV
-v2"). The dequant kernel and the I8 activation quantization
+**1179 passed** on a V620 (209 before GEMV v2, 1156 with it; the tests are
+listed under "GEMV v2" and "S5"). The dequant kernel and the I8 activation quantization
 are bit-identical to the reference; `rdna_hint_flex_linear_rdna2` matches
 `reference_linear` (float64) within 2e-3 relative error for M = 1..37 (F16),
 the I8 GEMV matches the integer-exact I8 reference within 1e-3; the synthetic
@@ -521,14 +523,17 @@ before using it. Nothing was added to the quantization code for this.
 Launch counts, not kernels, dominate the rest of a c=1 step (HiTp2Bring's
 profile: 2451 launches, 1.9 us gap each, 7.2 ms outside the GEMVs):
 `gemma_fused_add_rms_norm` (~770 launches per step) and the GDN glue (~17 per
-layer) are outside the hi2 files; so is folding the 304 activation transforms
-(~1.1 ms) into the preceding norm, which needs model-code plumbing.
+layer) are outside the hi2 files. The hi2 part is the 304 activation
+transforms (~1.1 ms) and the 64 SiluAndMul launches: "S5" below has what was
+tried (the transform inside the GEMV: slower at every slot; the SiluAndMul
+fold: ships behind `RDNA_HINT_FLEX_FUSE_SILU`).
 
-Tried and dropped while building v2 (standalone harness, ratios only): fusing
-the transform into the GEMV (redundant in-register transform adds ~23% VALU;
-LDS staging collapses occupancy), a v2 for the I8 mode, a factorised decode
-(not bit-identical), row permutation, `waves_per_eu` limits, non-temporal
-weight loads, persistent scheduling (~2%), an in-loop INT4 branch (spills).
+Tried and dropped while building v2 (standalone harness, ratios only): LDS
+staging of the activation (collapses occupancy), a v2 for the I8 mode, a
+factorised decode (not bit-identical), row permutation, `waves_per_eu`
+limits, non-temporal weight loads, persistent scheduling (~2%), an in-loop
+INT4 branch (spills). The transform inside the GEMV was prototyped there
+(+23% VALU) and again in the production kernel: see "S5".
 
 #### Correctness
 
@@ -543,12 +548,13 @@ weight loads, persistent scheduling (~2%), an in-loop INT4 branch (spills).
   fp16 ulp of the largest outputs); against the float64 decode of the same
   rows the error is identical for v1 and v2 in every cell (v2 never worse);
   the pair-interleaved and the natural activation give the same bits.
-* `tests/kernels/quantization/test_rdna_hint_flex_rdna2.py`: 1156 passed (209
-  before v2; the 947 added cover v2 against the float64 reference for each row
-  width, mixed INT2/INT4/INT8 run patterns with K = 512, 1088, 1600, bitwise
-  equality across (MT, RPW, WPB) and activation layouts, the pair-interleaved
-  transform, and the production op at M = 1..48). With `RDNA_HINT_FLEX_GEMV=v2`
-  and `=auto`, the 131 tests that go through the production op pass.
+* `tests/kernels/quantization/test_rdna_hint_flex_rdna2.py`: 1179 passed (209
+  before v2; 947 added for v2: the float64 reference for each row width, mixed
+  INT2/INT4/INT8 run patterns with K = 512, 1088, 1600, bitwise equality
+  across (MT, RPW, WPB) and activation layouts, the pair-interleaved
+  transform, and the production op at M = 1..48; 23 for the SiluAndMul fold,
+  see S5). With `RDNA_HINT_FLEX_GEMV=v2` and `=auto`, the 131 tests that go
+  through the production op pass.
 
 #### End to end
 
@@ -579,6 +585,128 @@ with M (gate_up 1.77x of M=1 at M=3); with v2 it is 1.13x (93.4 against 82.5 us)
 Remaining: the head (T45 or smaller), norm and transform launches, M = 1 (at
 the streaming rate), and the FA prefill attention (about 1.05-1.10 TFLOP/s,
 HiTp2Bring's branch `feat/hi2-attn-prefill`, not touched here).
+
+#### S5: the activation transform and SiluAndMul
+
+Two attempts to remove launches in front of the hi2 GEMVs: a decode step has
+304 transform launches (3.5-3.8 us each in `bench_tp2.py`; 256 on the six
+large slots, 48 on `in_proj_ba`) and 64 SiluAndMul launches. One V620 (HIP 4,
+bus df), cold weights, min us, no image build running; the KFD eviction
+counter was checked per window (one window rerun in the fused-transform table).
+
+**The transform inside the GEMV: slower at every slot, not shipped.** Branch
+`exp/hi2-fuse-transform-gemv` (commit `fb2dc8fd54`): op
+`rdna_hint_flex_gemv2_ft_rdna2`, production switch
+`RDNA_HINT_FLEX_FUSE_TRANSFORM=N` (0 to 3, default off: fused v2 for M <= N).
+Each v2 lane transforms its own 16-column group in registers, in the
+operation order of the transform kernel (IEEE division, in-place butterflies,
+the 0.25 scale, one fp16 rounding), so the result is bit-identical to the
+transform kernel followed by v2 with the same configuration: 550 tests pass,
+and on the real tensors of layers 0, 3, 31, 41, 47 and 63 (six slots, M = 1..3,
+eight configurations, 576 cells) every output is equal. Time per call: v1
+`linear`, the transform launch plus v2 (`l2`, what `auto` runs, best of two
+configurations) and the fused kernel (best of four):
+
+| slot, R x K (layers) | M=1 `linear` / `l2` / fused | M=2 `l2` / fused | M=3 `l2` / fused |
+| --- | --- | --- | --- |
+| gate_up 17408 x 5120 (64) | 86.0 / 90.4 / 130.3 | 92.6 / 193.9 | 94.6 / 261.8 |
+| in_proj_qkvz 8192 x 5120 (48) | 48.8 / 50.9 / 66.0 | 51.7 / 97.3 | 52.8 / 134.1 |
+| down 5120 x 8704 (64) | 53.9 / 56.0 / 70.3 | 57.1 / 102.9 | 59.1 / 142.8 |
+| qkv 7168 x 5120 (16) | 44.8 / 45.7 / 58.4 | 46.8 / 85.9 | 47.7 / 117.0 |
+| out_proj 5120 x 3072 (48) | 30.8 / 31.5 / 32.2 | 31.7 / 44.3 | 32.1 / 59.4 |
+| o_proj 5120 x 3072 (16) | 31.2 / 32.0 / 32.1 | 32.3 / 43.5 | 32.5 / 57.3 |
+
+Over a step (the six slots): `linear` 13.99 ms, `l2` 14.56 ms and fused
+19.00 ms at M=1; `l2` 14.85 ms against fused 27.87 ms at M=2; 15.20 against
+37.97 ms at M=3, while the 256 transform launches the fusion removes cost 0.95
+ms. The extra time grows with M and with the number of waves, not with the
+weight bytes (gate_up at RPW=4 has 4352 waves: +40 us at M=1 and about +60 us
+per further token), which is [INFERENCE] every wave redoing the divide and
+butterfly of the whole K x M activation; only out_proj / o_proj at M=1 (1280
+waves) break even. Cheaper redundancy (reciprocals instead of the divide, one
+transform per block in LDS) cannot win much against a 3.7 us launch
+[INFERENCE: the work per wave only drops by the waves per block]; not built.
+Removing the launches needs the transform done once per token in the kernel
+that writes the activation: 176 of the 304 follow a norm (qkvz and ba at the
+48 GDN layers, qkv at 16, gate_up at 64), about 0.65 ms per step at 3.7 us
+[INFERENCE: arithmetic]. That needs the norm kernel to know its consumer's
+`col_scale`/`had` and the layout the GEMV about to run reads (natural for v1,
+pair-interleaved for v2), and the linear op to skip its transform: model-code
+and norm-kernel plumbing, not attempted here. out_proj (the gated norm of the
+GDN layers), o_proj (attention output) and down (the SiluAndMul below) are
+the other 128.
+
+**SiluAndMul folded into the down projection's transform: ships behind a
+switch.** `RDNA_HINT_FLEX_FUSE_SILU=1` (default off; read when the model is
+built). The dense MLP (`Qwen2MoeMLP`, no shared-expert gate) then skips its
+activation and `down_proj` receives the `[M, 2K]` gate | up tensor:
+`rdna_hint_flex_linear_rdna2(..., silu_mul=True)` (and
+`rdna_hint_flex_act_transform_rdna2(..., silu_mul=True)`) evaluates
+`silu(gate) * up` inside the transform kernel as `SiluAndMul` does (silu in
+fp32 rounded to fp16, then the fp16 product). It needs the RDNA2 kernels, F16
+compute mode and a down projection with a transform; otherwise `apply` runs
+`silu_and_mul` itself and nothing changes. One launch less per MLP layer: 64
+per step (2451 to 2387 at c=1 [INFERENCE: arithmetic]).
+
+Per op (down projection, K = 8704, min us at M = 1 / 2 / 3 / 8, final binary):
+SiluAndMul 3.7 / 3.8 / 3.8 / 3.7, transform 3.7 / 3.7 / 3.7 / 3.8, transform
+with silu 4.4 at every M: 3.0 to 3.1 us saved per MLP layer, 0.19 to 0.20 ms per
+step. The whole op (`silu_linear` = SiluAndMul then `rdna_hint_flex_linear_rdna2`,
+against `linear_silu` = the op with `silu_mul=True`): under `auto` 59.8 / 61.8 /
+79.9 against 56.6 / 58.8 / 79.3 us at M = 2 / 3 / 8; with the default v1 57.8
+against 54.7 us at M=1 and 72.5 against 69.8 us at M=2 (at M = 3 and 8 on v1
+the two differ by the noise of the GEMV between windows, +1.6 and +9.8 us in
+the min column, -0.9 and -1.5 us in the medians). That is 0.7% of the 27.15 ms
+c=1 step of HiTp2Bring's profile: below the cell-to-cell variation of a
+serving benchmark, so judge it on the launch count and the step trace, not on
+tok/s alone.
+
+**c=1 to c=2.** The profile's +3.85 ms of GEMV time from c=1 to c=2 is v1
+(six large slots, whole step: 13.25 ms at M=1, 18.21 at M=2). With `auto`
+(v1 at M=1, v2 from M=2) the same rows take 13.25 / 14.14 / 14.71 / 15.72 /
+20.62 ms at M = 1 / 2 / 3 / 4 / 8: **+0.89 ms at c=2** instead of +4.96, and
++1.46 / +2.47 / +7.37 ms at M = 3 / 4 / 8 instead of +8.75 / +12.41 /
++26.52. What is left is the real cost of reading each weight once for more
+tokens: +0.89 ms for the second token, +0.57 for the third, +1.01 for the
+fourth, then +1.2 ms per token up to M=8 [INFERENCE: the MT=8 tile does more
+VALU per weight byte]; and, outside the GEMVs, the lm_head (+4 us at M=2) and
+the non-GEMV kernels and gaps of a two-token step, which these files do not
+touch.
+
+**Scoreboard arms** (same binary, only the environment differs; the serving
+tree needs this branch's `_rocm_C` and Python files, because the op schemas
+gained `silu_mul`):
+
+```text
+# A0: baseline (nothing set; v1)
+# A1: export RDNA_HINT_FLEX_GEMV=auto
+# A2: export RDNA_HINT_FLEX_GEMV=auto RDNA_HINT_FLEX_FUSE_SILU=1
+RECIPE=27b-hi2-tp2 MODEL=<snapshot> GPUS=4,5 PORT=18231 TAG=hi2-s5-a2 \
+  PREFIX_WORDS=3000 CELLS="1024:512:1 1024:512:8 16384:1024:8:32" \
+  BENCH_EXTRA="--temperature 0" SERVE_TREE=<tree> VENV=<venv> \
+  bash tools/rdna/port_v031/serve_validate.sh
+```
+
+Expected [INFERENCE]: A1 changes c >= 2 only (see above); A2 is A1 minus 64
+launches and about 0.2 ms per step. `RDNA_HINT_FLEX_FUSE_SILU` changes
+values by nothing (bitwise equal to the unfused path, below), so the greedy
+and `decode_kl.py` probes of A2 should match A1 exactly.
+
+**Checks for the fold.** With every new switch unset, the 210 output sets of
+the flag-off check (real tensors, base `_rocm_C` against this binary) hash
+identically. `test_silu_mul_bit_exact_over_all_gate_values`: every finite fp16
+gate value (against a random up value) gives the bits of
+`torch.ops._C.silu_and_mul`, NaNs in the same places.
+`test_act_transform_silu_mul_equals_silu_and_mul` and
+`test_linear_silu_mul_equals_unfused` (M = 1, 3, 9, 48, 130: GEMV and the
+dequant + GEMM prefill path) are bitwise. On the real tensors of the `down_proj`
+slot (layers 0, 3, 31, 47, 63, K = 8704), `bench_tp2.py --m 1,2,3,8,48
+--check-silu --check-layers 0,3,31,47,63` compares the op with `silu_mul=True`
+against `SiluAndMul` followed by the same op: all 25 cells equal bit for bit.
+The full test file in the default environment passes (1179 tests: 923 with
+`-k gemv2` and 256 without). The model hook in `Qwen2MoeMLP` and
+`RdnaHintFlexLinearMethod.fold_silu` were not run end to end (no TP=2 server
+was available to this work): the first A2 boot is their test.
 
 ### TunableOp
 

@@ -1416,6 +1416,7 @@ def rdna_hint_flex_linear_rdna2(
     transform: bool,
     decode_max_m: int,
     mode: int = 0,
+    silu_mul: bool = False,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(
         x,
@@ -1431,6 +1432,7 @@ def rdna_hint_flex_linear_rdna2(
         transform,
         decode_max_m,
         mode,
+        silu_mul,
     )
 
 
@@ -1634,9 +1636,10 @@ def rdna_hint_flex_act_transform_rdna2(
     had: torch.Tensor,
     out: torch.Tensor,
     pair_interleaved: bool = False,
+    silu_mul: bool = False,
 ) -> None:
     torch.ops._rocm_C.rdna_hint_flex_act_transform_rdna2(
-        x, col_scale, had, out, pair_interleaved
+        x, col_scale, had, out, pair_interleaved, silu_mul
     )
 
 
@@ -1659,6 +1662,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         transform: bool,
         decode_max_m: int,
         mode: int,
+        silu_mul: bool = False,
     ) -> torch.Tensor:
         return x.new_empty((x.size(0), row_nbits.size(0)))
 
@@ -1766,6 +1770,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         had: torch.Tensor,
         out: torch.Tensor,
         pair_interleaved: bool = False,
+        silu_mul: bool = False,
     ) -> None:
         return
 
