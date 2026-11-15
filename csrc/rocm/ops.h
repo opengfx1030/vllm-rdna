@@ -1362,13 +1362,19 @@ void spec_insert_resampled_rdna2(
 // rdna_hint_flex_rdna2.cu.
 void rdna_hint_flex_act_transform_rdna2(torch::Tensor x,
                                         torch::Tensor col_scale,
-                                        torch::Tensor had, torch::Tensor out);
+                                        torch::Tensor had, torch::Tensor out,
+                                        bool pair_interleaved);
 void rdna_hint_flex_gemv_rdna2(torch::Tensor x, torch::Tensor codes,
                                torch::Tensor code_off, torch::Tensor blk_params,
                                torch::Tensor param_off,
                                torch::Tensor row_consts,
                                torch::Tensor row_nbits, torch::Tensor row_block,
                                torch::Tensor out);
+void rdna_hint_flex_gemv2_rdna2(
+    torch::Tensor x, torch::Tensor codes, torch::Tensor code_off,
+    torch::Tensor blk_params, torch::Tensor param_off, torch::Tensor row_consts,
+    torch::Tensor row_nbits, torch::Tensor row_block, torch::Tensor out,
+    int64_t mt, int64_t rpw, int64_t wpb, bool x_pi);
 void rdna_hint_flex_dequant_rdna2(torch::Tensor codes, torch::Tensor code_off,
                                   torch::Tensor blk_params,
                                   torch::Tensor param_off,
