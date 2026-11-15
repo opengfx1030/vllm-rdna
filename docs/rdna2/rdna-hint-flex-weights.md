@@ -486,6 +486,13 @@ launches, 3.5 us for `in_proj_ba`'s 48): 304 launches, about 1.1 ms of a
 (`transform_pi`, same tool: 3.5-3.8 us per launch for every slot at M = 1, 3,
 8; 0.93 / 0.93 / 0.94 ms per step, natural 0.93 / 0.93 / 0.94 ms).
 
+With `RDNA_HINT_FLEX_GEMV=auto` the production op chooses the configuration
+itself. On the final binary (`linear`, same six slots, one process, one window
+rerun after a KFD eviction, junction 42 C at most) it takes 14.00 / 14.62 /
+14.95 / 15.65 / 20.65 ms per step at M = 1 / 2 / 3 / 4 / 8 (M = 1 is v1):
+x1.24 / 1.43 / 1.58 / 1.87 over the v1 `linear` row above (another process),
+and within 1.6% of the explicit `l2:` rows of the same run.
+
 The `auto` configuration (`gemv2_auto`): MT = M up to 4, 6 for M = 5-6, 8
 above (larger M runs MT = 8 along `grid.y`); 2 rows per wave at M <= 2, 4 from
 M = 3 on (2 when R < 2048: [INFERENCE] nothing that short was measured); 4
