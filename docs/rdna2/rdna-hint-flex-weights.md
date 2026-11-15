@@ -113,6 +113,14 @@ Routed experts follow the same mode (I8 for batches up to 48 tokens with
   one `lo`/`step` per word, code to fp16 by `half(0x6400 | c) - 1024` (exact up
   to 1023, so INT8 too), one `v_pk_fma_f16`, `v_dot2_f32_f16`, fp32
   accumulation, wave reduction.
+* `rdna_hint_flex_gemv2_rdna2` (F16 decode GEMV v2, M <= 48): a wave owns 2 or 4
+  rows and lane `l` owns the 16-column group `it * 32 + l` of each of them, so
+  one activation load serves all of the wave's rows (see "GEMV v2" under
+  Performance). `rdna_hint_flex_linear_rdna2` launches it when
+  `RDNA_HINT_FLEX_GEMV` asks for it (default `v1`: unchanged); the op itself
+  takes an explicit `(mt, rpw, wpb)` and is what the tests and
+  `bench_tp2.py` call. `rdna_hint_flex_act_transform_rdna2` takes
+  `pair_interleaved`, the activation order v2 reads.
 * `rdna_hint_flex_dequant_rdna2`: stored-basis fp16 `W [R, K]`, one 16-column
   group per thread, 16-byte stores.
 * `rdna_hint_flex_act_quant_rdna2` + `rdna_hint_flex_gemv_i8_rdna2` (I8):
@@ -144,8 +152,9 @@ The kernels trust the offsets; the loader validates them on the host first.
 
 Tried and dropped (slower on V620, measured with `bench_kernel.py`): staging
 the activation in LDS, lanes owning 16-column groups and reusing the activation
-in registers across 2-8 rows, and fusing the transform into the GEMV (VGPRs 43
-to 126, occupancy 16 to 8 waves/SIMD; 1.8x to 3x slower at M=1).
+in registers across 2-8 rows (GEMV v2 below is that structure: it is not faster
+at M=1 either, and wins from M=2 on), and fusing the transform into the GEMV
+(VGPRs 43 to 126, occupancy 16 to 8 waves/SIMD; 1.8x to 3x slower at M=1).
 
 ## Loader and tensor parallelism
 
@@ -188,7 +197,8 @@ OLMoE-1B-7B"); the points below were the requirements and still hold:
 ## Checks
 
 Unit tests: `bash tools/rdna/rdna_hint_flex/run_tests.sh <hip_device>`,
-**209 passed** on a V620. The dequant kernel and the I8 activation quantization
+**1156 passed** on a V620 (209 before GEMV v2; its tests are listed under "GEMV
+v2"). The dequant kernel and the I8 activation quantization
 are bit-identical to the reference; `rdna_hint_flex_linear_rdna2` matches
 `reference_linear` (float64) within 2e-3 relative error for M = 1..37 (F16),
 the I8 GEMV matches the integer-exact I8 reference within 1e-3; the synthetic
@@ -267,9 +277,11 @@ done here.
 
 ### Kernel timing (decode)
 
-`tools/rdna/rdna_hint_flex/bench_kernel.py`, one V620, CUDA graph of 50 calls;
-random tensors with 30% INT4 rows and mixed blocks; microseconds per call
-including the activation transform:
+`tools/rdna/rdna_hint_flex/bench_kernel.py`, one V620, CUDA graph of 50 calls
+of one weight set (so a 19-32 MB tensor sits in the 128 MiB Infinity Cache
+after the first call and the GB/s column is not a DRAM rate; cold-weight
+numbers are under "GEMV v2" below); random tensors with 30% INT4 rows and
+mixed blocks; microseconds per call including the activation transform:
 
 | shape (R x K) | F16 M=1 | I8 M=1 | F16 M=3 | F16 M=8 | F16 M=32 |
 | --- | --- | --- | --- | --- | --- |
@@ -277,6 +289,287 @@ including the activation transform:
 | down 2560 x 9216 | 28.1 (338 GB/s) | 18.5 | 41.5 | 74.8 | 294.3 |
 | in_proj_qkvz 12288 x 2560 | 30.5 (415 GB/s) | 28.6 | 47.4 | 93.5 | 366.9 |
 | out_proj 2560 x 4096 | 15.6 (273 GB/s) | 12.6 | 27.9 | 36.8 | 127.0 |
+
+### GEMV v2: decode at M = 2..48 (Qwen3.8-27B HI2, TP=2 and TP=4)
+
+Branch `feat/hi2-kernel-opt`; kernel `gemv2_kernel` in
+`csrc/rocm/rdna_hint_flex_rdna2.cu`, timing tool
+`tools/rdna/rdna_hint_flex/bench_tp2.py`. `RDNA_HINT_FLEX_GEMV` (read once per
+process) picks the decode GEMV that `rdna_hint_flex_linear_rdna2` runs
+(F16 mode, M <= 48):
+
+| value | M = 1 | M = 2 .. 48 |
+| --- | --- | --- |
+| unset, `v1` | v1 | v1: the kernel described above; every existing op gives the same bits as before this change |
+| `auto` | v1 | v2 |
+| `v2` | v2 | v2 |
+
+A call goes to v2 when R >= 1024 (the 48-row `in_proj_ba` keeps v1, which
+splits K over waves) and its code words are 16-byte aligned; anything else runs
+v1. v2 reads a pair-interleaved activation that the transform writes
+(`pair_interleaved`), so the two kernels of the op are always chosen together.
+**The default stays `v1`**: `auto` is recommended once it is verified end to
+end (see "End to end" below: it is not yet).
+
+Batch invariance: v1 gives a token the same bits whatever M is. `v2` does too
+(the eight pairs of a group are summed in the order 0..7 for every width and
+every (MT, RPW, WPB), tested bitwise). `auto` does not: M = 1 (v1) and M >= 2
+(v2) differ in the last fp32 bits before the one fp16 rounding, so a token
+decoded alone and in a verify batch can differ by an fp16 ulp in a logit. Use
+`v2` where that matters; it costs about 3% at M = 1 (0.4 ms per step at c=1).
+
+#### What a decode step reads
+
+Per rank at TP=2, from `tools/rdna/rdna_hint_flex/tp_layout.py MODEL --tp 2`
+(checkpoint headers plus the loader's partitioning; one kernel segment per
+layer, so one transform and one GEMV launch per linear):
+
+| slot | layers | R x K | % INT4 rows | MB per layer | MB per step |
+| --- | --- | --- | --- | --- | --- |
+| in_proj_qkvz | 48 | 8192 x 5120 | 26.2 | 15.12 | 726.0 |
+| in_proj_ba | 48 | 48 x 5120 | 99.9 | 0.15 | 7.1 |
+| out_proj | 48 | 5120 x 3072 | 71.6 | 7.44 | 357.3 |
+| gate_up_proj | 64 | 17408 x 5120 | 29.5 | 32.44 | 2076.1 |
+| down_proj | 64 | 5120 x 8704 | 36.8 | 17.04 | 1090.4 |
+| qkv_proj | 16 | 7168 x 5120 | 26.8 | 13.26 | 212.1 |
+| o_proj | 16 | 5120 x 3072 | 75.7 | 7.55 | 120.8 |
+
+That is 4.590 GB per rank per token for the 304 hi2 linears (no INT8 rows),
+plus the `lm_head` (124160 x 5120 fp16, 1.271 GB) and, per draft step, the dense
+MTP layer (0.425 GB). At 512 GB/s: 8.96 ms for the hi2 linears, 2.48 ms for
+the head, 11.45 ms per token. At TP=4 the rank reads 2.297 GB (R x K: qkvz
+4096 x 5120, in_proj_ba 24 x 5120, out_proj 5120 x 1536, gate_up 8704 x 5120,
+down 5120 x 4352, qkv 3584 x 5120, o_proj 5120 x 1536) plus 0.636 GB of head.
+
+#### How the numbers were taken
+
+One V620 (HIP 4, bus df), ROCm 7.14, torch 2.12. `bench_tp2.py MODEL --tp 2
+--m 1,2,3,4,8 --variants gemv,g2p:{mt}:2:4,... --repeats 5`: for each slot the
+real layers of the checkpoint (both layer kinds, in a fixed low-discrepancy
+order) are loaded as the loader would and replayed in one CUDA graph until the
+weight working set is 640 MiB (5x the Infinity Cache), so every call reads cold
+weights as a decode step does. 5 repeats per cell, min and median, GB/s on the
+tensors' real bytes, `% floor` against 512 GB/s. No `docker buildx build` ran
+(checked at the start and end of each run); a timing window is rerun when the
+process's KFD eviction counter moved during it (at most one window per run was
+hit); junction temperature stayed under 70 C (5 s mean). Cells vary up
+to ~10% between processes (gate_up M=4, `4:4:8`: 92 and 102 us in two runs;
+the M=2, 3, 8 cells agree to ~1%), ratios inside one run are stable to ~1%:
+compare within a run. `{mt}` is the token tile the v2 instantiations offer at
+that M; `g2p:MT:RPW:WPB` is the explicit-configuration op on the
+pair-interleaved activation.
+
+Streaming rate reachable on this card (`bench_tp2.py --stream`: the dense fp16
+GEMV of the `lm_head` over cold weights): 311 / 272 / 353 / 388 / 413 / 432 /
+437 GB/s at 3.9 / 7.9 / 16 / 33 / 67 / 268 / 1332 MB per call. So a 7-32 MB
+kernel cannot beat ~350-390 GB/s; the 512 GB/s floor is not reachable for
+kernels of this size.
+
+#### Baseline (v1) and what it leaves
+
+TP=2, v1 (`gemv`), min / median us (GB/s, share of the 512 GB/s floor):
+
+| slot (R x K, MB per call) | M=1 | M=2 | M=3 | M=4 | M=8 |
+| --- | --- | --- | --- | --- | --- |
+| gate_up_proj (17408 x 5120, 31.6) | 82.5 / 82.5 (383, 75%) | 118.8 / 124.2 (266, 52%) | 146.2 / 149.5 (216, 42%) | 172.2 / 173.0 (183, 36%) | 268.6 / 271.2 (117, 23%) |
+| down_proj (5120 x 8704, 16.8) | 50.1 / 50.2 (336, 66%) | 67.7 / 71.3 (249, 49%) | 81.8 / 85.9 (206, 40%) | 96.4 / 99.4 (175, 34%) | 150.3 / 153.2 (112, 22%) |
+| in_proj_qkvz (8192 x 5120, 15.2) | 45.0 / 45.0 (338, 66%) | 61.6 / 64.0 (247, 48%) | 73.9 / 76.5 (205, 40%) | 86.1 / 88.2 (176, 34%) | 134.2 / 136.1 (113, 22%) |
+| out_proj (5120 x 3072, 7.5) | 27.1 / 27.1 (275, 54%) | 33.5 / 34.1 (222, 43%) | 38.6 / 41.0 (193, 38%) | 43.1 / 45.5 (173, 34%) | 64.1 / 66.3 (116, 23%) |
+| qkv_proj (7168 x 5120, 13.2) | 41.0 / 41.1 (321, 63%) | 56.0 / 59.4 (235, 46%) | 67.0 / 70.7 (197, 38%) | 77.6 / 81.0 (170, 33%) | 120.5 / 123.9 (110, 21%) |
+| o_proj (5120 x 3072, 7.6) | 27.4 / 27.4 (276, 54%) | 33.6 / 34.2 (225, 44%) | 38.5 / 40.9 (197, 38%) | 43.2 / 45.5 (175, 34%) | 64.5 / 66.7 (117, 23%) |
+| in_proj_ba (48 x 5120, 0.1) | 4.4 / 4.4 | 5.7 / 5.7 | 6.5 / 6.5 | 7.1 / 7.1 | 10.0 / 10.0 |
+
+At M=1 v1 is at the streaming rate of its size (gate_up 383 GB/s against 388
+for 33 MB; down 336 against 353 for 16 MB): nothing to win there on the weight
+side. From M=2 the time grows by 26-36 us per token on gate_up (118.8, 146.2,
+172.2 us at M = 2, 3, 4) because v1 reloads the 16 activation values of a word
+for every word of every row: the GEMV falls to 23% of the floor at M=8. That
+slope is what a verify batch (MTP) or c >= 2 pays 304 times per step. The
+sum of the 304 v1 launches is 13.25 / 18.21 / 22.00 / 25.66 / 39.77 ms at
+M = 1 / 2 / 3 / 4 / 8 (HiTp2Bring's rocprof of the TP=2 server, f16 mode,
+taken while the image build ran, has 12.33 / 16.14 / 22.49 / 36.25 ms at
+c = 1 / 2 / 4 / 8 and 82.9 / 105.6 / 148.8 / 244.4 us for the gate_up GEMV at
+c = 1 / 2 / 4 / 8: the same shape of curve).
+
+#### What v2 does
+
+* A wave owns RPW rows (2 or 4) and lane `l` owns the 16-column group
+  `it * 32 + l` of each of them: the group's activation (MT tokens x 16
+  columns) is loaded once into registers (one iteration ahead for MT <= 4) and
+  serves all RPW rows, so a weight word costs its load, about four VALU
+  instructions to decode a column pair and MT `v_dot2_f32_f16`.
+* Pairing: the dot runs over the pairs (x_i, x_{i+8}) of the 16-column group
+  because those codes already sit in the two 16-bit halves of a dword (INT2:
+  `(w >> 2i) & 0x00030003`; INT4: the two words are cut into 16-bit halves with
+  one `v_perm_b32` each; INT8: one `v_perm_b32` per pair), then `| 0x64006400`,
+  `-1024`, `v_pk_fma_f16(step, lo)`: the spec decode `w = fp16(lo + c * step)`
+  with one rounding, identical to v1. The transform kernel writes the
+  activation in that pair order (stored[2i] = x[i], stored[2i+1] = x[i+8]) at
+  no cost. The accumulation order differs from v1 (other pairs, DPP wave sum:
+  four row steps and `v_permlanex16` instead of the `ds_bpermute` tree).
+* Rows of different width in one wave (the checkpoint's late layers have
+  2000-3000 INT2/INT4 runs, so 8-28% of waves straddle one): one instruction
+  stream whose decode is driven by wave-uniform SGPR controls (two word
+  selectors, shift and mask per pair), no divergence and no scratch. A branchy
+  version spilled (256 VGPRs, 84 B scratch at MT=8, RPW=4). Uniform waves keep
+  the specialised loops (the mixed stream is +26% on pure INT2). VGPRs are
+  73-237 per configuration, scratch 0.
+* An INT8 row in a wave falls back to one row at a time (none in this
+  checkpoint; covered by tests).
+
+Mixed-width effect, standalone one-kernel harness on the real row layouts of
+four gate_up layers, M=8, one process, **taken while the image build ran: only
+the ratios mean anything**: per-row mixed fallback 107.1 / 186.1 / 172.0 /
+142.5 us against the unified loop 104.7 / 133.1 / 133.3 / 136.4 us on layers
+0 (pure INT2), 41, 52 and 63 (89% to 100% INT4).
+
+#### Results
+
+TP=2, v2 with the `auto` configuration, min / median us (speedup over the v1
+min; config MT:RPW:WPB). M=1 is shown for reference: `auto` keeps v1 there.
+
+| slot | M=1 | M=2 | M=3 | M=4 | M=8 |
+| --- | --- | --- | --- | --- | --- |
+| gate_up_proj | 85.4 / 85.8 (x0.97; 1:2:4) | 89.0 / 89.6 (x1.33; 2:2:4) | 93.4 / 93.6 (x1.57; 3:4:4) | 102.9 / 104.5 (x1.67; 4:4:4) | 134.5 / 142.5 (x2.00; 8:4:4) |
+| down_proj | 52.2 / 52.3 (x0.96; 1:2:4) | 53.1 / 53.1 (x1.28; 2:2:4) | 54.9 / 55.0 (x1.49; 3:4:4) | 57.5 / 57.7 (x1.68; 4:4:4) | 76.0 / 76.6 (x1.98; 8:4:4) |
+| in_proj_qkvz | 46.9 / 47.1 (x0.96; 1:2:4) | 47.8 / 47.9 (x1.29; 2:2:4) | 49.4 / 49.6 (x1.50; 3:4:4) | 51.9 / 51.9 (x1.66; 4:4:4) | 70.4 / 71.6 (x1.91; 8:4:4) |
+| out_proj | 27.6 / 27.6 (x0.98; 1:2:4) | 27.8 / 27.9 (x1.21; 2:2:4) | 28.5 / 28.5 (x1.36; 3:4:4) | 29.3 / 29.3 (x1.47; 4:4:4) | 36.4 / 36.4 (x1.76; 8:4:4) |
+| qkv_proj | 41.8 / 41.8 (x0.98; 1:2:4) | 43.2 / 43.3 (x1.30; 2:2:4) | 43.9 / 44.0 (x1.53; 3:4:4) | 46.3 / 46.3 (x1.68; 4:4:4) | 59.9 / 61.3 (x2.01; 8:4:4) |
+| o_proj | 28.1 / 28.2 (x0.97; 1:2:4) | 28.4 / 28.5 (x1.18; 2:2:4) | 29.0 / 29.0 (x1.33; 3:4:4) | 29.7 / 29.7 (x1.45; 4:4:4) | 36.0 / 36.0 (x1.79; 8:4:4) |
+
+Whole decode step, sum of the GEMV launches (ms, min times, launches per step
+x min per call; in_proj_ba is v1 in both columns):
+
+| M | TP=2 v1 | TP=2 v2 | v1 / v2 | TP=4 v1 | TP=4 v2 | v1 / v2 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 13.25 | 13.71 | x0.97 | 7.83 | 7.81 | x1.00 |
+| 2 | 18.21 | 14.14 | x1.29 | 10.51 | 7.97 | x1.32 |
+| 3 | 22.00 | 14.71 | x1.50 | 12.46 | 8.19 | x1.52 |
+| 4 | 25.66 | 15.72 | x1.63 | 14.17 | 8.57 | x1.65 |
+| 8 | 39.77 | 20.62 | x1.93 | 21.57 | 11.64 | x1.85 |
+
+(TP=4 sums have the six large slots only: `in_proj_ba` at R=24 was not run.
+The M=1 "v2" column is not what `auto` runs, it is v2 for reference.) At M = 1
+v2 is 3% slower at TP=2 and level at TP=4 (v1 is weak at K = 1536: out_proj
+and o_proj are 22-26% faster with v2 there, in_proj_qkvz and gate_up are 5%
+slower), so `auto` does not touch M = 1 and a TP=4 `auto` run is exactly the
+v1 baseline at c = 1.
+
+TP=4, v2 `auto` configuration against v1 per slot (speedup over the v1 min;
+rank-0 shapes):
+
+| slot (R x K) | M=2 | M=3 | M=4 | M=8 |
+| --- | --- | --- | --- | --- |
+| gate_up_proj (8704 x 5120) | x1.28 | x1.51 | x1.66 | x1.94 |
+| down_proj (5120 x 4352) | x1.28 | x1.50 | x1.60 | x1.84 |
+| in_proj_qkvz (4096 x 5120) | x1.21 | x1.41 | x1.57 | x1.78 |
+| out_proj (5120 x 1536) | x1.74 | x1.77 | x1.86 | x1.65 |
+| qkv_proj (3584 x 5120) | x1.30 | x1.57 | x1.71 | x2.05 |
+| o_proj (5120 x 1536) | x1.72 | x1.77 | x1.84 | x1.69 |
+
+Larger batches, TP=2 (verify batches of MTP at c >= 4, c = 12..48), whole-step
+sum over the six large slots, v1 / v2 (`8:4:4`): M=12 49.71 / 33.96 ms
+(x1.46), M=16 72.25 / 35.36 (x2.04), M=24 105.60 / 51.59 (x2.05), M=32 138.71
+/ 68.67 (x2.02), M=48 205.04 / 103.51 (x1.98). v2 is faster than v1 for every
+slot at every M from 2 to 48. M = 5 and 6 use the 6-token tile (whole-step sum
+16.15 / 17.11 ms against 18.68 / 18.99 ms with the 8-token tile; v1 25.79 /
+33.04 ms), M = 7 the 8-token tile (19.83 ms; the 6-token tile in two passes
+27.41; v1 36.35).
+
+The whole op, transform plus GEMV (`linear` against `l2:` in one process, six
+large slots, ms per step): v1 `linear` 14.01 / 18.12 / 21.36 / 24.65 / 38.55 at
+M = 1 / 2 / 3 / 4 / 8; v2 14.85 (M=2, `2:2:8`) / 15.25 (`3:4:4`) / 16.02
+(`4:4:4`) / 20.92 (`8:4:4`): x1.22 / 1.40 / 1.54 / 1.84. The activation
+transform alone is 3.6-3.7 us per launch (0.93 ms per step for these 256
+launches, 3.5 us for `in_proj_ba`'s 48): 304 launches, about 1.1 ms of a
+27 ms c=1 step.
+
+The `auto` configuration (`gemv2_auto`): MT = M up to 4, 6 for M = 5-6, 8
+above (larger M runs MT = 8 along `grid.y`); 2 rows per wave at M <= 2, 4 from
+M = 3 on (2 when R < 2048: [INFERENCE] nothing that short was measured); 4
+waves per block. Per M, this single choice is within 1% of the best
+per-tensor choice in whole-step time (4% in one of three runs, from 8 waves per
+block on gate_up at M=4).
+
+Warm weights, for contrast (`--layers 1`: one layer replayed from the Infinity
+Cache; same process): gate_up layer 0, M=1, v1 51.5 us against v2 38.1 us,
+M=8 158.7 against 94.7 us. v2 is the more efficient kernel per instruction at
+every M; at M=1 on cold weights both wait for DRAM and v1's access pattern is
+3-4% better, so that is where it stays.
+
+#### lm_head and the other launches
+
+The `lm_head` is 1.271 GB per rank and 21.7% of the bytes of a TP=2 token:
+fp16 `gemv_f16_rdna2` 2911.5 us at M=1 (436.7 GB/s; 2915.7 / 2920.8 / 2939.1 /
+2995.0 us at M = 2 / 3 / 4 / 8), the T45 int8 shadow (`VLLM_RDNA_DENSE_INT8=1`,
+`gemv_i8_rdna2`) 1460.2 us at M=1 (435.5 GB/s; 1463.7 / 1468.4 / 1474.8 at
+M = 2 / 3 / 4, 2141.1 us at M = 8). T45 halves the head's time at M <= 4
+(-1.45 ms per step, 5% of a c=1 step). **Its accuracy on the HI2 27B is not
+validated**: per-row int8 of a vocabulary-sized fp16 matrix is lossy by
+construction; run `tools/rdna/port_v031/decode_kl.py` against the fp16 head
+before using it. Nothing was added to the quantization code for this.
+
+Launch counts, not kernels, dominate the rest of a c=1 step (HiTp2Bring's
+profile: 2451 launches, 1.9 us gap each, 7.2 ms outside the GEMVs):
+`gemma_fused_add_rms_norm` (~770 launches per step) and the GDN glue (~17 per
+layer) are outside the hi2 files; so is folding the 304 activation transforms
+(~1.1 ms) into the preceding norm, which needs model-code plumbing.
+
+Tried and dropped while building v2 (standalone harness, ratios only): fusing
+the transform into the GEMV (redundant in-register transform adds ~23% VALU;
+LDS staging collapses occupancy), a v2 for the I8 mode, a factorised decode
+(not bit-identical), row permutation, `waves_per_eu` limits, non-temporal
+weight loads, persistent scheduling (~2%), an in-loop INT4 branch (spills).
+
+#### Correctness
+
+* Flag off: with `RDNA_HINT_FLEX_GEMV` unset the outputs of
+  `rdna_hint_flex_linear_rdna2` (modes 0 and 1), `rdna_hint_flex_gemv_rdna2`
+  and `rdna_hint_flex_act_transform_rdna2` on real tensors (7 slots x 3 layers
+  x M in {1, 2, 3, 4, 5, 8, 13, 24, 48, 64}: 210 output sets) hash identically
+  between the base `_rocm_C` and `_custom_ops.py` and this branch's.
+* Real tensors (`bench_tp2.py --check "0:0:0;1:4:4;2:2:4;3:4:4;4:4:4;8:4:4;8:2:4"
+  --check-layers 0,3,30,31,41,47,63`, 588 cells): v2 against v1 differs in
+  0.13-0.25% of the outputs, by at most 1.95e-3 (3.3e-4 of max |y|: about one
+  fp16 ulp of the largest outputs); against the float64 decode of the same
+  rows the error is identical for v1 and v2 in every cell (v2 never worse);
+  the pair-interleaved and the natural activation give the same bits.
+* `tests/kernels/quantization/test_rdna_hint_flex_rdna2.py`: 1156 passed (209
+  before v2; the 947 added cover v2 against the float64 reference for each row
+  width, mixed INT2/INT4/INT8 run patterns with K = 512, 1088, 1600, bitwise
+  equality across (MT, RPW, WPB) and activation layouts, the pair-interleaved
+  transform, and the production op at M = 1..48). With `RDNA_HINT_FLEX_GEMV=v2`
+  and `=auto`, the 131 tests that go through the production op pass.
+
+#### End to end
+
+Verified end to end: **nothing of v2/auto yet.** The v1 baseline of the 27B
+TP=2 recipe (`27b-hi2-tp2`, from HiTp2Bring's branch) was booted and probed
+with an earlier build of this branch and the switch unset: READY in 180 s, greedy 3/3,
+PPL probe 5.73 (mean NLL 1.746 over 261 tokens), concurrency probe 47 of 48
+identical (1 near-tie), 0 KFD evictions; the prefix probe failed only because
+the default prompt is short (hit granularity 2048 tokens; use
+`PREFIX_WORDS=3000`). To A/B v2 on the same binary, only the environment
+differs (`serve_rdna.sh` passes the calling environment through):
+
+```text
+export RDNA_HINT_FLEX_GEMV=auto          # unset for the v1 baseline
+RECIPE=27b-hi2-tp2 MODEL=<snapshot> GPUS=4,5 PORT=18231 TAG=hi2k-auto \
+  PREFIX_WORDS=3000 CELLS="1024:512:1 1024:512:8 16384:1024:8:32" \
+  BENCH_EXTRA="--temperature 0" SERVE_TREE=<tree> VENV=<venv> \
+  bash tools/rdna/port_v031/serve_validate.sh
+# then: decode_kl.py collect against each server, compare auto and v1
+```
+
+Expected [INFERENCE]: c=1 unchanged (M=1 is v1); at c=8 the GEMV time of a
+step falls by about 19 ms (39.77 to 20.62 ms by the table above; the step
+length itself was not measured here); the MTP verify batch at c=1 (M = 3) pays
+14.71 instead of 22.00 ms of GEMV. The MTP doc's cost model used v1's growth
+with M (gate_up 1.77x of M=1 at M=3); with v2 it is 1.13x (93.4 against 82.5 us).
+
+Remaining: the head (T45 or smaller), norm and transform launches, M = 1 (at
+the streaming rate), and the FA prefill attention (about 1.05-1.10 TFLOP/s,
+HiTp2Bring's branch `feat/hi2-attn-prefill`, not touched here).
 
 ### TunableOp
 
