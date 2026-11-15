@@ -38,6 +38,9 @@ Labels: **[measured]** = a run listed here, **[inference]** = a run must confirm
    c=4 when the arm has `MTP=` > 0, and the **window label**: "quiet protocol" when
    `QUIET_HOLD=1` (default: the driver waits for any `docker buildx build` and for other
    lanes' windows) and otherwise "not for comparison".
+   Since 2026-11-15 the window also holds `~/w4a8_runs/measure.lock` (`MEASURE_LOCK=`; opt out
+   with `MEASURE_LOCK_SKIP=1`): a driver of another slot that is about to measure waits for it
+   (logged), so two slots never time a window at once; boots stay governed by the quiet files.
 
 ## Running arms
 

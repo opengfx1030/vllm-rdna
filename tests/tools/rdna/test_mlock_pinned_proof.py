@@ -688,10 +688,16 @@ def test_serve_validate_without_quiet_dir_is_unchanged(tmp_path: Path):
 
 
 def _quiet_functions() -> str:
-    """quiet_end, quiet_lock_wait and quiet_begin, cut out of serve_validate.sh."""
+    """The measure-lock and quiet_* functions, cut out of serve_validate.sh."""
     text = (PORT_V031 / "serve_validate.sh").read_text()
     out = []
-    for name in ("quiet_end", "quiet_lock_wait", "quiet_begin"):
+    for name in (
+        "measure_lock_take",
+        "measure_lock_drop",
+        "quiet_end",
+        "quiet_lock_wait",
+        "quiet_begin",
+    ):
         start = text.index(f"\n{name}() {{") + 1
         out.append(text[start : text.index("\n}\n", start) + 3])
     return "".join(out)
@@ -700,7 +706,7 @@ def _quiet_functions() -> str:
 def _run_quiet(tmp_path: Path, body: str, **env: str) -> list[str]:
     script = tmp_path / "quiet_fns.sh"
     script.write_text(
-        'log() { echo "log: $*"; }\nQUIET_FILE=""\nQUIET_PID=""\n'
+        'log() { echo "log: $*"; }\nQUIET_FILE=""\nQUIET_PID=""\nMEASURE_HELD=0\n'
         + _quiet_functions()
         + body
     )
@@ -796,6 +802,68 @@ def test_quiet_begin_is_a_noop_without_hold_or_dir(tmp_path: Path):
     assert lines == ["file=0"]
 
 
+@pytest.mark.skipif(not (LINUX and shutil.which("flock")), reason="flock and GNU stat")
+def test_quiet_begin_takes_the_measure_lock_before_the_file_and_end_drops_it(
+    tmp_path: Path,
+):
+    q = tmp_path / "quiet" / "EvictFix"
+    lock = tmp_path / "measure.lock"
+    # QUIET_TOUCH 30: a touch loop that kept fd 8 would hold the lock after the end
+    lines = _run_quiet(
+        tmp_path,
+        f"""
+( flock 7; sleep 1.2 ) 7> "{lock}" &
+sleep 0.3
+( sleep 0.5; echo "waiting: file=$([[ -e {q} ]] && echo yes || echo no)" ) &
+quiet_begin
+echo "begun: file=$([[ -e {q} ]] && echo yes || echo no) held=$MEASURE_HELD"
+flock -n "{lock}" true && echo "during: free" || echo "during: held"
+quiet_end
+flock -n "{lock}" true && echo "after: free" || echo "after: held"
+""",
+        MEASURE_LOCK=str(lock),
+        QUIET_TOUCH="30",
+        QUIET_CAP="60",
+    )
+    assert any("waiting for measure lock" in ln for ln in lines)
+    assert lines.index("waiting: file=no") < lines.index("begun: file=yes held=1")
+    assert "during: held" in lines and "after: free" in lines
+    assert "log: measure lock released" in lines
+
+
+@pytest.mark.skipif(not (LINUX and shutil.which("flock")), reason="flock")
+@pytest.mark.parametrize("opt_out", [{"MEASURE_LOCK_SKIP": "1"}, {"MEASURE_LOCK": ""}])
+def test_the_measure_lock_opts_out(tmp_path: Path, opt_out: dict[str, str]):
+    lock = tmp_path / "measure.lock"
+    lines = _run_quiet(
+        tmp_path,
+        f"""
+( flock 7; exec sleep 30 ) 7> "{lock}" &
+holder=$!
+sleep 0.3
+quiet_begin
+echo "begun: held=$MEASURE_HELD holder=$(kill -0 $holder && echo alive)"
+quiet_end
+kill $holder
+""",
+        QUIET_CAP="30",
+        **{"MEASURE_LOCK": str(lock), **opt_out},
+    )
+    assert "begun: held=0 holder=alive" in lines
+    assert not any("measure lock" in ln for ln in lines)
+
+
+def test_the_measure_lock_is_skipped_when_it_cannot_be_opened(tmp_path: Path):
+    lines = _run_quiet(
+        tmp_path,
+        'quiet_begin; echo "begun: held=$MEASURE_HELD"; quiet_end',
+        MEASURE_LOCK=str(tmp_path / "no" / "such" / "measure.lock"),
+        QUIET_CAP="30",
+    )
+    assert "begun: held=0" in lines
+    assert any("unavailable: measuring without it" in ln for ln in lines)
+
+
 def _serve_validate_cells(
     tmp_path: Path, bench: str = ":", **env: str
 ) -> "tuple[subprocess.CompletedProcess[str], list[list[str]], Path]":
@@ -810,7 +878,8 @@ def _serve_validate_cells(
     (tmp_path / "venv/bin/python").write_text(
         "#!/usr/bin/env bash\n"
         'if [[ " $* " == *" bench serve "* ]]; then\n'
-        '    echo "cell $(date +%s.%N) quiet=$(ls "$QUIET_DIR" | tr "\\n" ,)"'
+        '    echo "cell $(date +%s.%N) quiet=$(ls "$QUIET_DIR" | tr "\\n" ,)'
+        ' lock=$(flock -n "$MEASURE_LOCK" true && echo free || echo held)"'
         ' >> "$STUB_OBS"\n'
         f"    {bench}\n"
         "fi\n"
@@ -819,7 +888,8 @@ def _serve_validate_cells(
     (tmp_path / "venv/bin/python").chmod(0o755)
     (tmp_path / "hook.sh").write_text(
         "#!/usr/bin/env bash\n"
-        'echo "hook $(date +%s.%N) quiet=$(ls "$QUIET_DIR" | tr "\\n" ,)"'
+        'echo "hook $(date +%s.%N) quiet=$(ls "$QUIET_DIR" | tr "\\n" ,)'
+        ' lock=$(flock -n "$MEASURE_LOCK" true && echo free || echo held)"'
         ' >> "$STUB_OBS"\n'
         "echo PASS\n"
     )
@@ -859,7 +929,7 @@ def _serve_validate_cells(
         WARMUP="0",
         STUB_OBS=str(obs),
         REAL_PY=sys.executable,
-        **env,
+        **{"MEASURE_LOCK": str(tmp_path / "measure.lock"), **env},
     )
     (tmp_path / "serve_stub.sh").write_text(
         "#!/usr/bin/env bash\n"
@@ -886,6 +956,22 @@ def test_serve_validate_measures_the_cells_in_one_window_and_the_hook_in_none(
     assert res.stdout.count("quiet window open") == 1
     assert "quiet window closed" in res.stdout and list(quiet.iterdir()) == []
     assert "a boot is in flight" not in res.stdout
+
+
+@pytest.mark.skipif(
+    not (LINUX and shutil.which("curl") and shutil.which("flock")),
+    reason="curl and flock",
+)
+def test_serve_validate_holds_the_measure_lock_for_the_cells_only(tmp_path: Path):
+    # each client leaves a child behind: it must not carry the lock out of the window
+    res, rows, quiet = _serve_validate_cells(tmp_path, "(sleep 6 &)")
+    assert [r[0] for r in rows] == ["cell", "cell", "hook"]
+    assert [r[3] for r in rows] == ["lock=held", "lock=held", "lock=free"]
+    assert res.stdout.count("measure lock held") == 1
+    assert res.stdout.index("measure lock held") < res.stdout.index("quiet window open")
+    assert res.stdout.index("quiet window closed") < res.stdout.index(
+        "measure lock released"
+    )
 
 
 @pytest.mark.skipif(

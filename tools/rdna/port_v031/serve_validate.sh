@@ -47,6 +47,13 @@
 # (120) before the LOAD_HOOK,
 # which opens a window of its own for each load.
 #
+# MEASURE_LOCK=/path (default ~/w4a8_runs/measure.lock; MEASURE_LOCK_SKIP=1 or an
+# empty MEASURE_LOCK opts out): the measurement mutex across slots. quiet_begin takes
+# it (blocking, logged while it waits, before the quiet file appears so that a waiting
+# measurer does not hold the booters back) on fd 8; quiet_end lets go of it. The touch
+# loop and the bench client run with fd 8 closed (8>&-), so a stray child cannot keep
+# the lock of a finished window. Do not wrap this script in `flock` on the same file.
+#
 # STOP_GRACE=SECONDS (default 10): how long a server that is still shutting down
 # gets after the SIGTERM before the SIGKILL. A TP4 worker holding 24 GiB of
 # pinned memory can take longer than 10 s to leave KFD; a SIGKILL in the middle
@@ -115,6 +122,7 @@ else
     QUIET_DIR=${QUIET_DIR:-$HOME/w4a8_runs/lanes/quiet}
 fi
 QUIET_OWN=${QUIET_OWN:-${QUIET_NAME:-EvictFix}}
+MEASURE_LOCK=${MEASURE_LOCK-$HOME/w4a8_runs/measure.lock}
 quiet_recent() {
     [[ -n ${QUIET_DIR:-} ]] || return 0
     find "$QUIET_DIR" -maxdepth 1 -type f -mmin "-${QUIET_MIN:-6}" \
@@ -153,6 +161,26 @@ echo "$SPID" > "$OUT/serve.pid"
 
 QUIET_FILE=""
 QUIET_PID=""
+MEASURE_HELD=0
+measure_lock_take() {
+    [[ -n ${MEASURE_LOCK:-} && ${MEASURE_LOCK_SKIP:-0} != 1 ]] || return 0
+    if ! command -v flock > /dev/null 2>&1 || ! exec 8>> "$MEASURE_LOCK"; then
+        log "measure lock $MEASURE_LOCK unavailable: measuring without it"
+        return 0
+    fi
+    if ! flock -n 8; then
+        log "waiting for measure lock $MEASURE_LOCK (another slot is measuring)"
+        flock 8
+    fi
+    MEASURE_HELD=1
+    log "measure lock held: $MEASURE_LOCK"
+}
+measure_lock_drop() {
+    (( MEASURE_HELD )) || return 0
+    exec 8>&-
+    MEASURE_HELD=0
+    log "measure lock released"
+}
 quiet_end() {
     if [[ -n $QUIET_PID ]]; then
         kill "$QUIET_PID" 2>/dev/null
@@ -164,6 +192,7 @@ quiet_end() {
         QUIET_FILE=""
         log "quiet window closed"
     fi
+    measure_lock_drop
 }
 # A measurer waits until `flock -n BOOT_LOCK true` succeeds after touching its file
 # and again before every measured cell (a booter can take the lock just before the
@@ -188,6 +217,7 @@ quiet_lock_wait() {
 quiet_begin() {
     [[ -n ${QUIET_DIR:-} && ${QUIET_HOLD:-0} == 1 ]] || return 0
     local shell=$$
+    measure_lock_take
     # anchored: another agent's waiter carries the words in its own command line
     while pgrep -f "${BUILDX_PAT:-^(/usr/sbin/|/usr/bin/)?docker buildx build}" > /dev/null 2>&1; do
         log "a docker buildx build is running: measured windows wait"
@@ -201,7 +231,7 @@ quiet_begin() {
             && kill -0 "$shell" 2>/dev/null; do
             touch "$QUIET_FILE"
         done
-    ) &
+    ) 8>&- &
     QUIET_PID=$!
     log "quiet window open: $QUIET_FILE"
     quiet_lock_wait
@@ -361,7 +391,7 @@ for cell in $CELLS; do
         --dataset-name random --random-input-len "$in" --random-output-len "$out" \
         --num-prompts "$n" --max-concurrency "$conc" --ignore-eos \
         --request-rate inf --seed 12345 --save-result --result-dir "$OUT" \
-        --result-filename "$name.json" ${BENCH_EXTRA:-} > "$OUT/$name.log" 2>&1
+        --result-filename "$name.json" ${BENCH_EXTRA:-} > "$OUT/$name.log" 2>&1 8>&-
     python3 "$TREE/tools/rdna/port_v031/bench_metrics.py" "$OUT/$name.json" \
         | sed 's/^/    /' | tee -a "$SUM"
     evict --since "$OUT/evicted-$name.json" | sed 's/^/    /' | tee -a "$SUM"
