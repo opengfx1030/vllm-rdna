@@ -28,7 +28,9 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm.config.compilation import CUDAGraphMode
+from vllm.utils import torch_utils
 from vllm.v1.attention.backends import gdn_attn
+from vllm.v1.attention.backends import utils as attn_utils
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -37,6 +39,18 @@ from vllm.v1.attention.backends.gdn_attn import (
 from vllm.v1.kv_cache_interface import MambaSpec
 
 NULL = 0
+
+
+@pytest.fixture(autouse=True)
+def _stage_unpinned_without_a_device(monkeypatch):
+    """Pinned staging buffers need a device; on a CPU-only host stage unpinned.
+
+    ``async_tensor_h2d`` and the conv1d metadata of a prefill step both pin, and the
+    backend utils module holds its own copy of the constant.
+    """
+    if not torch.cuda.is_available():
+        monkeypatch.setattr(torch_utils, "PIN_MEMORY", False)
+        monkeypatch.setattr(attn_utils, "PIN_MEMORY", False)
 
 
 @pytest.fixture
