@@ -52,6 +52,8 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+#include "rdna_hint_flex_dense_gemm_rdna2.cuh"
+
 #if defined(__HIPCC__) && defined(__gfx1030__)
   #define __HIP__RDNA2__
 #endif
@@ -2763,14 +2765,16 @@ void rdna_hint_flex_gemv_i8_rdna2(
 
 // y = x . W^T for an rdna_hint_flex tensor (transform included when
 // `transform`). mode 0 (F16): M <= decode_max_m runs the F16 GEMV, otherwise
-// dequant + rocBLAS GEMM. mode 1 (I8 decode): M <= decode_max_m runs the I8
-// path, larger M as mode 0. mode 2 (I8 everywhere): the I8 path for every M.
+// dequant + GEMM (rocBLAS; with prefill_gemm > 0 the dense HIP GEMM of
+// rdna_hint_flex_dense_gemm_rdna2.cu wherever its dispatch table beats rocBLAS
+// for (M, R, K)). mode 1 (I8 decode): M <= decode_max_m runs the I8 path,
+// larger M as mode 0. mode 2 (I8 everywhere): the I8 path for every M.
 torch::Tensor rdna_hint_flex_linear_rdna2(
     torch::Tensor x, torch::Tensor col_scale, torch::Tensor had,
     torch::Tensor codes, torch::Tensor code_off, torch::Tensor blk_params,
     torch::Tensor param_off, torch::Tensor row_consts, torch::Tensor row_nbits,
     torch::Tensor row_block, bool transform, int64_t decode_max_m, int64_t mode,
-    bool silu_mul) {
+    bool silu_mul, int64_t prefill_gemm) {
   const Hi2Weight w{codes,      code_off,  blk_params, param_off,
                     row_consts, row_nbits, row_block};
   const int64_t R = check_weight(w);
@@ -2818,7 +2822,12 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
   } else {
     auto wd = torch::empty({R, K}, x.options());
     launch_dequant(w, wd, R, K, stream);
-    at::mm_out(out, xt, wd.t());
+    namespace hg = vllm::rdna_hint_flex::gemm;
+    const int design = prefill_gemm > 0 ? hg::pick(M, R, K) : hg::kRocblas;
+    if (design < 0 ||
+        !hg::launch(design, xt.data_ptr(), wd.data_ptr(), out.data_ptr(), M, R,
+                    K, xt.stride(0), wd.stride(0), out.stride(0), stream))
+      at::mm_out(out, xt, wd.t());
   }
   return out;
 }

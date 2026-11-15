@@ -3,7 +3,7 @@
 
 from enum import IntEnum
 from functools import cache
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -1417,8 +1417,13 @@ def rdna_hint_flex_linear_rdna2(
     decode_max_m: int,
     mode: int = 0,
     silu_mul: bool = False,
+    prefill_gemm: int = 0,
 ) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(
+    """prefill_gemm > 0: above decode_max_m the dequantized GEMM runs the dense
+    HIP kernel wherever its dispatch table beats rocBLAS (see
+    csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu); 0 is the rocBLAS path (the
+    argument is then not passed at all, so the call is the one older builds take)."""
+    args: list[Any] = [
         x,
         col_scale,
         had,
@@ -1433,7 +1438,26 @@ def rdna_hint_flex_linear_rdna2(
         decode_max_m,
         mode,
         silu_mul,
-    )
+    ]
+    if prefill_gemm:
+        args.append(prefill_gemm)
+    return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(*args)
+
+
+def rdna_hint_flex_dense_gemm_rdna2(
+    x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, design: int = -1
+) -> None:
+    """Out = x @ w.T for fp16 x [M, K], w [N, K], out [M, N] on gfx1030.
+
+    design -1: the (N, K, M) dispatch table picks the dense HIP kernel or
+    rocBLAS; design >= 0 forces that kernel design (error when it cannot run
+    the problem)."""
+    torch.ops._rocm_C.rdna_hint_flex_dense_gemm_rdna2(x, w, out, design)
+
+
+def rdna_hint_flex_dense_gemm_pick_rdna2(m: int, n: int, k: int) -> int:
+    """Design the dispatch table picks for (M, N, K); -1 = rocBLAS."""
+    return torch.ops._rocm_C.rdna_hint_flex_dense_gemm_pick_rdna2(m, n, k)
 
 
 def rdna_hint_flex_moe_rdna2(
@@ -1663,8 +1687,15 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         decode_max_m: int,
         mode: int,
         silu_mul: bool = False,
+        prefill_gemm: int = 0,
     ) -> torch.Tensor:
         return x.new_empty((x.size(0), row_nbits.size(0)))
+
+    @register_fake("_rocm_C::rdna_hint_flex_dense_gemm_rdna2")
+    def _rdna_hint_flex_dense_gemm_rdna2_fake(
+        x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, design: int = -1
+    ) -> None:
+        return
 
     @register_fake("_rocm_C::rdna_hint_flex_moe_rdna2")
     def _rdna_hint_flex_moe_rdna2_fake(x: torch.Tensor, *args) -> torch.Tensor:

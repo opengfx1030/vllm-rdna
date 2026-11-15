@@ -63,7 +63,23 @@ COMPUTE_MODES = {"f16": 0, "i8": 1, "i8_all": 2}
 # The GEMV re-reads the compact weights once per 8 tokens and stays faster
 # than dequant + GEMM up to about M = 48-64 on Qwen3.5-4B shapes (V620).
 DECODE_MAX_M = 48
+# Prefill GEMM backend above DECODE_MAX_M: the RDNA_HINT_FLEX_PREFILL_GEMM
+# environment variable selects it ("" / "0" / "off" / "rocblas" = rocBLAS, the
+# default; "hip" = the dense HIP kernel of csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu
+# wherever its (N, K, M) dispatch table measured it faster than rocBLAS, rocBLAS
+# everywhere else). Takes effect on the RDNA2 kernels only (gfx10x).
+PREFILL_GEMM_MODES = {"": 0, "0": 0, "off": 0, "rocblas": 0, "hip": 1}
 _FIELD_PREFIX = "hi2_"
+
+
+def _prefill_gemm_from_env() -> int:
+    value = os.environ.get("RDNA_HINT_FLEX_PREFILL_GEMM", "").strip().lower()
+    if value not in PREFILL_GEMM_MODES:
+        raise ValueError(
+            f"RDNA_HINT_FLEX_PREFILL_GEMM={value!r} is not one of "
+            f"{sorted(PREFILL_GEMM_MODES)}"
+        )
+    return PREFILL_GEMM_MODES[value]
 
 
 def _rdna2_kernels_available() -> bool:
@@ -265,6 +281,15 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
         self.has_col_scale = has_col_scale
         self.compute_mode = compute_mode
         self.use_kernels = _rdna2_kernels_available()
+        self.prefill_gemm = _prefill_gemm_from_env() if self.use_kernels else 0
+        if self.prefill_gemm and not hasattr(
+            torch.ops._rocm_C, "rdna_hint_flex_dense_gemm_rdna2"
+        ):
+            logger.warning_once(
+                "RDNA_HINT_FLEX_PREFILL_GEMM=hip: this _rocm_C build has no "
+                "rdna_hint_flex_dense_gemm_rdna2; prefill stays on rocBLAS."
+            )
+            self.prefill_gemm = 0
 
     def create_weights(
         self,
@@ -471,6 +496,7 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                     DECODE_MAX_M,
                     self.compute_mode,
                     silu,
+                    self.prefill_gemm,
                 )
             else:
                 xt = x2
