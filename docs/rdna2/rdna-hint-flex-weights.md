@@ -720,6 +720,11 @@ current / new, curate at 3 %, additive merge into all four rank files of
 over the heuristic per shape, 1.21x for the 4B's M >= 512 prefill shapes).
 Details: `tunableop/rocm7.14-rocblas5.5/README.md` and `provenance.json`.
 
+Qwen3.8-27B HI2 at TP=2 has its own opt-in row set (the canonical rows plus the
+prefill GEMMs at the scheduler's chunk M, `tunableop/rocm7.14-rocblas5.5-hi2-27b-tp2/`),
+selected by `TUNABLEOP_PREFER` in recipe `27b-hi2-tp2`:
+[`hi2-27b-tunableop-2026-11-15.md`](hi2-27b-tunableop-2026-11-15.md).
+
 ### Serving
 
 `tools/rdna/rdna_hint_flex/bench_serve.sh` (vLLM OpenAI server, `RECIPE=full` =

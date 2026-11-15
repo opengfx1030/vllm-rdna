@@ -319,13 +319,18 @@ rdse_tunableop_report() {
         return
     fi
     if [[ -f $lib ]] && command -v sha256sum >/dev/null 2>&1; then
-        local sha match
+        local sha picked mode name
         sha=$(sha256sum -- "$lib")
         sha=${sha:0:12}
-        match=$(_tunableop_profiles "$rows_root/profiles.json" |
-            awk -F'\t' -v h="$sha" 'substr($3, 1, 12) == h { print $1; exit }')
-        if [[ -n $match ]]; then
-            rdse_profile_line="$match (auto-selected for librocblas.so.5 $sha)"
+        picked=$(_tunableop_pick "$rows_root/profiles.json" "$sha" "" "${TUNABLEOP_PREFER:-}")
+        IFS=$'\t' read -r mode name _ <<< "$picked"
+        if [[ $mode == preferred ]]; then
+            rdse_profile_line="$name (preferred via TUNABLEOP_PREFER for librocblas.so.5 $sha)"
+        elif [[ -n $name ]]; then
+            rdse_profile_line="$name (auto-selected for librocblas.so.5 $sha)"
+            if [[ -n ${TUNABLEOP_PREFER:-} ]]; then
+                rdse_profile_line+="; preferred ${TUNABLEOP_PREFER} is not registered for this build"
+            fi
         else
             rdse_profile_line="no profile matches librocblas.so.5 $sha; per-user fallback row set"
         fi

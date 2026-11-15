@@ -13,6 +13,7 @@ one visible folder per rocBLAS build, selected at launch.
 | Profile | rocBLAS | ROCm / torch | `librocblas.so.5` sha256[:12] | rows / rank | Status |
 | --- | --- | --- | ---: | ---: | --- |
 | `rocm7.14-rocblas5.5/` | `5.5.0.cd957402` | `7.14.60850` / `2.12.0+rocm7.14.0` | `f30bb442e9b5` | **3330** (2738 + 592 TP8 shapes; ranks 0-7) | canonical (`venv-7.14.0_0.28.0` and `_0.31.0`) |
+| `rocm7.14-rocblas5.5-hi2-27b-tp2/` | `5.5.0.cd957402` | `7.14.60850` / `2.12.0+rocm7.14.0` | `f30bb442e9b5` | **3366** (3330 canonical + 36 for the 27B HI2 TP=2 prefill; ranks 0-3) | **opt-in** (`auto: false`, selected by `TUNABLEOP_PREFER` in recipe `27b-hi2-tp2` only) |
 | `rocm10-rocblas5.6/` | `5.6.0.8d1ae90e` | `7.15.26333` / `2.13.0+rocm10.0.0` | `d05939967b5f` | **139** | **qualified for build `d05939967b5f`** (55 prefill + 84 decode/MTP) |
 
 The canonical profile covers these serving families:
@@ -52,6 +53,31 @@ configure_tunableop <librocblas.so.5 path> <tunableop dir> [profile]
   library** and **fails the launch loudly on mismatch**. For experiments only,
   `TUNABLEOP_ALLOW_MISMATCH=1` downgrades the error to a hard warning and uses
   the rows anyway. A mismatched set can never run silently.
+* **preferred (`TUNABLEOP_PREFER=<name>`)** — the soft form of the explicit
+  choice: used only when `<name>` is registered **for the loaded library's
+  hash**; otherwise the helper warns (`preferred TunableOp profile "<name>"
+  ... is not registered for rocBLAS build <hash> ...; auto-selecting`) and
+  auto-selects, so a launch never fails because a recipe prefers a profile of
+  another build. An explicit `TUNABLEOP_PROFILE` wins over it; an empty
+  `TUNABLEOP_PREFER=` is the rows-off A/B arm. A profile registered with
+  `"auto": false` (opt-in) is never picked by auto-selection, only by name or
+  preference.
+
+After the selection the helper logs the rows it will serve per rank (a worker
+on device ordinal `r` reads `tunableop_results<r>.csv`; TP=2 uses ranks 0 and 1):
+
+```text
+TunableOp rows per rank (a worker on device ordinal r reads tunableop_results<r>.csv): 0=N 1=N 2=N 3=N
+```
+
+`rocm7.14-rocblas5.5-hi2-27b-tp2` is a derived profile: the canonical rank
+files 0-3 byte-for-byte plus the rows of
+`docs/rdna2/hi2-27b-tunableop-2026-11-15.md`. It exists so that the rows of one
+recipe never reach another recipe's lookup table (their rank files stay
+byte-identical) and so that the rows can be A/B'd (`TUNABLEOP_PREFER=`). If a
+later gate prefers a single row set, `tools/rdna/prof/tunableop_missing.py
+harvest --profile rocm7.14-rocblas5.5 --tuned <that profile's new rows>` merges
+them additively into the canonical profile.
 
 A healthy auto-selecting start logs:
 

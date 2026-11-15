@@ -574,6 +574,14 @@ mismatch. If no profile matches, it falls back to
 `TunableOp profile … auto-selected` in the log. **Never** point rows at `/tmp`
 or the run CWD.
 
+`TUNABLEOP_PREFER=<name>` is the soft form: it applies only when that profile is
+registered for the loaded library's hash, else the launcher warns and
+auto-selects. Recipe `27b-hi2-tp2` sets it to the opt-in derived profile
+`rocm7.14-rocblas5.5-hi2-27b-tp2` (the canonical rows plus the 27B HI2 TP=2 prefill
+rows, `docs/rdna2/hi2-27b-tunableop-2026-11-15.md`); `TUNABLEOP_PREFER=` (empty)
+gives the canonical rows. The helper also logs the rows per rank file
+(`TunableOp rows per rank ...`).
+
 A shape without a row silently runs the heuristic. Shapes change when you
 change `MAXBAT`, `BLOCK_SIZE` (chunk alignment), MTP, TP or the model. The
 HC pad (`VLLM_RDNA_HC_PAD_M`) exists to keep mixed steps on tuned rows.

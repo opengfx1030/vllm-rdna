@@ -21,6 +21,21 @@
         "OLMoE-1B-7B-0924 rdna_hint_flex (r4, b3.0) and dense fp16, TP=1: attention/router/lm_head shapes from the four bench cells (2026-10-26)"
       ]
     },
+    "rocm7.14-rocblas5.5-hi2-27b-tp2": {
+      "dir": "rocm7.14-rocblas5.5-hi2-27b-tp2",
+      "rocblas": "5.5.0.cd957402",
+      "rocm": "7.14.60850",
+      "torch": "2.12.0+rocm7.14.0",
+      "lib_sha256": "f30bb442e9b5a3c479f6aa60c4d0d0740f67db2957fc0a5c416253e1bf320262",
+      "rows_per_rank": 3366,
+      "venv": "venv-7.14.0_0.32.0",
+      "status": "opt-in (auto: false): the canonical rocm7.14-rocblas5.5 rows plus the Qwen3.8-27B HI2 TP=2 prefill rows; selected by TUNABLEOP_PREFER in recipe 27b-hi2-tp2 only",
+      "auto": false,
+      "derived_from": "rocm7.14-rocblas5.5",
+      "covers": [
+        "Qwen3.8-27B-HI2-3.0bpw (rdna_hint_flex) at TP=2 on the same rocBLAS build: prefill GEMMs of the hi2 dequant + mm_out path at the tile-aligned scheduler M (1023, 1024, 2046, 2047, 2048) plus the 48-row in_proj_ba at every census M (1023..1031, 1033..1045, 2046..2048)"
+      ]
+    },
     "rocm10-rocblas5.6": {
       "dir": "rocm10-rocblas5.6",
       "rocblas": "5.6.0.8d1ae90e",
