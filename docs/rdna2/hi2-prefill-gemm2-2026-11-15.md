@@ -22,7 +22,7 @@ stated per table). "Better rocBLAS" = the faster of the heuristic and the Tunabl
 | ops | `rdna_hint_flex_dense_gemm_rdna2(x, w, out, design=-1)` and `rdna_hint_flex_dense_gemm_pick_rdna2(m, n, k)` |
 | prefill branch of the composite op | `rdna_hint_flex_linear_rdna2(..., prefill_gemm)` in `csrc/rocm/rdna_hint_flex_rdna2.cu` |
 | switch | `RDNA_HINT_FLEX_PREFILL_GEMM` in `vllm/model_executor/layers/quantization/rdna_hint_flex.py` |
-| tests | `tests/kernels/quantization/test_rdna_dense_gemm_rdna2.py` (60 passed on the box: error table of every design at the five TP2 slots and M in {1, 27, 512, 700, 1023, 1024, 1031, 1500, 2046, 2048}, tails off the tile grid, strides, fallbacks, composite on/off, tail split, switch values) |
+| tests | `tests/kernels/quantization/test_rdna_dense_gemm_rdna2.py` (61 passed on the box, final build: error table of every design at the five TP2 slots and M in {1, 27, 512, 700, 1023, 1024, 1031, 1500, 2046, 2048}, tails off the tile grid, strides, fallbacks, composite on/off, tail split, generator pick rule and composite veto, switch values) |
 
 * **Switch.** `RDNA_HINT_FLEX_PREFILL_GEMM` = unset / `0` / `off` / `rocblas`: rocBLAS (default, the call is
   byte-identical to the pre-existing one: the trailing op argument is only passed when the switch is on). `hip`: the
@@ -239,7 +239,93 @@ dot2; BUF takes D1's VALU per dot2 from 1.062 to 1.031 and the DMA+BROT build to
 4. Fused decode-in-GEMM was not built: decoding each weight inside every tile row costs 12-23 % of the dot2 issue
    budget at BM = 128..256 [derived]; the standalone dequant pass is 1.6 % of TP2 prefill time.
 
-<!-- COMPOSITE -->
+## The composite op against rocBLAS: per-slot table (out of sample, HIP 5)
+
+`bench_linear.py` times `rdna_hint_flex_linear_rdna2` for the whole prefill linear: input transform + dequant to the fp16
+scratch + GEMM [+ tail] on synthetic HI2 weights (3.61 bits/weight, 50 % int4, the five TP2 shapes), packed weights
+rotating through 640 MB, CUDA graph, 9 interleaved rounds x 60 ms, medians. rocBLAS rows are the same op with
+`prefill_gemm=0`: the heuristic (what serving runs) and the TunableOp row of the cell where one exists (`rocm7.14-
+rocblas5.5-hi2-27b-tp2` rows at M 1023 / 1024 / 2046 / 2048, the round-1 rows at 512 / 700 / 1024 / 1500 / 2048).
+Mode 1 = padded tail, mode 4 = what `RDNA_HINT_FLEX_PREFILL_GEMM=hip` sends; TF/s = GEMM FLOPs / composite time; every row
+at the 174-175 W cap. `composite_final_hip5.csv` is `lin3a_hip5.csv` (a8 build) with the M = 512 / 700 / 1045 cells
+replaced by `lin4_hip5.csv` (a9 build: the final table and tail rule). Nothing in this table was used to pick designs
+except the one veto below, so it is the out-of-sample check of the in-sample grid above.
+
+* **45 cells: mode 4 is 1.109 x the better rocBLAS row and 1.163 x the heuristic (geomean); the 25 protocol cells
+  1.082 / 1.146; no cell is slower than rocBLAS** (lowest 1.004: gate_up M = 512, which the table routes to rocBLAS).
+* Per slot, vs better / vs heuristic (9 cells each): gate_up 1.094 / 1.205, down 1.138 / 1.138, in_proj_qkvz
+  1.108 / 1.172, qkv_proj 1.103 / 1.169, out_proj 1.103 / 1.131.
+* The gain over the **tuned** rows at the 16k / 32k chunk (M = 2048): gate_up 1.120, down 1.104, in_proj_qkvz 1.081,
+  qkv_proj 1.085, out_proj 1.068 (geomean 1.092, unweighted by each slot's share of the FLOPs [derived]).
+* Against the kernel-level grid the gain over the tuned row shrinks most on gate_up (1.156 -> 1.120 at M = 2048, 1.118 ->
+  1.041 at M = 1024): the dequant pass leaves part of the 178 MB scratch in the Infinity Cache, which helps rocBLAS more
+  than this kernel (the kernel-level rows read cold weights).
+
+| shape | M | heur us | tuned us | mode 1 us | mode 4 us (TF/s) | vs heur | vs tuned | vs better | MHz / W (heur, tuned, ours) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| gate_up | 512 | 4339 | 4341 | 4325 | 4323 (21.1) | 1.004 | 1.004 | 1.004 | 1722/175, 1719/174, 1720/174 |
+| gate_up | 700 | 6825 | 6061 | 5690 | 5687 (21.9) | 1.200 | 1.066 | 1.066 | 1639/175, 1744/174, 1656/175 |
+| gate_up | 1023 | 9278 | 8124 | 7905 | 7844 (23.2) | 1.183 | 1.036 | 1.036 | 1573/175, 1695/174, 1834/175 |
+| gate_up | 1024 | 9332 | 8144 | 8005 | 7824 (23.3) | 1.193 | 1.041 | 1.041 | 1559/175, 1686/174, 1802/175 |
+| gate_up | 1031 | 10268 |  | 8289 | 7982 (23.0) | 1.286 |  | 1.286 | 1563/175, -, 1760/174 |
+| gate_up | 1045 | 10174 |  | 8445 | 8784 (21.2) | 1.158 |  | 1.158 | 1587/174, -, 1877/174 |
+| gate_up | 1500 | 14212 | 12019 | 11179 | 11238 (23.8) | 1.265 | 1.069 | 1.069 | 1480/175, 1639/174, 1709/174 |
+| gate_up | 2046 | 19203 | 16197 | 14760 | 14793 (24.7) | 1.298 | 1.095 | 1.095 | 1446/175, 1584/174, 1692/175 |
+| gate_up | 2048 | 19230 | 16646 | 14866 | 14869 (24.6) | 1.293 | 1.120 | 1.120 | 1438/175, 1514/175, 1698/175 |
+| down | 512 | 2360 | 2363 | 2025 | 2032 (22.5) | 1.161 | 1.163 | 1.161 | 1903/175, 1900/174, 1764/175 |
+| down | 700 | 3196 | 3195 | 2835 | 2838 (22.0) | 1.126 | 1.126 | 1.126 | 1826/175, 1827/174, 1700/174 |
+| down | 1023 | 4214 |  | 3807 | 3817 (23.9) | 1.104 |  | 1.104 | 1722/174, -, 1581/174 |
+| down | 1024 | 4202 | 4208 | 3816 | 3824 (23.9) | 1.099 | 1.100 | 1.099 | 1719/175, 1720/174, 1577/174 |
+| down | 1031 | 4926 |  | 4079 | 3959 (23.2) | 1.244 |  | 1.244 | 1750/174, -, 1596/175 |
+| down | 1045 | 4856 |  | 4120 | 3990 (23.3) | 1.217 |  | 1.217 | 1772/174, -, 1707/174 |
+| down | 1500 | 6032 | 6025 | 5529 | 5528 (24.2) | 1.091 | 1.090 | 1.090 | 1677/175, 1677/175, 1687/174 |
+| down | 2046 | 7984 |  | 7218 | 7223 (25.2) | 1.105 |  | 1.105 | 1643/175, -, 1649/175 |
+| down | 2048 | 7996 | 8000 | 7245 | 7243 (25.2) | 1.104 | 1.104 | 1.104 | 1637/175, 1630/175, 1643/174 |
+| in_proj_qkvz | 512 | 2194 | 2195 | 1911 | 1907 (22.5) | 1.150 | 1.151 | 1.150 | 1771/174, 1772/175, 1798/174 |
+| in_proj_qkvz | 700 | 3117 | 2890 | 2743 | 2744 (21.4) | 1.136 | 1.053 | 1.053 | 1755/175, 1763/174, 1679/175 |
+| in_proj_qkvz | 1023 | 4078 | 3869 | 3663 | 3664 (23.4) | 1.113 | 1.056 | 1.056 | 1752/174, 1704/175, 1622/174 |
+| in_proj_qkvz | 1024 | 4073 | 3856 | 3667 | 3670 (23.4) | 1.110 | 1.051 | 1.051 | 1750/174, 1701/175, 1622/174 |
+| in_proj_qkvz | 1031 | 4644 |  | 3887 | 3783 (22.9) | 1.228 |  | 1.228 | 1738/174, -, 1642/175 |
+| in_proj_qkvz | 1045 | 4622 |  | 3987 | 3809 (23.0) | 1.213 |  | 1.213 | 1755/174, -, 1690/174 |
+| in_proj_qkvz | 1500 | 6298 | 5563 | 5176 | 5173 (24.3) | 1.217 | 1.075 | 1.075 | 1701/174, 1623/175, 1671/175 |
+| in_proj_qkvz | 2046 | 8210 | 7428 | 6885 | 6880 (24.9) | 1.193 | 1.080 | 1.080 | 1549/175, 1623/175, 1672/175 |
+| in_proj_qkvz | 2048 | 8247 | 7451 | 6898 | 6892 (24.9) | 1.197 | 1.081 | 1.081 | 1543/175, 1613/174, 1670/175 |
+| qkv_proj | 512 | 1931 | 1933 | 1749 | 1744 (21.6) | 1.108 | 1.109 | 1.108 | 1713/175, 1714/175, 1751/175 |
+| qkv_proj | 700 | 2724 | 2508 | 2406 | 2404 (21.4) | 1.133 | 1.043 | 1.043 | 1685/175, 1714/174, 1743/175 |
+| qkv_proj | 1023 | 3607 | 3412 | 3230 | 3236 (23.2) | 1.115 | 1.055 | 1.055 | 1758/174, 1697/175, 1614/174 |
+| qkv_proj | 1024 | 3605 | 3404 | 3231 | 3242 (23.2) | 1.112 | 1.050 | 1.050 | 1756/174, 1692/175, 1611/174 |
+| qkv_proj | 1031 | 4140 |  | 3457 | 3343 (22.6) | 1.239 |  | 1.239 | 1750/174, -, 1632/174 |
+| qkv_proj | 1045 | 4121 |  | 3544 | 3379 (22.7) | 1.220 |  | 1.220 | 1762/174, -, 1689/174 |
+| qkv_proj | 1500 | 5556 | 4929 | 4630 | 4633 (23.8) | 1.199 | 1.064 | 1.064 | 1590/175, 1670/174, 1692/174 |
+| qkv_proj | 2046 | 7259 | 6551 | 6047 | 6046 (24.8) | 1.201 | 1.084 | 1.084 | 1549/175, 1619/174, 1667/175 |
+| qkv_proj | 2048 | 7262 | 6557 | 6051 | 6045 (24.9) | 1.201 | 1.085 | 1.085 | 1546/175, 1610/175, 1667/175 |
+| out_proj | 512 | 854 | 843 | 763 | 763 (21.1) | 1.118 | 1.105 | 1.105 | 1771/174, 1749/175, 1742/175 |
+| out_proj | 700 | 1177 | 1176 | 1108 | 1108 (19.9) | 1.062 | 1.062 | 1.062 | 1742/175, 1742/174, 1733/175 |
+| out_proj | 1023 | 1601 |  | 1417 | 1416 (22.7) | 1.130 |  | 1.130 | 1684/175, -, 1707/174 |
+| out_proj | 1024 | 1594 | 1492 | 1415 | 1417 (22.7) | 1.125 | 1.053 | 1.053 | 1683/175, 1714/174, 1704/175 |
+| out_proj | 1031 | 1736 |  | 1515 | 1469 (22.1) | 1.182 |  | 1.182 | 1690/175, -, 1715/174 |
+| out_proj | 1045 | 1723 |  | 1544 | 1521 (21.6) | 1.132 |  | 1.132 | 1706/174, -, 1771/174 |
+| out_proj | 1500 | 2307 | 2312 | 2039 | 2038 (23.2) | 1.132 | 1.134 | 1.132 | 1597/175, 1595/175, 1715/174 |
+| out_proj | 2046 | 3023 | 2803 | 2629 | 2623 (24.5) | 1.152 | 1.068 | 1.068 | 1754/174, 1589/175, 1676/174 |
+| out_proj | 2048 | 3015 | 2799 | 2629 | 2622 (24.6) | 1.150 | 1.068 | 1.068 | 1751/174, 1578/175, 1677/174 |
+
+The first row is gate_up M = 512: **vetoed to rocBLAS**. The kernel won it by 7 % at kernel level (3622 against 3875 us) but
+lost 2-5 % in the composite on three windows (`lin3a` 0.950, `lin3c` 0.958 / 0.978); `gen_dispatch.py --composite` now
+keeps any cell where the mode-1 op is not 1 % faster than the better rocBLAS row on rocBLAS, and this was the only
+one; the 1.004 in the row is two rocBLAS paths against each other. Known small loss: gate_up M = 1045 (r = 21): mode 4
+(tail designs) 8784 us against 8445 us padded; on gate_up (178 MB scratch, more than the 128 MB Infinity Cache) the GEMV
+tail is the better split up to r ~ 24 (+2.8 % over padded at r = 21, `lin3b`), while on the slots whose scratch fits the
+cache the tail designs win from r ~ 14: a per-slot GEMV threshold would take the loss out; not done (the cell still beats
+the heuristic by 1.158).
+
+### Error table
+
+`err_table_a5.csv` (a9 build, the 61 passed tests): every design (six: D1..D4 and the two tail designs) at the five TP2
+slots x M in {1, 27, 512, 700, 1023, 1024, 1031, 1500, 2046, 2048} (300 cells) against the fp32 reference: the largest
+relative Frobenius error is 2.095e-4 and the largest absolute error 0.00788 for every design, rocBLAS 2.095e-4 and
+0.00789 in the same cells, i.e. the fp16 output rounding floor; the dense kernel and rocBLAS agree to that floor at
+every shape. The tail split (modes 2 / 3 / 4) is checked against the fp32 reference at M = 130, 1025, 1031, 1045, 1072,
+1073, 1100, 2049 and is bit-identical to mode 1 where no split is possible.
 
 ## Reproduce
 
