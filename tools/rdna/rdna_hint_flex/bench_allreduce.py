@@ -99,7 +99,11 @@ def setup(rank: int, world: int, args):
     )
     torch.accelerator.set_device_index(rank)
     dist.init_process_group("gloo", rank=rank, world_size=world)
-    pg = dist.new_group(list(range(world)), backend="nccl")
+    opts = None
+    if getattr(args, "high_priority", False):
+        opts = dist.ProcessGroupNCCL.Options()
+        opts.is_high_priority_stream = True
+    pg = dist.new_group(list(range(world)), backend="nccl", pg_options=opts)
     t = torch.ones(8, device="cuda")
     dist.all_reduce(t, group=pg)
     torch.accelerator.synchronize()
@@ -319,6 +323,11 @@ def main() -> int:
         action="store_true",
         help="sweep: also run an instance with VLLM_RDNA_AR_VPUSH=1 (needs the 16-byte"
         " push in _rocm_C)",
+    )
+    ap.add_argument(
+        "--high-priority",
+        action="store_true",
+        help="overlap: run the NCCL collectives on a high-priority stream",
     )
     args = ap.parse_args()
     os.makedirs(args.cache, exist_ok=True)

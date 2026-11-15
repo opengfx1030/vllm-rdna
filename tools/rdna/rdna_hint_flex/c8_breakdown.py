@@ -9,10 +9,14 @@
 TRACE_DIR holds the ``<pid>_kernel_trace.csv`` files that ``c8_profile.py``
 records (one per TP rank, windows separated by idle gaps of ``--window-gap-s``).
 Every window is cut into model steps at a kernel that runs once per step (the
-lm_head GEMV, ``--marker``); a step is typed by its attention kernels: prefill
-kernels only = ``prefill``, prefill and decode kernels = ``mixed``, decode
-kernels only = ``decode``. Per rank and step type the output has, per kernel
-family and per roll-up category: launches, kernel time, and the GPU idle time in
+lm_head GEMV, ``--marker``); a step is typed by its kernels: a prefill chunk
+(a ``fa_prefill`` kernel or the GDN prefill kernels, which the unfused prefill
+path of the final recipe has instead of ``fa_prefill``) without decode attention
+= ``prefill``, a chunk with decode attention = ``mixed``, decode attention
+only = ``decode``. The unfused prefill's two attention GEMMs are told from the
+linear-layer GEMMs by their position around the softmax. Per rank and step type
+the output has, per kernel family and per roll-up category: launches, kernel
+time, and the GPU idle time in
 front of the launches (a gap is charged to the kernel that waited), as ms per
 step and as a share of the step wall (marker start to next marker start).
 
@@ -42,6 +46,18 @@ FAMILIES: list[tuple[str, str, str]] = [
     ("hi2 gemv", "HI2 GEMM", r"(?:^|[\s:])gemv2?(?:_i8)?_kernel"),
     ("hi2 act transform", "HI2 GEMM", r"act_(?:transform|quant)(?:64)?_kernel"),
     ("lm_head gemv", "embedding / lm_head / sampling", r"gemv_f16_rdna2|gemv_act_k"),
+    (
+        "attention softmax (unfused prefill)",
+        "full attention",
+        r"SoftMaxForward.*Half.*Half",
+    ),
+    (
+        "attention K/V gather (unfused prefill)",
+        "full attention",
+        r"indexSelectSmallIndex<c10::Half",
+    ),
+    # Never matches by name: tag_attention_gemms assigns it by position.
+    ("attention GEMM (unfused prefill, rocBLAS)", "full attention", r"(?!x)x"),
     ("attention prefill", "full attention", r"fa_prefill"),
     ("attention decode", "full attention", r"fa_decode|paged_attn|splitk"),
     ("kv cache write", "full attention", r"reshape_and_cache"),
@@ -167,9 +183,35 @@ def cut_steps(win: list[K], marker: re.Pattern) -> list[list[K]]:
 
 
 def step_type(st: list[K]) -> str:
-    pf = any(k.fam == "attention prefill" for k in st)
+    """Prefill = a prefill chunk and no decode rows, mixed = both, decode = neither.
+
+    With the unfused prefill (VLLM_FA_RDNA2_UNFUSED_PREFILL=1) the prefill
+    attention is rocBLAS GEMMs and a softmax, not a ``fa_prefill`` kernel, so a
+    chunk is recognised by its GDN prefill kernels (every layer-group runs
+    one per chunk) as well as by ``fa_prefill``.
+    """
+    pf = any(k.fam in ("attention prefill", "GDN prefill kernels") for k in st)
     dc = any(k.fam == "attention decode" for k in st)
     return "mixed" if pf and dc else "prefill" if pf else "decode" if dc else "other"
+
+
+def tag_attention_gemms(win: list[K], reach: int = 8) -> None:
+    """Re-label the rocBLAS GEMMs around each unfused-prefill softmax.
+
+    The unfused prefill attention is S = Q K^T, softmax, O = P V: the nearest
+    ``Cijk_`` kernel before the softmax and the one after it (within ``reach``
+    launches) are the two attention GEMMs; every other rocBLAS GEMM is a linear
+    layer or the dequantised HI2 weight multiply.
+    """
+    for i, k in enumerate(win):
+        if k.fam != "attention softmax (unfused prefill)":
+            continue
+        for rng in (range(i - 1, max(i - reach, 0) - 1, -1), range(i + 1, i + reach)):
+            for j in rng:
+                if 0 <= j < len(win) and win[j].fam == "dense GEMM (rocBLAS)":
+                    win[j].fam = "attention GEMM (unfused prefill, rocBLAS)"
+                    win[j].roll = "full attention"
+                    break
 
 
 def measure(st: list[K], wall_ns: int) -> dict:
@@ -221,6 +263,7 @@ def analyse_rank(path: str, marker: re.Pattern, gap_s: float) -> list[dict]:
     rows = read_trace(path)
     steps: list[dict] = []
     for w, win in enumerate(split_windows(rows, int(gap_s * 1e9))):
+        tag_attention_gemms(win)
         cut = cut_steps(win, marker)
         idx = [i for i, k in enumerate(win) if marker.search(k.name)]
         for j, st in enumerate(cut):

@@ -13,6 +13,7 @@
 #   allreduce       bench_allreduce.py sweep, RCCL defaults and NCCL_P2P_LEVEL=pxb
 #                   NCCL_PROTO=Simple (VPUSH=1 adds the 16-byte push instance)
 #   overlap         bench_allreduce.py overlap
+#   overlap-hp      the same with the collectives on a high-priority NCCL stream
 #   attn-check      gqa_decode_check.py with VLLM_FA_RDNA2_GQA_DECODE=1 and 2: bits, timing
 #   install-so      move $NEW_SO over vllm/_rocm_C.abi3.so (atomic; running servers keep
 #                   the old inode)
@@ -95,6 +96,12 @@ step_overlap() {
     tail -12 "$OUT/ar_overlap.log"
 }
 
+step_overlap_hp() {
+    measured overlap-hp 500 "$OUT/ar_overlap_hp.log" "$PY" "$HERE/bench_allreduce.py" \
+        overlap --buses "$BUSES" --high-priority --csv "$OUT/ar_overlap_hp.csv"
+    tail -12 "$OUT/ar_overlap_hp.log"
+}
+
 step_attn_check() {
     local mode chk=$TREE/tools/rdna/port_v031/gqa_decode_check.py
     for mode in 1 2; do
@@ -127,6 +134,7 @@ for step in "$@"; do
             ;;
         allreduce) step_allreduce ;;
         overlap) step_overlap ;;
+        overlap-hp) step_overlap_hp ;;
         attn-check) step_attn_check ;;
         install-so) step_install_so ;;
         *) log "unknown step $step" ;;
