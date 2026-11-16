@@ -87,6 +87,7 @@ tests/tools/rdna/test_serve_validate_quiet_windows.py  # fork-only serve_validat
 tests/tools/rdna/test_pr_receipt_scan.py  # fork-only added-line scan for host syncs and unchecked launches in a diff (stub trees), CPU unit test; not in CI
 tests/tools/rdna/test_tunable_hi2.py  # fork-only 27B HI2 TunableOp shape formulas and census groups, CPU unit test; not in CI
 tests/tools/rdna/test_hi2_tunableop_profile.py  # fork-only 27B HI2 TP=2 TunableOp profile registry / rows / recipe wiring (print mode, stub venv), CPU unit test; not in CI
+tests/tools/rdna/test_tunableop_rank_agree.py  # fork-only per-key agreement of the shipped TunableOp rank files and the tool that makes them agree (stdlib, reads tunableop/), CPU unit test; not in CI
 tests/tools/rdna/test_hi2_recipe_defaults.py  # fork-only 27B HI2 recipe switch defaults, opt-outs and MTP delta checked against the serving doc's switch table (print mode, stub venv), CPU unit test; not in CI
 tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py  # fork-only opt-in routing statistics collector (CPU torch, AST zero-cost-off checks), CPU unit test; not in CI
 tests/models/qwen4_exp/test_amd_mono_rdna2_w4a8.py  # fork-only mono next to the W4A8 MoE prefill (meta-tensor layout, dispatch), CPU unit test; not in CI
