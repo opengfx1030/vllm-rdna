@@ -104,6 +104,21 @@ RUN VLLM_VERSION_OVERRIDE="${VLLM_VERSION}" VLLM_REQUIRE_RUST_FRONTEND=1 \
         --no-build-isolation --editable . \
     && rm /tmp/rdna-constraints.txt
 
+# GGUF (load format qwen4exp_gguf): the opengfx1030 fork of vllm-gguf-plugin, built
+# from a pinned commit against this image's torch. The PyPI plugin is CUDA-only and
+# its MMQ MoE kernel drops experts above id 255 (the fork removes that bound and
+# declares MOE_MMQ_MAX_EXPERTS, which the loader reads). gfx1030 only: the kernels
+# are tested nowhere else, and each arch adds a full HIP compile. --no-deps keeps pip
+# from replacing this image's vllm with the PyPI one. Bump the ref to take a plugin fix.
+ARG GGUF_PLUGIN_REF=b1c5e038d7cca09929e408ea76331485f1b94ea9
+ARG GGUF_PLUGIN_ARCH=gfx1030
+ADD https://github.com/opengfx1030/vllm-gguf-plugin.git#${GGUF_PLUGIN_REF} /src/vllm-gguf-plugin
+RUN PYTORCH_ROCM_ARCH="${GGUF_PLUGIN_ARCH}" \
+        nice -n 19 uv pip install --system --no-cache --no-build-isolation --no-deps /src/vllm-gguf-plugin \
+    && uv pip install --system --no-cache "gguf>=0.17.0" "huggingface_hub>=1.26.0" \
+    && rm -rf /src/vllm-gguf-plugin \
+    && python -c "import importlib.util as u, pathlib; d = pathlib.Path(u.find_spec('vllm_gguf_plugin').origin).parent; assert 'MOE_MMQ_MAX_EXPERTS' in (d / '__init__.py').read_text(), 'plugin without the expert-bound fix'; assert (d / '_C_gguf.abi3.so').stat().st_size > 1_000_000, 'plugin kernels not built'; print('vllm-gguf-plugin built in', d)"
+
 ARG VLLM_COMMIT
 ARG IMAGE_TAG=nightly
 LABEL org.opencontainers.image.title="vllm-rdna" \

@@ -29,6 +29,7 @@ ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags bel
 | Flash-Next AWQ-W4A16, same parsers, no MTP | [`flashnext`](../../tools/rdna/recipes/flashnext.env) | TP=4 | `0.0.0.0:18094`, name `flash-next` |
 | Flash-Next AWQ, plain decode, 262144 context | [`flashnext-mtp0`](../../tools/rdna/recipes/flashnext-mtp0.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
 | Flash-Next AWQ, MTP=2 | [`flashnext-mtp2`](../../tools/rdna/recipes/flashnext-mtp2.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
+| Flash-Next UD-Q4_K_XL GGUF, plain decode, text only (needs `GGUF_DIR`) | [`flashnext-gguf-mtp0`](../../tools/rdna/recipes/flashnext-gguf-mtp0.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
 | Flash-Next AWQ, lossy LeapQuant GDN, 512-token blocks, MTP=2 + MonoKernel | [`flashnext-leapquant-mtp2`](../../tools/rdna/recipes/flashnext-leapquant-mtp2.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
 | Flash-Next AWQ + Inco DFlash2 | [`flashnext-dflash2`](../../tools/rdna/recipes/flashnext-dflash2.env) | TP=4 | `127.0.0.1:18096`, name `flash-next` |
 | Flash-Next AWQ on 3 cards, no MTP | [`flashnext-pp3`](../../tools/rdna/recipes/flashnext-pp3.env) | TP=1, PP=3 | `127.0.0.1:18096`, name `flash-next` |
@@ -111,7 +112,7 @@ These are shell variables in the `.env` files. They become flags. They are not e
 | `PLE_QUANT_DIR` | Directory of an INT4 PLE table (`META.json` required). | Required for `PLE=int4` and `PLE=int4-disk`. |
 | `TUNED_CONFIG` | `1` sets `VLLM_TUNED_CONFIG_FOLDER` to `<repo>/tuned-moe`. | On for the AWQ MoE recipes. Off for `flashnext-exl3` (those configs are the W4A16 MoE path). |
 | `ALLOC_CONF` | `expandable_segments` true, false, or `auto` (false when the PLE sidecar is on). | `full` uses `auto`. |
-| `REQUIRED_VARS` | Names that must already be set or the launch stops. | No current recipe sets it. |
+| `REQUIRED_VARS` | Names that must already be set or the launch stops. | `flashnext-gguf-mtp0` sets `GGUF_DIR`. |
 
 ### `FEATURES` tokens
 
@@ -213,6 +214,17 @@ The checkpoint name in the recipe header is `turboderp/Qwen3.8-Flash-Next-exl3` 
 AWQ-W4A16 Flash-Next, TP=4, `SERVE_ENTRY=api`, `HOST=127.0.0.1`, `PORT=18096`, `SERVED_NAME=flash-next`. `MAXLEN=262144`, `SEQS=8`, `MAXBAT=2048`, `BLOCK_SIZE=1024`, `LPTH=0`, `PREFILL_INTERVAL=1`, `KV=4026531840`. No `GMEM` line, so the launcher does not pass `--gpu-memory-utilization`. Features: `expert-parallel prefix-caching mamba-align vision-cap`. Graphs match `flashnext`. `TUNED_CONFIG=1`. `PLE` defaults to `bf16`.
 
 The only difference between the two files is `MTP=0` versus `MTP=2`. The recipe comments say MTP=0 wins at 8×1k/512 c=8 and MTP=2 wins at 8×16k/1k c=8. Those runs are the ones already written up in the tuning guide.
+
+### `flashnext-gguf-mtp0`
+
+Flash-Next from the Unsloth `UD-Q4_K_XL` GGUF (104 GiB, four shards), TP=4, `MTP=0` (the file has no MTP head), text only. `SERVE_ENTRY=api`, `HOST=127.0.0.1`, `PORT=18096`, `SERVED_NAME=flash-next`. `MAXLEN=32768`, `KV=2147483648` (22 GiB of weights per card, 127,875 KV tokens), `SEQS=8`, `MAXBAT=2048`, `BLOCK_SIZE=1024`. Features: `prefix-caching mamba-align language-model-only`; no `expert-parallel`, no vision. `EXTRA_ARGS` passes `--load-format qwen4exp_gguf --model-loader-extra-config {"gguf_dir": ...}`; the recipe builds it from `GGUF_DIR` (`REQUIRED_VARS`). `MODEL` is a directory with the model's HF `config.json`, tokenizer files and chat template, not the GGUF.
+
+It needs the plugin fork `opengfx1030/vllm-gguf-plugin` (branch `rdna_extras`), built for gfx1030; the container image has it. With the PyPI plugin it still runs, correctly but with a 2.6x slower 16k prefill. Measured on 4x V620: PPL 4.80, 1k c=1 ITL 20.3 ms, 16k c=1 TTFT 8.2 s, 1k/512 c=8 186.9 tok/s. Setup, the three plugin kernel defects and the full table: [`docs/rdna2/gguf-flashnext-2026-11-16.md`](../rdna2/gguf-flashnext-2026-11-16.md).
+
+```bash
+MODEL=/path/to/hf-config-dir GGUF_DIR=/path/to/UD-Q4_K_XL VENV=/path/to/venv \
+  bash tools/rdna/serve_rdna.sh RECIPE=flashnext-gguf-mtp0
+```
 
 ### `flashnext-dflash2`
 
@@ -346,4 +358,5 @@ To restore the defaults, remove both files, run
 - [`docs/rdna2/hi2-27b-tp2-serving.md`](../rdna2/hi2-27b-tp2-serving.md) — HI2 27B on two cards: serving guide, switch table, memory, limits and scoreboard results.
 - [`docs/rdna/monokernel/README.md`](monokernel/README.md) — MonoKernel scope on gfx1030.
 - [`docs/rdna2/mixed-batch-stall-probe.md`](../rdna2/mixed-batch-stall-probe.md) — decode-stall cap.
+- [`docs/rdna2/gguf-flashnext-2026-11-16.md`](../rdna2/gguf-flashnext-2026-11-16.md) — GGUF Flash-Next: plugin fork, the MMQ expert-bound defect, measurements.
 - [gfx1030 wiki](https://blivioniag.github.io/gfx1030-wiki/) — host setup, the ROCm pin, and the published images.
