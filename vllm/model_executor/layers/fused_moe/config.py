@@ -1289,6 +1289,12 @@ class FusedMoEConfig:
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
+    # Requested finalized routed precision; None preserves backend defaults.
+    output_dtype: torch.dtype | None = None
+
+    # Global logical intermediate start and this rank's unpadded width.
+    intermediate_partition: tuple[int, int] | None = None
+
     # Defaults to hidden_dim if not specified.
     hidden_dim_unpadded: int | None = None
     # Defaults to intermediate_size_per_partition if not specified.
@@ -1349,8 +1355,43 @@ class FusedMoEConfig:
         from vllm._aiter_ops import rocm_aiter_ops
 
         tp_size = self.moe_parallel_config.tp_size
-        assert self.intermediate_size % tp_size == 0
-        self.intermediate_size_per_partition = self.intermediate_size // tp_size
+        if self.intermediate_partition is None:
+            assert self.intermediate_size % tp_size == 0
+            self.intermediate_size_per_partition = self.intermediate_size // tp_size
+        else:
+            partition = self.intermediate_partition
+            if (
+                not isinstance(partition, tuple)
+                or len(partition) != 2
+                or any(type(value) is not int for value in partition)
+            ):
+                raise ValueError(
+                    "intermediate_partition must be an integer (start, width)"
+                )
+            start, width = partition
+            if (
+                type(self.intermediate_size) is not int
+                or self.intermediate_size <= 0
+                or start < 0
+                or width <= 0
+                or start + width > self.intermediate_size
+            ):
+                raise ValueError(
+                    "intermediate_partition must be nonempty and within the global "
+                    "intermediate_size"
+                )
+            if self.intermediate_size_per_partition not in (-1, width):
+                raise ValueError(
+                    "intermediate_size_per_partition must match intermediate_partition"
+                )
+            if self.intermediate_size_per_partition_unpadded not in (None, width):
+                raise ValueError(
+                    "intermediate_size_per_partition_unpadded must match "
+                    "intermediate_partition"
+                )
+            if self.intermediate_pad not in (None, 0) or self.tp_shard_with_padding:
+                raise ValueError("intermediate_partition does not support padding")
+            self.intermediate_size_per_partition = width
 
         if self.dp_size > 1:
             logger.debug_once(

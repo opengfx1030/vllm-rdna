@@ -15,10 +15,12 @@ Weight format (per expert, same as dense RDNA2 W4A16):
 import os
 
 import torch
+from compressed_tensors.quantization import QuantizationType
 
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
@@ -28,11 +30,18 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
 )
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
+    W4A8_MOE_ENV_VAR,
     W4A8_MOE_MIN_TOKENS,
+    RDNA2W4A16MoEExperts,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
+)
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
+    make_wna16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.rdna_eplb_stats import (
     COLLECTOR as _EPLB_STATS,
@@ -147,11 +156,156 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
     """W4A16 MoE using the fused RDNA2 HIP kernel (moe_gptq_gemm_rdna2).
 
     Weights are in RDNA2 format (shuffled int32 [E, K/8, N]),
-    NOT Triton format (transposed uint8). apply() dispatches through
-    the fused HIP kernel directly.
+    NOT Triton format (transposed uint8). Explicit FP32 output uses the
+    modular kernel; the default retains the legacy fused HIP dispatch.
     """
 
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if getattr(self.moe, "intermediate_partition", None) is not None:
+            self._validate_intermediate_partition(
+                hidden_size, intermediate_size_per_partition, params_dtype
+            )
+        super().create_weights(
+            layer=layer,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+
+    def _validate_intermediate_partition(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+    ) -> None:
+        if not self._uses_modular_kernel():
+            raise ValueError(
+                "Explicit MoE intermediate partitions require FP32 output."
+            )
+        self._validate_fp32_config()
+        if (
+            self.weight_quant.type != QuantizationType.INT
+            or self.weight_quant.dynamic
+            or params_dtype != torch.float16
+            or not self.moe.is_act_and_mul
+        ):
+            raise ValueError(
+                "Explicit MoE intermediate partitions require static weight-only "
+                "symmetric INT4 quantization with FP16 scales."
+            )
+        if not ops._RDNA2_MOE_FP32_ACCUM:
+            raise ValueError(
+                "Explicit MoE intermediate partitions require ordered FP32 "
+                "accumulation (VLLM_RDNA2_MOE_FP32_ACCUM=1)."
+            )
+        if os.environ.get(W4A8_MOE_ENV_VAR) == "1":
+            raise ValueError(
+                "Explicit MoE intermediate partitions require W4A8 disabled "
+                "(VLLM_RDNA2_W4A8_SDOT4=0)."
+            )
+        parallel = self.moe.moe_parallel_config
+        if parallel.tp_size != 3 or parallel.use_ep or parallel.is_sequence_parallel:
+            raise ValueError(
+                "Explicit RDNA2 MoE intermediate partitions require TP3 "
+                "without expert or sequence parallelism."
+            )
+        start, width = self.moe.intermediate_partition
+        global_width = self.moe.intermediate_size
+        if (
+            type(start) is not int
+            or type(width) is not int
+            or start < 0
+            or width <= 0
+            or start + width > global_width
+            or global_width % self.group_size
+            or start % self.group_size
+            or width % self.group_size
+            or global_width // self.group_size < parallel.tp_size
+            or hidden_size % self.group_size
+            or hidden_size % 8
+            or width % 8
+            or width != intermediate_size_per_partition
+            or self.moe.tp_shard_with_padding
+        ):
+            raise ValueError(
+                "Explicit MoE intermediate partition must be a nonempty, unpadded "
+                "slice aligned to the checkpoint's complete INT4 groups "
+                f"(group_size={self.group_size})."
+            )
+        config = get_current_vllm_config_or_none()
+        requested_group_size = (
+            config.additional_config.get("rdna_moe_tp_group_size")
+            if config is not None
+            else None
+        )
+        if requested_group_size is not None and (
+            type(requested_group_size) is not int
+            or requested_group_size != self.group_size
+        ):
+            raise ValueError(
+                "rdna_moe_tp_group_size must match the checkpoint quantization "
+                f"group_size ({self.group_size})."
+            )
+
+    def _uses_modular_kernel(self) -> bool:
+        # Resident callers can construct this method without __init__.
+        output_dtype = getattr(getattr(self, "moe", None), "output_dtype", None)
+        if output_dtype is None:
+            return False
+        if output_dtype != torch.float32:
+            raise ValueError("Native RDNA2 MoE only supports explicit FP32 output.")
+        return True
+
+    def _validate_fp32_config(self, layer: torch.nn.Module | None = None) -> None:
+        if not self.symmetric:
+            raise ValueError(
+                "RDNA2 FP32 MoE output does not support asymmetric zero_v2 weights."
+            )
+        if self.num_bits != 4 or self.group_size <= 0 or self.strategy != "group":
+            raise ValueError(
+                "RDNA2 FP32 MoE output requires symmetric group-wise INT4 weights."
+            )
+        if self.input_quant is not None or self.weight_quant.actorder == "group":
+            raise ValueError(
+                "RDNA2 FP32 MoE output does not support input quantization "
+                "or group activation ordering."
+            )
+        if self.moe.has_bias or self.moe.activation != MoEActivation.SILU:
+            raise ValueError(
+                "RDNA2 FP32 MoE output requires bias-free SiLU gated experts."
+            )
+        if self.moe.in_dtype != torch.float16 or (
+            layer is not None
+            and any(
+                scale.dtype != torch.float16
+                for scale in (layer.w13_weight_scale, layer.w2_weight_scale)
+            )
+        ):
+            raise ValueError("RDNA2 FP32 MoE output requires FP16 input and scales.")
+        if (
+            self.wna16_backend != WNA16MoEBackend.RDNA2_W4A16
+            or self.experts_cls is not RDNA2W4A16MoEExperts
+        ):
+            raise ValueError(
+                "Native RDNA2 FP32 MoE output requires the RDNA2 W4A16 "
+                "modular experts selected by the WNA16 oracle."
+            )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self._uses_modular_kernel():
+            self._validate_fp32_config(layer)
+            if getattr(layer, "_rdna_expert_cache_slots", 0):
+                raise ValueError("FP32 MoE output does not support expert offload.")
         if getattr(layer, "_rdna_expert_cache_slots", 0):
             self._prepare_expert_cache(layer)
             return
@@ -222,6 +376,9 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         Also the entry point for callers that already hold K-first weights
         (the resident layout in rdna2_moe_resident.py).
         """
+        use_modular_kernel = self._uses_modular_kernel()
+        if use_modular_kernel:
+            self._validate_fp32_config(layer)
         device = layer.w13_weight_packed.device
         num_experts = layer.w13_weight_packed.shape[0]
 
@@ -274,6 +431,13 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
                 requires_grad=False,
             )
 
+        if use_modular_kernel:
+            layer.w13_weight = layer.w13_weight_packed
+            layer.w2_weight = layer.w2_weight_packed
+            self._setup_kernel(layer)
+            self.moe_kernel.fused_experts.output_dtype(self.moe.in_dtype)
+            return
+
         # Pre-allocate reusable buffers for decode (the resident layouts build
         # this method without __init__ and have no MoE config: minimum rows)
         N_gate_up = w13_N
@@ -296,6 +460,20 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
 
         self._w4a8 = resolve_w4a8_moe()
 
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        if not self._uses_modular_kernel():
+            return super().get_fused_moe_quant_config(layer)
+        return make_wna16_moe_quant_config(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            group_size=self.group_size,
+            num_bits=self.num_bits,
+            w1_zp=layer.w13_qzeros,
+            w2_zp=layer.w2_qzeros,
+        )
+
     def apply(
         self,
         layer: RoutedExperts,
@@ -305,6 +483,10 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self._uses_modular_kernel():
+            return super().apply(
+                layer, x, topk_weights, topk_ids, shared_experts, shared_experts_input
+            )
         activation = (
             layer.activation
             if isinstance(layer.activation, MoEActivation)

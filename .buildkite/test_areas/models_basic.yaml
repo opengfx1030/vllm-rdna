@@ -307,8 +307,25 @@ steps:
   - tools/rdna/port_v031/ppl_probe.py
   - tools/rdna/port_v031/bench_metrics.py
   - csrc/rocm/mono_gdn_rdna2.cu
+  - vllm/model_executor/layers/gdn_parallel.py
+  - vllm/model_executor/layers/qsa_parallel.py
+  - vllm/model_executor/layers/vision_parallel.py
+  - vllm/model_executor/layers/rdna_dense_int8.py
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+  - vllm/model_executor/models/qwen3_next.py
+  - vllm/model_executor/models/qwen2_5_vl.py
+  - vllm/model_executor/models/qwen3_vl.py
+  - vllm/model_executor/layers/quantization/compressed_tensors/
+  - tests/model_executor/test_gdn_parallel.py
+  - tests/model_executor/test_qsa_parallel.py
+  - tests/model_executor/test_vision_parallel.py
+  - tests/model_executor/test_rdna_dense_int8.py
+  - tests/model_executor/test_rdna_moe_tp_partition.py
+  - tests/model_executor/test_rdna_moe_output_dtype.py
   commands:
     - pytest -v -s models/qwen4_exp/test_config.py models/qwen4_exp/test_ple.py models/qwen4_exp/test_amd_mono_rdna2.py
+    - pytest -v -s model_executor/test_gdn_parallel.py model_executor/test_qsa_parallel.py model_executor/test_vision_parallel.py model_executor/test_rdna_dense_int8.py model_executor/test_rdna_moe_tp_partition.py model_executor/test_rdna_moe_output_dtype.py models/qwen4_exp/test_tp3_ownership.py
 
     # Standalone CPU coverage; native gfx1030 cases skip without RDNA hardware.
     - pytest --noconftest -v -s models/qwen4_exp/test_amd_mono_rdna2_offload.py

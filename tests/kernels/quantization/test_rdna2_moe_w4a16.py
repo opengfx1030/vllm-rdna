@@ -1412,3 +1412,50 @@ def test_decode_scratch_rows():
     assert rows(SimpleNamespace(experts_per_token=10, max_capture_size=24)) == 240
     # bigger capture ladders stop at the fused router's entry limit
     assert rows(SimpleNamespace(experts_per_token=10, max_capture_size=512)) == 1024
+
+
+@gfx1030_only
+def test_fp32_output_retains_subhalf_split_and_route_residual():
+    """Native FP32 preserves the rank-local residual before TP cancellation."""
+    k, n = 384, 8
+    x = torch.zeros(2, k, dtype=torch.float16, device=device)
+    x[0, 0] = 1
+    x[0, 256] = 2**-13
+    x[1, 0] = 2**-13
+    packed = torch.full(
+        (1, k // 8, n), -1717986919, dtype=torch.int32, device=device
+    )  # All nibbles 9: unit dequantized weights.
+    ops.gptq_shuffle(packed[0], 4)
+    scales = torch.ones(1, 3, n, dtype=torch.float16, device=device)
+    ids = torch.zeros(2, 1, dtype=torch.int32, device=device)
+    si, ei, ntp = moe_align_block_size(ids, 1, 1)
+    args = (
+        packed,
+        scales,
+        _make_qzeros(1, 3, n),
+        torch.empty(0, device=device),
+        si,
+        ei,
+        ntp,
+        1,
+        1,
+        False,
+        2,
+    )
+    half = torch.full((1, n), float("nan"), dtype=torch.float16, device=device)
+    out = torch.full((1, n), float("nan"), dtype=torch.float32, device=device)
+    ops.moe_gptq_gemm_rdna2(x, half, *args, True)
+    ops.moe_gptq_gemm_rdna2(x, out, *args, True)
+    torch.testing.assert_close(out, torch.full_like(out, 1 + 2**-12), atol=0, rtol=0)
+    torch.testing.assert_close(half, torch.ones_like(half), atol=0, rtol=0)
+    assert torch.all(out != half.float())
+    for _ in range(3):
+        out.fill_(float("nan"))
+        ops.moe_gptq_gemm_rdna2(x, out, *args, True)
+        torch.testing.assert_close(
+            out, torch.full_like(out, 1 + 2**-12), atol=0, rtol=0
+        )
+    ei.fill_(-1)
+    out.fill_(float("nan"))
+    ops.moe_gptq_gemm_rdna2(x, out, *args, True)
+    torch.testing.assert_close(out, torch.zeros_like(out), atol=0, rtol=0)

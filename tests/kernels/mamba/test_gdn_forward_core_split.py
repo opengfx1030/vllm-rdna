@@ -116,6 +116,11 @@ def _build_layer(
     layer.head_v_dim = V
     layer.key_dim = KEY_DIM
     layer.value_dim = VALUE_DIM
+    layer.local_num_k_heads = H
+    layer.local_num_v_heads = HV
+    layer.local_key_dim = KEY_DIM
+    layer.local_value_dim = VALUE_DIM
+    layer.local_conv_dim = 2 * KEY_DIM + VALUE_DIM
     layer.activation = "silu"
     layer.A_log = A_log
     layer.dt_bias = dt_bias

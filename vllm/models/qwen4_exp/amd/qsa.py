@@ -15,7 +15,10 @@ from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
@@ -23,6 +26,11 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.qsa_parallel import (
+    QSAOutputParallelLinear,
+    QSAQKVParallelLinear,
+    qsa_head_partition,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
@@ -69,7 +77,6 @@ from vllm.v1.worker.workspace import (
 )
 
 from ..common.qsa_cache import QSAForwardMetadata
-from . import model
 from .indexer_qsa import QSAIndexer
 
 
@@ -476,6 +483,24 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         return output
 
 
+def _qsa_tp3_ordinal(config: Qwen4ExpTextConfig, layer_id: int) -> int:
+    """Rotate by QSA order, with physical MTP layers following target owners."""
+    from . import model
+
+    layer_types = config.layer_types
+    target_layers = int(config.num_hidden_layers)
+    if layer_types is None or len(layer_types) != target_layers:
+        raise ValueError("Unequal QSA TP3 requires the complete target layer types")
+    if 0 <= layer_id < target_layers:
+        if layer_types[layer_id] not in model._QSA_LAYER_TYPES:
+            raise ValueError("Unequal QSA owner must name a full-attention layer")
+        return sum(kind in model._QSA_LAYER_TYPES for kind in layer_types[:layer_id])
+    draft_index = layer_id - target_layers
+    if 0 <= draft_index < int(getattr(config, "mtp_num_hidden_layers", 1)):
+        return sum(kind in model._QSA_LAYER_TYPES for kind in layer_types) + draft_index
+    raise ValueError("Unequal QSA owner has an invalid target or MTP layer index")
+
+
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     """Merged Qwen full-attention owner with a QSA index side branch."""
 
@@ -491,6 +516,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
+        from . import model
+
         nn.Module.__init__(self)
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -542,17 +569,36 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.hidden_size = int(config.hidden_size)
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = int(config.num_attention_heads)
-        if self.total_num_heads % tp_size:
-            raise ValueError("QSA attention heads must be divisible by TP size")
-        self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = int(config.num_key_value_heads)
-        if self.total_num_kv_heads >= tp_size:
-            if self.total_num_kv_heads % tp_size:
-                raise ValueError("QSA KV heads must be divisible by TP size")
-        elif tp_size % self.total_num_kv_heads:
-            raise ValueError("TP size must be divisible by replicated QSA KV heads")
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = int(config.head_dim or self.hidden_size // self.total_num_heads)
+        self._qsa_tp3_partition = None
+        if tp_size == 3 and self.total_num_kv_heads == 2:
+            if cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
+                raise NotImplementedError("Unequal QSA TP3 requires FP16/BF16 main KV")
+            self._qsa_tp3_partition = qsa_head_partition(
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                _qsa_tp3_ordinal(config, layer_id),
+                get_tensor_model_parallel_rank(),
+                tp_size,
+            )
+            self.num_heads = self._qsa_tp3_partition.q_count
+            self.num_kv_heads = self._qsa_tp3_partition.kv_count
+            self.head_dim = int(
+                config.head_dim or self.hidden_size // self.total_num_heads
+            )
+        else:
+            if self.total_num_heads % tp_size:
+                raise ValueError("QSA attention heads must be divisible by TP size")
+            self.num_heads = self.total_num_heads // tp_size
+            if self.total_num_kv_heads >= tp_size:
+                if self.total_num_kv_heads % tp_size:
+                    raise ValueError("QSA KV heads must be divisible by TP size")
+            elif tp_size % self.total_num_kv_heads:
+                raise ValueError("TP size must be divisible by replicated QSA KV heads")
+            self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+            self.head_dim = int(
+                config.head_dim or self.hidden_size // self.total_num_heads
+            )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -565,23 +611,43 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # gate next to Q, even when an inherited config default says otherwise.
         self.attn_output_gate = True
 
-        self.qkv_proj = QKVParallelLinear(
-            self.hidden_size,
-            self.head_dim,
-            self.total_num_heads * (1 + self.attn_output_gate),
-            self.total_num_kv_heads,
-            bias=False,
-            quant_config=model.without_modelopt_fp4(quant_config),
-            prefix=f"{prefix}.qkv_proj",
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            self.hidden_size,
-            bias=False,
-            reduce_results=reduce_results,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
+        if self._qsa_tp3_partition is not None:
+            self.qkv_proj = QSAQKVParallelLinear(
+                self.hidden_size,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                self.head_dim,
+                partition=self._qsa_tp3_partition,
+                quant_config=model.without_modelopt_fp4(quant_config),
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.o_proj = QSAOutputParallelLinear(
+                self.total_num_heads * self.head_dim,
+                self.hidden_size,
+                self.head_dim,
+                partition=self._qsa_tp3_partition,
+                reduce_results=reduce_results,
+                quant_config=quant_config,
+                prefix=f"{prefix}.o_proj",
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                self.hidden_size,
+                self.head_dim,
+                self.total_num_heads * (1 + self.attn_output_gate),
+                self.total_num_kv_heads,
+                bias=False,
+                quant_config=model.without_modelopt_fp4(quant_config),
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.o_proj = RowParallelLinear(
+                self.total_num_heads * self.head_dim,
+                self.hidden_size,
+                bias=False,
+                reduce_results=reduce_results,
+                quant_config=quant_config,
+                prefix=f"{prefix}.o_proj",
+            )
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
@@ -621,18 +687,19 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         set_default_quant_scales(self, register_buffer=True)
 
         self.attn_backend = Qwen4ExpQSAFlashAttentionBackend
-        self.impl = Qwen4ExpQSAFlashAttentionImpl(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            self.num_kv_heads,
-            None,
-            None,
-            self.kv_cache_dtype,
-            None,
-            AttentionType.DECODER,
-            None,
-        )
+        if self.num_kv_heads:
+            self.impl = Qwen4ExpQSAFlashAttentionImpl(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                self.num_kv_heads,
+                None,
+                None,
+                self.kv_cache_dtype,
+                None,
+                AttentionType.DECODER,
+                None,
+            )
         self.indexer = QSAIndexer(
             vllm_config=vllm_config,
             config=config,
@@ -644,7 +711,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # The fused prepare writes raw BF16 K/V; an Octave cache is packed by
         # do_kv_cache_update instead.
         self.use_fused_qsa_prepare = (
-            self.attn_output_gate
+            self._qsa_tp3_partition is None
+            and self.attn_output_gate
             and self.indexer.use_fused_pre_indexer
             and self.head_dim & (self.head_dim - 1) == 0
             and self.kv_cache_dtype not in _OCTAVE_CACHE_DTYPES
@@ -668,7 +736,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        if self.num_kv_heads == 0:
+            return None
         return FullAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
@@ -699,24 +769,27 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             if gate is not None:
                 gate.zero_()
             return
-        main_metadata = cast(FlashAttentionMetadata, metadata[self.layer_name])
-        if self.kv_cache.numel() == 0:
-            raise RuntimeError("QSA main K/V cache is not bound")
-
-        num_tokens = main_metadata.num_actual_tokens
         side_metadata = cast(
             QSAForwardMetadata,
             metadata[self.indexer.raw_key_cache.prefix],
         )
-        if side_metadata.num_actual_tokens != num_tokens:
-            raise RuntimeError("QSA main and side metadata token counts disagree")
+        num_tokens = side_metadata.num_actual_tokens
+        main_metadata = None
+        if self.num_kv_heads:
+            main_metadata = cast(FlashAttentionMetadata, metadata[self.layer_name])
+            if self.kv_cache.numel() == 0:
+                raise RuntimeError("QSA main K/V cache is not bound")
+            if main_metadata.num_actual_tokens != num_tokens:
+                raise RuntimeError("QSA main and side metadata token counts disagree")
         selected, main_outputs = self.indexer(
             hidden_states,
             positions,
             self.topk_indices_buffer[:num_tokens],
             attn=self,
             qkv=qkv,
-            slot_mapping=main_metadata.slot_mapping,
+            slot_mapping=(
+                main_metadata.slot_mapping if main_metadata is not None else None
+            ),
             gate_out=gate,
         )
         if selected.shape != (
@@ -724,6 +797,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.indexer.output_width,
         ):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
+        if self.num_kv_heads == 0:
+            # The empty owner still maintains replicated indexer state and MTP
+            # selection reuse, but has no main-KV allocation or attention work.
+            output.zero_()
+            return
+        main_metadata = cast(FlashAttentionMetadata, main_metadata)
         impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
         if main_outputs is None:
             assert key is not None and value is not None
@@ -760,8 +839,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
         num_tokens = hidden_states.shape[0]
+        qkv, _ = self.qkv_proj(hidden_states)
         encoded_layer_name = _encode_layer_name(self.layer_name)
         if self.use_fused_qsa_prepare:
             # Norm/RoPE/gate and the K/V cache write happen inside the op.
@@ -790,10 +869,15 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             output, _ = self.o_proj(flat_output)
             return output
 
-        q, k, v, gate = self._project_qkv_gate(qkv, positions)
-        query = q.view(num_tokens, self.num_heads, self.head_dim)
-        key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
-        value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
+        if self.num_kv_heads:
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            query = q.view(num_tokens, self.num_heads, self.head_dim)
+            key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
+            value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
+        else:
+            query = qkv.view(num_tokens, 0, self.head_dim)
+            key = value = query
+            gate = None
         attn_output = torch.empty_like(query)
         if current_platform.opaque_attention_op():
             torch.ops.vllm.qwen4_exp_qsa_with_output(
@@ -815,7 +899,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 attn_output,
                 encoded_layer_name,
             )
-        flat_output = attn_output.view(num_tokens, -1)
+        flat_output = attn_output.view(num_tokens, self.q_size)
         if gate is not None:
             flat_output = flat_output * torch.sigmoid(gate)
         output, _ = self.o_proj(flat_output)

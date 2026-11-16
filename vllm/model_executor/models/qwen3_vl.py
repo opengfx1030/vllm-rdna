@@ -60,6 +60,7 @@ from vllm.config.multimodal import (
     VideoPruningMethod,
 )
 from vllm.distributed import get_pp_group, parallel_state
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.inputs import MultiModalDataDict, MultiModalHashes
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -78,6 +79,11 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.vision_parallel import (
+    VisionColumnParallelLinear,
+    VisionOutputParallelLinear,
+    vision_partition,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -112,10 +118,10 @@ from vllm.multimodal.video_prune.vidcom2 import (
 from vllm.multimodal.video_prune.vidcom2 import (
     compute_retention_mask as vidcom2_compute_retention_mask,
 )
+from vllm.platforms.rdna import on_rdna2_hip
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.platforms.rdna import on_rdna2_hip
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.cache import LRUCache
 from vllm.utils.collection_utils import is_list_of
@@ -484,10 +490,20 @@ class Qwen3_VisionMLP(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        vision_group: GroupCoordinator | None = None,
     ):
         super().__init__()
         use_data_parallel = is_vit_use_data_parallel()
-        self.linear_fc1 = ColumnParallelLinear(
+        column_linear = ColumnParallelLinear
+        row_linear = RowParallelLinear
+        if vision_group is not None:
+            column_linear = partial(
+                VisionColumnParallelLinear, vision_group=vision_group, alignment=16
+            )
+            row_linear = partial(
+                VisionOutputParallelLinear, vision_group=vision_group, alignment=16
+            )
+        self.linear_fc1 = column_linear(
             in_features,
             hidden_features,
             bias=bias,
@@ -496,7 +512,7 @@ class Qwen3_VisionMLP(nn.Module):
             prefix=f"{prefix}.linear_fc1",
             disable_tp=use_data_parallel,
         )
-        self.linear_fc2 = RowParallelLinear(
+        self.linear_fc2 = row_linear(
             hidden_features,
             in_features,
             bias=bias,
@@ -533,6 +549,7 @@ class Qwen3_VisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        vision_group: GroupCoordinator | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -545,6 +562,7 @@ class Qwen3_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            vision_group=vision_group,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,
@@ -553,6 +571,7 @@ class Qwen3_VisionBlock(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            vision_group=vision_group,
         )
 
     def forward(
@@ -587,10 +606,18 @@ class Qwen3_VisionPatchMerger(nn.Module):
         use_postshuffle_norm: bool = False,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        vision_group: GroupCoordinator | None = None,
     ) -> None:
         super().__init__()
         use_data_parallel = is_vit_use_data_parallel()
         self.hidden_size = context_dim * (spatial_merge_size**2)
+        column_linear = ColumnParallelLinear
+        row_linear = RowParallelLinear
+        if vision_group is not None:
+            column_linear = partial(
+                VisionColumnParallelLinear, vision_group=vision_group
+            )
+            row_linear = partial(VisionOutputParallelLinear, vision_group=vision_group)
 
         self.use_postshuffle_norm = use_postshuffle_norm
         if self.use_postshuffle_norm:
@@ -599,7 +626,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm = norm_layer(context_dim)
-        self.linear_fc1 = ColumnParallelLinear(
+        self.linear_fc1 = column_linear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
@@ -608,7 +635,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
             disable_tp=use_data_parallel,
         )
         self.act_fn = nn.GELU()
-        self.linear_fc2 = RowParallelLinear(
+        self.linear_fc2 = row_linear(
             self.hidden_size,
             d_model,
             bias=True,
@@ -645,8 +672,10 @@ class Qwen3_VisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         input_norm: nn.Module | None = None,
         prefix: str = "",
+        vision_group: GroupCoordinator | None = None,
     ) -> None:
         super().__init__()
+        self.vision_group = vision_group
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
         self.num_position_embeddings = vision_config.num_position_embeddings
@@ -666,10 +695,22 @@ class Qwen3_VisionTransformer(nn.Module):
 
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
-            1
-            if use_data_parallel
-            else parallel_state.get_tensor_model_parallel_world_size()
+            vision_group.world_size
+            if vision_group is not None
+            else (
+                1
+                if use_data_parallel
+                else parallel_state.get_tensor_model_parallel_world_size()
+            )
         )
+        self.attention_hidden_size = self.hidden_size
+        self.attention_tp_size = self.tp_size
+        if vision_group is not None:
+            _, local_heads = vision_partition(self.num_heads, vision_group)
+            self.attention_hidden_size = local_heads * (
+                self.hidden_size // self.num_heads
+            )
+            self.attention_tp_size = 1
 
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
@@ -710,6 +751,7 @@ class Qwen3_VisionTransformer(nn.Module):
             spatial_merge_size=self.spatial_merge_size,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
+            vision_group=vision_group,
         )
 
         self.deepstack_merger_list = nn.ModuleList(
@@ -722,6 +764,7 @@ class Qwen3_VisionTransformer(nn.Module):
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.deepstack_merger_list.{layer_idx}",
+                    vision_group=vision_group,
                 )
                 for layer_idx in range(len(self.deepstack_visual_indexes))
             ]
@@ -742,6 +785,7 @@ class Qwen3_VisionTransformer(nn.Module):
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
+                    vision_group=vision_group,
                 )
                 for layer_idx in range(vision_config.depth)
             ]
@@ -924,8 +968,8 @@ class Qwen3_VisionTransformer(nn.Module):
         metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
             self.attn_backend,
             cu_seqlens,
-            self.hidden_size,
-            self.tp_size,
+            self.attention_hidden_size,
+            self.attention_tp_size,
             device,
             fp8_padded_hidden_size=self.fp8_padded_hidden_size,
         )

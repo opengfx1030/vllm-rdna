@@ -1098,6 +1098,8 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "w4a8_gemm_rdna2
 # single fp32->fp16 cast; the fp32 adds still round in arrival order, so it is
 # not run-to-run deterministic (VLLM_RDNA2_MOE_DETERMINISTIC is). Resolved once
 # at import; per-call override with fp32_accum=True/False.
+# Native float output uses private FP32 K-split/routing partials and fixed-order
+# reduction instead; it requires fp32_accum=True and never rounds through FP16.
 _RDNA2_MOE_FP32_ACCUM = envs.VLLM_RDNA2_MOE_FP32_ACCUM
 
 
