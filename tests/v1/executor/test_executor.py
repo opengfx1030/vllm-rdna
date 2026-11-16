@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from tests.v1.executor.shutdown_process import shutdown_process
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     KVConnectorOutput,
@@ -331,21 +332,15 @@ def test_ft_rpc_failure_keeps_next_rpc_responses_aligned(
     ]
 
 
-def _shutdown_process(connection, ignore_term):
-    if ignore_term:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    connection.send("ready")
-    connection.recv()
-    connection.close()
-
-
 @pytest.mark.parametrize("force_kill", [False, True])
 def test_worker_shutdown_reaps_real_process(monkeypatch, force_kill):
     """A normal child exits naturally; a TERM-resistant child is killed and reaped."""
-    monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "0" if force_kill else "5")
+    monkeypatch.setenv(
+        "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "0" if force_kill else "5"
+    )
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
-    process = context.Process(target=_shutdown_process, args=(child, force_kill))
+    process = context.Process(target=shutdown_process, args=(child, force_kill))
     process.start()
     child.close()
     try:
@@ -366,7 +361,9 @@ def test_worker_shutdown_reaps_real_process(monkeypatch, force_kill):
 
 @pytest.mark.parametrize("is_rocm", [False, True])
 @pytest.mark.parametrize("override", [None, "0", "6"])
-def test_worker_cleanup_grace_respects_explicit_environment(monkeypatch, is_rocm, override):
+def test_worker_cleanup_grace_respects_explicit_environment(
+    monkeypatch, is_rocm, override
+):
     from vllm import envs
     from vllm.v1.utils import get_worker_shutdown_timeout
 
@@ -374,5 +371,9 @@ def test_worker_cleanup_grace_respects_explicit_environment(monkeypatch, is_rocm
         monkeypatch.delenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", raising=False)
     else:
         monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", override)
-    expected = 15.0 if is_rocm and override is None else float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+    expected = (
+        15.0
+        if is_rocm and override is None
+        else float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+    )
     assert get_worker_shutdown_timeout(is_rocm=is_rocm) == expected
