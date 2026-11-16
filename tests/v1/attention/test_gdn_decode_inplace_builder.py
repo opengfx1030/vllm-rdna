@@ -60,7 +60,6 @@ def rdna2(monkeypatch):
     monkeypatch.setattr(gdn_attn, "on_rdna_family", lambda: True)
     monkeypatch.setattr(gdn_attn, "on_rdna2_hip", lambda: True)
     monkeypatch.setattr(gdn_attn, "_gdn_decode_rdna2_loaded", lambda: True)
-    monkeypatch.setattr(gdn_attn, "leapquant_gdn_enabled", lambda: False)
     monkeypatch.setenv("VLLM_RDNA_GDN_DECODE_INPLACE", "1")
     monkeypatch.setenv("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "0")
 
@@ -281,9 +280,9 @@ def test_enable_predicate(rdna2, monkeypatch):
     monkeypatch.setattr(gdn_attn, "_gdn_decode_rdna2_loaded", lambda: False)
     assert not gdn_decode_inplace_enabled(config)
     monkeypatch.setattr(gdn_attn, "_gdn_decode_rdna2_loaded", lambda: True)
-    monkeypatch.setattr(gdn_attn, "leapquant_gdn_enabled", lambda: True)
+    config.cache_config.replayssm_state_dtype = "leapquant"
     assert not gdn_decode_inplace_enabled(config)
-    monkeypatch.setattr(gdn_attn, "leapquant_gdn_enabled", lambda: False)
+    config.cache_config.replayssm_state_dtype = "auto"
     assert not gdn_decode_inplace_enabled(_builder(dtype=torch.bfloat16).vllm_config)
     monkeypatch.delenv("VLLM_RDNA_GDN_DECODE_INPLACE")
     assert not gdn_decode_inplace_enabled(config)
