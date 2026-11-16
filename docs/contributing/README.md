@@ -154,6 +154,12 @@ pytest tests/
 pytest -s -v tests/test_logger.py
 ```
 
+Tests isolated with `spawn_new_process_for_each_test` inherit pytest's import
+paths, so modules collected outside the repository remain importable in the
+child. An explicit interpreter `-X faulthandler` option is also forwarded; use
+`.venv/bin/python -X faulthandler -m pytest <test>` to retain native crash stacks
+across this extra interpreter boundary.
+
 !!! tip "Install python3-dev if Python.h is missing"
     If any of the above commands fails with `Python.h: No such file or directory`, install
     `python3-dev` with `sudo apt install python3-dev`.

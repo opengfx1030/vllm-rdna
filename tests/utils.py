@@ -1928,11 +1928,15 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
             repo_root = str(VLLM_PATH.resolve())
             env = os.environ.copy()
-            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = os.pathsep.join([repo_root, *sys.path])
             env[_SPAWN_CHILD_ENV] = "1"
+            # Keep explicit crash diagnostics across the extra interpreter.
+            child_flags = (
+                ["-X", "faulthandler"] if "faulthandler" in sys._xoptions else []
+            )
 
             result = subprocess.run(
-                [sys.executable, "-c", child_script],
+                [sys.executable, *child_flags, "-c", child_script],
                 input=payload,
                 env=env,
             )
