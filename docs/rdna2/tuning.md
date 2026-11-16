@@ -427,6 +427,12 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_RDNA_ALL_HIP` | 1 | Umbrella for the RDNA2 HIP kernel set: worker/sampler, top-k/top-p masking, QSA metadata, MTP conv1d + GDN spec-verify, unquantized MoE, vision pos-embed. Default on since 2026-10-16; set 0 to fall back to the pre-port Triton kernels. With it set the Triton audit shows zero launches and decode is ~99 vs ~89 tok/s (V620, TP4, MTP-2). Independent of the per-op flags above. |
 | `VLLM_RDNA_MROPE_BLOCK` | auto | HIP M-RoPE block size. `auto` = one block per token, striding the rotary index across the block; `1` restores the one-thread-per-token launch, which at decode (3 tokens) runs 3 threads and makes the kernel ~50x slower (494 vs 10 us, gfx1030). |
 
+The HIP HyperConnection implementations run behind the same functional custom-op
+boundary as Triton. Strided-weight packing and its address-keyed cache stay
+inside that boundary, so full-graph Dynamo tracing does not inspect device
+pointers. Arithmetic and packed-buffer lifetime are unchanged. The RDNA2 HC
+suite covers strided inputs and changed-input graph replay.
+
 ### All-reduce (TP over PCIe)
 
 | Env | Default | Notes |

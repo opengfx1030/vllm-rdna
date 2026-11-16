@@ -414,29 +414,33 @@ def _hc_combine_norm_fake(
     return residual.new_empty(residual.shape), residual.new_empty(residual.shape)
 
 
+# Keep HIP packing and its address-keyed buffers behind the functional custom
+# ops' Dynamo boundary, just like the Triton implementations.
+_use_rdna2_hc = hc_rdna2.hc_use_rdna2()
+
 direct_register_custom_op(
     op_name="qwen4_exp_grouped_gemma_rmsnorm",
-    op_func=_grouped_gemma_rmsnorm,
+    op_func=hc_rdna2.grouped_gemma_rmsnorm if _use_rdna2_hc else _grouped_gemma_rmsnorm,
     fake_impl=_same_shape_fake,
 )
 direct_register_custom_op(
     op_name="qwen4_exp_hc_silu",
-    op_func=_hc_silu,
+    op_func=hc_rdna2.hc_silu if _use_rdna2_hc else _hc_silu,
     fake_impl=_same_shape_fake,
 )
 direct_register_custom_op(
     op_name="qwen4_exp_hc_gate_mix",
-    op_func=_hc_gate_mix,
+    op_func=hc_rdna2.hc_gate_mix if _use_rdna2_hc else _hc_gate_mix,
     fake_impl=_hc_gate_mix_fake,
 )
 direct_register_custom_op(
     op_name="qwen4_exp_hc_combine",
-    op_func=_hc_combine,
+    op_func=hc_rdna2.hc_combine if _use_rdna2_hc else _hc_combine,
     fake_impl=_hc_combine_fake,
 )
 direct_register_custom_op(
     op_name="qwen4_exp_hc_combine_norm",
-    op_func=_hc_combine_norm,
+    op_func=hc_rdna2.hc_combine_norm if _use_rdna2_hc else _hc_combine_norm,
     fake_impl=_hc_combine_norm_fake,
 )
 
@@ -444,20 +448,14 @@ direct_register_custom_op(
 def grouped_gemma_rmsnorm(
     x: torch.Tensor, weight: torch.Tensor, eps: float, num_groups: int
 ) -> torch.Tensor:
-    if hc_rdna2.hc_use_rdna2():
-        return hc_rdna2.grouped_gemma_rmsnorm(x, weight, eps, num_groups)
     return torch.ops.vllm.qwen4_exp_grouped_gemma_rmsnorm(x, weight, eps, num_groups)
 
 
 def hc_silu(x: torch.Tensor, hc_count: int) -> torch.Tensor:
-    if hc_rdna2.hc_use_rdna2():
-        return hc_rdna2.hc_silu(x, hc_count)
     return torch.ops.vllm.qwen4_exp_hc_silu(x, hc_count)
 
 
 def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Tensor:
-    if hc_rdna2.hc_use_rdna2():
-        return hc_rdna2.hc_gate_mix(x, gate, hc_count)
     return torch.ops.vllm.qwen4_exp_hc_gate_mix(x, gate, hc_count)
 
 
@@ -467,8 +465,6 @@ def hc_combine(
     injection_logits: torch.Tensor,
     hc_count: int,
 ) -> torch.Tensor:
-    if hc_rdna2.hc_use_rdna2():
-        return hc_rdna2.hc_combine(residual, block_output, injection_logits, hc_count)
     return torch.ops.vllm.qwen4_exp_hc_combine(
         residual, block_output, injection_logits, hc_count
     )
@@ -482,15 +478,6 @@ def hc_combine_norm(
     eps: float,
     hc_count: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if hc_rdna2.hc_use_rdna2():
-        return hc_rdna2.hc_combine_norm(
-            residual,
-            block_output,
-            injection_logits,
-            norm_weight,
-            eps,
-            hc_count,
-        )
     return torch.ops.vllm.qwen4_exp_hc_combine_norm(
         residual,
         block_output,
