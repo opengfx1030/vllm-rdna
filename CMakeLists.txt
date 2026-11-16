@@ -1663,11 +1663,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/mono_qsa_decode_rdna2.cu"
       "csrc/rocm/fa_rdna2.cu"
       "csrc/rocm/rdna_hint_flex_rdna2.cu"
+      "csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu"
       "csrc/rocm/int4_fp16_kv_cache.cu"
       "csrc/rocm/gemm_w8a8_fp8_dense_rdna2.cu"
       "csrc/rocm/moe_q_gemm_rdna2.cu"
       "csrc/rocm/moe_w4a8_rdna2.cu"
       "csrc/rocm/gdn_decode_rdna2.cu"
+      "csrc/rocm/gdn_leapquant_rdna2.cu"
       "csrc/rocm/causal_conv1d_rdna2.cu"
       "csrc/rocm/gdn_prefill_prep_rdna2.cu"
       "csrc/rocm/gdn_prefill_kkt_rdna2.cu"
@@ -1733,6 +1735,16 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+
+  if(VLLM_ROCM_HAS_GFX1030)
+    # The dense prefill GEMM designs were swept with hipcc -O3
+    # (tools/rdna/rdna_hint_flex/gemm_sweep); build the shipped kernels with the
+    # same flag so the register allocation and instruction mix that were measured
+    # are the ones that run (RelWithDebInfo would give -O2).
+    set_source_files_properties(
+      "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.hip"
+      PROPERTIES COMPILE_OPTIONS "-O3")
+  endif()
   
   if(TARGET _rocm_C_skinny)
     target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)

@@ -206,6 +206,7 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
+        num_admission_batches: int = 0,
     ) -> int:
         """Get the number of device blocks needed to be allocated for the request.
 
@@ -232,6 +233,8 @@ class KVCacheCoordinator(ABC):
                 retention Mamba reserves a prefill checkpoint only on the chunk
                 reaching it; under dense retention every chunk publishes a
                 state, so it is ignored (0).
+            num_admission_batches: If nonzero, reserve recurrent state peaks for
+                this many unresolved batches as well as the predicted allocation.
 
         Returns:
             The number of blocks to allocate.
@@ -254,7 +257,7 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                group_blocks = manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
                     new_computed_blocks[i],
@@ -264,6 +267,17 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                     prefill_end=prefill_end,
                 )
+                if num_admission_batches and isinstance(manager, MambaManager):
+                    group_blocks = max(
+                        group_blocks,
+                        manager.get_num_blocks_for_peak(
+                            request_id,
+                            num_tokens_main_model,
+                            new_computed_blocks[i],
+                            num_admission_batches,
+                        ),
+                    )
+                num_blocks_to_allocate += group_blocks
         return num_blocks_to_allocate
 
     def allocate_new_computed_blocks(

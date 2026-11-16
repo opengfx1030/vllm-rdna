@@ -1,0 +1,24 @@
+ pciescope  REPLAY    29.0/29.0s x1 ‖paused par1-cs25  12:53:49Z  20261107-demo
+ 1:Topology  2:Live  3:Matrix  4:Errors  5:Measure
+bandwidth GB/s  d2d-push  64.0MiB  (rows=src, cols=dst)
+           H1    H2    H3    H4│    H6    H7    H8    H9
+H1:ce       ╲ 26.3  26.5  26.6 │ 25.2× 25.4× 25.1× 25.2×
+H2:d3   26.6      ╲ 26.3  26.5 │ 25.1× 25.2× 25.4× 25.1×
+H3:d8   26.4  26.6      ╲ 26.3 │ 25.4× 25.1× 25.2× 25.4×
+H4:db   26.2  26.4  26.6      ╲│ 25.3× 25.4× 25.1× 25.2×
+───────────────────────────────┼────────────────────────
+H6:0a   25.2× 25.4× 25.1× 25.2×│     ╲ 26.3  26.5  26.6
+H7:0f   25.1× 25.2× 25.4× 25.1×│ 26.6      ╲ 26.3  26.5
+H8:14   25.4× 25.1× 25.2× 25.4×│ 26.4  26.6      ╲ 26.3
+H9:17   25.3× 25.4× 25.1× 25.2×│ 26.2  26.4  26.6      ╲
+intra-switch  n=24  median  26.45 GB/s  min  26.25  eff  84%
+cross-root    n=32  median  25.25 GB/s  min  25.05  eff  80%
+mark: × cross-root, h host, none = intra-switch
+colour:  ≥80%  ≥50%  ≥25%  <25%
+
+
+
+
+
+
+ m metric  [/] size  v direction  │  ? help  q quit

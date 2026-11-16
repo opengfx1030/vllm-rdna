@@ -63,7 +63,34 @@ COMPUTE_MODES = {"f16": 0, "i8": 1, "i8_all": 2}
 # The GEMV re-reads the compact weights once per 8 tokens and stays faster
 # than dequant + GEMM up to about M = 48-64 on Qwen3.5-4B shapes (V620).
 DECODE_MAX_M = 48
+# Prefill GEMM backend above DECODE_MAX_M: the RDNA_HINT_FLEX_PREFILL_GEMM
+# environment variable selects it ("" / "0" / "off" / "rocblas" = rocBLAS, the
+# default; "hip" = the dense HIP kernel of csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu
+# wherever its (N, K, M) dispatch table measured it faster than rocBLAS, rocBLAS
+# everywhere else, and the 1..64 rows of a short tail M % 128 (the scheduler's
+# 1024 + a few decode tokens) apart from the whole tile rows; "hip-notail" = the
+# same kernel with the tail rows padded into one more tile row). The values are
+# the op's prefill_gemm modes (rdna_hint_flex_dense_gemm_rdna2.cuh). Takes effect
+# on the RDNA2 kernels only (gfx10x).
+PREFILL_GEMM_MODES = {
+    "": 0,
+    "0": 0,
+    "off": 0,
+    "rocblas": 0,
+    "hip": 4,
+    "hip-notail": 1,
+}
 _FIELD_PREFIX = "hi2_"
+
+
+def _prefill_gemm_from_env() -> int:
+    value = os.environ.get("RDNA_HINT_FLEX_PREFILL_GEMM", "").strip().lower()
+    if value not in PREFILL_GEMM_MODES:
+        raise ValueError(
+            f"RDNA_HINT_FLEX_PREFILL_GEMM={value!r} is not one of "
+            f"{sorted(PREFILL_GEMM_MODES)}"
+        )
+    return PREFILL_GEMM_MODES[value]
 
 
 def _rdna2_kernels_available() -> bool:
@@ -265,6 +292,15 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
         self.has_col_scale = has_col_scale
         self.compute_mode = compute_mode
         self.use_kernels = _rdna2_kernels_available()
+        self.prefill_gemm = _prefill_gemm_from_env() if self.use_kernels else 0
+        if self.prefill_gemm and not hasattr(
+            torch.ops._rocm_C, "rdna_hint_flex_dense_gemm_rdna2"
+        ):
+            logger.warning_once(
+                "RDNA_HINT_FLEX_PREFILL_GEMM=hip: this _rocm_C build has no "
+                "rdna_hint_flex_dense_gemm_rdna2; prefill stays on rocBLAS."
+            )
+            self.prefill_gemm = 0
 
     def create_weights(
         self,
@@ -422,6 +458,20 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                 "fp16 weights (correct, not memory-saving)."
             )
 
+    def fold_silu(self, layer: torch.nn.Module) -> bool:
+        """Ask this (down projection) layer to run SiluAndMul in its input
+        transform: with RDNA_HINT_FLEX_FUSE_SILU=1, on the RDNA2 kernels in F16
+        compute mode, `apply` then takes the [M, 2K] gate | up output of the
+        gate_up projection instead of silu(gate) * up, and the activation launch
+        in front of the GEMV disappears. Called once per layer when the MLP is
+        built; the MLP skips its activation iff this returns True."""
+        if os.environ.get("RDNA_HINT_FLEX_FUSE_SILU", "0") in ("", "0"):
+            return False
+        if not self.use_kernels or self.compute_mode != COMPUTE_MODES["f16"]:
+            return False
+        layer.hi2_silu_input = True
+        return True
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -430,8 +480,17 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         shape = x.shape
         x2 = x.reshape(-1, shape[-1])
+        segments = layer._rdna_hint_flex_segments
+        silu = getattr(layer, "hi2_silu_input", False)
+        if silu and (len(segments) != 1 or not segments[0]["transform"]):
+            # No input transform to fold into: the plain activation.
+            act = torch.empty(
+                (x2.shape[0], x2.shape[-1] // 2), dtype=x2.dtype, device=x2.device
+            )
+            torch.ops._C.silu_and_mul(act, x2)
+            x2, silu = act, False
         outs = []
-        for seg in layer._rdna_hint_flex_segments:
+        for seg in segments:
             if self.use_kernels:
                 y = ops.rdna_hint_flex_linear_rdna2(
                     x2,
@@ -447,6 +506,8 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                     seg["transform"],
                     DECODE_MAX_M,
                     self.compute_mode,
+                    silu,
+                    self.prefill_gemm,
                 )
             else:
                 xt = x2

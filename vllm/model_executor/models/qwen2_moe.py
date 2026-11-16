@@ -142,6 +142,12 @@ class Qwen2MoeMLP(nn.Module):
         self._exl3_fp16_activation = (
             quant_config is not None and quant_config.get_name() == "exl3"
         )
+        # gfx1030 rdna_hint_flex (RDNA_HINT_FLEX_FUSE_SILU=1): the down
+        # projection applies silu(gate) * up inside its input transform.
+        self._hi2_silu_fused = False
+        fold_silu = getattr(self.down_proj.quant_method, "fold_silu", None)
+        if expert_gate is None and fold_silu is not None:
+            self._hi2_silu_fused = fold_silu(self.down_proj)
 
     def forward(self, x):
         if self.expert_gate is not None and _rdna_shared_expert_ok(self, x):
@@ -167,7 +173,10 @@ class Qwen2MoeMLP(nn.Module):
                 out = tensor_model_parallel_all_reduce(out)
             return out
         gate_up, _ = self.gate_up_proj(x)
-        if self._exl3_fp16_activation and gate_up.dtype == torch.float16:
+        if self._hi2_silu_fused:
+            # down_proj takes gate | up and applies silu(gate) * up itself.
+            out = gate_up
+        elif self._exl3_fp16_activation and gate_up.dtype == torch.float16:
             # EXL3 mul1 codebooks can overflow FP16 during SiLU multiplication.
             # Keep their existing guard local to that quantization format.
             out = SiluAndMul.forward_native(gate_up.float())

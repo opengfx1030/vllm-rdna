@@ -24,19 +24,29 @@ The kernel is only built/registered for gfx1030; tests skip elsewhere.
 Run `pytest tests/kernels/quantization/test_gdn_prefill_kkt_rdna2.py`.
 """
 
+import os
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 
-# Pre-existing on 0.28 and v0.31: this module fails, then the process aborts
-# in hsa_signal_wait. See docs/rdna2/v0.31.0-port-notes.md.
-pytest.skip(
-    "Recorded GPU hang: test_gdn_prefill_kkt_rdna2 fails, then the process "
-    "aborts in hsa_signal_wait (docs/rdna2/v0.31.0-port-notes.md). "
-    "Run in isolation only (ONLY=gdn_prefill_kkt).",
-    allow_module_level=True,
-)
+# Recorded on 0.28 and on the 2026-10-08 v0.31 validation run: this module
+# fails, then the process aborts in hsa_signal_wait. That record predates the
+# kkt precision fix (34cc3c21bd, 2026-10-13) and has not been re-run on the
+# current tree, so the skip is opt-in rather than deleted. See
+# docs/rdna2/v0.31.0-port-notes.md.
+if os.environ.get("VLLM_RUN_GDN_KKT_HANG_TEST") != "1":
+    pytest.skip(
+        "Skipped by default: recorded GPU hang (test_gdn_prefill_kkt_rdna2 "
+        "fails, then the process aborts in hsa_signal_wait, see "
+        "docs/rdna2/v0.31.0-port-notes.md; recorded before 34cc3c21bd, not "
+        "re-run since). To run it, set "
+        "VLLM_RUN_GDN_KKT_HANG_TEST=1 and run this file in its own process "
+        "(e.g. VLLM_RUN_GDN_KKT_HANG_TEST=1 ONLY=gdn_prefill_kkt "
+        "bash tools/rdna/port_v031/unit.sh).",
+        allow_module_level=True,
+    )
 
 if not current_platform.is_rocm():
     pytest.skip("RDNA2 GDN prefill KKT kernel is ROCm-only", allow_module_level=True)

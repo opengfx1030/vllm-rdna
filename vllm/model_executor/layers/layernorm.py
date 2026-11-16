@@ -179,6 +179,46 @@ class GemmaRMSNorm(CustomOp):
         set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
         self.variance_epsilon = eps
         self._opaque_rdna = on_rdna_family()
+        # VLLM_RDNA_GEMMA_RESIDUAL_DIRECT (gfx10x, fp16). The fp16 (1 + w) scale
+        # lives in a persistent buffer refreshed by the weight loader, so the
+        # graph reads it in place instead of rebuilding it every call. Until a
+        # real weight load ran (dummy weights, loaders that bypass
+        # weight_loader) _rdna_scale_ready stays False and the opaque
+        # functional op below is used.
+        self.rdna_residual_direct = self._opaque_rdna and _gemma_residual_direct()
+        self._rdna_scale_ready = False
+        if self.rdna_residual_direct:
+            self.register_buffer(
+                "rdna_scale16",
+                torch.zeros(hidden_size, dtype=torch.float16),
+                persistent=False,
+            )
+            set_weight_attrs(self.weight, {"weight_loader": self._load_weight})
+
+    def _load_weight(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        from vllm.model_executor.model_loader.weight_utils import (
+            default_weight_loader,
+        )
+
+        default_weight_loader(param, loaded_weight)
+        self.refresh_rdna_scale()
+
+    def refresh_rdna_scale(self) -> None:
+        """Recompute the cached fp16 (1 + w) scale from the current weight.
+
+        Same arithmetic as the functional path ((w.float() + 1).to(fp16)),
+        written into the existing buffer so a captured graph keeps seeing
+        refreshed values.
+        """
+        w = self.weight.data
+        if not self.rdna_residual_direct or not w.is_cuda:
+            return
+        self.rdna_scale16.copy_((w.float() + 1.0).to(torch.float16))
+        self._rdna_scale_ready = True
+        logger.info_once(
+            "VLLM_RDNA_GEMMA_RESIDUAL_DIRECT=1: GemmaRMSNorm with a residual "
+            "uses the cached fp16 scale and the in-place fused add-norm"
+        )
 
     def forward_native(
         self,
@@ -197,6 +237,21 @@ class GemmaRMSNorm(CustomOp):
             return torch.ops.vllm.gemma_rms_norm(
                 x, self.weight.data, self.variance_epsilon
             )
+        if (
+            self._rdna_scale_ready
+            and x.dtype == torch.float16
+            and residual.dtype == torch.float16
+            and x.dim() == 2
+            and residual.dim() == 2
+        ):
+            # In place on x (normed output) and residual (sum): the caller's
+            # x and residual are consumed, as on the XPU path below. The op
+            # declares both as mutated, so inductor keeps or copies them
+            # where another consumer still needs the old values.
+            torch.ops.vllm.gemma_fused_add_rms_norm_inplace(
+                x, residual, self.rdna_scale16, self.variance_epsilon
+            )
+            return x, residual
         return torch.ops.vllm.gemma_fused_add_rms_norm(
             x, residual, self.weight.data, self.variance_epsilon
         )
@@ -612,6 +667,70 @@ direct_register_custom_op(
     op_name="gemma_fused_add_rms_norm",
     op_func=gemma_fused_add_rms_norm,
     fake_impl=gemma_fused_add_rms_norm_fake,
+)
+
+
+def _gemma_residual_direct() -> bool:
+    """VLLM_RDNA_GEMMA_RESIDUAL_DIRECT=1 on gfx10x (default off)."""
+    if not envs.VLLM_RDNA_GEMMA_RESIDUAL_DIRECT:
+        return False
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx10x
+
+    return on_gfx10x()
+
+
+def gemma_fused_add_rms_norm_inplace(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    scale: torch.Tensor,
+    epsilon: float,
+) -> None:
+    """X <- rms_norm(x + residual) * scale, residual <- x + residual, in place.
+
+    scale is the fp16 (1 + w) vector of the caller. Same kernel the IR
+    vllm_c impl reaches (torch.ops._C.fused_add_rms_norm), minus the scale
+    prep and the two activation clones of the functional wrapper.
+    """
+    if x.data_ptr() == residual.data_ptr():
+        raise RuntimeError(
+            "gemma_fused_add_rms_norm_inplace: x and residual alias the same "
+            "storage; the in-place norm needs distinct buffers"
+        )
+    # The kernel takes its 8-wide vector path only for 16-byte aligned buffers
+    # and the functional path always hands it fresh (aligned, contiguous)
+    # clones, so only that case may skip the clones without changing the
+    # reduction order. Anything else runs the functional op and copies back.
+    if (
+        x.is_contiguous()
+        and residual.is_contiguous()
+        and x.data_ptr() % 16 == 0
+        and residual.data_ptr() % 16 == 0
+    ):
+        torch.ops._C.fused_add_rms_norm(x, residual, scale, epsilon)
+        return
+    out, new_residual = ir.ops.fused_add_rms_norm(x, residual, scale, epsilon)
+    x.copy_(out)
+    residual.copy_(new_residual)
+
+
+def gemma_fused_add_rms_norm_inplace_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    scale: torch.Tensor,
+    epsilon: float,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="gemma_fused_add_rms_norm_inplace",
+    op_func=gemma_fused_add_rms_norm_inplace,
+    mutates_args=["x", "residual"],
+    fake_impl=gemma_fused_add_rms_norm_inplace_fake,
 )
 
 

@@ -1,0 +1,71 @@
+device AMD Radeon Pro V620 gfx1030 bus 0xdf CUs 36
+no image build at start: 
+Sun Nov 15 03:50:48 PM CET 2026
+device: AMD Radeon Pro V620 gfx1030 bus df CUs 36 (WGPs)
+0 TunableOp rows merged from 0 files -> /home/chenco_adm/w4a8_runs/hi2-gemm2/tunableop_prod_rows.csv
+rocblas_heur  default                              gate_up       M=1        1628.2 us (min  1429.2)   0.11 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=1        1869.1 us (min  1614.0)    0.1 TF/s  vs_rb  0.871  err           design 4 vs_heur 0.871
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=1        1758.7 us (min  1519.8)    0.1 TF/s  vs_rb  0.926  err           design 5 vs_heur 0.926
+rocblas_heur  default                              gate_up       M=7        1645.3 us (min  1512.4)   0.76 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=7        1663.5 us (min  1507.6)   0.75 TF/s  vs_rb  0.989  err           design 4 vs_heur 0.989
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=7        1670.1 us (min  1417.9)   0.75 TF/s  vs_rb  0.985  err           design 5 vs_heur 0.985
+rocblas_heur  default                              gate_up       M=16       1669.2 us (min  1543.8)   1.71 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=16       1913.8 us (min  1779.5)   1.49 TF/s  vs_rb  0.872  err           design 4 vs_heur 0.872
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=16       1801.5 us (min  1638.3)   1.58 TF/s  vs_rb  0.927  err           design 5 vs_heur 0.927
+rocblas_heur  default                              gate_up       M=32       1699.8 us (min  1568.7)   3.36 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=32       1736.5 us (min  1639.1)   3.28 TF/s  vs_rb  0.979  err           design 4 vs_heur 0.979
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=32       1658.8 us (min  1619.4)   3.44 TF/s  vs_rb  1.025  err           design 5 vs_heur 1.025
+rocblas_heur  default                              gate_up       M=33       1707.7 us (min  1627.4)   3.44 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=33       1806.2 us (min  1780.2)   3.26 TF/s  vs_rb  0.945  err           design 4 vs_heur 0.945
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=33       2092.8 us (min  1935.7)   2.81 TF/s  vs_rb  0.816  err           design 5 vs_heur 0.816
+rocblas_heur  default                              gate_up       M=48       1728.4 us (min  1689.0)   4.95 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=48       2087.8 us (min  2074.1)    4.1 TF/s  vs_rb  0.828  err           design 4 vs_heur 0.828
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=48       1934.6 us (min  1913.8)   4.42 TF/s  vs_rb  0.893  err           design 5 vs_heur 0.893
+rocblas_heur  default                              gate_up       M=64       1761.9 us (min  1726.5)   6.48 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=64       2109.0 us (min  2074.0)   5.41 TF/s  vs_rb  0.835  err           design 4 vs_heur 0.835
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf gate_up       M=64       1972.7 us (min  1802.5)   5.78 TF/s  vs_rb  0.893  err           design 5 vs_heur 0.893
+rocblas_heur  default                              down          M=1        1225.9 us (min  1191.8)   0.07 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=1         396.9 us (min   395.3)   0.22 TF/s  vs_rb  3.089  err           design 4 vs_heur 3.089
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=1         420.1 us (min   418.6)   0.21 TF/s  vs_rb  2.918  err           design 5 vs_heur 2.918
+rocblas_heur  default                              down          M=7        1238.2 us (min  1234.3)    0.5 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=7         415.9 us (min   414.2)    1.5 TF/s  vs_rb  2.977  err           design 4 vs_heur 2.977
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=7         473.7 us (min   472.8)   1.32 TF/s  vs_rb  2.614  err           design 5 vs_heur 2.614
+rocblas_heur  default                              down          M=16       1247.3 us (min  1241.8)   1.14 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=16        423.9 us (min   421.8)   3.36 TF/s  vs_rb  2.943  err           design 4 vs_heur 2.943
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=16        474.3 us (min   474.1)   3.01 TF/s  vs_rb   2.63  err           design 5 vs_heur 2.630
+rocblas_heur  default                              down          M=32       1260.1 us (min  1256.0)   2.26 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=32        422.1 us (min   419.7)   6.76 TF/s  vs_rb  2.985  err           design 4 vs_heur 2.985
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=32        478.2 us (min   477.4)   5.96 TF/s  vs_rb  2.635  err           design 5 vs_heur 2.635
+rocblas_heur  default                              down          M=33       1263.5 us (min  1259.2)   2.33 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=33        521.1 us (min   518.1)   5.64 TF/s  vs_rb  2.425  err           design 4 vs_heur 2.425
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=33        479.5 us (min   478.4)   6.13 TF/s  vs_rb  2.635  err           design 5 vs_heur 2.635
+rocblas_heur  default                              down          M=48       1276.5 us (min  1271.3)   3.35 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=48        568.7 us (min   567.1)   7.52 TF/s  vs_rb  2.245  err           design 4 vs_heur 2.245
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=48        487.7 us (min   485.5)   8.77 TF/s  vs_rb  2.617  err           design 5 vs_heur 2.617
+rocblas_heur  default                              down          M=64       1293.3 us (min  1290.3)   4.41 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=64        585.3 us (min   583.0)   9.75 TF/s  vs_rb   2.21  err           design 4 vs_heur 2.210
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf down          M=64        493.9 us (min   491.4)  11.55 TF/s  vs_rb  2.618  err           design 5 vs_heur 2.618
+rocblas_heur  default                              out_proj      M=1         144.3 us (min   143.8)   0.22 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=1         276.7 us (min   273.0)   0.11 TF/s  vs_rb  0.521  err           design 4 vs_heur 0.521
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=1         259.7 us (min   258.2)   0.12 TF/s  vs_rb  0.556  err           design 5 vs_heur 0.556
+rocblas_heur  default                              out_proj      M=7         159.5 us (min   157.7)   1.38 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=7         305.7 us (min   301.4)   0.72 TF/s  vs_rb  0.522  err           design 4 vs_heur 0.522
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=7         284.3 us (min   282.1)   0.77 TF/s  vs_rb  0.561  err           design 5 vs_heur 0.561
+rocblas_heur  default                              out_proj      M=16        266.6 us (min   259.3)   1.89 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=16        311.1 us (min   306.4)   1.62 TF/s  vs_rb  0.857  err           design 4 vs_heur 0.857
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=16        299.1 us (min   295.3)   1.68 TF/s  vs_rb  0.891  err           design 5 vs_heur 0.891
+rocblas_heur  default                              out_proj      M=32        263.0 us (min   257.7)   3.83 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=32        276.3 us (min   275.3)   3.64 TF/s  vs_rb  0.952  err           design 4 vs_heur 0.952
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=32        266.3 us (min   265.7)   3.78 TF/s  vs_rb  0.988  err           design 5 vs_heur 0.988
+rocblas_heur  default                              out_proj      M=33        393.7 us (min   388.2)   2.64 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=33        311.6 us (min   309.4)   3.33 TF/s  vs_rb  1.263  err           design 4 vs_heur 1.263
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=33        296.5 us (min   295.8)    3.5 TF/s  vs_rb  1.328  err           design 5 vs_heur 1.328
+rocblas_heur  default                              out_proj      M=48        204.6 us (min   204.1)   7.38 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=48        337.8 us (min   334.9)   4.47 TF/s  vs_rb  0.606  err           design 4 vs_heur 0.606
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=48        268.6 us (min   267.4)   5.62 TF/s  vs_rb  0.762  err           design 5 vs_heur 0.762
+rocblas_heur  default                              out_proj      M=64        210.1 us (min   209.7)   9.58 TF/s  vs_rb    1.0  err           
+hip           32x128k32t4x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=64        339.5 us (min   337.1)   5.93 TF/s  vs_rb  0.619  err           design 4 vs_heur 0.619
+hip           64x128k32t8x8n2p0r0g16b0w0s1m0u1l8z+skip+buf out_proj      M=64        273.9 us (min   273.0)   7.35 TF/s  vs_rb  0.767  err           design 5 vs_heur 0.767
+Sun Nov 15 03:52:18 PM CET 2026
+no image build at end: 
+bench_exit=0

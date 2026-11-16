@@ -1,0 +1,24 @@
+phase,kind,variant,shape,N,K,M,us,us_min,tflops,vs_rb,max_abs,rel_fro,rel_fp32,vgpr,lds,scratch,threads,blocks_per_wgp,waves_per_simd,gfx_mhz,power_w,note
+probe_a,probe,rocblas_heur:default,in_proj_qkvz,8192,5120,2048,7998.8,,21.48,,,,,,,,,,,1564.0,175.0,rep0 13.73 TF/s per GHz
+probe_a,probe,rocblas_tuned:tunableop,in_proj_qkvz,8192,5120,2048,7237.1,,23.74,,,,,,,,,,,1633.0,175.0,rep0 14.54 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m0u1,in_proj_qkvz,8192,5120,2048,8683.9,,19.78,,,,,,,,,,,1816.0,175.0,rep0 10.89 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m1u1,in_proj_qkvz,8192,5120,2048,7394.1,,23.23,,,,,,,,,,,1929.0,175.0,rep0 12.04 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m2u1,in_proj_qkvz,8192,5120,2048,4036.3,,42.56,,,,,,,,,,,2424.0,175.0,rep0 17.56 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m3u1,in_proj_qkvz,8192,5120,2048,6875.1,,24.99,,,,,,,,,,,2041.0,175.0,rep0 12.24 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m4u1,in_proj_qkvz,8192,5120,2048,3702.7,,46.4,,,,,,,,,,,2468.0,163.0,rep0 18.80 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x4n2p8r0g16b0w0s1m0u1,in_proj_qkvz,8192,5120,2048,9411.2,,18.25,,,,,,,,,,,1831.0,175.0,rep0 9.97 TF/s per GHz
+probe_a,probe,dense:64x64k32t4x4n2p8r0g16b0w0s1m0u1,in_proj_qkvz,8192,5120,2048,11826.5,,14.53,,,,,,,,,,,1840.0,175.0,rep0 7.89 TF/s per GHz
+probe_a,probe,dense:128x128k32t16x8n2p8r0g16b0w0s1m0u1,in_proj_qkvz,8192,5120,2048,8085.7,,21.25,,,,,,,,,,,1852.0,175.0,rep0 11.47 TF/s per GHz
+probe_a,probe,dense:128x64k32t8x8n2p8r0g16b0w0s1m0u1,in_proj_qkvz,8192,5120,2048,8640.9,,19.88,,,,,,,,,,,1741.0,175.0,rep0 11.42 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m0u1q1,in_proj_qkvz,8192,5120,2048,7853.2,,21.88,,,,,,,,,,,1694.0,174.0,rep0 12.91 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m1u1q1,in_proj_qkvz,8192,5120,2048,6498.2,,26.44,,,,,,,,,,,1758.0,175.0,rep0 15.04 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m3u1q1,in_proj_qkvz,8192,5120,2048,5883.8,,29.2,,,,,,,,,,,1886.0,175.0,rep0 15.48 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m1u1l8,in_proj_qkvz,8192,5120,2048,7153.8,,24.02,,,,,,,,,,,1865.0,174.0,rep0 12.88 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m1u1l8q1,in_proj_qkvz,8192,5120,2048,7125.8,,24.11,,,,,,,,,,,1877.0,175.0,rep0 12.84 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m3u1l8,in_proj_qkvz,8192,5120,2048,5357.0,,32.07,,,,,,,,,,,1810.0,174.0,rep0 17.72 TF/s per GHz
+probe_a,probe,dense:128x128k32t8x8n2p8r0g16b0w0s1m3u1l8q1,in_proj_qkvz,8192,5120,2048,5327.7,,32.25,,,,,,,,,,,1800.0,174.0,rep0 17.91 TF/s per GHz
+probe_a,probe,dense:128x128k64t8x8n1p0r0g16b0w0s1m0u1zq1,in_proj_qkvz,8192,5120,2048,7576.3,,22.68,,,,,,,,,,,1693.0,175.0,rep0 13.39 TF/s per GHz
+probe_a,probe,dense:128x128k64t8x8n1p0r0g16b0w6s1m0u1zq1,in_proj_qkvz,8192,5120,2048,8008.5,,21.45,,,,,,,,,,,1728.0,175.0,rep0 12.41 TF/s per GHz
+probe_a,probe,dense:256x128k32t16x8n2p8r0g16b0w0s1m0u1,in_proj_qkvz,8192,5120,2048,8013.7,,21.44,,,,,,,,,,,1891.0,175.0,rep0 11.34 TF/s per GHz
+probe_a,probe,dense:128x128k32t16x8n2p8r0g16b0w0s1m0u1l8,in_proj_qkvz,8192,5120,2048,7410.0,,23.18,,,,,,,,,,,1576.0,175.0,rep0 14.71 TF/s per GHz
+probe_a,probe,dense:128x128k64t8x8n1p0r0g16b0w6s1m0u1z,in_proj_qkvz,8192,5120,2048,7409.4,,23.19,,,,,,,,,,,1748.0,175.0,rep0 13.26 TF/s per GHz

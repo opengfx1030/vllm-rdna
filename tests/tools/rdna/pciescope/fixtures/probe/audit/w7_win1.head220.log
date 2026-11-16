@@ -1,0 +1,220 @@
+DEV 0 AMD Radeon Pro V620 gfx1030 bus=0000:ce:00.0
+DEV 1 AMD Radeon Pro V620 gfx1030 bus=0000:d3:00.0
+DEV 2 AMD Radeon Pro V620 gfx1030 bus=0000:d8:00.0
+DEV 3 AMD Radeon Pro V620 gfx1030 bus=0000:db:00.0
+DEV 4 AMD Radeon Pro V620 gfx1030 bus=0000:0a:00.0
+DEV 5 AMD Radeon Pro V620 gfx1030 bus=0000:0f:00.0
+DEV 6 AMD Radeon Pro V620 gfx1030 bus=0000:14:00.0
+P2P 0->1 access=1 perf_rank=2 native_atomics=1
+P2P 0->2 access=1 perf_rank=2 native_atomics=1
+P2P 0->3 access=1 perf_rank=2 native_atomics=1
+P2P 0->4 access=1 perf_rank=2 native_atomics=1
+P2P 0->5 access=1 perf_rank=2 native_atomics=1
+P2P 0->6 access=1 perf_rank=2 native_atomics=1
+P2P 1->0 access=1 perf_rank=2 native_atomics=1
+P2P 1->2 access=1 perf_rank=2 native_atomics=1
+P2P 1->3 access=1 perf_rank=2 native_atomics=1
+P2P 1->4 access=1 perf_rank=2 native_atomics=1
+P2P 1->5 access=1 perf_rank=2 native_atomics=1
+P2P 1->6 access=1 perf_rank=2 native_atomics=1
+P2P 2->0 access=1 perf_rank=2 native_atomics=1
+P2P 2->1 access=1 perf_rank=2 native_atomics=1
+P2P 2->3 access=1 perf_rank=2 native_atomics=1
+P2P 2->4 access=1 perf_rank=2 native_atomics=1
+P2P 2->5 access=1 perf_rank=2 native_atomics=1
+P2P 2->6 access=1 perf_rank=2 native_atomics=1
+P2P 3->0 access=1 perf_rank=2 native_atomics=1
+P2P 3->1 access=1 perf_rank=2 native_atomics=1
+P2P 3->2 access=1 perf_rank=2 native_atomics=1
+P2P 3->4 access=1 perf_rank=2 native_atomics=1
+P2P 3->5 access=1 perf_rank=2 native_atomics=1
+P2P 3->6 access=1 perf_rank=2 native_atomics=1
+P2P 4->0 access=1 perf_rank=2 native_atomics=1
+P2P 4->1 access=1 perf_rank=2 native_atomics=1
+P2P 4->2 access=1 perf_rank=2 native_atomics=1
+P2P 4->3 access=1 perf_rank=2 native_atomics=1
+P2P 4->5 access=1 perf_rank=2 native_atomics=1
+P2P 4->6 access=1 perf_rank=2 native_atomics=1
+P2P 5->0 access=1 perf_rank=2 native_atomics=1
+P2P 5->1 access=1 perf_rank=2 native_atomics=1
+P2P 5->2 access=1 perf_rank=2 native_atomics=1
+P2P 5->3 access=1 perf_rank=2 native_atomics=1
+P2P 5->4 access=1 perf_rank=2 native_atomics=1
+P2P 5->6 access=1 perf_rank=2 native_atomics=1
+P2P 6->0 access=1 perf_rank=2 native_atomics=1
+P2P 6->1 access=1 perf_rank=2 native_atomics=1
+P2P 6->2 access=1 perf_rank=2 native_atomics=1
+P2P 6->3 access=1 perf_rank=2 native_atomics=1
+P2P 6->4 access=1 perf_rank=2 native_atomics=1
+P2P 6->5 access=1 perf_rank=2 native_atomics=1
+# hip=1,2,3,4,6,7,8 buses={0: 'ce', 1: 'd3', 2: 'd8', 3: 'db', 4: '0a', 5: '0f', 6: '14'} A=[0, 1, 2, 3] B=[4, 5, 6]
+### lat 2000 0 0:1 0:2 0:3 0:4 0:5 0:6 1:2 1:3 1:4 1:5 1:6 2:3 2:4 2:5 2:6 3:4 3:5 3:6 4:5 4:6 5:6
+LAT 0<->1 payload=0 one_way_us=6.24
+LAT 0<->2 payload=0 one_way_us=6.27
+LAT 0<->3 payload=0 one_way_us=6.14
+LAT 0<->4 payload=0 one_way_us=6.95
+LAT 0<->5 payload=0 one_way_us=6.97
+LAT 0<->6 payload=0 one_way_us=6.90
+LAT 1<->2 payload=0 one_way_us=6.28
+LAT 1<->3 payload=0 one_way_us=6.15
+LAT 1<->4 payload=0 one_way_us=6.95
+LAT 1<->5 payload=0 one_way_us=6.92
+LAT 1<->6 payload=0 one_way_us=6.89
+LAT 2<->3 payload=0 one_way_us=6.19
+LAT 2<->4 payload=0 one_way_us=6.93
+LAT 2<->5 payload=0 one_way_us=6.90
+LAT 2<->6 payload=0 one_way_us=6.91
+LAT 3<->4 payload=0 one_way_us=6.87
+LAT 3<->5 payload=0 one_way_us=6.87
+LAT 3<->6 payload=0 one_way_us=6.80
+LAT 4<->5 payload=0 one_way_us=6.34
+LAT 4<->6 payload=0 one_way_us=6.29
+LAT 5<->6 payload=0 one_way_us=6.24
+### lat 2000 4096 0:1 0:2 0:3 0:4 0:5 0:6 1:2 1:3 1:4 1:5 1:6 2:3 2:4 2:5 2:6 3:4 3:5 3:6 4:5 4:6 5:6
+LAT 0<->1 payload=4096 one_way_us=6.44
+LAT 0<->2 payload=4096 one_way_us=6.49
+LAT 0<->3 payload=4096 one_way_us=6.36
+LAT 0<->4 payload=4096 one_way_us=7.13
+LAT 0<->5 payload=4096 one_way_us=7.16
+LAT 0<->6 payload=4096 one_way_us=7.08
+LAT 1<->2 payload=4096 one_way_us=6.53
+LAT 1<->3 payload=4096 one_way_us=6.47
+LAT 1<->4 payload=4096 one_way_us=7.24
+LAT 1<->5 payload=4096 one_way_us=7.28
+LAT 1<->6 payload=4096 one_way_us=7.24
+LAT 2<->3 payload=4096 one_way_us=6.27
+LAT 2<->4 payload=4096 one_way_us=7.09
+LAT 2<->5 payload=4096 one_way_us=7.10
+LAT 2<->6 payload=4096 one_way_us=7.14
+LAT 3<->4 payload=4096 one_way_us=7.13
+LAT 3<->5 payload=4096 one_way_us=7.10
+LAT 3<->6 payload=4096 one_way_us=7.06
+LAT 4<->5 payload=4096 one_way_us=6.52
+LAT 4<->6 payload=4096 one_way_us=6.43
+LAT 5<->6 payload=4096 one_way_us=6.45
+### lat 2000 16384 0:1 0:2 0:3 0:4 0:5 0:6 1:2 1:3 1:4 1:5 1:6 2:3 2:4 2:5 2:6 3:4 3:5 3:6 4:5 4:6 5:6
+LAT 0<->1 payload=16384 one_way_us=7.03
+LAT 0<->2 payload=16384 one_way_us=6.94
+LAT 0<->3 payload=16384 one_way_us=6.76
+LAT 0<->4 payload=16384 one_way_us=7.63
+LAT 0<->5 payload=16384 one_way_us=7.64
+LAT 0<->6 payload=16384 one_way_us=7.58
+LAT 1<->2 payload=16384 one_way_us=7.03
+LAT 1<->3 payload=16384 one_way_us=6.72
+LAT 1<->4 payload=16384 one_way_us=7.68
+LAT 1<->5 payload=16384 one_way_us=7.68
+LAT 1<->6 payload=16384 one_way_us=7.67
+LAT 2<->3 payload=16384 one_way_us=6.87
+LAT 2<->4 payload=16384 one_way_us=7.66
+LAT 2<->5 payload=16384 one_way_us=7.66
+LAT 2<->6 payload=16384 one_way_us=7.57
+LAT 3<->4 payload=16384 one_way_us=7.46
+LAT 3<->5 payload=16384 one_way_us=7.48
+LAT 3<->6 payload=16384 one_way_us=7.44
+LAT 4<->5 payload=16384 one_way_us=7.20
+LAT 4<->6 payload=16384 one_way_us=7.10
+LAT 5<->6 payload=16384 one_way_us=7.03
+### lat 2000 65536 0:1 0:2 0:3 0:4 0:5 0:6 1:2 1:3 1:4 1:5 1:6 2:3 2:4 2:5 2:6 3:4 3:5 3:6 4:5 4:6 5:6
+LAT 0<->1 payload=65536 one_way_us=8.37
+LAT 0<->2 payload=65536 one_way_us=8.36
+LAT 0<->3 payload=65536 one_way_us=8.17
+LAT 0<->4 payload=65536 one_way_us=9.04
+LAT 0<->5 payload=65536 one_way_us=9.04
+LAT 0<->6 payload=65536 one_way_us=8.85
+LAT 1<->2 payload=65536 one_way_us=8.35
+LAT 1<->3 payload=65536 one_way_us=8.19
+LAT 1<->4 payload=65536 one_way_us=9.02
+LAT 1<->5 payload=65536 one_way_us=9.05
+LAT 1<->6 payload=65536 one_way_us=8.85
+LAT 2<->3 payload=65536 one_way_us=8.10
+LAT 2<->4 payload=65536 one_way_us=9.04
+LAT 2<->5 payload=65536 one_way_us=9.08
+LAT 2<->6 payload=65536 one_way_us=8.84
+LAT 3<->4 payload=65536 one_way_us=9.00
+LAT 3<->5 payload=65536 one_way_us=9.03
+LAT 3<->6 payload=65536 one_way_us=8.61
+LAT 4<->5 payload=65536 one_way_us=8.67
+LAT 4<->6 payload=65536 one_way_us=8.57
+LAT 5<->6 payload=65536 one_way_us=8.56
+### bw 0.4 65536 128 p:0>4
+X p:0>4 size=65536 blocks=128 gbps=25.21 verify=ok
+AGG size=65536 fg_gbps=25.21 bg_gbps=0.00 n=1
+### bw 0.4 65536 128 p:4>0
+X p:4>0 size=65536 blocks=128 gbps=25.19 verify=ok
+AGG size=65536 fg_gbps=25.19 bg_gbps=0.00 n=1
+### bw 0.4 65536 128 p:0>4 p:4>0
+X p:0>4 size=65536 blocks=128 gbps=26.74 verify=ok
+X p:4>0 size=65536 blocks=128 gbps=26.76 verify=ok
+AGG size=65536 fg_gbps=53.50 bg_gbps=0.00 n=2
+### bw 0.4 65536 128 p:0>4 p:1>5
+X p:0>4 size=65536 blocks=128 gbps=13.81 verify=ok
+X p:1>5 size=65536 blocks=128 gbps=13.81 verify=ok
+AGG size=65536 fg_gbps=27.63 bg_gbps=0.00 n=2
+### bw 0.4 65536 128 p:4>0 p:5>1
+X p:4>0 size=65536 blocks=128 gbps=13.77 verify=ok
+X p:5>1 size=65536 blocks=128 gbps=13.77 verify=ok
+AGG size=65536 fg_gbps=27.54 bg_gbps=0.00 n=2
+### bw 0.4 65536 128 p:0>4 p:1>5 p:4>0 p:5>1
+X p:0>4 size=65536 blocks=128 gbps=13.80 verify=ok
+X p:1>5 size=65536 blocks=128 gbps=13.74 verify=ok
+X p:4>0 size=65536 blocks=128 gbps=13.73 verify=ok
+X p:5>1 size=65536 blocks=128 gbps=13.80 verify=ok
+AGG size=65536 fg_gbps=55.07 bg_gbps=0.00 n=4
+### bw 0.4 65536 128 p:0>4 p:1>5 p:2>6
+X p:0>4 size=65536 blocks=128 gbps=6.19 verify=ok
+X p:1>5 size=65536 blocks=128 gbps=6.19 verify=ok
+X p:2>6 size=65536 blocks=128 gbps=6.20 verify=ok
+AGG size=65536 fg_gbps=18.58 bg_gbps=0.00 n=3
+### bw 0.4 65536 128 p:4>0 p:5>1 p:6>2
+X p:4>0 size=65536 blocks=128 gbps=6.18 verify=ok
+X p:5>1 size=65536 blocks=128 gbps=6.18 verify=ok
+X p:6>2 size=65536 blocks=128 gbps=6.19 verify=ok
+AGG size=65536 fg_gbps=18.54 bg_gbps=0.00 n=3
+### bw 0.4 65536 128 p:0>4 p:1>5 p:2>6 p:4>0 p:5>1 p:6>2
+X p:0>4 size=65536 blocks=128 gbps=6.60 verify=ok
+X p:1>5 size=65536 blocks=128 gbps=6.60 verify=ok
+X p:2>6 size=65536 blocks=128 gbps=6.60 verify=ok
+X p:4>0 size=65536 blocks=128 gbps=6.59 verify=ok
+X p:5>1 size=65536 blocks=128 gbps=6.54 verify=ok
+X p:6>2 size=65536 blocks=128 gbps=6.59 verify=ok
+AGG size=65536 fg_gbps=39.52 bg_gbps=0.00 n=6
+### bw 0.4 65536 128 p:0>1 p:1>2 p:2>3 p:3>0
+X p:0>1 size=65536 blocks=128 gbps=26.33 verify=ok
+X p:1>2 size=65536 blocks=128 gbps=26.34 verify=ok
+X p:2>3 size=65536 blocks=128 gbps=26.31 verify=ok
+X p:3>0 size=65536 blocks=128 gbps=26.38 verify=ok
+AGG size=65536 fg_gbps=105.36 bg_gbps=0.00 n=4
+### bw 0.4 65536 128 p:0>1 p:0>2 p:0>3 p:1>0 p:1>2 p:1>3 p:2>0 p:2>1 p:2>3 p:3>0 p:3>1 p:3>2
+X p:0>1 size=65536 blocks=128 gbps=8.87 verify=ok
+X p:0>2 size=65536 blocks=128 gbps=8.87 verify=ok
+X p:0>3 size=65536 blocks=128 gbps=8.87 verify=ok
+X p:1>0 size=65536 blocks=128 gbps=8.67 verify=ok
+X p:1>2 size=65536 blocks=128 gbps=8.67 verify=ok
+X p:1>3 size=65536 blocks=128 gbps=8.67 verify=ok
+X p:2>0 size=65536 blocks=128 gbps=8.91 verify=ok
+X p:2>1 size=65536 blocks=128 gbps=8.91 verify=ok
+X p:2>3 size=65536 blocks=128 gbps=8.91 verify=ok
+X p:3>0 size=65536 blocks=128 gbps=8.76 verify=ok
+X p:3>1 size=65536 blocks=128 gbps=8.76 verify=ok
+X p:3>2 size=65536 blocks=128 gbps=8.76 verify=ok
+AGG size=65536 fg_gbps=105.64 bg_gbps=0.00 n=12
+### bw 0.4 65536 128 p:4>5 p:5>6 p:6>4
+X p:4>5 size=65536 blocks=128 gbps=21.52 verify=ok
+X p:5>6 size=65536 blocks=128 gbps=21.54 verify=ok
+X p:6>4 size=65536 blocks=128 gbps=21.59 verify=ok
+AGG size=65536 fg_gbps=64.65 bg_gbps=0.00 n=3
+### bw 0.4 65536 128 p:4>5 p:4>6 p:5>4 p:5>6 p:6>4 p:6>5
+X p:4>5 size=65536 blocks=128 gbps=13.55 verify=ok
+X p:4>6 size=65536 blocks=128 gbps=13.55 verify=ok
+X p:5>4 size=65536 blocks=128 gbps=13.54 verify=ok
+X p:5>6 size=65536 blocks=128 gbps=13.54 verify=ok
+X p:6>4 size=65536 blocks=128 gbps=13.06 verify=ok
+X p:6>5 size=65536 blocks=128 gbps=13.05 verify=ok
+AGG size=65536 fg_gbps=80.29 bg_gbps=0.00 n=6
+### bw 0.4 65536 128 p:0>1 p:1>2 p:2>3 p:3>0 p:4>5 p:5>6 p:6>4
+X p:0>1 size=65536 blocks=128 gbps=26.38 verify=ok
+X p:1>2 size=65536 blocks=128 gbps=26.36 verify=ok
+X p:2>3 size=65536 blocks=128 gbps=26.31 verify=ok
+X p:3>0 size=65536 blocks=128 gbps=26.37 verify=ok
+X p:4>5 size=65536 blocks=128 gbps=25.82 verify=ok
+X p:5>6 size=65536 blocks=128 gbps=25.85 verify=ok

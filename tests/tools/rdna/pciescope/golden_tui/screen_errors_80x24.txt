@@ -1,0 +1,24 @@
+ pciescope  REPLAY    29.0/29.0s x1 ‖paused par1-cs25  12:53:49Z  20261107-demo
+ 1:Topology  2:Live  3:Matrix  4:Errors  5:Measure
+31 error series watched, 2 non-zero (standing since boot / driver load)
+  H2:d3          aer.correctable                             3
+  H2:d3          aer.error[correctable][BadTLP]              3
+
+time(UTC) entity    what                    delta detail
+12:53:45  d0:00.0   link_change                   speed 16.0 -> 8.0 GT/s
+12:53:40  H2:d3     aer.correctable            +3
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ c clear log  │  1-5 view  space pause  e export  ? help  q quit

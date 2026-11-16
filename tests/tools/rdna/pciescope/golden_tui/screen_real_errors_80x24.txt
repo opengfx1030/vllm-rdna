@@ -1,0 +1,24 @@
+ pciescope  REPLAY    33.1/33.1s x1 par1-cs25  13:25:54Z  real
+ 1:Topology  2:Live  3:Matrix  4:Errors  5:Measure
+220 error series watched, 34 non-zero (standing since boot / driver load)
+  H0:cb          aer.correctable                             1
+  H0:cb          aer.error[correctable][NonFatalErr]          1
+  00:01.1        aer.rootport_correctable                   10
+  02:0c.0        aer.correctable                             1
+  02:0c.0        aer.error[correctable][NonFatalErr]          1
+  c0:03.1        aer.rootport_correctable                   10
+  c5:00.0        aer.correctable                             1
+  c5:00.0        aer.error[correctable][NonFatalErr]          1
+  c6:04.0        aer.correctable                             1
+  c6:04.0        aer.error[correctable][NonFatalErr]          1
+  c6:08.0        aer.correctable                             1
+  c6:08.0        aer.error[correctable][NonFatalErr]          1
+  … 22 more
+
+time(UTC) entity    what                    delta detail
+no new errors since the TUI started
+
+
+
+
+ c clear log  │  1-5 view  space pause  e export  ? help  q quit

@@ -1,0 +1,21 @@
+root:00  root port 00:01.1  5 GPU
+└─ ● switch B  PEX88096  up 01:00.0  16Gx16  slot B
+   ├─ 04:00.0  ● H5:07  W7800  gfx1100 kfd6  smi0  16Gx16  45.0GiB
+   ├─ 04:10.0  ● H6:0a  V620   gfx1030 kfd7  smi1  16Gx16  slot B  30.0GiB
+   ├─ 0c:00.0  ● H7:0f  V620   gfx1030 kfd8  smi2  16Gx16  slot B  30.0GiB
+   ├─ 11:00.0  ● H8:14  V620   gfx1030 kfd9  smi3  16Gx16  slot B  30.0GiB
+   ├─ 11:10.0  ● H9:17  V620   gfx1030 kfd10 smi4  16Gx16  slot B  30.0GiB
+   ├─ 02:1c.0  mgmt endpoint 1c:00.0  16Gx16
+   ├─ 19:14.0  unused (link down)
+   └─ 19:15.0  unused (link down)
+
+root:c0  root port c0:03.1  5 GPU
+└─ ● switch A  PEX88096  up c5:00.0  16Gx16  slot A
+   ├─ c8:00.0  ● H0:cb  W7800  gfx1100 kfd1  smi5  16Gx16  45.0GiB
+   ├─ c8:10.0  ● H1:ce  V620   gfx1030 kfd2  smi6  16Gx16  slot A  30.0GiB
+   ├─ d0:00.0  ✖ H2:d3  V620   gfx1030 kfd3  smi7  16Gx16  slot A  30.0GiB
+   ├─ d5:00.0  ● H3:d8  V620   gfx1030 kfd4  smi8  16Gx16  slot A  30.0GiB
+   ├─ d5:10.0  ● H4:db  V620   gfx1030 kfd5  smi9  16Gx16  slot A  30.0GiB
+   ├─ c6:1c.0  mgmt endpoint e0:00.0  16Gx16
+   ├─ dd:14.0  unused (link down)
+   └─ dd:15.0  unused (link down)

@@ -175,6 +175,7 @@ def is_known_kv_cache_dtype(name: str) -> bool:
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["align", "none"]
+ReplaySSMStateDType = Literal["auto", "leapquant"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -320,6 +321,17 @@ class CacheConfig:
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
     Kimi-K3 speculative decode does not use B. Default 16."""
+    replayssm_state_dtype: ReplaySSMStateDType = "auto"
+    """Storage format of the Gated DeltaNet (GDN) recurrent state. The default
+    'auto' keeps the model's own state dtype. 'leapquant' stores each state as
+    an INT8 residual with FP16 compensators and a ring of FP16 records
+    (LeapQuant, arXiv 2609.38166). It changes model outputs and runs only on
+    RDNA2 (gfx10x) ROCm, for Qwen-style GDN layers with head dimension 128.
+    It does not use `use_replayssm` or `replayssm_buffer_len` (the window is
+    fixed at 32 records) and is rejected at startup with `use_replayssm`, KV
+    connectors, KV offloading, stochastic rounding, AITER GDN, or the V1 model
+    runner with `mamba_cache_mode='align'`. See
+    docs/rdna2/leapquant-config-guards-2026-11-14.md."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
@@ -431,6 +443,9 @@ class CacheConfig:
             # Feature toggles not impacting compiled graph shape
             "kv_sharing_fast_prefill",
             "swa_bounded_replay",
+            # Picks the HIP ops that run inside the opaque GDN layer op and the
+            # KV-cache page layout; the compiled graph does not change.
+            "replayssm_state_dtype",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

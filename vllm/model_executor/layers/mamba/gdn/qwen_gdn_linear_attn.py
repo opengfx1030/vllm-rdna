@@ -5,7 +5,7 @@
 import functools
 import itertools
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Any, Literal
 
@@ -51,6 +51,11 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
+    LeapQuantLayout,
+    leapquant_gdn_layout,
+    verify_leapquant_gdn,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -88,10 +93,11 @@ from vllm.v1.attention.backends.gdn_attn import (
     gather_gdn_state_arenas,
     gdn_arenas_ready_for_capture,
     gdn_decode_arena_max_bs,
+    gdn_decode_inplace_enabled,
     scatter_gdn_state_arenas,
     static_gdn_cache_slots,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
@@ -120,6 +126,69 @@ MONO_GDN_HOOK: Any = None
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+
+
+class _LqNormalizeGroup:
+    """The LeapQuant GDN layers of one KV-cache group on this rank.
+
+    A KV-cache group shares one block table, so its layers normalize the same
+    state indices with the same accepted counts each step: the first layer
+    normalizes all of them in one launch and the others skip (one launch per
+    group and step instead of one per layer, ~3 us each in a graph). Layers
+    of different groups hold different slots for the same request and never
+    share a launch. ``offsets`` holds each layer's paged blob address relative
+    to the leader's; it is built at KV-cache bind, which never runs under
+    capture, so captured graphs only ever see a finished table."""
+
+    def __init__(self, layers: list["QwenGatedDeltaNetAttention"]) -> None:
+        ref = layers[0].kv_cache[1]
+        self.leader = layers[0]
+        self.leader_ptr = ref.data_ptr()
+        self.offsets = torch.tensor(
+            [layer.kv_cache[1].data_ptr() - self.leader_ptr for layer in layers],
+            dtype=torch.int64,
+            device=ref.device,
+        )
+
+
+def share_leapquant_normalize_groups(
+    ordered_layer_names: list[str],
+    forward_context: dict[str, Any],
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Give the LeapQuant GDN layers of each KV-cache group one normalize
+    launch per step (see ``_LqNormalizeGroup``). Hybrid models spread their
+    GDN layers over several KV-cache groups, each with its own block table;
+    without the group map every layer keeps its own launch."""
+    layer_to_group = {
+        name: group_idx
+        for group_idx, group in enumerate(kv_cache_groups or ())
+        for name in group.layer_names
+    }
+    by_group: dict[int, list[QwenGatedDeltaNetAttention]] = {}
+    for name in ordered_layer_names:
+        layer = forward_context[name]
+        if (
+            not isinstance(layer, QwenGatedDeltaNetAttention)
+            or layer._lq_layout is None
+        ):
+            continue
+        layer._lq_group = None
+        if name in layer_to_group:
+            by_group.setdefault(layer_to_group[name], []).append(layer)
+    for layers in by_group.values():
+        ref = layers[0].kv_cache[1]
+        if len(layers) < 2 or not all(
+            b.device == ref.device
+            and b.dtype == ref.dtype
+            and b.shape == ref.shape
+            and b.stride() == ref.stride()
+            for b in (layer.kv_cache[1] for layer in layers)
+        ):
+            continue
+        group = _LqNormalizeGroup(layers)
+        for layer in layers:
+            layer._lq_group = group
 
 
 # Scratch buffers reused across GDN prefill calls. The key MUST carry a role
@@ -244,6 +313,38 @@ def _timed_call(fn, *args, **kwargs):
     """Run fn under the GDN prefill timer (see _GdnPrefillTimer)."""
     with _GdnPrefillTimer("prep"):
         return fn(*args, **kwargs)
+
+
+_GATED_NORM_STRIDED_Z: dict[torch.device, bool] = {}
+
+
+def _gated_rms_norm_takes_strided_z(device: torch.device) -> bool:
+    """Whether the built ``_rocm_C.gated_rms_norm`` takes a [T, H, N] z with a
+    token stride (a view into the packed qkvz projection). Released builds
+    declare 2D inputs only and raise, so the first call per device probes it;
+    never while a graph is being captured (the caller then flattens z, and the
+    probe runs on a later eager step)."""
+    known = _GATED_NORM_STRIDED_Z.get(device)
+    if known is not None:
+        return known
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    try:
+        x = torch.zeros(2, 128, dtype=torch.float16, device=device)
+        z = torch.zeros(2, 256, dtype=torch.float16, device=device)[:, :128]
+        torch.ops._rocm_C.gated_rms_norm(
+            torch.empty_like(x),
+            x,
+            z.unsqueeze(1),
+            torch.ones(128, dtype=torch.float16, device=device),
+            1e-6,
+            0,
+        )
+        ok = True
+    except (AttributeError, RuntimeError):
+        ok = False
+    _GATED_NORM_STRIDED_Z[device] = ok
+    return ok
 
 
 def _gdn_prefill_chain_rdna2(
@@ -769,6 +870,8 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    supports_leapquant_state = True
+
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -780,6 +883,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.head_v_dim,
             self.conv_kernel_size,
             self.num_spec,
+            replayssm_state_dtype=self.cache_config.replayssm_state_dtype,
         )
 
     def __init__(
@@ -975,21 +1079,55 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._gdn_arena_max_bs = gdn_decode_arena_max_bs(vllm_config, self.num_spec)
         self._conv_state_arena: torch.Tensor | None = None
         self._ssm_state_arena: torch.Tensor | None = None
+        # VLLM_RDNA_GDN_DECODE_INPLACE=1: decode runs on the paged state (see
+        # gdn_decode_inplace_enabled), so there are no arenas to allocate, and
+        # the decode glue drops the copies around them and the fill/copies the
+        # arena path left in (forward_cuda, _forward_core_decode_non_spec).
+        self._rdna_decode_inplace = gdn_decode_inplace_enabled(vllm_config)
         # Allocate before any decode / BeginCapture. Lazy alloc on first
         # decode can run under capture and bake a new data_ptr into the graph.
         mode = vllm_config.compilation_config.cudagraph_mode
-        if mode is not None and bool(mode) and on_rdna_family():
+        if (
+            mode is not None
+            and bool(mode)
+            and on_rdna_family()
+            and not self._rdna_decode_inplace
+        ):
             self._init_gdn_state_arenas()
 
         mono = MONO_GDN_HOOK(self, vllm_config) if MONO_GDN_HOOK else None
         self._mono_gdn_op: Any
         self._mono_gdn: Any
         self._mono_gdn_op, self._mono_gdn = mono if mono else (None, None)
+        self._lq_layout = self._init_leapquant(vllm_config)
+        self._lq_group: _LqNormalizeGroup | None = None
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def _init_leapquant(self, vllm_config: VllmConfig) -> LeapQuantLayout | None:
+        """LeapQuant GDN state (``--replayssm-state-dtype leapquant``): the
+        recurrent state is a uint8 blob per (block, head) read by the gdn_lq_*
+        kernels on every path that reads or writes it here (spec verify, non-spec
+        decode, prefill)."""
+        if vllm_config.cache_config.replayssm_state_dtype != "leapquant":
+            return None
+        verify_leapquant_gdn(
+            vllm_config,
+            head_dims=(self.head_k_dim, self.head_v_dim),
+            fused_cuda_spec_decode=self.enable_fused_gdn_spec_decode,
+            flashinfer_checkpoints=self._checkpoint_alignment is not None,
+        )
+        layout = leapquant_gdn_layout(self.head_k_dim, self.head_v_dim, self.num_spec)
+        logger.info_once(
+            "GDN recurrent state: LeapQuant INT8 (window %d, r %d, %d B/head)",
+            layout.window,
+            layout.num_comp,
+            layout.nbytes,
+        )
+        return layout
 
     def _init_gdn_state_arenas(self) -> None:
         """Permanent arenas on the layer device, before first BeginCapture."""
@@ -1076,11 +1214,96 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             num,
         )
 
+    def _use_gdn_decode_rdna2(
+        self,
+        x_dtype: torch.dtype,
+        ssm_dtype: torch.dtype,
+        out_dtype: torch.dtype,
+    ) -> bool:
+        """Whether the non-spec decode runs ``gdn_decode_rdna2`` (gfx10x HIP)
+        rather than the Triton packed decode."""
+        if not (
+            current_platform.is_rocm()
+            and self.head_k_dim == 128
+            and x_dtype == torch.float16
+            and ssm_dtype in (torch.float32, torch.float16)
+            and out_dtype == torch.float16
+        ):
+            return False
+        from vllm.platforms.rocm import on_gfx10x
+
+        return (
+            on_gfx10x()
+            and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
+            and hasattr(torch.ops, "_rocm_C")
+            and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
+        )
+
+    def _decode_step_in_place(self, num_tokens: int, dtype: torch.dtype) -> bool:
+        """VLLM_RDNA_GDN_DECODE_INPLACE=1 and this call is the pure non-spec
+        decode (``_forward_core_decode_non_spec``) over exactly ``num_tokens``
+        rows, run by ``gdn_decode_rdna2``: it writes every row (zeros for a NULL
+        slot) and reads b, a and z in place at their token strides."""
+        if not (self._rdna_decode_inplace and self._rdna_strided_decode_inputs):
+            return False
+        raw = get_forward_context().attn_metadata
+        md = raw.get(self.prefix) if isinstance(raw, dict) else None
+        if not isinstance(md, GDNAttentionMetadata):
+            return False
+        return (
+            self.enable_packed_recurrent_decode
+            and self._lq_layout is None
+            and md.spec_sequence_masks is None
+            and md.num_prefills == 0
+            and md.num_decodes > 0
+            and md.num_actual_tokens == num_tokens
+            and self._use_gdn_decode_rdna2(dtype, self.kv_cache[1].dtype, dtype)
+        )
+
+    def _gated_norm_strided_z(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """``self.norm(x, z)`` with z read in place at its token stride.
+
+        ``RMSNormGated.forward_hip`` flattens z to [T * HV, V] rows, which for
+        T > 1 copies the z slice of the packed qkvz projection (its token
+        stride is the whole projection width). ``_rocm_C.gated_rms_norm`` takes
+        a [T, HV, V] z with any token stride, so decode passes it as is: the same
+        kernel on the same values, one launch less."""
+        norm = self.norm
+        if (
+            norm._forward_method == norm.forward_hip
+            and x.dim() == 3
+            and x.is_contiguous()
+            and x.dtype == torch.float16
+            and z.dtype == torch.float16
+            and z.shape == x.shape
+            and z.stride(2) == 1
+            and z.stride(1) == z.size(2)
+            and norm.group_size is None
+            and norm.norm_before_gate
+            and norm.activation in ("silu", "swish", "sigmoid")
+            and norm.weight.dtype == torch.float16
+            and _gated_rms_norm_takes_strided_z(x.device)
+        ):
+            n = x.size(-1)
+            out = torch.empty_like(x)
+            torch.ops._rocm_C.gated_rms_norm(
+                out.view(-1, n),
+                x.view(-1, n),
+                z,
+                norm.weight.data,
+                norm.eps,
+                1 if norm.activation == "sigmoid" else 0,
+            )
+            return out
+        return norm(x, z)
+
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
+        if self._lq_layout is not None and isinstance(spec, MambaSpec):
+            spec = replace(spec, state_format=self._lq_layout.state_format)
         if not self._exports_checkpoints or not isinstance(spec, MambaSpec):
             return spec
         # FlashInfer emits states at one stride for the whole batch, the gcd of
@@ -1481,13 +1704,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         core_attn_out: torch.Tensor,
         z: torch.Tensor,
+        strided_z: bool = False,
     ) -> torch.Tensor:
         """Part 3: RMSNormGated + output linear projection.
 
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
+        ``strided_z`` reads z at its token stride instead of copying it (the
+        in-place decode step).
         """
-        core_attn_out = self.norm(core_attn_out, z)
+        if strided_z:
+            core_attn_out = self._gated_norm_strided_z(core_attn_out, z)
+        else:
+            core_attn_out = self.norm(core_attn_out, z)
         output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
@@ -1603,9 +1832,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
+        # In-place decode: gdn_decode_rdna2 writes every row, zeros for NULL
+        # slots, so the fill is dead. Every other step keeps it.
+        in_place_step = self._decode_step_in_place(num_tokens, hidden_states.dtype)
         # Note: we should not use torch.empty here like other attention backends,
         # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
+        core_attn_out = (torch.empty if in_place_step else torch.zeros)(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -1626,7 +1858,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         if self._rdna_pack_z:
             z = z.contiguous()
-        return self._output_projection(core_attn_out, z)
+        return self._output_projection(core_attn_out, z, strided_z=in_place_step)
 
     def forward_xpu(
         self,
@@ -1888,7 +2120,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self._decode_kernels_warmed_up:
             return
         self._decode_kernels_warmed_up = True
-        if not on_rdna_family():
+        if not on_rdna_family() or self._lq_layout is not None:
+            # LeapQuant runs the gdn_lq_* HIP kernels, not these (their FP32
+            # state shapes do not fit the blob), and needs the V2 runner,
+            # whose JIT warmup replays the real decode steps.
             return
 
         device = qkv_or_qkvz.device
@@ -2140,6 +2375,93 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _lq_normalize(
+        self,
+        blob: torch.Tensor,
+        state_indices: torch.Tensor,
+        num_accepted: torch.Tensor | None,
+    ) -> None:
+        """Commit the previous step's accepted records of the home blobs
+        ``state_indices`` (``num_accepted``; one record for slot-0 readers,
+        ``None``) and fold full windows. Runs before every decode / verify
+        launch, the MonoKernel one included, and before prefill reads.
+
+        On the paged blobs the leader of the layer's KV-cache group normalizes
+        every layer of that group in one launch and the others skip; decode
+        arenas are per-layer copies, so they are normalized per layer."""
+        layout = self._lq_layout
+        assert layout is not None
+        group = self._lq_group
+        offsets = None
+        if group is not None and blob is self.kv_cache[1]:
+            if group.leader is not self:
+                return
+            assert blob.data_ptr() == group.leader_ptr, "stale LeapQuant group"
+            offsets = group.offsets
+            logger.info_once(
+                "LeapQuant GDN: one normalize launch per KV-cache group (%d layers)",
+                offsets.numel(),
+            )
+        torch.ops._rocm_C.gdn_lq_normalize_rdna2(
+            blob,
+            state_indices,
+            num_accepted,
+            layout.head_v_dim,
+            layout.num_comp,
+            layout.capacity,
+            layout.window,
+            layout.power_iters,
+            offsets,
+        )
+
+    def _lq_recurrent(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        blob: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        state_indices: torch.Tensor,
+        num_accepted: torch.Tensor | None,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Decode / MTP verify on LeapQuant blobs.
+
+        Commits the previous step's accepted records (``num_accepted``, or one
+        for slot-0 readers), then runs each request's tokens from its home
+        block ``state_indices`` and appends their records."""
+        layout = self._lq_layout
+        assert layout is not None
+        num_reqs = cu_seqlens.shape[0] - 1
+        state_indices = state_indices[:num_reqs]
+        self._lq_normalize(blob, state_indices, num_accepted)
+        if out is None:
+            out = torch.zeros(
+                (1, q.shape[1], v.shape[2], v.shape[3]),
+                dtype=q.dtype,
+                device=q.device,
+            )
+        torch.ops._rocm_C.gdn_lq_decode_rdna2(
+            q,
+            k,
+            v,
+            a,
+            b,
+            self.A_log,
+            self.dt_bias,
+            out,
+            blob,
+            cu_seqlens,
+            state_indices,
+            self.head_k_dim**-0.5,
+            layout.num_comp,
+            layout.capacity,
+            layout.window,
+        )
+        return out
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -2171,6 +2493,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         if (
             self.enable_packed_recurrent_decode
+            and self._lq_layout is None
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
@@ -2421,7 +2744,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and core_attn_out.dtype == query_spec.dtype
             and core_attn_out.is_contiguous()
         )
-        if spec_sequence_masks is not None:
+        lq = self._lq_layout
+        if spec_sequence_masks is not None and lq is not None:
+            assert spec_state_indices_tensor is not None
+            core_attn_out_spec = self._lq_recurrent(
+                query_spec,
+                key_spec,
+                value_spec,
+                a_spec,
+                b_spec,
+                ssm_state,
+                cu_seqlens=spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_spec_decodes + 1
+                ],
+                state_indices=spec_state_indices_tensor[:, 0],
+                num_accepted=num_accepted_tokens,
+                out=(
+                    core_attn_out[:num_actual_tokens].unsqueeze(0)
+                    if spec_direct
+                    else None
+                ),
+            )
+            last_recurrent_state = None
+        elif spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2455,22 +2800,36 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             query_decode, key_decode, value_decode = split_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
-            core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
-                A_log=self.A_log,
-                a=a[:num_decode_tokens],
-                b=b[:num_decode_tokens],
-                dt_bias=self.dt_bias,
-                q=query_decode,
-                k=key_decode,
-                v=value_decode,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
-                    : attn_metadata.num_decodes + 1
-                ],
-                ssm_state_indices=non_spec_state_indices_tensor,
-                use_qk_l2norm_in_kernel=True,
-            )
+            decode_cu_seqlens = non_spec_query_start_loc[  # type: ignore[index]
+                : attn_metadata.num_decodes + 1
+            ]
+            if lq is not None:
+                core_attn_out_decode = self._lq_recurrent(
+                    query_decode,
+                    key_decode,
+                    value_decode,
+                    a[:num_decode_tokens],
+                    b[:num_decode_tokens],
+                    ssm_state,
+                    cu_seqlens=decode_cu_seqlens,
+                    state_indices=non_spec_state_indices_tensor,  # type: ignore[arg-type]
+                    num_accepted=None,
+                )
+            else:
+                core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
+                    A_log=self.A_log,
+                    a=a[:num_decode_tokens],
+                    b=b[:num_decode_tokens],
+                    dt_bias=self.dt_bias,
+                    q=query_decode,
+                    k=key_decode,
+                    v=value_decode,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=decode_cu_seqlens,
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    use_qk_l2norm_in_kernel=True,
+                )
         else:
             core_attn_out_decode = None
 
@@ -2484,7 +2843,30 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
+            if lq is not None:
+                # Commit the slot-0 record a previous decode left pending, then
+                # expand the blobs into the FP32 initial state of the chunk.
+                self._lq_normalize(ssm_state, prefill_state_indices, None)
+                initial_state = torch.empty(
+                    (
+                        prefill_state_indices.shape[0],
+                        ssm_state.shape[1],
+                        lq.head_v_dim,
+                        lq.head_k_dim,
+                    ),
+                    dtype=torch.float32,
+                    device=ssm_state.device,
+                )
+                torch.ops._rocm_C.gdn_lq_materialize_rdna2(
+                    ssm_state,
+                    initial_state,
+                    prefill_state_indices,
+                    lq.num_comp,
+                    lq.capacity,
+                    lq.window,
+                )
+            else:
+                initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
             with _GdnPrefillTimer("chain"):
                 plan = attn_metadata.flashinfer_checkpoint_plan
@@ -2557,7 +2939,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         recurrent_rows=plan.rows,
                     )
             # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if lq is not None:
+                torch.ops._rocm_C.gdn_lq_store_rdna2(
+                    last_recurrent_state.float().contiguous(),
+                    ssm_state,
+                    prefill_state_indices,
+                    lq.num_comp,
+                    lq.capacity,
+                    lq.window,
+                    lq.power_iters,
+                )
+            else:
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
@@ -2565,6 +2960,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec], dim=1
                 )
+        elif attn_metadata.num_decodes > 0 and lq is not None:
+            core_attn_out_non_spec = self._lq_recurrent(
+                query_non_spec,
+                key_non_spec,
+                value_non_spec,
+                a,
+                b,
+                ssm_state,
+                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_decodes + 1
+                ],
+                state_indices=non_spec_state_indices_tensor,  # type: ignore[arg-type]
+                num_accepted=None,
+            )
+            last_recurrent_state = None
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
@@ -2703,8 +3113,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
-        b = b[:num_actual_tokens].contiguous()
-        a = a[:num_actual_tokens].contiguous()
+        out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
+        use_rdna2 = self._use_gdn_decode_rdna2(
+            mixed_qkv.dtype, ssm_state.dtype, out_buf.dtype
+        )
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
+        if not (use_rdna2 and self._rdna_decode_inplace):
+            # gdn_decode_rdna2 reads b and a at their token strides (views of
+            # the ba projection); the Triton kernel wants them dense.
+            b = b.contiguous()
+            a = a.contiguous()
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
@@ -2718,41 +3137,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             validate_data=False,
         )
-        out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-        if (
-            current_platform.is_rocm()
-            and self.head_k_dim == 128
-            and mixed_qkv_non_spec.dtype == torch.float16
-            and ssm_state.dtype in (torch.float32, torch.float16)
-            and out_buf.dtype == torch.float16
-        ):
-            from vllm.platforms.rocm import on_gfx10x
-
-            if (
-                on_gfx10x()
-                and os.environ.get("VLLM_GDN_DECODE_RDNA2", "1") != "0"
-                and hasattr(torch.ops, "_rocm_C")
-                and hasattr(torch.ops._rocm_C, "gdn_decode_rdna2")
-            ):
-                torch.ops._rocm_C.gdn_decode_rdna2(
-                    mixed_qkv_non_spec,
-                    a,
-                    b,
-                    self.A_log,
-                    self.dt_bias,
-                    out_buf,
-                    ssm_state,
-                    non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
-                    self.head_k_dim**-0.5,
-                    True,
-                )
-                self._unbind_decode_state_arenas(
-                    paged_conv_state,
-                    paged_ssm_state,
-                    attn_metadata,
-                    attn_metadata.num_decodes,
-                )
-                return
+        if use_rdna2:
+            torch.ops._rocm_C.gdn_decode_rdna2(
+                mixed_qkv_non_spec,
+                a,
+                b,
+                self.A_log,
+                self.dt_bias,
+                out_buf,
+                ssm_state,
+                non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+                self.head_k_dim**-0.5,
+                True,
+            )
+            self._unbind_decode_state_arenas(
+                paged_conv_state,
+                paged_ssm_state,
+                attn_metadata,
+                attn_metadata.num_decodes,
+            )
+            return
         fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv_non_spec,
             a=a,

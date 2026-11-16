@@ -314,6 +314,13 @@ The fit mode depends on the model (`MixedStepController.fit_all_steps_default`):
 
 With one bucket of samples the cap can also drop below its initial 512 tokens.
 
+The fit uses the last 64 eligible observations, with the last eight samples
+per token bucket reduced to a median. The smallest selectable chunk also
+feeds the fit: ignoring its measurements can lock the policy at that chunk
+forever. A cold bucket expires even if the policy no longer selects it.
+If the fitted intercept is negative, the slope is refitted through the
+origin; clamping only the intercept would overpredict work cost.
+
 ### Where it is on
 
 **Dense 27B at TP=4 (`27b-exl3`): on, budget 250 ms.** Off in `full` (27B at TP=2): steps are ~2x slower there, and the cap cut 16k/1k c=8 aggregate output 22.7 -> 19.6 tok/s (TTFT 135 -> 200 s). 16k injection

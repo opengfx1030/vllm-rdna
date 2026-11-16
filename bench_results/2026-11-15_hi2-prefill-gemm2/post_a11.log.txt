@@ -1,0 +1,13 @@
+device AMD Radeon Pro V620 gfx1030 bus 0xe2 CUs 36
+Sun Nov 15 05:15:28 PM CET 2026
+== force rebuild a11 (stale hipify objects removed)
+build_exit=0 after 144s
+-rwxr-xr-x. 1 chenco_adm chenco_adm 95744040 Nov 15 17:17 /home/chenco_adm/w4a8_runs/leapquant/tree-hi2g/vllm/_rocm_C.ab
+== tests
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+61 passed, 14 warnings in 22.12s
+6d72fb11630008c3a77545438822b016796566b44ff80f13acd01c819c16488d  /home/chenco_adm/w4a8_runs/hi2-gemm2/_rocm_C.abi3.so.final
+-rwxr-xr-x. 1 chenco_adm chenco_adm 95744040 Nov 15 17:18 /home/chenco_adm/w4a8_runs/hi2-gemm2/_rocm_C.abi3.so.final
+Sun Nov 15 05:18:27 PM CET 2026
+post_a11_done

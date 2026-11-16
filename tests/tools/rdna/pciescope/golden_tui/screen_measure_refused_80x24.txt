@@ -1,0 +1,24 @@
+ pciescope  LIVE  refused: lease slotA not held par1-cs25  --:--:--Z  ○ not rec…
+ 1:Topology  2:Live  3:Matrix  4:Errors  5:Measure
+Probe suites (active: only on GPUs whose lease you hold)
+▶ quick      ~  30s  lat + bw per pair
+  full       ~ 600s  everything
+
+GPUs: H1:ce H2:d3 H3:d8 H4:db
+Lease: lease slotA not held
+  needs: PcieTui.slotA
+  (lease files live in ~/w4a8_runs/lanes/lease/; the lead grants them)
+Status: idle
+  refused: lease slotA not held
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ suite  s start  x cancel  g gpus  │  ? help  q quit

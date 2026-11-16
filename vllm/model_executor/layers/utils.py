@@ -30,6 +30,26 @@ _RDNA_SMALLM_MAX_BYTES = int(
     os.environ.get("VLLM_RDNA_SMALLM_GEMM_MAX_BYTES", "0") or 0
 )
 
+# Rows up to which the dense gemv_f16_rdna2 kernel (it serves 1..32) takes the LM
+# head on gfx10x; every other dense GEMM keeps 8. Above 8 rocBLAS wins on shapes
+# with TunableOp rows (Flash-Next at M=16-24), but an LM head without a row (HI2
+# 27B at TP=2: 124160 x 5120) runs an untuned rocBLAS kernel, 10.4 ms at 12 rows
+# against 2.9 ms for the gemv (MTP=2 verify at c=4; docs/rdna2/
+# hi2-27b-tp2-2026-11-14.md). 8 keeps the previous behaviour; the 27b-hi2-tp2
+# recipe sets 32.
+_RDNA_LM_HEAD_GEMV_MAX_M = min(
+    32, max(8, int(os.environ.get("VLLM_RDNA_LM_HEAD_GEMV_MAX_M", "8") or 8))
+)
+
+
+def _gemv_rows_for_layer(layer: torch.nn.Module) -> int:
+    """Rows up to which the dense gfx10x GEMV serves this layer's GEMM."""
+    if _RDNA_LM_HEAD_GEMV_MAX_M > 8 and any(
+        cls.__name__ == "ParallelLMHead" for cls in type(layer).__mro__
+    ):
+        return _RDNA_LM_HEAD_GEMV_MAX_M
+    return 8
+
 
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
@@ -337,7 +357,10 @@ def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
 
 
 def rocm_unquantized_gemm_impl(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    max_gemv_rows: int = 8,
 ) -> torch.Tensor:
     if envs.VLLM_BATCH_INVARIANT:
         from vllm.model_executor.determinism.batch_invariant import (
@@ -359,15 +382,16 @@ def rocm_unquantized_gemm_impl(
     k = weight.shape[1]
 
     # gfx10x decode path: wvSplitK/LLMM1 are gfx9/gfx11+ only and their RDNA
-    # build is numerically wrong on gfx1030. Use gemv_f16_rdna2 for M<=8.
-    # Above that, rocBLAS with the shipped TunableOp rows wins on the tuned
-    # shapes (Flash-Next at M=16-24, tools/rdna/port_v031/gemv_crossover_bench.py).
+    # build is numerically wrong on gfx1030. Use gemv_f16_rdna2 for M<=8 (the LM
+    # head passes max_gemv_rows up to 32, _RDNA_LM_HEAD_GEMV_MAX_M). Above that,
+    # rocBLAS with the shipped TunableOp rows wins on the tuned shapes (Flash-Next
+    # at M=16-24, tools/rdna/port_v031/gemv_crossover_bench.py).
     if (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx10x()
         and x.dtype == torch.float16
         and weight.dtype == torch.float16
-        and 0 < n <= 8
+        and 0 < n <= max_gemv_rows
         and k % 8 == 0
         and weight.is_contiguous()
         and (bias is None or bias.is_contiguous())
@@ -487,7 +511,10 @@ def rocm_unquantized_gemm_impl(
 
 
 def rocm_unquantized_gemm_fake(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    max_gemv_rows: int = 8,
 ) -> torch.Tensor:
     return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
@@ -505,7 +532,9 @@ def rocm_unquantized_gemm(
     # through the device-agnostic fallback instead of hard-crashing.
     if not x.is_cuda:
         return default_unquantized_gemm(layer, x, weight, bias)
-    return torch.ops.vllm.rocm_unquantized_gemm(x, weight, bias)
+    return torch.ops.vllm.rocm_unquantized_gemm(
+        x, weight, bias, _gemv_rows_for_layer(layer)
+    )
 
 
 direct_register_custom_op(

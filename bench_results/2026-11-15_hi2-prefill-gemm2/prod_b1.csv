@@ -1,0 +1,958 @@
+phase,kind,variant,shape,N,K,M,us,us_min,tflops,vs_rb,max_abs,rel_fro,rel_fp32,vgpr,lds,scratch,threads,blocks_per_wgp,waves_per_simd,gfx_mhz,power_w,note
+slotB1,rocblas_heur,default,gate_up,17408,5120,384,3691.7,3641.2,18.54,1.0,,,2.07e-04,,,,,,,1730.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,384,2770.1,2767.4,24.71,1.333,,,2.07e-04,,,,,,,1679.0,175.0,design 0 vs_heur 1.333
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,384,2782.6,2770.2,24.6,1.327,,,2.07e-04,,,,,,,1675.0,174.0,design 1 vs_heur 1.327
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,384,2841.4,2833.2,24.09,1.299,,,2.07e-04,,,,,,,1676.0,175.0,design 2 vs_heur 1.299
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,384,3511.0,3492.7,19.5,1.051,,,2.07e-04,,,,,,,1728.0,174.0,design 3 vs_heur 1.051
+slotB1,rocblas_heur,default,gate_up,17408,5120,448,3799.4,3772.3,21.02,1.0,,,2.07e-04,,,,,,,1690.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,448,3560.0,3552.3,22.43,1.067,,,2.07e-04,,,,,,,1662.0,175.0,design 0 vs_heur 1.067
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,448,3567.5,3555.5,22.39,1.065,,,2.07e-04,,,,,,,1661.0,175.0,design 1 vs_heur 1.065
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,448,3731.1,3724.5,21.4,1.018,,,2.07e-04,,,,,,,1682.0,174.0,design 2 vs_heur 1.018
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,448,3542.9,3533.3,22.54,1.072,,,2.07e-04,,,,,,,1718.0,174.0,design 3 vs_heur 1.072
+slotB1,rocblas_heur,default,gate_up,17408,5120,512,3875.1,3823.2,23.55,1.0,,,2.07e-04,,,,,,,1651.0,175.0,
+slotB1,rocblas_tuned,tunableop,gate_up,17408,5120,512,3877.5,3868.4,23.54,0.999,,,2.07e-04,,,,,,,1651.0,175.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,512,3621.8,3619.0,25.2,1.07,,,2.07e-04,,,,,,,1652.0,174.0,design 0 vs_heur 1.070
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,512,3623.0,3617.8,25.19,1.07,,,2.07e-04,,,,,,,1653.0,175.0,design 1 vs_heur 1.070
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,512,3781.4,3757.0,24.14,1.025,,,2.07e-04,,,,,,,1664.0,174.0,design 2 vs_heur 1.025
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,512,3587.3,3571.7,25.44,1.08,,,2.07e-04,,,,,,,1711.0,174.0,design 3 vs_heur 1.080
+slotB1,rocblas_heur,default,gate_up,17408,5120,576,5539.2,5506.9,18.54,1.0,,,2.07e-04,,,,,,,1705.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,576,4476.6,4463.0,22.94,1.237,,,2.07e-04,,,,,,,1630.0,175.0,design 0 vs_heur 1.237
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,576,4645.4,4614.7,22.1,1.192,,,2.07e-04,,,,,,,1570.5,175.0,design 1 vs_heur 1.192
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,576,4849.6,4780.7,21.17,1.142,,,2.07e-04,,,,,,,1596.0,174.0,design 2 vs_heur 1.142
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,576,5229.3,5191.1,19.63,1.059,,,2.07e-04,,,,,,,1714.0,174.0,design 3 vs_heur 1.059
+slotB1,rocblas_heur,default,gate_up,17408,5120,640,5555.4,5528.0,20.54,1.0,,,2.07e-04,,,,,,,1527.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,640,4623.6,4614.8,24.67,1.202,,,2.07e-04,,,,,,,1602.0,174.0,design 0 vs_heur 1.202
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,640,4642.4,4627.6,24.57,1.197,,,2.07e-04,,,,,,,1557.0,175.0,design 1 vs_heur 1.197
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,640,4913.0,4824.4,23.22,1.131,,,2.07e-04,,,,,,,1573.0,175.0,design 2 vs_heur 1.131
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,640,5311.9,5252.7,21.48,1.046,,,2.07e-04,,,,,,,1703.0,174.0,design 3 vs_heur 1.046
+slotB1,rocblas_heur,default,gate_up,17408,5120,700,6579.0,6565.2,18.97,0.87,,,2.07e-04,,,,,,,1518.5,175.0,
+slotB1,rocblas_tuned,tunableop,gate_up,17408,5120,700,5720.9,5692.6,21.81,1.0,,,2.07e-04,,,,,,,1667.0,173.0,Gemm_Rocblas_-1086326063
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,700,5338.7,5313.0,23.37,1.072,,,2.07e-04,,,,,,,1570.0,175.0,design 0 vs_heur 1.232
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,700,5601.7,5554.0,22.28,1.021,,,2.07e-04,,,,,,,1553.0,175.0,design 1 vs_heur 1.174
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,700,5798.7,5722.5,21.52,0.987,,,2.07e-04,,,,,,,1604.0,174.0,design 2 vs_heur 1.135
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,700,5341.5,5313.9,23.36,1.071,,,2.07e-04,,,,,,,1700.0,174.0,design 3 vs_heur 1.232
+slotB1,rocblas_heur,default,gate_up,17408,5120,768,6835.7,6765.0,20.03,1.0,,,2.07e-04,,,,,,,1487.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,768,5587.3,5575.0,24.5,1.223,,,2.07e-04,,,,,,,1552.0,174.0,design 0 vs_heur 1.223
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,768,5605.4,5552.5,24.42,1.219,,,2.07e-04,,,,,,,1547.0,175.0,design 1 vs_heur 1.219
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,768,5907.7,5777.5,23.17,1.157,,,2.07e-04,,,,,,,1578.0,174.0,design 2 vs_heur 1.157
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,768,5450.1,5395.8,25.12,1.254,,,2.07e-04,,,,,,,1690.0,174.0,design 3 vs_heur 1.254
+slotB1,rocblas_heur,default,gate_up,17408,5120,832,7956.1,7842.9,18.64,1.0,,,2.07e-04,,,,,,,1481.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,832,6464.5,6448.5,22.94,1.231,,,2.07e-04,,,,,,,1511.0,174.0,design 0 vs_heur 1.231
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,832,6500.4,6492.0,22.82,1.224,,,2.07e-04,,,,,,,1515.0,175.0,design 1 vs_heur 1.224
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,832,6820.9,6686.5,21.74,1.166,,,2.07e-04,,,,,,,1570.0,174.0,design 2 vs_heur 1.166
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,832,7052.5,7002.9,21.03,1.128,,,2.07e-04,,,,,,,1691.0,174.0,design 3 vs_heur 1.128
+slotB1,rocblas_heur,default,gate_up,17408,5120,896,8091.7,7961.5,19.74,1.0,,,2.07e-04,,,,,,,1467.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,896,6538.3,6504.8,24.43,1.238,,,2.07e-04,,,,,,,1506.0,174.0,design 0 vs_heur 1.238
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,896,6571.0,6551.0,24.31,1.231,,,2.07e-04,,,,,,,1505.0,175.0,design 1 vs_heur 1.231
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,896,6874.4,6743.3,23.23,1.177,,,2.07e-04,,,,,,,1560.0,174.0,design 2 vs_heur 1.177
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,896,7099.8,7038.2,22.5,1.14,,,2.07e-04,,,,,,,1686.0,174.0,design 3 vs_heur 1.140
+slotB1,rocblas_heur,default,gate_up,17408,5120,960,9151.3,9051.7,18.7,1.0,,,2.07e-04,,,,,,,1457.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,960,7376.6,7365.2,23.2,1.241,,,2.07e-04,,,,,,,1538.0,174.0,design 0 vs_heur 1.241
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,960,7438.8,7401.7,23.0,1.23,,,2.07e-04,,,,,,,1514.0,175.0,design 1 vs_heur 1.230
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,960,7838.6,7603.5,21.83,1.167,,,2.07e-04,,,,,,,1575.0,174.0,design 2 vs_heur 1.167
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,960,7109.7,7083.4,24.07,1.287,,,2.07e-04,,,,,,,1676.0,174.0,design 3 vs_heur 1.287
+slotB1,rocblas_heur,default,gate_up,17408,5120,1023,9197.7,9087.2,19.83,0.872,,,2.07e-04,,,,,,,1442.0,175.0,
+slotB1,rocblas_tuned,tunableop,gate_up,17408,5120,1023,8022.5,7935.4,22.73,1.0,,,2.07e-04,,,,,,,1578.0,173.0,Gemm_Rocblas_-1086326079
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1023,7296.5,7280.3,24.99,1.1,,,2.07e-04,,,,,,,1533.0,174.0,design 0 vs_heur 1.261
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1023,7562.5,7540.1,24.11,1.061,,,2.07e-04,,,,,,,1488.0,175.0,design 1 vs_heur 1.216
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1023,7896.4,7659.7,23.09,1.016,,,2.07e-04,,,,,,,1564.0,174.0,design 2 vs_heur 1.165
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1023,7166.2,7120.7,25.45,1.119,,,2.07e-04,,,,,,,1671.0,174.0,design 3 vs_heur 1.283
+slotB1,rocblas_heur,default,gate_up,17408,5120,1024,9317.4,9145.8,19.59,0.861,,,2.07e-04,,,,,,,1427.5,175.0,
+slotB1,rocblas_tuned,tunableop,gate_up,17408,5120,1024,8021.1,7896.8,22.76,1.0,,,2.07e-04,,,,,,,1570.0,173.0,Gemm_Rocblas_-1086326063
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1024,7329.4,7299.9,24.9,1.094,,,2.07e-04,,,,,,,1525.0,174.0,design 0 vs_heur 1.271
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1024,7587.1,7577.3,24.06,1.057,,,2.07e-04,,,,,,,1482.0,175.0,design 1 vs_heur 1.228
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1024,7935.3,7684.7,23.0,1.011,,,2.07e-04,,,,,,,1557.0,174.0,design 2 vs_heur 1.174
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1024,7173.5,7135.2,25.45,1.118,,,2.07e-04,,,,,,,1667.0,174.0,design 3 vs_heur 1.299
+slotB1,rocblas_heur,default,gate_up,17408,5120,1031,10246.9,10096.2,17.94,1.0,,,2.07e-04,,,,,,,1466.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1031,8234.1,8193.8,22.32,1.244,,,2.07e-04,,,,,,,1507.0,174.0,design 0 vs_heur 1.244
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1031,8198.9,8179.2,22.42,1.25,,,2.07e-04,,,,,,,1527.0,175.0,design 1 vs_heur 1.250
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1031,8639.8,8461.7,21.27,1.186,,,2.07e-04,,,,,,,1587.0,174.0,design 2 vs_heur 1.186
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1031,7857.4,7788.5,23.39,1.304,,,2.07e-04,,,,,,,1665.0,174.0,design 3 vs_heur 1.304
+slotB1,rocblas_heur,default,gate_up,17408,5120,1045,10385.6,10197.2,17.94,1.0,,,2.07e-04,,,,,,,1450.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1045,8560.8,8498.4,21.76,1.213,,,2.07e-04,,,,,,,1454.0,174.0,design 0 vs_heur 1.213
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1045,8652.9,8627.0,21.53,1.2,,,2.07e-04,,,,,,,1451.0,175.0,design 1 vs_heur 1.200
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1045,9064.2,8804.6,20.55,1.146,,,2.07e-04,,,,,,,1514.0,174.0,design 2 vs_heur 1.146
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1045,8720.3,8526.7,21.36,1.191,,,2.07e-04,,,,,,,1651.0,174.0,design 3 vs_heur 1.191
+slotB1,rocblas_heur,default,gate_up,17408,5120,1100,10521.3,10318.7,18.64,1.0,,,2.07e-04,,,,,,,1442.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1100,8585.1,8542.1,22.84,1.226,,,2.07e-04,,,,,,,1452.0,174.0,design 0 vs_heur 1.226
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1100,8654.6,8633.1,22.66,1.216,,,2.07e-04,,,,,,,1451.0,175.0,design 1 vs_heur 1.216
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1100,9093.1,8928.0,21.56,1.157,,,2.07e-04,,,,,,,1516.5,174.0,design 2 vs_heur 1.157
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1100,9007.7,8936.7,21.77,1.168,,,2.07e-04,,,,,,,1592.0,174.0,design 3 vs_heur 1.168
+slotB1,rocblas_heur,default,gate_up,17408,5120,1152,10706.5,10519.5,19.18,1.0,,,2.07e-04,,,,,,,1416.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1152,8666.9,8642.7,23.69,1.235,,,2.07e-04,,,,,,,1442.0,174.0,design 0 vs_heur 1.235
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1152,8688.4,8639.7,23.64,1.232,,,2.07e-04,,,,,,,1445.0,175.0,design 1 vs_heur 1.232
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1152,9140.4,8958.4,22.47,1.171,,,2.07e-04,,,,,,,1502.0,174.0,design 2 vs_heur 1.171
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1152,9043.3,8963.2,22.71,1.184,,,2.07e-04,,,,,,,1579.0,174.0,design 3 vs_heur 1.184
+slotB1,rocblas_heur,default,gate_up,17408,5120,1160,11497.0,11386.5,17.99,1.0,,,2.07e-04,,,,,,,1446.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1160,9177.2,9146.3,22.53,1.253,,,2.07e-04,,,,,,,1509.0,174.0,design 0 vs_heur 1.253
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1160,9126.5,9085.9,22.66,1.26,,,2.07e-04,,,,,,,1529.0,175.0,design 1 vs_heur 1.260
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1160,9610.0,9562.4,21.52,1.196,,,2.07e-04,,,,,,,1578.5,174.0,design 2 vs_heur 1.196
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1160,8947.5,8942.7,23.11,1.285,,,2.07e-04,,,,,,,1581.0,175.0,design 3 vs_heur 1.285
+slotB1,rocblas_heur,default,gate_up,17408,5120,1230,11807.1,11634.6,18.57,1.0,,,2.07e-04,,,,,,,1415.5,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1230,9538.0,9509.2,22.99,1.238,,,2.07e-04,,,,,,,1452.0,174.0,design 0 vs_heur 1.238
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1230,9586.5,9550.2,22.87,1.232,,,2.07e-04,,,,,,,1452.5,175.0,design 1 vs_heur 1.232
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1230,10035.8,9929.5,21.85,1.176,,,2.07e-04,,,,,,,1520.5,174.0,design 2 vs_heur 1.176
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1230,9086.2,9059.3,24.13,1.299,,,2.07e-04,,,,,,,1565.0,174.0,design 3 vs_heur 1.299
+slotB1,rocblas_heur,default,gate_up,17408,5120,1280,11869.5,11772.7,19.22,1.0,,,2.07e-04,,,,,,,1414.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1280,9569.8,9536.9,23.84,1.24,,,2.07e-04,,,,,,,1447.0,174.0,design 0 vs_heur 1.240
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1280,9596.8,9557.7,23.78,1.237,,,2.07e-04,,,,,,,1451.0,175.0,design 1 vs_heur 1.237
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1280,10067.1,9961.2,22.66,1.179,,,2.07e-04,,,,,,,1517.0,174.0,design 2 vs_heur 1.179
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1280,9104.2,9042.2,25.06,1.304,,,2.07e-04,,,,,,,1562.0,174.0,design 3 vs_heur 1.304
+slotB1,rocblas_heur,default,gate_up,17408,5120,1300,12871.5,12697.5,18.0,1.0,,,2.07e-04,,,,,,,1427.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1300,10427.0,10406.4,22.22,1.234,,,2.07e-04,,,,,,,1463.5,174.0,design 0 vs_heur 1.234
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1300,10469.1,10424.1,22.14,1.229,,,2.07e-04,,,,,,,1463.5,175.0,design 1 vs_heur 1.229
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1300,10961.4,10752.2,21.14,1.174,,,2.07e-04,,,,,,,1536.0,174.0,design 2 vs_heur 1.174
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1300,10332.8,10212.8,22.43,1.246,,,2.07e-04,,,,,,,1665.0,174.0,design 3 vs_heur 1.246
+slotB1,rocblas_heur,default,gate_up,17408,5120,1370,12984.8,12774.3,18.81,1.0,,,2.07e-04,,,,,,,1423.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1370,10493.8,10467.6,23.27,1.237,,,2.07e-04,,,,,,,1453.0,174.0,design 0 vs_heur 1.237
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1370,10533.0,10486.6,23.19,1.233,,,2.07e-04,,,,,,,1453.0,175.0,design 1 vs_heur 1.233
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1370,11018.0,10890.0,22.16,1.179,,,2.07e-04,,,,,,,1535.0,174.0,design 2 vs_heur 1.179
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1370,10758.7,10714.4,22.7,1.207,,,2.07e-04,,,,,,,1602.0,174.0,design 3 vs_heur 1.207
+slotB1,rocblas_heur,default,gate_up,17408,5120,1408,13180.9,13090.7,19.04,1.0,,,2.07e-04,,,,,,,1405.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1408,10551.3,10492.7,23.79,1.249,,,2.07e-04,,,,,,,1447.0,174.0,design 0 vs_heur 1.249
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1408,10577.8,10540.8,23.73,1.246,,,2.07e-04,,,,,,,1447.0,175.0,design 1 vs_heur 1.246
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1408,11067.5,10937.1,22.68,1.191,,,2.07e-04,,,,,,,1528.0,174.0,design 2 vs_heur 1.191
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1408,10808.4,10779.9,23.22,1.219,,,2.07e-04,,,,,,,1591.5,174.0,design 3 vs_heur 1.219
+slotB1,rocblas_heur,default,gate_up,17408,5120,1440,14073.5,13857.1,18.24,1.0,,,2.07e-04,,,,,,,1426.5,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1440,11373.0,11327.4,22.57,1.237,,,2.07e-04,,,,,,,1462.0,174.0,design 0 vs_heur 1.237
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1440,11383.1,11232.5,22.55,1.236,,,2.07e-04,,,,,,,1452.0,175.0,design 1 vs_heur 1.236
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1440,11955.3,11811.9,21.47,1.177,,,2.07e-04,,,,,,,1531.0,175.0,design 2 vs_heur 1.177
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1440,10849.2,10786.7,23.66,1.297,,,2.07e-04,,,,,,,1590.0,174.0,design 3 vs_heur 1.297
+slotB1,rocblas_heur,default,gate_up,17408,5120,1500,14198.5,14179.9,18.83,0.848,,,2.07e-04,,,,,,,1405.0,175.0,
+slotB1,rocblas_tuned,tunableop,gate_up,17408,5120,1500,12044.6,11987.8,22.2,1.0,,,2.07e-04,,,,,,,1556.0,174.0,Gemm_Rocblas_-1086326063
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1500,11294.3,11252.6,23.67,1.066,,,2.07e-04,,,,,,,1454.0,175.0,design 0 vs_heur 1.257
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1500,11536.2,11426.2,23.18,1.044,,,2.07e-04,,,,,,,1431.0,175.0,design 1 vs_heur 1.231
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1500,12012.1,11877.7,22.26,1.003,,,2.07e-04,,,,,,,1528.0,174.0,design 2 vs_heur 1.182
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1500,10878.1,10834.1,24.58,1.107,,,2.07e-04,,,,,,,1584.0,174.0,design 3 vs_heur 1.305
+slotB1,rocblas_heur,default,gate_up,17408,5120,1536,14360.5,14281.8,19.07,1.0,,,2.07e-04,,,,,,,1407.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1536,11489.6,11445.9,23.83,1.25,,,2.07e-04,,,,,,,1448.0,174.0,design 0 vs_heur 1.250
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1536,11495.0,11458.0,23.82,1.249,,,2.07e-04,,,,,,,1437.5,175.0,design 1 vs_heur 1.249
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1536,12027.7,11907.1,22.76,1.194,,,2.07e-04,,,,,,,1524.0,174.0,design 2 vs_heur 1.194
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1536,10896.4,10816.0,25.13,1.318,,,2.07e-04,,,,,,,1583.0,174.0,design 3 vs_heur 1.318
+slotB1,rocblas_heur,default,gate_up,17408,5120,1570,15391.5,15310.0,18.18,1.0,,,2.07e-04,,,,,,,1413.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1570,12370.4,12351.9,22.62,1.244,,,2.07e-04,,,,,,,1457.5,174.0,design 0 vs_heur 1.244
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1570,12564.1,12550.0,22.27,1.225,,,2.07e-04,,,,,,,1418.0,175.0,design 1 vs_heur 1.225
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1570,13183.3,12999.6,21.23,1.168,,,2.07e-04,,,,,,,1510.0,174.0,design 2 vs_heur 1.168
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1570,12566.7,12482.1,22.27,1.225,,,2.07e-04,,,,,,,1606.0,174.0,design 3 vs_heur 1.225
+slotB1,rocblas_heur,default,gate_up,17408,5120,1640,15528.4,15452.4,18.83,1.0,,,2.07e-04,,,,,,,1401.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1640,12457.6,12441.2,23.47,1.247,,,2.07e-04,,,,,,,1448.0,174.0,design 0 vs_heur 1.247
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1640,12637.0,12606.0,23.13,1.229,,,2.07e-04,,,,,,,1414.0,175.0,design 1 vs_heur 1.229
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1640,13186.9,13058.9,22.17,1.178,,,2.07e-04,,,,,,,1507.0,174.0,design 2 vs_heur 1.178
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1640,12641.1,12580.2,23.13,1.228,,,2.07e-04,,,,,,,1594.0,174.0,design 3 vs_heur 1.228
+slotB1,rocblas_heur,default,gate_up,17408,5120,1664,15588.7,15329.0,19.03,1.0,,,2.07e-04,,,,,,,1385.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1664,12488.2,12447.1,23.75,1.248,,,2.07e-04,,,,,,,1440.5,174.0,design 0 vs_heur 1.248
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1664,12655.1,12616.5,23.44,1.232,,,2.07e-04,,,,,,,1413.0,175.0,design 1 vs_heur 1.232
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1664,13263.8,13112.8,22.36,1.175,,,2.07e-04,,,,,,,1494.0,174.0,design 2 vs_heur 1.175
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1664,12707.8,12628.5,23.34,1.227,,,2.07e-04,,,,,,,1582.0,174.0,design 3 vs_heur 1.227
+slotB1,rocblas_heur,default,gate_up,17408,5120,1700,16570.7,16343.8,18.29,1.0,,,2.07e-04,,,,,,,1405.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1700,13339.6,13291.0,22.72,1.242,,,2.07e-04,,,,,,,1434.0,174.0,design 0 vs_heur 1.242
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1700,13532.7,13445.1,22.39,1.224,,,2.07e-04,,,,,,,1411.0,175.0,design 1 vs_heur 1.224
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1700,14093.2,13991.6,21.5,1.176,,,2.07e-04,,,,,,,1503.0,174.0,design 2 vs_heur 1.176
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1700,12724.2,12627.6,23.82,1.302,,,2.07e-04,,,,,,,1581.0,174.0,design 3 vs_heur 1.302
+slotB1,rocblas_heur,default,gate_up,17408,5120,1770,16826.5,16520.0,18.75,1.0,,,2.07e-04,,,,,,,1389.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1770,13411.0,13379.0,23.53,1.255,,,2.07e-04,,,,,,,1431.0,174.0,design 0 vs_heur 1.255
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1770,13583.8,13551.4,23.23,1.239,,,2.07e-04,,,,,,,1409.0,175.0,design 1 vs_heur 1.239
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1770,14198.7,14066.4,22.22,1.185,,,2.07e-04,,,,,,,1501.0,174.0,design 2 vs_heur 1.185
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1770,12778.8,12696.4,24.69,1.317,,,2.07e-04,,,,,,,1579.0,174.0,design 3 vs_heur 1.317
+slotB1,rocblas_heur,default,gate_up,17408,5120,1792,16833.0,16436.2,18.98,1.0,,,2.07e-04,,,,,,,1398.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1792,13430.5,13405.8,23.78,1.253,,,2.07e-04,,,,,,,1428.0,174.0,design 0 vs_heur 1.253
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1792,13548.1,13522.2,23.58,1.242,,,2.07e-04,,,,,,,1411.0,175.0,design 1 vs_heur 1.242
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1792,14122.3,14030.1,22.62,1.192,,,2.07e-04,,,,,,,1505.0,174.0,design 2 vs_heur 1.192
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1792,12750.0,12680.8,25.05,1.32,,,2.07e-04,,,,,,,1584.0,174.0,design 3 vs_heur 1.320
+slotB1,rocblas_heur,default,gate_up,17408,5120,1840,17904.4,17504.1,18.32,1.0,,,2.07e-04,,,,,,,1399.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1840,14304.6,14292.8,22.93,1.252,,,2.07e-04,,,,,,,1436.0,174.0,design 0 vs_heur 1.252
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1840,14492.2,14414.8,22.63,1.235,,,2.07e-04,,,,,,,1419.0,175.0,design 1 vs_heur 1.235
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1840,15259.5,14742.2,21.49,1.173,,,2.07e-04,,,,,,,1515.0,174.0,design 2 vs_heur 1.173
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1840,14344.0,14320.9,22.87,1.248,,,2.07e-04,,,,,,,1603.0,174.0,design 3 vs_heur 1.248
+slotB1,rocblas_heur,default,gate_up,17408,5120,1900,18030.2,17654.3,18.78,1.0,,,2.07e-04,,,,,,,1392.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1900,14379.9,14333.9,23.55,1.254,,,2.07e-04,,,,,,,1429.0,174.0,design 0 vs_heur 1.254
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1900,14515.0,14482.0,23.33,1.242,,,2.07e-04,,,,,,,1415.0,175.0,design 1 vs_heur 1.242
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1900,15294.5,14806.2,22.14,1.179,,,2.07e-04,,,,,,,1508.0,174.0,design 2 vs_heur 1.179
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1900,14403.7,14384.7,23.51,1.252,,,2.07e-04,,,,,,,1596.0,174.0,design 3 vs_heur 1.252
+slotB1,rocblas_heur,default,gate_up,17408,5120,1920,18176.6,17779.5,18.83,1.0,,,2.07e-04,,,,,,,1388.5,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1920,14419.7,14393.2,23.74,1.261,,,2.07e-04,,,,,,,1425.0,174.0,design 0 vs_heur 1.261
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1920,14581.9,14554.5,23.47,1.247,,,2.07e-04,,,,,,,1410.0,175.0,design 1 vs_heur 1.247
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1920,15362.5,14861.6,22.28,1.183,,,2.07e-04,,,,,,,1504.5,174.0,design 2 vs_heur 1.183
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1920,14446.8,14407.5,23.69,1.258,,,2.07e-04,,,,,,,1592.0,174.0,design 3 vs_heur 1.258
+slotB1,rocblas_heur,default,gate_up,17408,5120,1970,19047.2,18789.2,18.44,1.0,,,2.07e-04,,,,,,,1394.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1970,15332.2,15232.8,22.9,1.242,,,2.07e-04,,,,,,,1415.0,174.0,design 0 vs_heur 1.242
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1970,15326.3,15288.5,22.91,1.243,,,2.07e-04,,,,,,,1425.5,175.0,design 1 vs_heur 1.243
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,1970,16309.5,15765.6,21.53,1.168,,,2.07e-04,,,,,,,1501.0,174.0,design 2 vs_heur 1.168
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,1970,14496.4,14478.8,24.22,1.314,,,2.07e-04,,,,,,,1580.0,174.0,design 3 vs_heur 1.314
+slotB1,rocblas_heur,default,gate_up,17408,5120,2046,19128.0,18952.4,19.07,0.86,,,2.07e-04,,,,,,,1366.0,175.0,
+slotB1,rocblas_tuned,tunableop,gate_up,17408,5120,2046,16454.4,16357.6,22.17,1.0,,,2.07e-04,,,,,,,1467.0,174.0,Gemm_Rocblas_-1086326063
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,2046,15215.5,15165.7,23.97,1.081,,,2.07e-04,,,,,,,1417.0,175.0,design 0 vs_heur 1.257
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,2046,15478.4,15309.7,23.56,1.063,,,2.07e-04,,,,,,,1408.0,175.0,design 1 vs_heur 1.236
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,2046,16359.9,15874.9,22.29,1.006,,,2.07e-04,,,,,,,1492.0,174.0,design 2 vs_heur 1.169
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,2046,14571.2,14543.0,25.03,1.129,,,2.07e-04,,,,,,,1572.0,174.0,design 3 vs_heur 1.313
+slotB1,rocblas_heur,default,gate_up,17408,5120,2048,19239.3,19030.3,18.98,0.877,,,2.07e-04,,,,,,,1379.0,175.0,
+slotB1,rocblas_tuned,tunableop,gate_up,17408,5120,2048,16863.8,16832.5,21.65,1.0,,,2.07e-04,,,,,,,1432.0,174.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,2048,15168.8,15096.2,24.07,1.112,,,2.07e-04,,,,,,,1428.0,175.0,design 0 vs_heur 1.268
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,2048,15445.5,15373.2,23.64,1.092,,,2.07e-04,,,,,,,1408.5,175.0,design 1 vs_heur 1.246
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,gate_up,17408,5120,2048,16395.8,15873.1,22.27,1.029,,,2.07e-04,,,,,,,1493.0,174.0,design 2 vs_heur 1.173
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,gate_up,17408,5120,2048,14583.2,14570.6,25.03,1.156,,,2.07e-04,,,,,,,1574.0,174.0,design 3 vs_heur 1.319
+slotB1,rocblas_heur,default,down,5120,8704,384,2205.0,2189.2,15.52,1.0,,,2.08e-04,,,,,,,1909.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,384,1547.4,1542.2,22.12,1.425,,,2.08e-04,,,,,,,1770.0,175.0,design 0 vs_heur 1.425
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,384,1559.5,1555.3,21.95,1.414,,,2.08e-04,,,,,,,1755.0,174.0,design 1 vs_heur 1.414
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,384,1543.6,1536.8,22.17,1.428,,,2.08e-04,,,,,,,1691.0,175.0,design 2 vs_heur 1.428
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,384,2110.8,2080.2,16.21,1.045,,,2.08e-04,,,,,,,1899.0,174.0,design 3 vs_heur 1.045
+slotB1,rocblas_heur,default,down,5120,8704,448,2260.9,2249.0,17.66,1.0,,,2.08e-04,,,,,,,1893.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,448,1929.5,1926.3,20.69,1.172,,,2.08e-04,,,,,,,1712.0,175.0,design 0 vs_heur 1.172
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,448,1951.4,1941.5,20.46,1.159,,,2.08e-04,,,,,,,1694.0,174.0,design 1 vs_heur 1.159
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,448,1974.3,1964.7,20.22,1.145,,,2.08e-04,,,,,,,1660.0,175.0,design 2 vs_heur 1.145
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,448,2118.3,2080.5,18.85,1.067,,,2.08e-04,,,,,,,1893.0,174.0,design 3 vs_heur 1.067
+slotB1,rocblas_heur,default,down,5120,8704,512,2298.2,2283.5,19.86,1.0,,,2.08e-04,,,,,,,1859.0,175.0,
+slotB1,rocblas_tuned,tunableop,down,5120,8704,512,2307.2,2296.6,19.78,0.996,,,2.08e-04,,,,,,,1858.0,174.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,512,1946.0,1941.5,23.45,1.181,,,2.08e-04,,,,,,,1717.0,175.0,design 0 vs_heur 1.181
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,512,1958.9,1951.4,23.3,1.173,,,2.08e-04,,,,,,,1703.5,174.0,design 1 vs_heur 1.173
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,512,1989.5,1978.1,22.94,1.155,,,2.08e-04,,,,,,,1659.0,175.0,design 2 vs_heur 1.155
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,512,2133.1,2092.4,21.39,1.077,,,2.08e-04,,,,,,,1889.0,174.0,design 3 vs_heur 1.077
+slotB1,rocblas_heur,default,down,5120,8704,576,3047.6,3015.0,16.85,1.0,,,2.08e-04,,,,,,,1821.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,576,2393.8,2385.5,21.45,1.273,,,2.08e-04,,,,,,,1684.0,175.0,design 0 vs_heur 1.273
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,576,2395.9,2390.0,21.43,1.272,,,2.08e-04,,,,,,,1663.0,175.0,design 1 vs_heur 1.272
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,576,2524.9,2510.6,20.33,1.207,,,2.08e-04,,,,,,,1684.0,175.0,design 2 vs_heur 1.207
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,576,2874.9,2856.2,17.86,1.06,,,2.08e-04,,,,,,,1811.0,174.0,design 3 vs_heur 1.060
+slotB1,rocblas_heur,default,down,5120,8704,640,3099.3,3078.2,18.4,1.0,,,2.08e-04,,,,,,,1793.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,640,2483.7,2463.7,22.97,1.248,,,2.08e-04,,,,,,,1706.0,175.0,design 0 vs_heur 1.248
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,640,2406.8,2392.1,23.7,1.288,,,2.08e-04,,,,,,,1655.0,175.0,design 1 vs_heur 1.288
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,640,2536.9,2519.4,22.48,1.222,,,2.08e-04,,,,,,,1679.0,174.0,design 2 vs_heur 1.222
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,640,2893.7,2882.9,19.71,1.071,,,2.08e-04,,,,,,,1800.0,174.0,design 3 vs_heur 1.071
+slotB1,rocblas_heur,default,down,5120,8704,700,3149.3,3125.6,19.81,1.0,,,2.08e-04,,,,,,,1782.0,175.0,
+slotB1,rocblas_tuned,tunableop,down,5120,8704,700,3156.1,3149.4,19.77,0.998,,,2.08e-04,,,,,,,1779.0,174.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,700,2786.2,2779.0,22.39,1.13,,,2.08e-04,,,,,,,1608.0,175.0,design 0 vs_heur 1.130
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,700,2856.6,2823.8,21.84,1.102,,,2.08e-04,,,,,,,1591.5,175.0,design 1 vs_heur 1.102
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,700,3001.1,2967.0,20.79,1.049,,,2.08e-04,,,,,,,1656.0,174.0,design 2 vs_heur 1.049
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,700,2919.6,2908.4,21.37,1.079,,,2.08e-04,,,,,,,1792.0,174.0,design 3 vs_heur 1.079
+slotB1,rocblas_heur,default,down,5120,8704,768,3189.7,3175.0,21.46,1.0,,,2.08e-04,,,,,,,1758.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,768,2809.1,2792.9,24.37,1.135,,,2.08e-04,,,,,,,1618.0,175.0,design 0 vs_heur 1.135
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,768,2852.7,2844.0,24.0,1.118,,,2.08e-04,,,,,,,1590.0,175.0,design 1 vs_heur 1.118
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,768,3021.0,2980.7,22.66,1.056,,,2.08e-04,,,,,,,1644.0,174.0,design 2 vs_heur 1.056
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,768,2951.5,2935.6,23.19,1.081,,,2.08e-04,,,,,,,1786.0,174.0,design 3 vs_heur 1.081
+slotB1,rocblas_heur,default,down,5120,8704,832,3947.4,3900.4,18.79,1.0,,,2.08e-04,,,,,,,1763.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,832,3242.6,3227.1,22.87,1.217,,,2.08e-04,,,,,,,1576.0,175.0,design 0 vs_heur 1.217
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,832,3304.5,3277.0,22.44,1.195,,,2.08e-04,,,,,,,1553.0,175.0,design 1 vs_heur 1.195
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,832,3471.8,3434.4,21.36,1.137,,,2.08e-04,,,,,,,1623.0,174.0,design 2 vs_heur 1.137
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,832,3695.8,3663.1,20.06,1.068,,,2.08e-04,,,,,,,1757.0,174.0,design 3 vs_heur 1.068
+slotB1,rocblas_heur,default,down,5120,8704,896,3971.7,3941.9,20.11,1.0,,,2.08e-04,,,,,,,1740.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,896,3287.3,3270.3,24.29,1.208,,,2.08e-04,,,,,,,1573.0,175.0,design 0 vs_heur 1.208
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,896,3322.9,3300.6,24.03,1.195,,,2.08e-04,,,,,,,1549.0,175.0,design 1 vs_heur 1.195
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,896,3479.8,3446.3,22.95,1.141,,,2.08e-04,,,,,,,1615.0,174.0,design 2 vs_heur 1.141
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,896,3712.0,3679.0,21.51,1.07,,,2.08e-04,,,,,,,1742.0,174.0,design 3 vs_heur 1.070
+slotB1,rocblas_heur,default,down,5120,8704,960,4019.3,3987.3,21.29,1.0,,,2.08e-04,,,,,,,1723.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,960,3678.3,3662.5,23.26,1.093,,,2.08e-04,,,,,,,1531.0,175.0,design 0 vs_heur 1.093
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,960,3754.8,3736.9,22.79,1.07,,,2.08e-04,,,,,,,1529.0,175.0,design 1 vs_heur 1.070
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,960,3930.6,3856.9,21.77,1.023,,,2.08e-04,,,,,,,1600.0,174.0,design 2 vs_heur 1.023
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,960,3740.1,3704.9,22.88,1.075,,,2.08e-04,,,,,,,1731.0,174.0,design 3 vs_heur 1.075
+slotB1,rocblas_heur,default,down,5120,8704,1023,4079.3,4049.4,22.35,1.0,,,2.08e-04,,,,,,,1709.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1023,3696.4,3693.1,24.67,1.104,,,2.08e-04,,,,,,,1527.0,175.0,design 0 vs_heur 1.104
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1023,3775.3,3762.8,24.15,1.081,,,2.08e-04,,,,,,,1524.0,175.0,design 1 vs_heur 1.081
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1023,3964.9,3875.7,23.0,1.029,,,2.08e-04,,,,,,,1591.0,174.0,design 2 vs_heur 1.029
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1023,3764.5,3715.8,24.22,1.084,,,2.08e-04,,,,,,,1728.0,174.0,design 3 vs_heur 1.084
+slotB1,rocblas_heur,default,down,5120,8704,1024,4066.3,4044.1,22.45,1.0,,,2.08e-04,,,,,,,1707.0,174.0,
+slotB1,rocblas_tuned,tunableop,down,5120,8704,1024,4087.9,4072.3,22.33,0.995,,,2.08e-04,,,,,,,1700.0,174.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1024,3698.0,3687.2,24.68,1.1,,,2.08e-04,,,,,,,1522.0,175.0,design 0 vs_heur 1.100
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1024,3795.2,3755.9,24.05,1.071,,,2.08e-04,,,,,,,1522.0,175.0,design 1 vs_heur 1.071
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1024,3949.3,3875.3,23.11,1.03,,,2.08e-04,,,,,,,1595.0,174.0,design 2 vs_heur 1.030
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1024,3763.3,3717.7,24.25,1.081,,,2.08e-04,,,,,,,1728.5,174.0,design 3 vs_heur 1.081
+slotB1,rocblas_heur,default,down,5120,8704,1031,4812.5,4793.2,19.09,1.0,,,2.08e-04,,,,,,,1731.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1031,3931.2,3917.8,23.38,1.224,,,2.08e-04,,,,,,,1561.5,175.0,design 0 vs_heur 1.224
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1031,4096.5,4001.6,22.43,1.175,,,2.08e-04,,,,,,,1552.0,175.0,design 1 vs_heur 1.175
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1031,4249.4,4196.9,21.62,1.133,,,2.08e-04,,,,,,,1636.0,174.0,design 2 vs_heur 1.133
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1031,4059.0,4052.2,22.64,1.186,,,2.08e-04,,,,,,,1737.0,174.0,design 3 vs_heur 1.186
+slotB1,rocblas_heur,default,down,5120,8704,1045,4829.0,4786.0,19.29,1.0,,,2.08e-04,,,,,,,1729.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1045,4084.9,4055.9,22.8,1.182,,,2.08e-04,,,,,,,1495.0,175.0,design 0 vs_heur 1.182
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1045,4294.8,4210.0,21.69,1.124,,,2.08e-04,,,,,,,1489.0,175.0,design 1 vs_heur 1.124
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1045,4439.3,4340.3,20.98,1.088,,,2.08e-04,,,,,,,1576.0,174.0,design 2 vs_heur 1.088
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1045,4467.6,4425.6,20.85,1.081,,,2.08e-04,,,,,,,1724.0,174.0,design 3 vs_heur 1.081
+slotB1,rocblas_heur,default,down,5120,8704,1100,4868.6,4849.9,20.14,1.0,,,2.08e-04,,,,,,,1719.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1100,4098.1,4083.4,23.92,1.188,,,2.08e-04,,,,,,,1490.0,175.0,design 0 vs_heur 1.188
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1100,4291.4,4209.6,22.85,1.135,,,2.08e-04,,,,,,,1480.5,175.0,design 1 vs_heur 1.135
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1100,4466.6,4368.1,21.95,1.09,,,2.08e-04,,,,,,,1574.0,174.0,design 2 vs_heur 1.090
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1100,4577.8,4548.7,21.42,1.064,,,2.08e-04,,,,,,,1690.0,174.0,design 3 vs_heur 1.064
+slotB1,rocblas_heur,default,down,5120,8704,1152,4896.4,4881.1,20.97,1.0,,,2.08e-04,,,,,,,1706.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1152,4115.3,4099.4,24.95,1.19,,,2.08e-04,,,,,,,1485.0,175.0,design 0 vs_heur 1.190
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1152,4305.5,4222.0,23.85,1.137,,,2.08e-04,,,,,,,1481.0,175.0,design 1 vs_heur 1.137
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1152,4467.0,4371.0,22.99,1.096,,,2.08e-04,,,,,,,1566.5,174.0,design 2 vs_heur 1.096
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1152,4577.3,4539.3,22.43,1.07,,,2.08e-04,,,,,,,1685.0,174.0,design 3 vs_heur 1.070
+slotB1,rocblas_heur,default,down,5120,8704,1160,4912.8,4881.3,21.04,1.0,,,2.08e-04,,,,,,,1701.5,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1160,4481.4,4475.2,23.07,1.096,,,2.08e-04,,,,,,,1665.0,175.0,design 0 vs_heur 1.096
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1160,4484.5,4476.5,23.05,1.096,,,2.08e-04,,,,,,,1665.0,174.0,design 1 vs_heur 1.096
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1160,4731.6,4727.0,21.85,1.038,,,2.08e-04,,,,,,,1674.0,175.0,design 2 vs_heur 1.038
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1160,4549.1,4546.9,22.73,1.08,,,2.08e-04,,,,,,,1684.0,174.0,design 3 vs_heur 1.080
+slotB1,rocblas_heur,default,down,5120,8704,1230,4980.4,4943.5,22.01,1.0,,,2.08e-04,,,,,,,1689.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1230,4632.6,4616.0,23.66,1.075,,,2.08e-04,,,,,,,1600.0,175.0,design 0 vs_heur 1.075
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1230,4690.9,4679.7,23.37,1.062,,,2.08e-04,,,,,,,1593.0,175.0,design 1 vs_heur 1.062
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1230,4909.4,4881.2,22.33,1.014,,,2.08e-04,,,,,,,1618.0,175.0,design 2 vs_heur 1.014
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1230,4575.4,4553.4,23.96,1.088,,,2.08e-04,,,,,,,1682.0,174.0,design 3 vs_heur 1.088
+slotB1,rocblas_heur,default,down,5120,8704,1280,5000.6,4982.5,22.81,1.0,,,2.08e-04,,,,,,,1678.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1280,4641.4,4618.6,24.58,1.077,,,2.08e-04,,,,,,,1598.0,175.0,design 0 vs_heur 1.077
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1280,4694.0,4690.5,24.3,1.065,,,2.08e-04,,,,,,,1591.0,175.0,design 1 vs_heur 1.065
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1280,4912.9,4883.6,23.22,1.018,,,2.08e-04,,,,,,,1616.5,174.0,design 2 vs_heur 1.018
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1280,4580.6,4557.1,24.91,1.092,,,2.08e-04,,,,,,,1682.0,174.0,design 3 vs_heur 1.092
+slotB1,rocblas_heur,default,down,5120,8704,1300,5732.6,5702.0,20.21,1.0,,,2.08e-04,,,,,,,1704.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1300,5045.1,5027.7,22.97,1.136,,,2.08e-04,,,,,,,1584.5,175.0,design 0 vs_heur 1.136
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1300,5116.5,5101.0,22.65,1.12,,,2.08e-04,,,,,,,1577.0,175.0,design 1 vs_heur 1.120
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1300,5365.5,5320.5,21.6,1.068,,,2.08e-04,,,,,,,1605.0,174.0,design 2 vs_heur 1.068
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1300,5224.3,5189.6,22.18,1.097,,,2.08e-04,,,,,,,1712.0,174.0,design 3 vs_heur 1.097
+slotB1,rocblas_heur,default,down,5120,8704,1370,5818.5,5758.2,20.99,1.0,,,2.08e-04,,,,,,,1692.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1370,5075.5,5062.5,24.06,1.146,,,2.08e-04,,,,,,,1573.0,175.0,design 0 vs_heur 1.146
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1370,5133.9,5121.7,23.78,1.133,,,2.08e-04,,,,,,,1571.5,175.0,design 1 vs_heur 1.133
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1370,5372.4,5358.1,22.73,1.083,,,2.08e-04,,,,,,,1607.0,174.0,design 2 vs_heur 1.083
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1370,5362.4,5347.8,22.77,1.085,,,2.08e-04,,,,,,,1670.0,174.0,design 3 vs_heur 1.085
+slotB1,rocblas_heur,default,down,5120,8704,1408,5832.1,5803.8,21.52,1.0,,,2.08e-04,,,,,,,1684.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1408,5095.9,5078.1,24.63,1.144,,,2.08e-04,,,,,,,1567.0,175.0,design 0 vs_heur 1.144
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1408,5164.0,5142.5,24.3,1.129,,,2.08e-04,,,,,,,1566.0,175.0,design 1 vs_heur 1.129
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1408,5406.2,5375.0,23.21,1.079,,,2.08e-04,,,,,,,1601.0,175.0,design 2 vs_heur 1.079
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1408,5399.9,5359.8,23.24,1.08,,,2.08e-04,,,,,,,1668.0,174.0,design 3 vs_heur 1.080
+slotB1,rocblas_heur,default,down,5120,8704,1440,5860.1,5825.5,21.9,1.0,,,2.08e-04,,,,,,,1680.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1440,5523.6,5492.5,23.24,1.061,,,2.08e-04,,,,,,,1560.0,175.0,design 0 vs_heur 1.061
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1440,5573.5,5545.8,23.03,1.051,,,2.08e-04,,,,,,,1558.0,175.0,design 1 vs_heur 1.051
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1440,5851.0,5823.7,21.94,1.002,,,2.08e-04,,,,,,,1594.0,174.0,design 2 vs_heur 1.002
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1440,5405.8,5364.8,23.74,1.084,,,2.08e-04,,,,,,,1666.0,174.0,design 3 vs_heur 1.084
+slotB1,rocblas_heur,default,down,5120,8704,1500,5899.2,5848.8,22.66,1.0,,,2.08e-04,,,,,,,1673.0,175.0,
+slotB1,rocblas_tuned,tunableop,down,5120,8704,1500,5940.3,5879.8,22.51,0.993,,,2.08e-04,,,,,,,1671.0,174.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1500,5523.1,5513.7,24.21,1.068,,,2.08e-04,,,,,,,1555.0,175.0,design 0 vs_heur 1.068
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1500,5583.5,5561.7,23.94,1.057,,,2.08e-04,,,,,,,1554.0,175.0,design 1 vs_heur 1.057
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1500,5867.0,5839.6,22.79,1.005,,,2.08e-04,,,,,,,1592.0,174.0,design 2 vs_heur 1.005
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1500,5413.8,5371.0,24.7,1.09,,,2.08e-04,,,,,,,1666.0,174.0,design 3 vs_heur 1.090
+slotB1,rocblas_heur,default,down,5120,8704,1536,5936.7,5866.4,23.06,1.0,,,2.08e-04,,,,,,,1659.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1536,5546.8,5521.7,24.68,1.07,,,2.08e-04,,,,,,,1550.5,175.0,design 0 vs_heur 1.070
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1536,5598.9,5583.6,24.45,1.06,,,2.08e-04,,,,,,,1548.0,175.0,design 1 vs_heur 1.060
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1536,5876.4,5847.0,23.3,1.01,,,2.08e-04,,,,,,,1580.0,174.0,design 2 vs_heur 1.010
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1536,5416.5,5371.6,25.27,1.096,,,2.08e-04,,,,,,,1655.0,174.0,design 3 vs_heur 1.096
+slotB1,rocblas_heur,default,down,5120,8704,1570,6691.8,6632.5,20.91,1.0,,,2.08e-04,,,,,,,1679.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1570,5962.1,5923.4,23.47,1.122,,,2.08e-04,,,,,,,1534.0,175.0,design 0 vs_heur 1.122
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1570,6059.4,6040.8,23.09,1.104,,,2.08e-04,,,,,,,1523.0,175.0,design 1 vs_heur 1.104
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1570,6367.8,6331.7,21.97,1.051,,,2.08e-04,,,,,,,1566.0,174.0,design 2 vs_heur 1.051
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1570,6237.0,6201.9,22.44,1.073,,,2.08e-04,,,,,,,1633.0,174.0,design 3 vs_heur 1.073
+slotB1,rocblas_heur,default,down,5120,8704,1640,6731.6,6628.8,21.71,1.0,,,2.08e-04,,,,,,,1670.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1640,5978.2,5947.7,24.45,1.126,,,2.08e-04,,,,,,,1533.0,175.0,design 0 vs_heur 1.126
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1640,6069.5,6050.0,24.08,1.109,,,2.08e-04,,,,,,,1523.0,175.0,design 1 vs_heur 1.109
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1640,6338.9,6187.4,23.06,1.062,,,2.08e-04,,,,,,,1566.0,175.0,design 2 vs_heur 1.062
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1640,6233.3,6201.6,23.45,1.08,,,2.08e-04,,,,,,,1633.0,174.0,design 3 vs_heur 1.080
+slotB1,rocblas_heur,default,down,5120,8704,1664,6748.0,6689.5,21.98,1.0,,,2.08e-04,,,,,,,1666.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1664,5986.1,5954.6,24.78,1.127,,,2.08e-04,,,,,,,1531.0,175.0,design 0 vs_heur 1.127
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1664,6076.3,6057.7,24.41,1.111,,,2.08e-04,,,,,,,1523.0,175.0,design 1 vs_heur 1.111
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1664,6377.6,6348.6,23.25,1.058,,,2.08e-04,,,,,,,1564.0,174.0,design 2 vs_heur 1.058
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1664,6243.0,6212.4,23.76,1.081,,,2.08e-04,,,,,,,1631.0,174.0,design 3 vs_heur 1.081
+slotB1,rocblas_heur,default,down,5120,8704,1700,6802.1,6655.0,22.28,1.0,,,2.08e-04,,,,,,,1652.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1700,6440.8,6405.6,23.52,1.056,,,2.08e-04,,,,,,,1520.0,175.0,design 0 vs_heur 1.056
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1700,6511.3,6470.3,23.27,1.045,,,2.08e-04,,,,,,,1517.0,175.0,design 1 vs_heur 1.045
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1700,6854.4,6832.3,22.11,0.992,,,2.08e-04,,,,,,,1602.0,174.0,design 2 vs_heur 0.992
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1700,6242.7,6236.4,24.27,1.09,,,2.08e-04,,,,,,,1625.0,174.0,design 3 vs_heur 1.090
+slotB1,rocblas_heur,default,down,5120,8704,1770,6878.6,6847.1,22.93,1.0,,,2.08e-04,,,,,,,1647.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1770,6465.5,6432.2,24.4,1.064,,,2.08e-04,,,,,,,1517.0,175.0,design 0 vs_heur 1.064
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1770,6522.0,6479.8,24.19,1.055,,,2.08e-04,,,,,,,1515.0,175.0,design 1 vs_heur 1.055
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1770,6878.0,6857.9,22.94,1.0,,,2.08e-04,,,,,,,1603.0,174.0,design 2 vs_heur 1.000
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1770,6268.5,6254.6,25.17,1.097,,,2.08e-04,,,,,,,1628.0,174.0,design 3 vs_heur 1.097
+slotB1,rocblas_heur,default,down,5120,8704,1792,6934.2,6811.3,23.03,1.0,,,2.08e-04,,,,,,,1645.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1792,6485.9,6442.3,24.63,1.069,,,2.08e-04,,,,,,,1514.0,175.0,design 0 vs_heur 1.069
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1792,6538.7,6500.0,24.43,1.06,,,2.08e-04,,,,,,,1511.0,175.0,design 1 vs_heur 1.060
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1792,6892.0,6869.7,23.17,1.006,,,2.08e-04,,,,,,,1600.0,174.0,design 2 vs_heur 1.006
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1792,6276.2,6255.5,25.45,1.105,,,2.08e-04,,,,,,,1626.0,174.0,design 3 vs_heur 1.105
+slotB1,rocblas_heur,default,down,5120,8704,1840,7602.6,7306.5,21.57,1.0,,,2.08e-04,,,,,,,1667.5,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1840,6945.9,6892.7,23.61,1.095,,,2.08e-04,,,,,,,1504.0,175.0,design 0 vs_heur 1.095
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1840,6964.5,6942.9,23.55,1.092,,,2.08e-04,,,,,,,1505.0,175.0,design 1 vs_heur 1.092
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1840,7369.8,7335.2,22.25,1.032,,,2.08e-04,,,,,,,1591.0,174.0,design 2 vs_heur 1.032
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1840,7094.3,7088.5,23.12,1.072,,,2.08e-04,,,,,,,1613.0,174.0,design 3 vs_heur 1.072
+slotB1,rocblas_heur,default,down,5120,8704,1900,7664.8,7383.3,22.09,1.0,,,2.08e-04,,,,,,,1658.5,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1900,6933.6,6906.1,24.42,1.105,,,2.08e-04,,,,,,,1502.0,175.0,design 0 vs_heur 1.105
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1900,6973.8,6951.7,24.28,1.099,,,2.08e-04,,,,,,,1500.0,175.0,design 1 vs_heur 1.099
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1900,7373.6,7338.6,22.97,1.039,,,2.08e-04,,,,,,,1589.0,174.0,design 2 vs_heur 1.039
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1900,7105.2,7082.2,23.83,1.079,,,2.08e-04,,,,,,,1612.0,174.0,design 3 vs_heur 1.079
+slotB1,rocblas_heur,default,down,5120,8704,1920,7686.3,7465.1,22.26,1.0,,,2.08e-04,,,,,,,1656.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1920,6974.9,6914.2,24.53,1.102,,,2.08e-04,,,,,,,1497.0,175.0,design 0 vs_heur 1.102
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1920,6996.4,6960.3,24.46,1.099,,,2.08e-04,,,,,,,1498.0,175.0,design 1 vs_heur 1.099
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1920,7452.2,7330.6,22.96,1.031,,,2.08e-04,,,,,,,1583.5,174.0,design 2 vs_heur 1.031
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1920,7086.5,6990.6,24.15,1.085,,,2.08e-04,,,,,,,1612.0,174.0,design 3 vs_heur 1.085
+slotB1,rocblas_heur,default,down,5120,8704,1970,7796.1,7639.2,22.52,1.0,,,2.08e-04,,,,,,,1643.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1970,7388.0,7365.1,23.77,1.055,,,2.08e-04,,,,,,,1484.5,175.0,design 0 vs_heur 1.055
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1970,7426.2,7337.0,23.64,1.05,,,2.08e-04,,,,,,,1493.0,174.0,design 1 vs_heur 1.050
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,1970,7921.9,7782.5,22.16,0.984,,,2.08e-04,,,,,,,1576.0,174.0,design 2 vs_heur 0.984
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,1970,7107.9,7098.9,24.7,1.097,,,2.08e-04,,,,,,,1609.0,174.0,design 3 vs_heur 1.097
+slotB1,rocblas_heur,default,down,5120,8704,2046,7847.4,7589.2,23.24,1.0,,,2.08e-04,,,,,,,1633.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,2046,7427.6,7394.4,24.55,1.057,,,2.08e-04,,,,,,,1480.0,175.0,design 0 vs_heur 1.057
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,2046,7453.2,6948.2,24.47,1.053,,,2.08e-04,,,,,,,1489.0,174.0,design 1 vs_heur 1.053
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,2046,7928.0,7814.7,23.0,0.99,,,2.08e-04,,,,,,,1565.5,174.0,design 2 vs_heur 0.990
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,2046,7136.0,7117.8,25.55,1.1,,,2.08e-04,,,,,,,1598.0,174.0,design 3 vs_heur 1.100
+slotB1,rocblas_heur,default,down,5120,8704,2048,7848.9,7657.1,23.26,1.0,,,2.08e-04,,,,,,,1624.0,174.0,
+slotB1,rocblas_tuned,tunableop,down,5120,8704,2048,7957.9,7824.0,22.94,0.986,,,2.08e-04,,,,,,,1613.0,174.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,2048,7416.8,7391.6,24.61,1.058,,,2.08e-04,,,,,,,1483.0,175.0,design 0 vs_heur 1.058
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,2048,7453.8,7382.0,24.49,1.053,,,2.08e-04,,,,,,,1489.5,175.0,design 1 vs_heur 1.053
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,down,5120,8704,2048,7928.1,7804.3,23.02,0.99,,,2.08e-04,,,,,,,1565.0,174.0,design 2 vs_heur 0.990
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,down,5120,8704,2048,7134.0,7125.0,25.59,1.1,,,2.08e-04,,,,,,,1599.0,174.0,design 3 vs_heur 1.100
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,384,1607.6,1579.1,20.04,1.0,,,2.07e-04,,,,,,,1741.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,384,1535.7,1517.8,20.98,1.047,,,2.07e-04,,,,,,,1792.0,174.0,design 0 vs_heur 1.047
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,384,1546.0,1530.0,20.84,1.04,,,2.07e-04,,,,,,,1801.0,174.0,design 1 vs_heur 1.040
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,384,1442.6,1436.7,22.33,1.114,,,2.07e-04,,,,,,,1666.0,176.0,design 2 vs_heur 1.114
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,384,1815.7,1792.9,17.74,0.885,,,2.07e-04,,,,,,,1748.0,174.0,design 3 vs_heur 0.885
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,448,2043.3,1959.9,18.39,1.0,,,2.07e-04,,,,,,,1747.5,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,448,1833.3,1829.7,20.5,1.115,,,2.07e-04,,,,,,,1696.0,175.0,design 0 vs_heur 1.115
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,448,1839.0,1833.0,20.44,1.111,,,2.07e-04,,,,,,,1692.0,174.0,design 1 vs_heur 1.111
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,448,1873.9,1871.7,20.06,1.09,,,2.07e-04,,,,,,,1666.0,175.0,design 2 vs_heur 1.090
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,448,1817.5,1812.2,20.68,1.124,,,2.07e-04,,,,,,,1743.0,174.0,design 3 vs_heur 1.124
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,512,2117.0,2051.1,20.29,1.0,,,2.07e-04,,,,,,,1741.0,175.0,
+slotB1,rocblas_tuned,tunableop,in_proj_qkvz,8192,5120,512,2118.4,2076.1,20.27,0.999,,,2.07e-04,,,,,,,1738.0,174.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,512,1871.4,1863.8,22.95,1.131,,,2.07e-04,,,,,,,1702.0,175.0,design 0 vs_heur 1.131
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,512,1874.3,1870.2,22.91,1.129,,,2.07e-04,,,,,,,1696.0,174.0,design 1 vs_heur 1.129
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,512,1888.6,1885.2,22.74,1.121,,,2.07e-04,,,,,,,1657.0,175.0,design 2 vs_heur 1.121
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,512,1843.6,1825.0,23.3,1.148,,,2.07e-04,,,,,,,1742.0,174.0,design 3 vs_heur 1.148
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,576,2583.7,2521.1,18.7,1.0,,,2.07e-04,,,,,,,1744.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,576,2286.1,2276.9,21.14,1.13,,,2.07e-04,,,,,,,1678.5,175.0,design 0 vs_heur 1.130
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,576,2280.2,2267.2,21.19,1.133,,,2.07e-04,,,,,,,1640.5,175.0,design 1 vs_heur 1.133
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,576,2334.1,2317.1,20.7,1.107,,,2.07e-04,,,,,,,1606.0,175.0,design 2 vs_heur 1.107
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,576,2654.5,2612.0,18.2,0.973,,,2.07e-04,,,,,,,1730.0,174.0,design 3 vs_heur 0.973
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,640,2635.5,2600.8,20.37,1.0,,,2.07e-04,,,,,,,1721.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,640,2328.4,2327.0,23.06,1.132,,,2.07e-04,,,,,,,1687.0,175.0,design 0 vs_heur 1.132
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,640,2289.2,2279.0,23.45,1.151,,,2.07e-04,,,,,,,1637.0,175.0,design 1 vs_heur 1.151
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,640,2345.1,2326.0,22.89,1.124,,,2.07e-04,,,,,,,1602.5,175.0,design 2 vs_heur 1.124
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,640,2680.0,2636.6,20.03,0.983,,,2.07e-04,,,,,,,1729.5,174.0,design 3 vs_heur 0.983
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,700,3048.5,2984.8,19.26,0.924,,,2.07e-04,,,,,,,1719.0,174.0,
+slotB1,rocblas_tuned,tunableop,in_proj_qkvz,8192,5120,700,2816.5,2810.2,20.85,1.0,,,2.07e-04,,,,,,,1715.0,174.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,700,2677.6,2669.5,21.93,1.052,,,2.07e-04,,,,,,,1635.0,175.0,design 0 vs_heur 1.139
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,700,2740.1,2729.1,21.43,1.028,,,2.07e-04,,,,,,,1619.0,174.0,design 1 vs_heur 1.113
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,700,2767.4,2759.2,21.22,1.018,,,2.07e-04,,,,,,,1642.0,175.0,design 2 vs_heur 1.102
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,700,2709.0,2679.3,21.68,1.04,,,2.07e-04,,,,,,,1734.5,174.0,design 3 vs_heur 1.125
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,768,3157.9,3096.2,20.4,1.0,,,2.07e-04,,,,,,,1714.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,768,2735.2,2712.3,23.55,1.155,,,2.07e-04,,,,,,,1653.0,175.0,design 0 vs_heur 1.155
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,768,2746.2,2726.1,23.46,1.15,,,2.07e-04,,,,,,,1630.0,175.0,design 1 vs_heur 1.150
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,768,2799.5,2776.2,23.01,1.128,,,2.07e-04,,,,,,,1625.0,175.0,design 2 vs_heur 1.128
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,768,2770.3,2741.4,23.26,1.14,,,2.07e-04,,,,,,,1740.0,174.0,design 3 vs_heur 1.140
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,832,3644.7,3553.9,19.15,1.0,,,2.07e-04,,,,,,,1735.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,832,3106.8,3096.8,22.46,1.173,,,2.07e-04,,,,,,,1556.0,175.0,design 0 vs_heur 1.173
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,832,3174.7,3149.4,21.98,1.148,,,2.07e-04,,,,,,,1556.0,175.0,design 1 vs_heur 1.148
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,832,3228.4,3194.0,21.62,1.129,,,2.07e-04,,,,,,,1582.5,174.0,design 2 vs_heur 1.129
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,832,3513.9,3484.2,19.86,1.037,,,2.07e-04,,,,,,,1721.0,174.0,design 3 vs_heur 1.037
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,896,3794.9,3765.0,19.81,1.0,,,2.07e-04,,,,,,,1765.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,896,3133.5,3124.6,23.99,1.211,,,2.07e-04,,,,,,,1554.0,175.0,design 0 vs_heur 1.211
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,896,3200.1,3176.3,23.49,1.186,,,2.07e-04,,,,,,,1546.0,175.0,design 1 vs_heur 1.186
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,896,3253.2,3210.9,23.1,1.167,,,2.07e-04,,,,,,,1572.0,174.0,design 2 vs_heur 1.167
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,896,3532.4,3499.1,21.28,1.074,,,2.07e-04,,,,,,,1718.0,174.0,design 3 vs_heur 1.074
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,960,3881.1,3853.6,20.75,1.0,,,2.07e-04,,,,,,,1750.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,960,3560.9,3549.6,22.62,1.09,,,2.07e-04,,,,,,,1607.0,175.0,design 0 vs_heur 1.090
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,960,3574.2,3566.9,22.53,1.086,,,2.07e-04,,,,,,,1574.0,175.0,design 1 vs_heur 1.086
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,960,3693.9,3620.1,21.8,1.051,,,2.07e-04,,,,,,,1596.0,174.0,design 2 vs_heur 1.051
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,960,3531.2,3509.5,22.81,1.099,,,2.07e-04,,,,,,,1715.0,174.0,design 3 vs_heur 1.099
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1023,3988.3,3918.0,21.52,0.942,,,2.07e-04,,,,,,,1751.0,174.0,
+slotB1,rocblas_tuned,tunableop,in_proj_qkvz,8192,5120,1023,3756.9,3743.8,22.84,1.0,,,2.07e-04,,,,,,,1683.0,175.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1023,3578.3,3562.7,23.98,1.05,,,2.07e-04,,,,,,,1605.0,175.0,design 0 vs_heur 1.115
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1023,3602.7,3588.4,23.82,1.043,,,2.07e-04,,,,,,,1563.0,175.0,design 1 vs_heur 1.107
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1023,3715.9,3634.6,23.09,1.011,,,2.07e-04,,,,,,,1590.0,174.0,design 2 vs_heur 1.073
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1023,3545.0,3524.8,24.21,1.06,,,2.07e-04,,,,,,,1715.0,174.0,design 3 vs_heur 1.125
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1024,3982.9,3962.5,21.57,0.938,,,2.07e-04,,,,,,,1752.0,174.0,
+slotB1,rocblas_tuned,tunableop,in_proj_qkvz,8192,5120,1024,3736.0,3730.7,22.99,1.0,,,2.07e-04,,,,,,,1681.0,175.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1024,3571.0,3562.6,24.05,1.046,,,2.07e-04,,,,,,,1604.0,175.0,design 0 vs_heur 1.115
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1024,3594.9,3588.0,23.9,1.039,,,2.07e-04,,,,,,,1565.0,175.0,design 1 vs_heur 1.108
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1024,3713.0,3633.4,23.14,1.006,,,2.07e-04,,,,,,,1591.5,174.0,design 2 vs_heur 1.073
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1024,3543.7,3525.1,24.24,1.054,,,2.07e-04,,,,,,,1715.0,174.0,design 3 vs_heur 1.124
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1031,4548.0,4499.6,19.02,1.0,,,2.07e-04,,,,,,,1722.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1031,3843.3,3822.7,22.5,1.183,,,2.07e-04,,,,,,,1589.0,175.0,design 0 vs_heur 1.183
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1031,3861.5,3828.0,22.4,1.178,,,2.07e-04,,,,,,,1599.0,175.0,design 1 vs_heur 1.178
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1031,3952.9,3928.5,21.88,1.151,,,2.07e-04,,,,,,,1639.0,174.0,design 2 vs_heur 1.151
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1031,3770.4,3751.4,22.94,1.206,,,2.07e-04,,,,,,,1705.0,174.0,design 3 vs_heur 1.206
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1045,4526.5,4412.8,19.37,1.0,,,2.07e-04,,,,,,,1720.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1045,3943.9,3917.5,22.23,1.148,,,2.07e-04,,,,,,,1536.0,175.0,design 0 vs_heur 1.148
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1045,4073.3,4014.3,21.52,1.111,,,2.07e-04,,,,,,,1526.0,175.0,design 1 vs_heur 1.111
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1045,4140.8,4067.3,21.17,1.093,,,2.07e-04,,,,,,,1573.0,174.0,design 2 vs_heur 1.093
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1045,4113.5,4061.7,21.31,1.1,,,2.07e-04,,,,,,,1678.0,174.0,design 3 vs_heur 1.100
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1100,4612.7,4580.6,20.0,1.0,,,2.07e-04,,,,,,,1714.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1100,3946.2,3931.4,23.38,1.169,,,2.07e-04,,,,,,,1529.0,175.0,design 0 vs_heur 1.169
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1100,4101.0,4021.2,22.5,1.125,,,2.07e-04,,,,,,,1523.0,175.0,design 1 vs_heur 1.125
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1100,4150.5,4120.5,22.23,1.111,,,2.07e-04,,,,,,,1575.0,174.0,design 2 vs_heur 1.111
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1100,4251.7,4222.2,21.7,1.085,,,2.07e-04,,,,,,,1625.0,174.0,design 3 vs_heur 1.085
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1152,4698.5,4570.7,20.57,1.0,,,2.07e-04,,,,,,,1708.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1152,3975.9,3942.8,24.31,1.182,,,2.07e-04,,,,,,,1525.0,175.0,design 0 vs_heur 1.182
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1152,4090.7,4029.0,23.62,1.149,,,2.07e-04,,,,,,,1521.0,175.0,design 1 vs_heur 1.149
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1152,4173.5,4135.9,23.15,1.126,,,2.07e-04,,,,,,,1570.0,174.0,design 2 vs_heur 1.126
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1152,4261.5,4237.8,22.68,1.103,,,2.07e-04,,,,,,,1620.0,174.0,design 3 vs_heur 1.103
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1160,4715.3,4614.9,20.64,1.0,,,2.07e-04,,,,,,,1709.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1160,4253.6,4233.6,22.88,1.109,,,2.07e-04,,,,,,,1605.5,175.0,design 0 vs_heur 1.109
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1160,4307.5,4220.5,22.59,1.095,,,2.07e-04,,,,,,,1609.0,175.0,design 1 vs_heur 1.095
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1160,4428.5,4415.8,21.97,1.065,,,2.07e-04,,,,,,,1644.5,174.0,design 2 vs_heur 1.065
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1160,4221.0,4208.7,23.05,1.117,,,2.07e-04,,,,,,,1619.0,175.0,design 3 vs_heur 1.117
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1230,5173.1,5031.1,19.95,1.0,,,2.07e-04,,,,,,,1717.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1230,4387.5,4372.3,23.52,1.179,,,2.07e-04,,,,,,,1546.0,175.0,design 0 vs_heur 1.179
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1230,4495.5,4425.4,22.95,1.151,,,2.07e-04,,,,,,,1541.0,175.0,design 1 vs_heur 1.151
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1230,4601.9,4580.2,22.42,1.124,,,2.07e-04,,,,,,,1586.0,174.0,design 2 vs_heur 1.124
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1230,4257.5,4249.2,24.23,1.215,,,2.07e-04,,,,,,,1610.0,174.0,design 3 vs_heur 1.215
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1280,5232.7,5112.0,20.52,1.0,,,2.07e-04,,,,,,,1710.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1280,4405.7,4362.4,24.37,1.188,,,2.07e-04,,,,,,,1537.0,175.0,design 0 vs_heur 1.188
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1280,4510.1,4444.8,23.81,1.16,,,2.07e-04,,,,,,,1534.5,175.0,design 1 vs_heur 1.160
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1280,4606.0,4598.3,23.31,1.136,,,2.07e-04,,,,,,,1582.0,174.0,design 2 vs_heur 1.136
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1280,4269.4,4263.4,25.15,1.226,,,2.07e-04,,,,,,,1607.0,174.0,design 3 vs_heur 1.226
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1300,5561.5,5419.4,19.61,1.0,,,2.07e-04,,,,,,,1705.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1300,4816.8,4801.4,22.64,1.155,,,2.07e-04,,,,,,,1548.0,175.0,design 0 vs_heur 1.155
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1300,4901.1,4843.6,22.25,1.135,,,2.07e-04,,,,,,,1549.0,175.0,design 1 vs_heur 1.135
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1300,5041.7,4988.4,21.63,1.103,,,2.07e-04,,,,,,,1602.0,174.0,design 2 vs_heur 1.103
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1300,4894.8,4870.9,22.28,1.136,,,2.07e-04,,,,,,,1693.0,174.0,design 3 vs_heur 1.136
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1370,5673.4,5634.5,20.26,1.0,,,2.07e-04,,,,,,,1699.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1370,4845.2,4831.2,23.72,1.171,,,2.07e-04,,,,,,,1539.0,175.0,design 0 vs_heur 1.171
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1370,4925.2,4864.0,23.33,1.152,,,2.07e-04,,,,,,,1546.0,175.0,design 1 vs_heur 1.152
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1370,5078.7,5042.1,22.63,1.117,,,2.07e-04,,,,,,,1597.5,174.0,design 2 vs_heur 1.117
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1370,5082.6,5064.2,22.61,1.116,,,2.07e-04,,,,,,,1643.0,174.0,design 3 vs_heur 1.116
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1408,5684.8,5557.1,20.78,1.0,,,2.07e-04,,,,,,,1692.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1408,4844.7,4830.9,24.38,1.173,,,2.07e-04,,,,,,,1541.0,175.0,design 0 vs_heur 1.173
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1408,4934.7,4873.3,23.94,1.152,,,2.07e-04,,,,,,,1544.0,175.0,design 1 vs_heur 1.152
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1408,5073.0,5045.7,23.28,1.121,,,2.07e-04,,,,,,,1592.0,174.0,design 2 vs_heur 1.121
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1408,5075.9,5061.2,23.27,1.12,,,2.07e-04,,,,,,,1637.0,174.0,design 3 vs_heur 1.120
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1440,6069.5,5887.5,19.9,1.0,,,2.07e-04,,,,,,,1692.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1440,5263.7,5250.6,22.95,1.153,,,2.07e-04,,,,,,,1539.0,175.0,design 0 vs_heur 1.153
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1440,5309.6,5274.0,22.75,1.143,,,2.07e-04,,,,,,,1519.0,175.0,design 1 vs_heur 1.143
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1440,5507.6,5457.3,21.93,1.102,,,2.07e-04,,,,,,,1578.5,174.0,design 2 vs_heur 1.102
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1440,5091.2,5067.6,23.73,1.192,,,2.07e-04,,,,,,,1634.0,174.0,design 3 vs_heur 1.192
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1500,6170.7,6047.7,20.39,0.882,,,2.07e-04,,,,,,,1690.0,174.0,
+slotB1,rocblas_tuned,tunableop,in_proj_qkvz,8192,5120,1500,5440.4,5417.5,23.13,1.0,,,2.07e-04,,,,,,,1599.0,175.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1500,5344.1,5335.4,23.55,1.018,,,2.07e-04,,,,,,,1531.0,175.0,design 0 vs_heur 1.155
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1500,5321.9,5290.5,23.64,1.022,,,2.07e-04,,,,,,,1520.0,175.0,design 1 vs_heur 1.160
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1500,5532.3,5480.0,22.74,0.983,,,2.07e-04,,,,,,,1579.0,174.0,design 2 vs_heur 1.115
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1500,5123.8,5095.3,24.56,1.062,,,2.07e-04,,,,,,,1634.0,174.0,design 3 vs_heur 1.204
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1536,6224.1,6061.8,20.7,1.0,,,2.07e-04,,,,,,,1690.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1536,5304.8,5161.6,24.29,1.173,,,2.07e-04,,,,,,,1535.0,175.0,design 0 vs_heur 1.173
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1536,5358.9,5318.0,24.04,1.161,,,2.07e-04,,,,,,,1509.0,175.0,design 1 vs_heur 1.161
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1536,5546.3,5504.5,23.23,1.122,,,2.07e-04,,,,,,,1575.0,174.0,design 2 vs_heur 1.122
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1536,5131.4,5103.9,25.11,1.213,,,2.07e-04,,,,,,,1632.0,174.0,design 3 vs_heur 1.213
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1570,6624.4,6574.3,19.88,1.0,,,2.07e-04,,,,,,,1691.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1570,5718.4,5692.1,23.03,1.158,,,2.07e-04,,,,,,,1539.0,175.0,design 0 vs_heur 1.158
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1570,5762.4,5719.1,22.86,1.15,,,2.07e-04,,,,,,,1520.0,175.0,design 1 vs_heur 1.150
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1570,5978.2,5927.5,22.03,1.108,,,2.07e-04,,,,,,,1586.0,174.0,design 2 vs_heur 1.108
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1570,5894.8,5862.1,22.34,1.124,,,2.07e-04,,,,,,,1652.0,174.0,design 3 vs_heur 1.124
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1640,6556.7,6475.4,20.98,1.0,,,2.07e-04,,,,,,,1547.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1640,5808.2,5798.8,23.69,1.129,,,2.07e-04,,,,,,,1534.0,174.0,design 0 vs_heur 1.129
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1640,5759.9,5713.8,23.88,1.138,,,2.07e-04,,,,,,,1523.0,175.0,design 1 vs_heur 1.138
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1640,5988.5,5946.0,22.97,1.095,,,2.07e-04,,,,,,,1580.0,174.0,design 2 vs_heur 1.095
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1640,5913.8,5889.7,23.26,1.109,,,2.07e-04,,,,,,,1646.0,174.0,design 3 vs_heur 1.109
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1664,6594.1,6455.1,21.17,1.0,,,2.07e-04,,,,,,,1539.5,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1664,5813.9,5789.7,24.01,1.134,,,2.07e-04,,,,,,,1532.0,175.0,design 0 vs_heur 1.134
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1664,5764.0,5758.2,24.22,1.144,,,2.07e-04,,,,,,,1518.0,175.0,design 1 vs_heur 1.144
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1664,6004.8,5943.9,23.25,1.098,,,2.07e-04,,,,,,,1578.0,174.0,design 2 vs_heur 1.098
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1664,5913.9,5890.4,23.6,1.115,,,2.07e-04,,,,,,,1647.0,174.0,design 3 vs_heur 1.115
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1700,6969.5,6792.9,20.46,1.0,,,2.07e-04,,,,,,,1561.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1700,6222.7,6170.9,22.92,1.12,,,2.07e-04,,,,,,,1496.0,175.0,design 0 vs_heur 1.120
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1700,6188.6,6156.9,23.04,1.126,,,2.07e-04,,,,,,,1505.0,175.0,design 1 vs_heur 1.126
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1700,6417.7,6367.9,22.22,1.086,,,2.07e-04,,,,,,,1570.5,174.0,design 2 vs_heur 1.086
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1700,5935.2,5886.3,24.03,1.174,,,2.07e-04,,,,,,,1644.0,174.0,design 3 vs_heur 1.174
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1770,7081.2,6802.6,20.97,1.0,,,2.07e-04,,,,,,,1550.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1770,6249.8,6225.9,23.76,1.133,,,2.07e-04,,,,,,,1489.0,175.0,design 0 vs_heur 1.133
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1770,6206.0,6186.7,23.92,1.141,,,2.07e-04,,,,,,,1507.0,175.0,design 1 vs_heur 1.141
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1770,6437.5,6400.5,23.06,1.1,,,2.07e-04,,,,,,,1574.0,174.0,design 2 vs_heur 1.100
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1770,5965.3,5927.6,24.89,1.187,,,2.07e-04,,,,,,,1645.0,174.0,design 3 vs_heur 1.187
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1792,7106.9,6872.7,21.15,1.0,,,2.07e-04,,,,,,,1538.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1792,6251.2,6225.6,24.05,1.137,,,2.07e-04,,,,,,,1488.0,175.0,design 0 vs_heur 1.137
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1792,6199.9,6187.0,24.25,1.146,,,2.07e-04,,,,,,,1501.0,175.0,design 1 vs_heur 1.146
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1792,6436.4,6385.7,23.36,1.104,,,2.07e-04,,,,,,,1569.0,174.0,design 2 vs_heur 1.104
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1792,5957.4,5919.2,25.23,1.193,,,2.07e-04,,,,,,,1640.0,174.0,design 3 vs_heur 1.193
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1840,7499.2,7389.3,20.58,1.0,,,2.07e-04,,,,,,,1553.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1840,6661.7,6645.9,23.17,1.126,,,2.07e-04,,,,,,,1501.0,175.0,design 0 vs_heur 1.126
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1840,6637.9,6602.2,23.25,1.13,,,2.07e-04,,,,,,,1511.0,175.0,design 1 vs_heur 1.130
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1840,6867.0,6825.0,22.48,1.092,,,2.07e-04,,,,,,,1583.0,174.0,design 2 vs_heur 1.092
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1840,6753.3,6707.9,22.86,1.11,,,2.07e-04,,,,,,,1661.0,174.0,design 3 vs_heur 1.110
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1900,7591.8,7314.2,20.99,1.0,,,2.07e-04,,,,,,,1547.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1900,6698.4,6689.8,23.79,1.133,,,2.07e-04,,,,,,,1493.0,175.0,design 0 vs_heur 1.133
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1900,6638.7,6601.4,24.01,1.144,,,2.07e-04,,,,,,,1514.0,174.0,design 1 vs_heur 1.144
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1900,6898.2,6841.3,23.11,1.101,,,2.07e-04,,,,,,,1582.0,174.0,design 2 vs_heur 1.101
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1900,6781.6,6732.4,23.5,1.119,,,2.07e-04,,,,,,,1662.5,174.0,design 3 vs_heur 1.119
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1920,7608.9,7369.2,21.17,1.0,,,2.07e-04,,,,,,,1542.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1920,6706.7,6688.4,24.02,1.135,,,2.07e-04,,,,,,,1491.0,175.0,design 0 vs_heur 1.135
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1920,6645.3,6628.5,24.24,1.145,,,2.07e-04,,,,,,,1510.5,174.0,design 1 vs_heur 1.145
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1920,6893.7,6841.5,23.36,1.104,,,2.07e-04,,,,,,,1583.0,174.0,design 2 vs_heur 1.104
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1920,6766.9,6694.9,23.8,1.124,,,2.07e-04,,,,,,,1663.0,174.0,design 3 vs_heur 1.124
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,1970,7989.0,7544.8,20.69,1.0,,,2.07e-04,,,,,,,1561.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1970,7095.8,7080.6,23.29,1.126,,,2.07e-04,,,,,,,1501.0,175.0,design 0 vs_heur 1.126
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1970,7028.4,6998.1,23.51,1.137,,,2.07e-04,,,,,,,1500.0,175.0,design 1 vs_heur 1.137
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,1970,7316.5,7265.1,22.59,1.092,,,2.07e-04,,,,,,,1576.5,174.0,design 2 vs_heur 1.092
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,1970,6757.5,6679.9,24.46,1.182,,,2.07e-04,,,,,,,1663.0,174.0,design 3 vs_heur 1.182
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,2046,8047.1,7705.1,21.33,0.915,,,2.07e-04,,,,,,,1542.0,175.0,
+slotB1,rocblas_tuned,tunableop,in_proj_qkvz,8192,5120,2046,7361.9,7329.3,23.31,1.0,,,2.07e-04,,,,,,,1600.0,174.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,2046,7109.3,6919.6,24.14,1.036,,,2.07e-04,,,,,,,1489.0,175.0,design 0 vs_heur 1.132
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,2046,7064.1,6860.2,24.3,1.042,,,2.07e-04,,,,,,,1488.0,175.0,design 1 vs_heur 1.139
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,2046,7312.0,7275.7,23.47,1.007,,,2.07e-04,,,,,,,1565.5,174.0,design 2 vs_heur 1.101
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,2046,6791.1,6734.4,25.27,1.084,,,2.07e-04,,,,,,,1654.0,174.0,design 3 vs_heur 1.185
+slotB1,rocblas_heur,default,in_proj_qkvz,8192,5120,2048,8042.6,7579.0,21.36,0.913,,,2.07e-04,,,,,,,1528.0,175.0,
+slotB1,rocblas_tuned,tunableop,in_proj_qkvz,8192,5120,2048,7345.8,7153.6,23.39,1.0,,,2.07e-04,,,,,,,1596.0,174.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,2048,7108.6,7090.7,24.17,1.033,,,2.07e-04,,,,,,,1490.0,175.0,design 0 vs_heur 1.131
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,2048,7065.5,7034.9,24.32,1.04,,,2.07e-04,,,,,,,1488.0,175.0,design 1 vs_heur 1.138
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,in_proj_qkvz,8192,5120,2048,7325.6,7280.9,23.45,1.003,,,2.07e-04,,,,,,,1566.0,174.0,design 2 vs_heur 1.098
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,in_proj_qkvz,8192,5120,2048,6799.8,6758.8,25.27,1.08,,,2.07e-04,,,,,,,1651.0,174.0,design 3 vs_heur 1.183
+slotB1,rocblas_heur,default,out_proj,5120,3072,384,619.2,601.5,19.51,1.0,,,2.07e-04,,,,,,,1756.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,384,636.1,627.8,18.99,0.973,,,2.07e-04,,,,,,,1915.0,174.0,design 0 vs_heur 0.973
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,384,636.1,628.7,18.99,0.973,,,2.07e-04,,,,,,,1915.0,174.0,design 1 vs_heur 0.973
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,384,570.1,569.7,21.19,1.086,,,2.07e-04,,,,,,,1743.0,176.0,design 2 vs_heur 1.086
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,384,787.7,778.5,15.34,0.786,,,2.07e-04,,,,,,,1927.5,174.0,design 3 vs_heur 0.786
+slotB1,rocblas_heur,default,out_proj,5120,3072,448,810.6,790.2,17.39,1.0,,,2.07e-04,,,,,,,1792.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,448,728.7,727.7,19.34,1.112,,,2.07e-04,,,,,,,1780.0,175.0,design 0 vs_heur 1.112
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,448,729.5,727.1,19.32,1.111,,,2.07e-04,,,,,,,1777.0,174.0,design 1 vs_heur 1.111
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,448,706.5,703.0,19.95,1.147,,,2.07e-04,,,,,,,1698.0,176.0,design 2 vs_heur 1.147
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,448,787.0,775.4,17.91,1.03,,,2.07e-04,,,,,,,1911.0,174.0,design 3 vs_heur 1.030
+slotB1,rocblas_heur,default,out_proj,5120,3072,512,850.9,832.3,18.93,0.969,,,2.07e-04,,,,,,,1793.0,174.0,
+slotB1,rocblas_tuned,tunableop,out_proj,5120,3072,512,824.4,813.8,19.54,1.0,,,2.07e-04,,,,,,,1760.0,175.0,Gemm_Rocblas_-1086326045
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,512,749.8,747.2,21.48,1.1,,,2.07e-04,,,,,,,1796.0,174.0,design 0 vs_heur 1.135
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,512,751.0,747.3,21.45,1.098,,,2.07e-04,,,,,,,1794.0,174.0,design 1 vs_heur 1.133
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,512,713.5,711.1,22.57,1.155,,,2.07e-04,,,,,,,1693.0,176.0,design 2 vs_heur 1.193
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,512,797.8,784.9,20.19,1.033,,,2.07e-04,,,,,,,1915.0,174.0,design 3 vs_heur 1.067
+slotB1,rocblas_heur,default,out_proj,5120,3072,576,930.7,902.7,19.47,1.0,,,2.07e-04,,,,,,,1685.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,576,991.4,984.1,18.28,0.939,,,2.07e-04,,,,,,,1862.0,174.0,design 0 vs_heur 0.939
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,576,970.6,958.9,18.67,0.959,,,2.07e-04,,,,,,,1853.0,174.0,design 1 vs_heur 0.959
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,576,901.4,900.4,20.1,1.032,,,2.07e-04,,,,,,,1698.5,175.0,design 2 vs_heur 1.032
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,576,1046.3,1038.8,17.32,0.889,,,2.07e-04,,,,,,,1799.0,174.0,design 3 vs_heur 0.889
+slotB1,rocblas_heur,default,out_proj,5120,3072,640,965.1,939.8,20.86,1.0,,,2.07e-04,,,,,,,1664.5,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,640,1038.5,1030.6,19.39,0.929,,,2.07e-04,,,,,,,1902.0,174.0,design 0 vs_heur 0.929
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,640,974.2,967.7,20.66,0.991,,,2.07e-04,,,,,,,1847.0,175.0,design 1 vs_heur 0.991
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,640,905.1,901.1,22.24,1.066,,,2.07e-04,,,,,,,1695.0,175.0,design 2 vs_heur 1.066
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,640,1060.6,1053.1,18.98,0.91,,,2.07e-04,,,,,,,1802.0,174.0,design 3 vs_heur 0.910
+slotB1,rocblas_heur,default,out_proj,5120,3072,700,1130.9,1098.1,19.47,1.0,,,2.07e-04,,,,,,,1707.0,175.0,
+slotB1,rocblas_tuned,tunableop,out_proj,5120,3072,700,1131.2,1126.3,19.47,1.0,,,2.07e-04,,,,,,,1709.0,175.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,700,1079.6,1073.2,20.4,1.048,,,2.07e-04,,,,,,,1748.0,174.0,design 0 vs_heur 1.048
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,700,1108.0,1104.4,19.87,1.021,,,2.07e-04,,,,,,,1783.0,174.0,design 1 vs_heur 1.021
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,700,1058.6,1055.9,20.8,1.068,,,2.07e-04,,,,,,,1688.0,175.0,design 2 vs_heur 1.068
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,700,1088.6,1078.8,20.23,1.039,,,2.07e-04,,,,,,,1828.0,174.0,design 3 vs_heur 1.039
+slotB1,rocblas_heur,default,out_proj,5120,3072,768,1150.7,1112.5,20.99,1.0,,,2.07e-04,,,,,,,1690.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,768,1124.0,1117.7,21.49,1.024,,,2.07e-04,,,,,,,1799.0,174.0,design 0 vs_heur 1.024
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,768,1108.1,1103.7,21.8,1.039,,,2.07e-04,,,,,,,1781.0,174.0,design 1 vs_heur 1.039
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,768,1063.1,1060.4,22.72,1.082,,,2.07e-04,,,,,,,1683.5,176.0,design 2 vs_heur 1.082
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,768,1133.0,1120.9,21.32,1.016,,,2.07e-04,,,,,,,1855.0,174.0,design 3 vs_heur 1.016
+slotB1,rocblas_heur,default,out_proj,5120,3072,832,1322.6,1293.4,19.79,1.0,,,2.07e-04,,,,,,,1684.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,832,1241.2,1239.1,21.09,1.066,,,2.07e-04,,,,,,,1727.0,174.0,design 0 vs_heur 1.066
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,832,1243.4,1240.7,21.05,1.064,,,2.07e-04,,,,,,,1746.0,174.0,design 1 vs_heur 1.064
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,832,1223.4,1222.0,21.39,1.081,,,2.07e-04,,,,,,,1659.0,175.0,design 2 vs_heur 1.081
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,832,1345.7,1333.1,19.45,0.983,,,2.07e-04,,,,,,,1750.0,174.0,design 3 vs_heur 0.983
+slotB1,rocblas_heur,default,out_proj,5120,3072,896,1357.9,1339.0,20.76,1.0,,,2.07e-04,,,,,,,1650.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,896,1280.0,1276.9,22.02,1.061,,,2.07e-04,,,,,,,1757.0,174.0,design 0 vs_heur 1.061
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,896,1248.6,1243.5,22.57,1.088,,,2.07e-04,,,,,,,1743.0,174.0,design 1 vs_heur 1.088
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,896,1232.0,1230.9,22.88,1.102,,,2.07e-04,,,,,,,1653.0,175.0,design 2 vs_heur 1.102
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,896,1359.5,1342.9,20.73,0.999,,,2.07e-04,,,,,,,1750.0,174.0,design 3 vs_heur 0.999
+slotB1,rocblas_heur,default,out_proj,5120,3072,960,1519.1,1469.2,19.88,1.0,,,2.07e-04,,,,,,,1679.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,960,1350.5,1349.0,22.36,1.125,,,2.07e-04,,,,,,,1675.5,175.0,design 0 vs_heur 1.125
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,960,1389.1,1379.0,21.74,1.094,,,2.07e-04,,,,,,,1701.0,174.0,design 1 vs_heur 1.094
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,960,1395.2,1392.7,21.65,1.089,,,2.07e-04,,,,,,,1630.0,175.0,design 2 vs_heur 1.089
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,960,1372.7,1353.3,22.0,1.107,,,2.07e-04,,,,,,,1746.0,174.0,design 3 vs_heur 1.107
+slotB1,rocblas_heur,default,out_proj,5120,3072,1023,1551.2,1533.5,20.75,1.0,,,2.07e-04,,,,,,,1677.5,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1023,1372.0,1362.1,23.46,1.131,,,2.07e-04,,,,,,,1689.0,175.0,design 0 vs_heur 1.131
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1023,1402.1,1397.5,22.95,1.106,,,2.07e-04,,,,,,,1704.5,174.0,design 1 vs_heur 1.106
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1023,1389.9,1388.4,23.15,1.116,,,2.07e-04,,,,,,,1657.0,175.0,design 2 vs_heur 1.116
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1023,1385.4,1362.3,23.23,1.12,,,2.07e-04,,,,,,,1746.0,174.0,design 3 vs_heur 1.120
+slotB1,rocblas_heur,default,out_proj,5120,3072,1024,1544.5,1510.2,20.86,0.927,,,2.07e-04,,,,,,,1675.0,175.0,
+slotB1,rocblas_tuned,tunableop,out_proj,5120,3072,1024,1432.5,1430.4,22.49,1.0,,,2.07e-04,,,,,,,1690.0,174.0,Gemm_Rocblas_-1086326079
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1024,1373.2,1363.5,23.46,1.043,,,2.07e-04,,,,,,,1699.0,175.0,design 0 vs_heur 1.125
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1024,1402.1,1395.3,22.97,1.022,,,2.07e-04,,,,,,,1707.5,174.0,design 1 vs_heur 1.102
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1024,1389.2,1387.3,23.19,1.031,,,2.07e-04,,,,,,,1657.0,175.0,design 2 vs_heur 1.112
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1024,1384.9,1361.6,23.26,1.034,,,2.07e-04,,,,,,,1747.0,174.0,design 3 vs_heur 1.115
+slotB1,rocblas_heur,default,out_proj,5120,3072,1031,1689.8,1635.8,19.19,1.0,,,2.07e-04,,,,,,,1683.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1031,1474.1,1469.3,22.0,1.146,,,2.07e-04,,,,,,,1698.0,175.0,design 0 vs_heur 1.146
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1031,1501.8,1497.1,21.6,1.125,,,2.07e-04,,,,,,,1715.0,174.0,design 1 vs_heur 1.125
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1031,1500.2,1496.5,21.62,1.126,,,2.07e-04,,,,,,,1680.0,175.0,design 2 vs_heur 1.126
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1031,1489.9,1479.9,21.77,1.134,,,2.07e-04,,,,,,,1766.0,174.0,design 3 vs_heur 1.134
+slotB1,rocblas_heur,default,out_proj,5120,3072,1045,1695.6,1657.9,19.39,1.0,,,2.07e-04,,,,,,,1681.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1045,1510.3,1503.5,21.77,1.123,,,2.07e-04,,,,,,,1672.0,175.0,design 0 vs_heur 1.123
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1045,1542.2,1533.9,21.32,1.1,,,2.07e-04,,,,,,,1679.0,174.0,design 1 vs_heur 1.100
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1045,1555.5,1551.1,21.13,1.09,,,2.07e-04,,,,,,,1632.0,175.0,design 2 vs_heur 1.090
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1045,1642.3,1621.2,20.02,1.032,,,2.07e-04,,,,,,,1757.0,174.0,design 3 vs_heur 1.032
+slotB1,rocblas_heur,default,out_proj,5120,3072,1100,1713.2,1655.9,20.2,1.0,,,2.07e-04,,,,,,,1657.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1100,1516.8,1512.7,22.81,1.13,,,2.07e-04,,,,,,,1666.0,175.0,design 0 vs_heur 1.130
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1100,1549.1,1544.0,22.34,1.106,,,2.07e-04,,,,,,,1680.0,174.0,design 1 vs_heur 1.106
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1100,1560.9,1556.0,22.17,1.098,,,2.07e-04,,,,,,,1634.5,175.0,design 2 vs_heur 1.098
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1100,1685.8,1666.7,20.53,1.016,,,2.07e-04,,,,,,,1724.0,174.0,design 3 vs_heur 1.016
+slotB1,rocblas_heur,default,out_proj,5120,3072,1152,1736.6,1702.5,20.87,1.0,,,2.07e-04,,,,,,,1635.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1152,1521.8,1513.1,23.81,1.141,,,2.07e-04,,,,,,,1654.0,174.0,design 0 vs_heur 1.141
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1152,1551.3,1543.4,23.36,1.119,,,2.07e-04,,,,,,,1679.0,174.0,design 1 vs_heur 1.119
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1152,1562.5,1560.1,23.19,1.111,,,2.07e-04,,,,,,,1630.0,175.0,design 2 vs_heur 1.111
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1152,1684.6,1662.7,21.51,1.031,,,2.07e-04,,,,,,,1719.0,174.0,design 3 vs_heur 1.031
+slotB1,rocblas_heur,default,out_proj,5120,3072,1160,1863.8,1834.6,19.58,1.0,,,2.07e-04,,,,,,,1667.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1160,1667.1,1663.1,21.89,1.118,,,2.07e-04,,,,,,,1716.0,174.0,design 0 vs_heur 1.118
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1160,1648.8,1645.4,22.13,1.13,,,2.07e-04,,,,,,,1713.0,174.0,design 1 vs_heur 1.130
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1160,1687.6,1685.5,21.62,1.104,,,2.07e-04,,,,,,,1686.0,175.0,design 2 vs_heur 1.104
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1160,1673.7,1668.3,21.8,1.114,,,2.07e-04,,,,,,,1715.0,174.0,design 3 vs_heur 1.114
+slotB1,rocblas_heur,default,out_proj,5120,3072,1230,1874.6,1814.9,20.64,1.0,,,2.07e-04,,,,,,,1612.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1230,1713.9,1708.9,22.58,1.094,,,2.07e-04,,,,,,,1690.0,174.0,design 0 vs_heur 1.094
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1230,1689.8,1677.1,22.9,1.109,,,2.07e-04,,,,,,,1674.0,174.0,design 1 vs_heur 1.109
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1230,1738.3,1735.8,22.26,1.078,,,2.07e-04,,,,,,,1646.0,175.0,design 2 vs_heur 1.078
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1230,1683.8,1673.1,22.98,1.113,,,2.07e-04,,,,,,,1719.0,174.0,design 3 vs_heur 1.113
+slotB1,rocblas_heur,default,out_proj,5120,3072,1280,1891.1,1823.8,21.29,1.0,,,2.07e-04,,,,,,,1590.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1280,1718.7,1707.9,23.43,1.1,,,2.07e-04,,,,,,,1690.5,174.0,design 0 vs_heur 1.100
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1280,1689.6,1685.2,23.83,1.119,,,2.07e-04,,,,,,,1676.0,174.0,design 1 vs_heur 1.119
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1280,1737.6,1736.1,23.17,1.088,,,2.07e-04,,,,,,,1646.0,175.0,design 2 vs_heur 1.088
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1280,1683.9,1675.9,23.91,1.123,,,2.07e-04,,,,,,,1720.0,174.0,design 3 vs_heur 1.123
+slotB1,rocblas_heur,default,out_proj,5120,3072,1300,2032.2,1983.1,20.12,1.0,,,2.07e-04,,,,,,,1607.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1300,1861.0,1850.4,21.97,1.092,,,2.07e-04,,,,,,,1680.0,174.0,design 0 vs_heur 1.092
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1300,1828.8,1822.9,22.36,1.111,,,2.07e-04,,,,,,,1656.0,175.0,design 1 vs_heur 1.111
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1300,1899.5,1894.2,21.53,1.07,,,2.07e-04,,,,,,,1630.0,175.0,design 2 vs_heur 1.070
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1300,1908.2,1893.1,21.43,1.065,,,2.07e-04,,,,,,,1742.0,174.0,design 3 vs_heur 1.065
+slotB1,rocblas_heur,default,out_proj,5120,3072,1370,2069.0,2027.3,20.83,1.0,,,2.07e-04,,,,,,,1585.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1370,1863.1,1843.9,23.13,1.111,,,2.07e-04,,,,,,,1678.0,174.0,design 0 vs_heur 1.111
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1370,1842.0,1837.2,23.4,1.123,,,2.07e-04,,,,,,,1654.0,174.0,design 1 vs_heur 1.123
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1370,1913.0,1908.2,22.53,1.082,,,2.07e-04,,,,,,,1627.0,175.0,design 2 vs_heur 1.082
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1370,1970.7,1960.5,21.87,1.05,,,2.07e-04,,,,,,,1702.0,174.0,design 3 vs_heur 1.050
+slotB1,rocblas_heur,default,out_proj,5120,3072,1408,2077.4,2011.4,21.32,1.0,,,2.07e-04,,,,,,,1563.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1408,1873.7,1861.9,23.64,1.109,,,2.07e-04,,,,,,,1675.0,174.0,design 0 vs_heur 1.109
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1408,1842.1,1835.4,24.04,1.128,,,2.07e-04,,,,,,,1645.0,175.0,design 1 vs_heur 1.128
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1408,1917.4,1909.9,23.1,1.083,,,2.07e-04,,,,,,,1618.5,175.0,design 2 vs_heur 1.083
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1408,1967.1,1958.7,22.52,1.056,,,2.07e-04,,,,,,,1693.0,174.0,design 3 vs_heur 1.056
+slotB1,rocblas_heur,default,out_proj,5120,3072,1440,2228.7,2190.1,20.32,1.0,,,2.07e-04,,,,,,,1586.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1440,2005.0,1996.8,22.59,1.112,,,2.07e-04,,,,,,,1662.0,174.0,design 0 vs_heur 1.112
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1440,1988.1,1981.6,22.78,1.121,,,2.07e-04,,,,,,,1631.0,175.0,design 1 vs_heur 1.121
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1440,2071.6,2066.6,21.87,1.076,,,2.07e-04,,,,,,,1609.0,175.0,design 2 vs_heur 1.076
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1440,1966.2,1956.7,23.04,1.134,,,2.07e-04,,,,,,,1696.0,174.0,design 3 vs_heur 1.134
+slotB1,rocblas_heur,default,out_proj,5120,3072,1500,2269.7,2190.7,20.79,0.997,,,2.07e-04,,,,,,,1572.0,174.0,
+slotB1,rocblas_tuned,tunableop,out_proj,5120,3072,1500,2263.3,2251.7,20.85,1.0,,,2.07e-04,,,,,,,1572.0,175.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1500,2020.0,2011.2,23.36,1.12,,,2.07e-04,,,,,,,1655.0,174.0,design 0 vs_heur 1.124
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1500,1995.8,1990.6,23.64,1.134,,,2.07e-04,,,,,,,1627.0,174.0,design 1 vs_heur 1.137
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1500,2088.9,2077.5,22.59,1.083,,,2.07e-04,,,,,,,1608.0,175.0,design 2 vs_heur 1.087
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1500,1983.1,1973.4,23.79,1.141,,,2.07e-04,,,,,,,1698.0,174.0,design 3 vs_heur 1.144
+slotB1,rocblas_heur,default,out_proj,5120,3072,1536,2269.5,2198.4,21.29,1.0,,,2.07e-04,,,,,,,1553.5,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1536,2024.7,2013.7,23.86,1.121,,,2.07e-04,,,,,,,1651.5,174.0,design 0 vs_heur 1.121
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1536,1999.9,1996.7,24.16,1.135,,,2.07e-04,,,,,,,1631.0,175.0,design 1 vs_heur 1.135
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1536,2093.1,2082.3,23.08,1.084,,,2.07e-04,,,,,,,1606.0,175.0,design 2 vs_heur 1.084
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1536,1987.2,1973.7,24.31,1.142,,,2.07e-04,,,,,,,1699.5,174.0,design 3 vs_heur 1.142
+slotB1,rocblas_heur,default,out_proj,5120,3072,1570,2414.1,2349.9,20.46,1.0,,,2.07e-04,,,,,,,1567.5,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1570,2169.1,2163.4,22.77,1.113,,,2.07e-04,,,,,,,1631.5,174.0,design 0 vs_heur 1.113
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1570,2162.0,2152.9,22.84,1.117,,,2.07e-04,,,,,,,1595.0,175.0,design 1 vs_heur 1.117
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1570,2260.1,2245.7,21.85,1.068,,,2.07e-04,,,,,,,1590.0,175.0,design 2 vs_heur 1.068
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1570,2258.2,2215.5,21.87,1.069,,,2.07e-04,,,,,,,1679.0,174.0,design 3 vs_heur 1.069
+slotB1,rocblas_heur,default,out_proj,5120,3072,1640,2583.6,2537.8,19.97,1.0,,,2.07e-04,,,,,,,1802.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1640,2167.3,2165.2,23.8,1.192,,,2.07e-04,,,,,,,1624.0,175.0,design 0 vs_heur 1.192
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1640,2171.4,2166.5,23.76,1.19,,,2.07e-04,,,,,,,1596.0,174.0,design 1 vs_heur 1.190
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1640,2260.2,2248.8,22.83,1.143,,,2.07e-04,,,,,,,1593.0,175.0,design 2 vs_heur 1.143
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1640,2262.1,2244.1,22.81,1.142,,,2.07e-04,,,,,,,1679.0,174.0,design 3 vs_heur 1.142
+slotB1,rocblas_heur,default,out_proj,5120,3072,1664,2590.5,2572.4,20.21,1.0,,,2.07e-04,,,,,,,1799.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1664,2171.2,2166.9,24.11,1.193,,,2.07e-04,,,,,,,1625.0,175.0,design 0 vs_heur 1.193
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1664,2176.3,2167.4,24.05,1.19,,,2.07e-04,,,,,,,1594.0,175.0,design 1 vs_heur 1.190
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1664,2260.2,2248.6,23.16,1.146,,,2.07e-04,,,,,,,1594.0,175.0,design 2 vs_heur 1.146
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1664,2260.8,2245.8,23.15,1.146,,,2.07e-04,,,,,,,1680.0,174.0,design 3 vs_heur 1.146
+slotB1,rocblas_heur,default,out_proj,5120,3072,1700,2607.4,2561.5,20.51,1.0,,,2.07e-04,,,,,,,1792.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1700,2325.6,2321.3,22.99,1.121,,,2.07e-04,,,,,,,1624.0,175.0,design 0 vs_heur 1.121
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1700,2329.4,2324.5,22.96,1.119,,,2.07e-04,,,,,,,1642.0,174.0,design 1 vs_heur 1.119
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1700,2418.6,2417.7,22.11,1.078,,,2.07e-04,,,,,,,1619.0,175.0,design 2 vs_heur 1.078
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1700,2262.3,2250.3,23.64,1.153,,,2.07e-04,,,,,,,1677.0,174.0,design 3 vs_heur 1.153
+slotB1,rocblas_heur,default,out_proj,5120,3072,1770,2653.9,2621.5,20.98,1.0,,,2.07e-04,,,,,,,1798.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1770,2339.7,2333.9,23.8,1.134,,,2.07e-04,,,,,,,1614.0,175.0,design 0 vs_heur 1.134
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1770,2344.6,2336.5,23.75,1.132,,,2.07e-04,,,,,,,1641.0,174.0,design 1 vs_heur 1.132
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1770,2432.1,2426.9,22.89,1.091,,,2.07e-04,,,,,,,1619.5,175.0,design 2 vs_heur 1.091
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1770,2279.8,2270.8,24.42,1.164,,,2.07e-04,,,,,,,1676.0,174.0,design 3 vs_heur 1.164
+slotB1,rocblas_heur,default,out_proj,5120,3072,1792,2657.9,2620.2,21.21,1.0,,,2.07e-04,,,,,,,1792.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1792,2344.8,2336.7,24.04,1.134,,,2.07e-04,,,,,,,1610.0,175.0,design 0 vs_heur 1.134
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1792,2349.4,2344.9,23.99,1.131,,,2.07e-04,,,,,,,1640.0,174.0,design 1 vs_heur 1.131
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1792,2435.4,2429.3,23.15,1.091,,,2.07e-04,,,,,,,1617.5,175.0,design 2 vs_heur 1.091
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1792,2282.5,2271.0,24.7,1.164,,,2.07e-04,,,,,,,1676.0,174.0,design 3 vs_heur 1.164
+slotB1,rocblas_heur,default,out_proj,5120,3072,1840,2901.6,2812.2,19.95,1.0,,,2.07e-04,,,,,,,1788.5,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1840,2498.6,2493.3,23.17,1.161,,,2.07e-04,,,,,,,1595.0,175.0,design 0 vs_heur 1.161
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1840,2497.5,2493.2,23.18,1.162,,,2.07e-04,,,,,,,1624.0,174.0,design 1 vs_heur 1.162
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1840,2596.4,2591.8,22.29,1.118,,,2.07e-04,,,,,,,1610.0,175.0,design 2 vs_heur 1.118
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1840,2558.6,2552.2,22.62,1.134,,,2.07e-04,,,,,,,1662.0,174.0,design 3 vs_heur 1.134
+slotB1,rocblas_heur,default,out_proj,5120,3072,1900,2919.4,2829.7,20.47,1.0,,,2.07e-04,,,,,,,1782.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1900,2514.1,2509.5,23.77,1.161,,,2.07e-04,,,,,,,1589.0,175.0,design 0 vs_heur 1.161
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1900,2511.7,2452.6,23.8,1.162,,,2.07e-04,,,,,,,1619.0,174.0,design 1 vs_heur 1.162
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1900,2608.5,2573.9,22.91,1.119,,,2.07e-04,,,,,,,1605.0,175.0,design 2 vs_heur 1.119
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1900,2570.6,2565.7,23.25,1.136,,,2.07e-04,,,,,,,1655.0,174.0,design 3 vs_heur 1.136
+slotB1,rocblas_heur,default,out_proj,5120,3072,1920,2926.5,2816.0,20.64,1.0,,,2.07e-04,,,,,,,1778.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1920,2513.8,2508.1,24.03,1.164,,,2.07e-04,,,,,,,1588.0,175.0,design 0 vs_heur 1.164
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1920,2511.5,2505.5,24.05,1.165,,,2.07e-04,,,,,,,1621.5,174.0,design 1 vs_heur 1.165
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1920,2605.1,2603.4,23.18,1.123,,,2.07e-04,,,,,,,1606.0,175.0,design 2 vs_heur 1.123
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1920,2569.1,2564.6,23.51,1.139,,,2.07e-04,,,,,,,1656.0,174.0,design 3 vs_heur 1.139
+slotB1,rocblas_heur,default,out_proj,5120,3072,1970,2927.9,2860.4,21.17,1.0,,,2.07e-04,,,,,,,1770.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1970,2664.5,2642.6,23.26,1.099,,,2.07e-04,,,,,,,1579.0,175.0,design 0 vs_heur 1.099
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1970,2656.8,2648.9,23.33,1.102,,,2.07e-04,,,,,,,1606.0,174.0,design 1 vs_heur 1.102
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,1970,2749.4,2737.7,22.54,1.065,,,2.07e-04,,,,,,,1611.0,175.0,design 2 vs_heur 1.065
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,1970,2569.4,2564.3,24.12,1.14,,,2.07e-04,,,,,,,1651.0,174.0,design 3 vs_heur 1.140
+slotB1,rocblas_heur,default,out_proj,5120,3072,2046,2956.4,2852.9,21.77,0.932,,,2.07e-04,,,,,,,1762.5,174.0,
+slotB1,rocblas_tuned,tunableop,out_proj,5120,3072,2046,2756.7,2742.9,23.35,1.0,,,2.07e-04,,,,,,,1557.0,175.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,2046,2678.4,2658.7,24.03,1.029,,,2.07e-04,,,,,,,1581.0,174.0,design 0 vs_heur 1.104
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,2046,2660.1,2651.7,24.2,1.036,,,2.07e-04,,,,,,,1605.0,174.0,design 1 vs_heur 1.111
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,2046,2762.2,2744.1,23.3,0.998,,,2.07e-04,,,,,,,1604.0,175.0,design 2 vs_heur 1.070
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,2046,2582.9,2572.0,24.92,1.067,,,2.07e-04,,,,,,,1648.0,174.0,design 3 vs_heur 1.145
+slotB1,rocblas_heur,default,out_proj,5120,3072,2048,2957.2,2933.6,21.79,0.927,,,2.07e-04,,,,,,,1762.0,174.0,
+slotB1,rocblas_tuned,tunableop,out_proj,5120,3072,2048,2739.9,2736.7,23.51,1.0,,,2.07e-04,,,,,,,1550.0,175.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,2048,2686.5,2654.5,23.98,1.02,,,2.07e-04,,,,,,,1579.0,174.0,design 0 vs_heur 1.101
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,2048,2659.0,2649.9,24.23,1.03,,,2.07e-04,,,,,,,1607.0,174.0,design 1 vs_heur 1.112
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,out_proj,5120,3072,2048,2761.0,2742.5,23.33,0.992,,,2.07e-04,,,,,,,1608.0,175.0,design 2 vs_heur 1.071
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,out_proj,5120,3072,2048,2581.1,2568.5,24.96,1.062,,,2.07e-04,,,,,,,1649.0,174.0,design 3 vs_heur 1.146
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,384,1479.7,1458.5,19.05,1.0,,,2.07e-04,,,,,,,1780.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,384,1380.7,1375.8,20.41,1.072,,,2.07e-04,,,,,,,1838.0,174.0,design 0 vs_heur 1.072
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,384,1382.8,1378.0,20.38,1.07,,,2.07e-04,,,,,,,1837.0,174.0,design 1 vs_heur 1.070
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,384,1279.3,1277.3,22.03,1.157,,,2.07e-04,,,,,,,1715.0,176.0,design 2 vs_heur 1.157
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,384,1708.2,1689.9,16.5,0.866,,,2.07e-04,,,,,,,1858.0,174.0,design 3 vs_heur 0.866
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,448,1804.6,1773.2,18.22,1.0,,,2.07e-04,,,,,,,1718.0,174.5,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,448,1625.9,1620.1,20.22,1.11,,,2.07e-04,,,,,,,1714.0,175.0,design 0 vs_heur 1.110
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,448,1636.2,1619.6,20.1,1.103,,,2.07e-04,,,,,,,1712.0,174.0,design 1 vs_heur 1.103
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,448,1635.9,1629.7,20.1,1.103,,,2.07e-04,,,,,,,1675.0,175.0,design 2 vs_heur 1.103
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,448,1709.8,1689.7,19.23,1.055,,,2.07e-04,,,,,,,1849.0,174.0,design 3 vs_heur 1.055
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,512,1875.4,1808.1,20.04,0.998,,,2.07e-04,,,,,,,1706.0,175.0,
+slotB1,rocblas_tuned,tunableop,qkv_proj,7168,5120,512,1872.3,1867.2,20.07,1.0,,,2.07e-04,,,,,,,1703.5,175.0,Default
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,512,1660.6,1651.2,22.63,1.127,,,2.07e-04,,,,,,,1717.0,174.0,design 0 vs_heur 1.129
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,512,1663.8,1651.8,22.59,1.125,,,2.07e-04,,,,,,,1716.0,174.0,design 1 vs_heur 1.127
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,512,1649.6,1642.1,22.78,1.135,,,2.07e-04,,,,,,,1667.0,175.0,design 2 vs_heur 1.137
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,512,1720.1,1697.9,21.85,1.088,,,2.07e-04,,,,,,,1848.0,174.0,design 3 vs_heur 1.090
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,576,2240.1,2178.8,18.87,1.0,,,2.07e-04,,,,,,,1683.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,576,2043.5,2035.0,20.69,1.096,,,2.07e-04,,,,,,,1706.0,174.0,design 0 vs_heur 1.096
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,576,2020.6,2004.4,20.92,1.109,,,2.07e-04,,,,,,,1685.0,175.0,design 1 vs_heur 1.109
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,576,2031.6,2028.9,20.81,1.103,,,2.07e-04,,,,,,,1650.5,175.0,design 2 vs_heur 1.103
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,576,2288.1,2262.5,18.48,0.979,,,2.07e-04,,,,,,,1712.0,174.0,design 3 vs_heur 0.979
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,640,2300.1,2239.1,20.42,1.0,,,2.07e-04,,,,,,,1652.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,640,2099.9,2089.7,22.37,1.095,,,2.07e-04,,,,,,,1715.0,174.0,design 0 vs_heur 1.095
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,640,2031.2,2014.9,23.13,1.132,,,2.07e-04,,,,,,,1681.0,175.0,design 1 vs_heur 1.132
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,640,2043.5,2040.6,22.99,1.126,,,2.07e-04,,,,,,,1645.0,175.0,design 2 vs_heur 1.126
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,640,2313.4,2281.5,20.31,0.994,,,2.07e-04,,,,,,,1708.0,174.0,design 3 vs_heur 0.994
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,700,2661.2,2645.7,19.31,0.912,,,2.07e-04,,,,,,,1667.0,175.0,
+slotB1,rocblas_tuned,tunableop,qkv_proj,7168,5120,700,2427.4,2421.6,21.17,1.0,,,2.07e-04,,,,,,,1680.0,174.0,Gemm_Rocblas_-1086326063
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,700,2377.7,2372.5,21.61,1.021,,,2.07e-04,,,,,,,1662.0,174.0,design 0 vs_heur 1.119
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,700,2368.0,2362.5,21.7,1.025,,,2.07e-04,,,,,,,1638.5,175.0,design 1 vs_heur 1.124
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,700,2440.8,2422.1,21.05,0.995,,,2.07e-04,,,,,,,1622.5,175.0,design 2 vs_heur 1.090
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,700,2337.7,2311.6,21.98,1.038,,,2.07e-04,,,,,,,1712.0,174.0,design 3 vs_heur 1.138
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,768,2755.1,2688.9,20.46,1.0,,,2.07e-04,,,,,,,1658.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,768,2385.8,2373.7,23.63,1.155,,,2.07e-04,,,,,,,1645.0,174.0,design 0 vs_heur 1.155
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,768,2389.3,2382.8,23.59,1.153,,,2.07e-04,,,,,,,1626.0,175.0,design 1 vs_heur 1.153
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,768,2449.6,2428.2,23.01,1.125,,,2.07e-04,,,,,,,1606.0,175.0,design 2 vs_heur 1.125
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,768,2424.3,2397.9,23.25,1.136,,,2.07e-04,,,,,,,1746.0,174.0,design 3 vs_heur 1.136
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,832,3124.1,3000.7,19.55,1.0,,,2.07e-04,,,,,,,1658.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,832,2759.3,2744.0,22.13,1.132,,,2.07e-04,,,,,,,1598.5,175.0,design 0 vs_heur 1.132
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,832,2773.1,2765.1,22.02,1.127,,,2.07e-04,,,,,,,1597.0,174.0,design 1 vs_heur 1.127
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,832,2821.7,2812.5,21.64,1.107,,,2.07e-04,,,,,,,1603.0,175.0,design 2 vs_heur 1.107
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,832,3098.3,3044.9,19.71,1.008,,,2.07e-04,,,,,,,1731.0,174.0,design 3 vs_heur 1.008
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,896,3371.3,3281.5,19.51,1.0,,,2.07e-04,,,,,,,1773.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,896,2800.4,2784.2,23.48,1.204,,,2.07e-04,,,,,,,1617.0,175.0,design 0 vs_heur 1.204
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,896,2786.6,2770.4,23.6,1.21,,,2.07e-04,,,,,,,1592.5,175.0,design 1 vs_heur 1.210
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,896,2851.7,2825.4,23.06,1.182,,,2.07e-04,,,,,,,1588.0,175.0,design 2 vs_heur 1.182
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,896,3118.2,3070.7,21.09,1.081,,,2.07e-04,,,,,,,1724.0,174.0,design 3 vs_heur 1.081
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,960,3417.5,3284.9,20.62,1.0,,,2.07e-04,,,,,,,1763.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,960,3134.7,3114.0,22.48,1.09,,,2.07e-04,,,,,,,1607.0,175.0,design 0 vs_heur 1.090
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,960,3132.6,3121.3,22.49,1.091,,,2.07e-04,,,,,,,1572.0,175.0,design 1 vs_heur 1.091
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,960,3235.7,3176.7,21.78,1.056,,,2.07e-04,,,,,,,1581.0,175.0,design 2 vs_heur 1.056
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,960,3126.4,3076.1,22.54,1.093,,,2.07e-04,,,,,,,1719.5,174.0,design 3 vs_heur 1.093
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1023,3515.9,3413.1,21.36,0.939,,,2.07e-04,,,,,,,1767.5,174.0,
+slotB1,rocblas_tuned,tunableop,qkv_proj,7168,5120,1023,3303.2,3282.1,22.73,1.0,,,2.07e-04,,,,,,,1683.0,175.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1023,3114.9,3102.1,24.11,1.06,,,2.07e-04,,,,,,,1600.0,175.0,design 0 vs_heur 1.129
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1023,3170.6,3143.1,23.68,1.042,,,2.07e-04,,,,,,,1556.0,175.0,design 1 vs_heur 1.109
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1023,3257.7,3185.9,23.05,1.014,,,2.07e-04,,,,,,,1573.0,175.0,design 2 vs_heur 1.079
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1023,3144.3,3093.9,23.88,1.051,,,2.07e-04,,,,,,,1720.5,174.0,design 3 vs_heur 1.118
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1024,3518.4,3503.1,21.36,0.931,,,2.07e-04,,,,,,,1772.0,174.0,
+slotB1,rocblas_tuned,tunableop,qkv_proj,7168,5120,1024,3277.1,3269.8,22.94,1.0,,,2.07e-04,,,,,,,1682.0,175.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1024,3118.9,3105.4,24.1,1.051,,,2.07e-04,,,,,,,1609.0,175.0,design 0 vs_heur 1.128
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1024,3167.2,3140.6,23.73,1.035,,,2.07e-04,,,,,,,1562.0,175.0,design 1 vs_heur 1.111
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1024,3250.6,3182.3,23.12,1.008,,,2.07e-04,,,,,,,1575.0,175.0,design 2 vs_heur 1.082
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1024,3135.6,3094.5,23.97,1.045,,,2.07e-04,,,,,,,1725.0,174.0,design 3 vs_heur 1.122
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1031,4002.4,3937.1,18.91,1.0,,,2.07e-04,,,,,,,1736.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1031,3345.9,3336.4,22.62,1.196,,,2.07e-04,,,,,,,1621.0,175.0,design 0 vs_heur 1.196
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1031,3391.2,3366.8,22.32,1.18,,,2.07e-04,,,,,,,1617.5,175.0,design 1 vs_heur 1.180
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1031,3454.9,3446.2,21.9,1.158,,,2.07e-04,,,,,,,1644.0,174.0,design 2 vs_heur 1.158
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1031,3336.3,3320.5,22.68,1.2,,,2.07e-04,,,,,,,1713.5,174.0,design 3 vs_heur 1.200
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1045,4009.4,3900.6,19.13,1.0,,,2.07e-04,,,,,,,1737.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1045,3471.5,3354.6,22.1,1.155,,,2.07e-04,,,,,,,1554.0,175.0,design 0 vs_heur 1.155
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1045,3562.8,3535.8,21.53,1.125,,,2.07e-04,,,,,,,1540.0,175.0,design 1 vs_heur 1.125
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1045,3623.1,3472.5,21.17,1.107,,,2.07e-04,,,,,,,1578.0,174.0,design 2 vs_heur 1.107
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1045,3633.5,3595.0,21.11,1.103,,,2.07e-04,,,,,,,1691.0,174.0,design 3 vs_heur 1.103
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1100,4095.8,3993.1,19.71,1.0,,,2.07e-04,,,,,,,1732.5,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1100,3482.9,3465.8,23.18,1.176,,,2.07e-04,,,,,,,1547.0,175.0,design 0 vs_heur 1.176
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1100,3587.8,3543.1,22.5,1.142,,,2.07e-04,,,,,,,1544.5,175.0,design 1 vs_heur 1.142
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1100,3639.1,3611.2,22.19,1.125,,,2.07e-04,,,,,,,1576.5,174.0,design 2 vs_heur 1.125
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1100,3756.8,3718.8,21.49,1.09,,,2.07e-04,,,,,,,1649.0,174.0,design 3 vs_heur 1.090
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1152,4159.9,4026.6,20.33,1.0,,,2.07e-04,,,,,,,1727.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1152,3480.3,3449.0,24.3,1.195,,,2.07e-04,,,,,,,1552.0,175.0,design 0 vs_heur 1.195
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1152,3591.8,3543.6,23.54,1.158,,,2.07e-04,,,,,,,1545.0,175.0,design 1 vs_heur 1.158
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1152,3639.4,3610.3,23.23,1.143,,,2.07e-04,,,,,,,1577.0,174.0,design 2 vs_heur 1.143
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1152,3752.3,3705.0,22.53,1.109,,,2.07e-04,,,,,,,1651.0,174.0,design 3 vs_heur 1.109
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1160,4177.2,4083.6,20.38,1.0,,,2.07e-04,,,,,,,1722.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1160,3760.0,3743.0,22.64,1.111,,,2.07e-04,,,,,,,1634.0,175.0,design 0 vs_heur 1.111
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1160,3775.7,3726.3,22.55,1.106,,,2.07e-04,,,,,,,1646.0,174.0,design 1 vs_heur 1.106
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1160,3888.7,3882.9,21.9,1.074,,,2.07e-04,,,,,,,1666.0,174.0,design 2 vs_heur 1.074
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1160,3733.6,3680.1,22.8,1.119,,,2.07e-04,,,,,,,1642.0,175.0,design 3 vs_heur 1.119
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1230,4530.1,4336.1,19.93,1.0,,,2.07e-04,,,,,,,1601.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1230,3940.1,3910.3,22.91,1.15,,,2.07e-04,,,,,,,1570.0,175.0,design 0 vs_heur 1.150
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1230,3923.8,3912.3,23.01,1.155,,,2.07e-04,,,,,,,1574.0,175.0,design 1 vs_heur 1.155
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1230,4054.9,4041.2,22.27,1.117,,,2.07e-04,,,,,,,1600.0,174.0,design 2 vs_heur 1.117
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1230,3764.4,3752.4,23.98,1.203,,,2.07e-04,,,,,,,1627.0,174.0,design 3 vs_heur 1.203
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1280,4583.4,4440.9,20.5,1.0,,,2.07e-04,,,,,,,1591.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1280,3932.2,3779.6,23.89,1.166,,,2.07e-04,,,,,,,1567.0,175.0,design 0 vs_heur 1.166
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1280,3932.1,3917.7,23.89,1.166,,,2.07e-04,,,,,,,1576.5,175.0,design 1 vs_heur 1.166
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1280,4055.3,4032.6,23.17,1.13,,,2.07e-04,,,,,,,1600.0,174.0,design 2 vs_heur 1.130
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1280,3767.3,3748.1,24.94,1.217,,,2.07e-04,,,,,,,1629.0,174.0,design 3 vs_heur 1.217
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1300,4903.8,4766.2,19.46,1.0,,,2.07e-04,,,,,,,1611.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1300,4275.7,4186.8,22.32,1.147,,,2.07e-04,,,,,,,1589.0,174.0,design 0 vs_heur 1.147
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1300,4267.0,4141.6,22.36,1.149,,,2.07e-04,,,,,,,1566.0,175.0,design 1 vs_heur 1.149
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1300,4433.8,4387.9,21.52,1.106,,,2.07e-04,,,,,,,1598.0,174.0,design 2 vs_heur 1.106
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1300,4359.9,4314.1,21.89,1.125,,,2.07e-04,,,,,,,1723.0,174.0,design 3 vs_heur 1.125
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1370,5001.4,4840.1,20.11,1.0,,,2.07e-04,,,,,,,1606.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1370,4333.4,4319.3,23.21,1.154,,,2.07e-04,,,,,,,1577.0,174.5,design 0 vs_heur 1.154
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1370,4290.5,4282.5,23.44,1.166,,,2.07e-04,,,,,,,1560.0,175.0,design 1 vs_heur 1.166
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1370,4463.3,4410.6,22.53,1.121,,,2.07e-04,,,,,,,1598.0,174.0,design 2 vs_heur 1.121
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1370,4519.7,4497.7,22.25,1.107,,,2.07e-04,,,,,,,1681.0,174.0,design 3 vs_heur 1.107
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1408,5042.3,4837.3,20.5,1.0,,,2.07e-04,,,,,,,1599.5,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1408,4331.7,4303.8,23.86,1.164,,,2.07e-04,,,,,,,1575.0,174.0,design 0 vs_heur 1.164
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1408,4299.1,4287.7,24.04,1.173,,,2.07e-04,,,,,,,1559.0,175.0,design 1 vs_heur 1.173
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1408,4467.9,4414.0,23.13,1.129,,,2.07e-04,,,,,,,1597.0,174.0,design 2 vs_heur 1.129
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1408,4528.6,4503.8,22.82,1.113,,,2.07e-04,,,,,,,1680.0,174.0,design 3 vs_heur 1.113
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1440,5374.1,5224.5,19.67,1.0,,,2.07e-04,,,,,,,1593.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1440,4662.4,4642.9,22.67,1.153,,,2.07e-04,,,,,,,1544.0,175.0,design 0 vs_heur 1.153
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1440,4664.9,4646.3,22.66,1.152,,,2.07e-04,,,,,,,1555.0,175.0,design 1 vs_heur 1.152
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1440,4816.4,4794.5,21.95,1.116,,,2.07e-04,,,,,,,1599.0,174.0,design 2 vs_heur 1.116
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1440,4520.1,4503.8,23.38,1.189,,,2.07e-04,,,,,,,1679.0,174.0,design 3 vs_heur 1.189
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1500,5429.2,5300.4,20.28,0.893,,,2.07e-04,,,,,,,1582.0,175.0,
+slotB1,rocblas_tuned,tunableop,qkv_proj,7168,5120,1500,4849.8,4829.8,22.7,1.0,,,2.07e-04,,,,,,,1640.5,174.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1500,4643.2,4630.7,23.71,1.044,,,2.07e-04,,,,,,,1538.0,175.0,design 0 vs_heur 1.169
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1500,4690.0,4659.5,23.48,1.034,,,2.07e-04,,,,,,,1549.0,175.0,design 1 vs_heur 1.158
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1500,4837.1,4804.5,22.76,1.003,,,2.07e-04,,,,,,,1595.0,174.0,design 2 vs_heur 1.122
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1500,4529.2,4505.5,24.31,1.071,,,2.07e-04,,,,,,,1678.0,174.0,design 3 vs_heur 1.199
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1536,5532.7,5345.0,20.38,1.0,,,2.07e-04,,,,,,,1574.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1536,4706.5,4680.8,23.95,1.176,,,2.07e-04,,,,,,,1535.0,175.0,design 0 vs_heur 1.176
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1536,4693.4,4678.0,24.02,1.179,,,2.07e-04,,,,,,,1544.0,175.0,design 1 vs_heur 1.179
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1536,4846.7,4809.9,23.26,1.142,,,2.07e-04,,,,,,,1586.0,174.0,design 2 vs_heur 1.142
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1536,4536.3,4500.4,24.85,1.22,,,2.07e-04,,,,,,,1675.0,174.0,design 3 vs_heur 1.220
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1570,5874.0,5798.4,19.62,1.0,,,2.07e-04,,,,,,,1592.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1570,5067.7,5051.0,22.74,1.159,,,2.07e-04,,,,,,,1546.0,175.0,design 0 vs_heur 1.159
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1570,5053.5,5039.7,22.8,1.162,,,2.07e-04,,,,,,,1527.5,175.0,design 1 vs_heur 1.162
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1570,5242.7,5219.6,21.98,1.12,,,2.07e-04,,,,,,,1580.0,174.0,design 2 vs_heur 1.120
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1570,5167.5,5161.3,22.3,1.137,,,2.07e-04,,,,,,,1609.0,174.0,design 3 vs_heur 1.137
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1640,5775.1,5531.3,20.84,1.0,,,2.07e-04,,,,,,,1543.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1640,5104.4,5085.6,23.58,1.131,,,2.07e-04,,,,,,,1543.0,174.0,design 0 vs_heur 1.131
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1640,5060.1,5041.4,23.79,1.141,,,2.07e-04,,,,,,,1529.0,175.0,design 1 vs_heur 1.141
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1640,5245.6,5217.7,22.95,1.101,,,2.07e-04,,,,,,,1579.0,174.0,design 2 vs_heur 1.101
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1640,5173.7,5160.9,23.27,1.116,,,2.07e-04,,,,,,,1608.0,174.0,design 3 vs_heur 1.116
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1664,5805.2,5594.8,21.04,1.0,,,2.07e-04,,,,,,,1538.0,175.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1664,5114.0,5101.0,23.88,1.135,,,2.07e-04,,,,,,,1539.0,174.0,design 0 vs_heur 1.135
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1664,5070.1,5058.7,24.09,1.145,,,2.07e-04,,,,,,,1524.0,175.0,design 1 vs_heur 1.145
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1664,5256.5,5235.6,23.24,1.104,,,2.07e-04,,,,,,,1577.0,174.0,design 2 vs_heur 1.104
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1664,5185.0,5173.6,23.56,1.12,,,2.07e-04,,,,,,,1605.0,174.0,design 3 vs_heur 1.120
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1700,6127.0,5752.4,20.37,1.0,,,2.07e-04,,,,,,,1564.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1700,5451.6,5435.1,22.89,1.124,,,2.07e-04,,,,,,,1514.0,175.0,design 0 vs_heur 1.124
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1700,5432.0,5406.3,22.97,1.128,,,2.07e-04,,,,,,,1522.0,175.0,design 1 vs_heur 1.128
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1700,5624.2,5607.8,22.19,1.089,,,2.07e-04,,,,,,,1578.0,174.0,design 2 vs_heur 1.089
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1700,5190.9,5180.8,24.04,1.18,,,2.07e-04,,,,,,,1604.0,174.0,design 3 vs_heur 1.180
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1770,6208.4,5822.8,20.93,1.0,,,2.07e-04,,,,,,,1554.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1770,5483.5,5460.2,23.69,1.132,,,2.07e-04,,,,,,,1503.0,175.0,design 0 vs_heur 1.132
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1770,5453.6,5433.1,23.82,1.138,,,2.07e-04,,,,,,,1522.0,175.0,design 1 vs_heur 1.138
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1770,5646.2,5631.0,23.01,1.1,,,2.07e-04,,,,,,,1578.0,174.0,design 2 vs_heur 1.100
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1770,5217.1,5206.6,24.9,1.19,,,2.07e-04,,,,,,,1605.0,174.0,design 3 vs_heur 1.190
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1792,6236.6,5700.2,21.09,1.0,,,2.07e-04,,,,,,,1539.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1792,5481.7,5472.5,23.99,1.138,,,2.07e-04,,,,,,,1509.0,175.0,design 0 vs_heur 1.138
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1792,5451.6,5442.4,24.13,1.144,,,2.07e-04,,,,,,,1520.0,174.5,design 1 vs_heur 1.144
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1792,5639.6,5630.5,23.32,1.106,,,2.07e-04,,,,,,,1575.0,174.0,design 2 vs_heur 1.106
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1792,5211.1,5193.0,25.24,1.197,,,2.07e-04,,,,,,,1599.0,174.0,design 3 vs_heur 1.197
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1840,6579.0,6201.5,20.53,1.0,,,2.07e-04,,,,,,,1560.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1840,5847.3,5833.2,23.1,1.125,,,2.07e-04,,,,,,,1523.0,175.0,design 0 vs_heur 1.125
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1840,5799.7,5782.3,23.29,1.134,,,2.07e-04,,,,,,,1514.0,175.0,design 1 vs_heur 1.134
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1840,6054.5,5913.5,22.31,1.087,,,2.07e-04,,,,,,,1575.0,174.0,design 2 vs_heur 1.087
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1840,5896.0,5884.1,22.91,1.116,,,2.07e-04,,,,,,,1651.0,174.0,design 3 vs_heur 1.116
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1900,6664.7,6202.9,20.93,1.0,,,2.07e-04,,,,,,,1552.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1900,5878.6,5862.4,23.72,1.134,,,2.07e-04,,,,,,,1517.0,175.0,design 0 vs_heur 1.134
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1900,5819.4,5809.7,23.96,1.145,,,2.07e-04,,,,,,,1511.0,175.0,design 1 vs_heur 1.145
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1900,6078.1,5924.8,22.94,1.097,,,2.07e-04,,,,,,,1576.0,174.0,design 2 vs_heur 1.097
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1900,5913.2,5901.1,23.58,1.127,,,2.07e-04,,,,,,,1656.0,174.0,design 3 vs_heur 1.127
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1920,6682.1,6221.1,21.09,1.0,,,2.07e-04,,,,,,,1550.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1920,5874.5,5710.2,23.99,1.137,,,2.07e-04,,,,,,,1520.0,175.0,design 0 vs_heur 1.137
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1920,5822.5,5804.7,24.2,1.148,,,2.07e-04,,,,,,,1511.0,175.0,design 1 vs_heur 1.148
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1920,6083.3,5923.7,23.17,1.098,,,2.07e-04,,,,,,,1579.0,174.0,design 2 vs_heur 1.098
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1920,5905.8,5897.2,23.86,1.131,,,2.07e-04,,,,,,,1657.0,174.0,design 3 vs_heur 1.131
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,1970,7021.9,6690.7,20.59,1.0,,,2.07e-04,,,,,,,1561.0,174.0,
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1970,6224.3,6160.7,23.23,1.128,,,2.07e-04,,,,,,,1495.0,175.0,design 0 vs_heur 1.128
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1970,6246.6,6155.6,23.15,1.124,,,2.07e-04,,,,,,,1502.5,175.0,design 1 vs_heur 1.124
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,1970,6446.7,6317.6,22.43,1.089,,,2.07e-04,,,,,,,1578.0,174.0,design 2 vs_heur 1.089
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,1970,5936.8,5888.7,24.36,1.183,,,2.07e-04,,,,,,,1650.0,174.0,design 3 vs_heur 1.183
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,2046,7035.1,6799.5,21.35,0.928,,,2.07e-04,,,,,,,1545.0,175.0,
+slotB1,rocblas_tuned,tunableop,qkv_proj,7168,5120,2046,6527.6,6480.3,23.01,1.0,,,2.07e-04,,,,,,,1567.0,174.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,2046,6135.2,5883.9,24.48,1.064,,,2.07e-04,,,,,,,1493.0,175.0,design 0 vs_heur 1.147
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,2046,6295.6,6185.9,23.85,1.037,,,2.07e-04,,,,,,,1492.0,175.0,design 1 vs_heur 1.117
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,2046,6475.1,6350.4,23.19,1.008,,,2.07e-04,,,,,,,1570.0,174.0,design 2 vs_heur 1.086
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,2046,6000.7,5916.3,25.03,1.088,,,2.07e-04,,,,,,,1643.0,174.0,design 3 vs_heur 1.172
+slotB1,rocblas_heur,default,qkv_proj,7168,5120,2048,7016.6,6713.0,21.42,0.927,,,2.07e-04,,,,,,,1536.0,175.0,
+slotB1,rocblas_tuned,tunableop,qkv_proj,7168,5120,2048,6503.0,6425.4,23.12,1.0,,,2.07e-04,,,,,,,1558.5,174.0,Gemm_Rocblas_-1086326047
+slotB1,hip,128x128k32t8x16n2p0r8g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,2048,6140.6,6121.8,24.48,1.059,,,2.07e-04,,,,,,,1493.0,175.0,design 0 vs_heur 1.143
+slotB1,hip,128x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,2048,6287.2,6173.5,23.91,1.034,,,2.07e-04,,,,,,,1492.0,175.0,design 1 vs_heur 1.116
+slotB1,hip,128x64k64t8x8n1p8r4g16b0w0s1m0u1l8+skip+buf,qkv_proj,7168,5120,2048,6400.6,6327.4,23.49,1.016,,,2.07e-04,,,,,,,1570.0,174.0,design 2 vs_heur 1.096
+slotB1,hip,256x128k32t8x16n2p0r4g16b0w0s1m0u1l8z+brot+skip+buf,qkv_proj,7168,5120,2048,5975.0,5895.4,25.16,1.088,,,2.07e-04,,,,,,,1641.0,174.0,design 3 vs_heur 1.174

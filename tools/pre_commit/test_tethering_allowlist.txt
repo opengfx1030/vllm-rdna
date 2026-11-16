@@ -77,6 +77,7 @@ tests/tools/rdna/test_pinned_proof.py  # fork-only pinned-host mlock proof helpe
 tests/tools/rdna/test_mlock_pinned_proof.py  # fork-only pinned-host mlock proof driver against stub launchers, CPU unit test; not in CI
 tests/tools/rdna/test_pinned_fdinfo_check.py  # fork-only KFD-buffer-versus-VmLck check of a worker (fake /proc tree), CPU unit test; not in CI
 tests/tools/rdna/test_serve_pci_buses.py  # fork-only PCI_BUSES launcher key and TP8 / TP4xPP2 recipe plans (print mode, stub venv), CPU unit test; not in CI
+tests/tools/rdna/test_serve_replayssm_state_dtype.py  # fork-only REPLAYSSM_STATE_DTYPE launcher key and the retired LeapQuant switch (print mode, stub venv), CPU unit test; not in CI
 tests/tools/rdna/test_spec_acceptance.py  # fork-only speculative acceptance length of a bench cell (fake server log), CPU unit test; not in CI
 tests/tools/rdna/test_hetero_moe.py  # fork-only hetero-MoE expert-stats IO, placement solver, validator and simulator tools, CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_report.py  # fork-only PR receipt logic (cells, ABBA verdicts, summary parsing, gates), CPU unit test; not in CI
@@ -84,6 +85,9 @@ tests/tools/rdna/test_pr_receipt_driver.py  # fork-only pr_receipt.sh driver aga
 tests/tools/rdna/test_archdiff_report.py  # fork-only per-function disassembly diff report (normalization, verdicts), CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_quiet_windows.py  # fork-only serve_validate.sh quiet-window renewal between cells (stub server and venv), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_scan.py  # fork-only added-line scan for host syncs and unchecked launches in a diff (stub trees), CPU unit test; not in CI
+tests/tools/rdna/test_tunable_hi2.py  # fork-only 27B HI2 TunableOp shape formulas and census groups, CPU unit test; not in CI
+tests/tools/rdna/test_hi2_tunableop_profile.py  # fork-only 27B HI2 TP=2 TunableOp profile registry / rows / recipe wiring (print mode, stub venv), CPU unit test; not in CI
+tests/tools/rdna/test_hi2_recipe_defaults.py  # fork-only 27B HI2 recipe switch defaults, opt-outs and MTP delta checked against the serving doc's switch table (print mode, stub venv), CPU unit test; not in CI
 tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py  # fork-only opt-in routing statistics collector (CPU torch, AST zero-cost-off checks), CPU unit test; not in CI
 tests/models/qwen4_exp/test_amd_mono_rdna2_w4a8.py  # fork-only mono next to the W4A8 MoE prefill (meta-tensor layout, dispatch), CPU unit test; not in CI
 tests/models/qwen4_exp/test_hc_ops_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC ops, not in CI
@@ -104,9 +108,54 @@ tests/tools/test_v620_tuning_coverage.py  # fork-only V620 (gfx1030) tuning tabl
 tests/v1/ple_offload/test_exl3_ngram_ring.py  # fork-only exl3 ngram ring decode, CPU unit test; not in CI
 tests/v1/ple_offload/test_ple_quant_gather.py  # fork-only PLE sidecar, skipped on the v0.31 port; not in CI
 tests/tools/test_stall_probe.py  # fork-only stall probe tool, CPU unit test against a fake server; not in CI
+tests/tools/test_concurrency_probe.py  # fork-only concurrency probe tool, CPU unit test against a fake completions server; not in CI
 tests/tools/test_moe_placement.py  # fork-only MoE placement analysis tool, CPU unit test; not in CI
 tests/tools/test_tunableop_missing.py  # fork-only TunableOp missing-shape harness, CPU unit test; not in CI
+tests/tools/test_tunableop_env.py  # fork-only TunableOp helper selection (preferred / opt-in profiles, rows-per-rank log), CPU unit test; not in CI
 tests/tools/test_topk_kl.py  # fork-only top-k KL / agentic bench quality tools, CPU unit test; not in CI
+# pciescope (PCIe fabric monitor for par1-cs25), CPU unit tests under
+# tests/tools/rdna/pciescope/; test files are named test_pciescope_<part>_*.py and
+# every owner adds its lines under its own marker so concurrent pushes do not collide.
+# pciescope core
+tests/tools/rdna/pciescope/test_pciescope_core_cli.py  # pciescope CLI verbs on a captured sysfs, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_collectors.py  # pciescope passive collectors, CPU unit test on a captured sysfs; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_mcp.py  # pciescope MCP tools and stdio round trip, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_model.py  # pciescope data model and link math, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_report.py  # pciescope report and Perfetto export, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_runner.py  # pciescope sampling loop and event detection, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_store.py  # pciescope session store, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_topology.py  # pciescope topology discovery on a captured sysfs, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_core_views.py  # pciescope snapshot tables and invocation environment, CPU unit test; not in CI
+# end pciescope core
+# pciescope plx
+tests/tools/rdna/pciescope/test_pciescope_plx_cli.py  # pciescope plx CLI verbs and fixture format on a captured PEX88096 register file, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_collector.py  # pciescope plx collector metrics, events and gated counters on a captured/fake register file, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_decode.py  # pciescope PEX88096 window decoders vs lspci on a captured register file, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_helper.py  # pciescope plx BAR0 helper read policy and write refusal on a fake resource0, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_interim.py  # pciescope plx on the interim layout (one chip, six V620, uplink port 0): port map, chip registry, policy data, counters, idle gate and leases on a captured/fake register file, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_perf.py  # pciescope plx PerformancePAK sequence and counter unwrap on a stateful fake, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_ports.py  # pciescope PEX88096 port number to BDF to GPU map, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_plx_safety.py  # pciescope plx write-switch policy, idle gate, health diff and perf run stop/undo on fake registers, CPU unit test; not in CI
+# end pciescope plx
+# pciescope probe
+tests/tools/rdna/pciescope/test_pciescope_probe_api.py  # pciescope active probe API, refusals, dry run and end to end against a probe double, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_build.py  # pciescope probe binary build and status with a fake compiler, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_effectiveness.py  # pciescope probe effectiveness rules and audit baseline, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_guard.py  # pciescope probe safety guards (noise, temperature, evictions), CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_insitu.py  # pciescope in-situ link utilisation from counters, CPU unit test on a captured sysfs; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_lease.py  # pciescope probe GPU lease check, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_links.py  # pciescope probe link downtrain watcher, CPU unit test on a captured sysfs; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_parse.py  # pciescope p2p_probe output parser on real audit logs, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_paths.py  # pciescope PCIe fabric path model, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_plan.py  # pciescope probe suite plans on the captured topology, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_results.py  # pciescope probe output to Measurement conversion on real audit rows, CPU unit test; not in CI
+tests/tools/rdna/pciescope/test_pciescope_probe_runner.py  # pciescope probe runner guards against a probe double, CPU unit test; not in CI
+# end pciescope probe
+# pciescope tui
+tests/tools/rdna/pciescope/test_pciescope_tui_app.py  # pciescope TUI pilot tests, CPU only; not in CI
+tests/tools/rdna/pciescope/test_pciescope_tui_render.py  # pciescope TUI render golden tests, CPU only; not in CI
+tests/tools/rdna/pciescope/test_pciescope_tui_session.py  # pciescope TUI session/replay tests, CPU only; not in CI
+# end pciescope tui
 # Temporary gaps from disabling jobs until their transitive dependencies are locked.
 tests/evals/qwen4_exp/test_accuracy.py  # CI jobs disabled pending locked evalscope transitive dependencies
 tests/kernels/helion/test_autotune.py  # CI jobs disabled pending locked helion transitive dependencies
