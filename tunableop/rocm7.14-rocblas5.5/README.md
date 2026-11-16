@@ -264,8 +264,7 @@ End-to-end cells with these frozen rows are recorded under
   pure 1023-row prefill pass. `tools/rdna2_028/tunableop_agree.py write` kept
   the fastest recorded solution per key (2124 lines rewritten in the eight
   files, no key added or dropped); see `tunableop/README.md`, "Rank files
-  must agree per key", and `docs/rdna2/eplb-lean-design-2026-11-16.md`,
-  section 11.
+  must agree per key", and `docs/rdna2/tunableop-rank-agreement-2026-11-16.md`.
 
 ## Regeneration
 

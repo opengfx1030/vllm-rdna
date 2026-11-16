@@ -11,7 +11,7 @@ rank by rank, and for 531 of the 3330 keys of ``rocm7.14-rocblas5.5`` the files 
 different solvers (the router GEMM at 1023 rows: ``tn_512_1023_2560_ld_2560_2560_512``
 was ``...046`` on ranks 0, 1 and 3 and ``...044`` on rank 2, so rank 2 flipped near-tie
 top-k decisions in every pure 1023-row prefill pass; see
-docs/rdna2/eplb-lean-design-2026-11-16.md, section 11).
+docs/rdna2/tunableop-rank-agreement-2026-11-16.md).
 
     tunableop_agree.py check tunableop/rocm7.14-rocblas5.5 [more profile dirs]
     tunableop_agree.py write tunableop/rocm7.14-rocblas5.5 [--out DIR]

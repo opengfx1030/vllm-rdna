@@ -29,7 +29,7 @@
     "lines_rewritten": 2124,
     "files": 8,
     "guard": "tests/tools/rdna/test_tunableop_rank_agree.py",
-    "why": "tn_512_1023_2560_ld_2560_2560_512 (the MoE router GEMM at 1023 rows) was ...046 on ranks 0, 1, 3 and ...044 on rank 2: rank 2 routed near-tied tokens differently in every pure 1023-row prefill pass (docs/rdna2/eplb-lean-design-2026-11-16.md, section 11)"
+    "why": "tn_512_1023_2560_ld_2560_2560_512 (the MoE router GEMM at 1023 rows) was ...046 on ranks 0, 1, 3 and ...044 on rank 2: rank 2 routed near-tied tokens differently in every pure 1023-row prefill pass (docs/rdna2/tunableop-rank-agreement-2026-11-16.md)"
   },
   "campaign": {
     "date": "2026-10-25",

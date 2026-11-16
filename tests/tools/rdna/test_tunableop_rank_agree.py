@@ -6,7 +6,7 @@ CPU only, stdlib. A TP worker on device ordinal ``r`` reads
 ``tunableop_results<r>.csv``;
 a replicated GEMM (the MoE router) must run the same rocBLAS solution on every rank or
 its logits differ in the last bit and the ranks route a near-tied token differently
-(docs/rdna2/eplb-lean-design-2026-11-16.md, section 11). The data tests read the
+(docs/rdna2/tunableop-rank-agreement-2026-11-16.md). The data tests read the
 committed ``tunableop/`` tree, the others build throw-away profile directories.
 """
 

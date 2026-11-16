@@ -113,8 +113,8 @@ replicated GEMM (the MoE router, hyper-connection and PLE projections)
 multiplies the same operands on every rank. Two rank files that name different
 solutions for one key give different rounding on different ranks; the router
 GEMM at M=1023 flipped near-tied top-k decisions on rank 2 in every pure
-1023-row prefill pass that way (`docs/rdna2/eplb-lean-design-2026-11-16.md`,
-section 11). Every profile therefore ships one solution per key in all of its
+1023-row prefill pass that way (`docs/rdna2/tunableop-rank-agreement-2026-11-16.md`).
+Every profile therefore ships one solution per key in all of its
 rank files (TP8 and TP4 x PP2 read ranks 0-7):
 
 ```bash
