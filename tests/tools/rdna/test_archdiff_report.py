@@ -1628,6 +1628,14 @@ def test_plan_line_shifts_override(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+in_git_checkout = pytest.mark.skipif(
+    subprocess.run(
+        ["git", "-C", str(DRIVER.parent), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+    ).returncode
+    != 0,
+    reason="rev resolution needs a git checkout (rsynced mirrors have none)",
+)
 
 
 def run_driver(
@@ -1716,6 +1724,7 @@ def test_driver_refuses_a_foreign_non_empty_work_dir(tmp_path: Path) -> None:
 
 
 @needs_bash
+@in_git_checkout
 def test_driver_unresolvable_rev_exits_2(tmp_path: Path) -> None:
     proc = run_driver(
         tmp_path, {"BASE": "no-such-rev-anywhere", "HEAD": "also-not-a-rev"}
