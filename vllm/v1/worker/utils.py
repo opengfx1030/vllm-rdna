@@ -13,6 +13,9 @@ import torch
 from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    share_leapquant_normalize_groups,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
@@ -885,7 +888,8 @@ def bind_kv_cache_to_layers(
     num_attn_module: int = 1,
     kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
 ) -> None:
-    """Bind layer caches and share ReplaySSM trackers in model-layer order."""
+    """Bind layer caches, then share ReplaySSM trackers and LeapQuant GDN
+    normalize launches per KV-cache group, in model-layer order."""
     # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
     # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
     # splits conv/ssm), so the kv_caches dict can hold a single tensor per
@@ -897,6 +901,9 @@ def bind_kv_cache_to_layers(
         kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)
     )
     share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+    share_leapquant_normalize_groups(
+        ordered_layer_names, forward_context, kv_cache_groups
+    )
 
 
 def clear_layer_kv_caches(layers: Iterable[Any]) -> None:

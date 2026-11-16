@@ -1,0 +1,21 @@
+{
+ "arm": "mtp2-nofix",
+ "recipe": "27b-hi2-tp2",
+ "model": "/home/chenco_adm/.cache/huggingface/hub/models--BlivionIaG--Qwen3.8-27B-HI2-3.0bpw/snapshots/db2a3aa3cd5efb0f92403cd4864e1f0d99378149",
+ "gpus": "2,3",
+ "buses": "d9 dc",
+ "cells": [
+  "1024:512:1:8",
+  "1024:512:2:8",
+  "1024:512:4:8",
+  "1024:512:8:16"
+ ],
+ "quiet_hold": "1",
+ "overrides": "MTP=2 VLLM_RDNA_LM_HEAD_GEMV_MAX_M=8",
+ "tree_sha": "f7edb8b1e7",
+ "build_running_start": "0",
+ "start": "2026-11-15 06:15:41",
+ "env": {},
+ "build_running_end": "0",
+ "serve_validate_rc": 0
+}

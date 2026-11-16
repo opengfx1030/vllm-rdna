@@ -352,6 +352,12 @@ if TYPE_CHECKING:
     VLLM_PLE_DISK_OFFLOAD_DIR: str = ""
     VLLM_PLE_QUANT_DIR: str = ""
     VLLM_RDNA_DENSE_INT8: bool = False
+    # gfx10x only: GemmaRMSNorm with a residual (Qwen3.5/3.8 hybrid decoder
+    # norms) caches its fp16 (1 + w) scale and runs torch.ops._C.fused_add_rms_norm
+    # in place on x and residual, dropping 3 scale launches and 2 clone launches
+    # per call. Default off; audited for Qwen3.5 / Qwen3.8 only, see
+    # docs/rdna2/hi2-residual-direct-2026-11-15.md
+    VLLM_RDNA_GEMMA_RESIDUAL_DIRECT: bool = False
     VLLM_RDNA_FUSED_HC: bool = True
     VLLM_RDNA_FUSED_SE: bool = True
     # Qwen4Exp / Qwen3.8-Flash-Next on gfx1030: HIP paths for the HC prefill
@@ -376,6 +382,10 @@ if TYPE_CHECKING:
     # vision pos-embed). Default on: gfx10x runs the HIP set; set 0 to fall
     # back to the Triton kernels as before the port.
     VLLM_RDNA_ALL_HIP: bool = True
+    # Opt-in page packing of LeapQuant GDN layers (needs --replayssm-state-dtype
+    # leapquant): a GDN page keeps its natural size and one KV-cache group holds
+    # as many GDN layers as one block fits, so a request holds fewer block tables.
+    VLLM_RDNA_GDN_LEAPQUANT_PACK: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2304,6 +2314,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PLE_DISK_OFFLOAD_DIR": lambda: os.getenv("VLLM_PLE_DISK_OFFLOAD_DIR", ""),
     "VLLM_PLE_QUANT_DIR": lambda: os.getenv("VLLM_PLE_QUANT_DIR", ""),
     "VLLM_RDNA_DENSE_INT8": lambda: os.getenv("VLLM_RDNA_DENSE_INT8", "0") == "1",
+    "VLLM_RDNA_GEMMA_RESIDUAL_DIRECT": lambda: (
+        os.getenv("VLLM_RDNA_GEMMA_RESIDUAL_DIRECT", "0") == "1"
+    ),
     "VLLM_RDNA_FUSED_HC": lambda: os.getenv("VLLM_RDNA_FUSED_HC", "1") == "1",
     "VLLM_RDNA_FUSED_SE": lambda: os.getenv("VLLM_RDNA_FUSED_SE", "1") == "1",
     "VLLM_RDNA_HC_PREFILL_HIP": lambda: (
@@ -2313,6 +2326,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RDNA_QSA_DECODE_MODE": lambda: os.getenv("VLLM_RDNA_QSA_DECODE_MODE", "auto"),
     "VLLM_RDNA_PLE_CONV_HIP": lambda: os.getenv("VLLM_RDNA_PLE_CONV_HIP", "0") == "1",
     "VLLM_RDNA_ALL_HIP": lambda: os.getenv("VLLM_RDNA_ALL_HIP", "1") == "1",
+    "VLLM_RDNA_GDN_LEAPQUANT_PACK": lambda: (
+        os.getenv("VLLM_RDNA_GDN_LEAPQUANT_PACK", "0") == "1"
+    ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
     # with quantization methods and attention backends.
@@ -2610,6 +2626,9 @@ def compile_factors() -> dict[str, object]:
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
+        # LeapQuant page packing changes the KV-cache page layout, not the
+        # compiled graph (same reason replayssm_state_dtype is not hashed).
+        "VLLM_RDNA_GDN_LEAPQUANT_PACK",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
     }
 

@@ -3,7 +3,7 @@
 
 from enum import IntEnum
 from functools import cache
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -1416,8 +1416,14 @@ def rdna_hint_flex_linear_rdna2(
     transform: bool,
     decode_max_m: int,
     mode: int = 0,
+    silu_mul: bool = False,
+    prefill_gemm: int = 0,
 ) -> torch.Tensor:
-    return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(
+    """prefill_gemm > 0: above decode_max_m the dequantized GEMM runs the dense
+    HIP kernel wherever its dispatch table beats rocBLAS (see
+    csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu); 0 is the rocBLAS path (the
+    argument is then not passed at all)."""
+    args: list[Any] = [
         x,
         col_scale,
         had,
@@ -1431,7 +1437,27 @@ def rdna_hint_flex_linear_rdna2(
         transform,
         decode_max_m,
         mode,
-    )
+        silu_mul,
+    ]
+    if prefill_gemm:
+        args.append(prefill_gemm)
+    return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(*args)
+
+
+def rdna_hint_flex_dense_gemm_rdna2(
+    x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, design: int = -1
+) -> None:
+    """Out = x @ w.T for fp16 x [M, K], w [N, K], out [M, N] on gfx1030.
+
+    design -1: the (N, K, M) dispatch table picks the dense HIP kernel or
+    rocBLAS; design >= 0 forces that kernel design (error when it cannot run
+    the problem)."""
+    torch.ops._rocm_C.rdna_hint_flex_dense_gemm_rdna2(x, w, out, design)
+
+
+def rdna_hint_flex_dense_gemm_pick_rdna2(m: int, n: int, k: int) -> int:
+    """Design the dispatch table picks for (M, N, K); -1 = rocBLAS."""
+    return torch.ops._rocm_C.rdna_hint_flex_dense_gemm_pick_rdna2(m, n, k)
 
 
 def rdna_hint_flex_moe_rdna2(
@@ -1602,10 +1628,43 @@ def rdna_hint_flex_dequant_rdna2(
     )  # fmt: skip
 
 
-def rdna_hint_flex_act_transform_rdna2(
-    x: torch.Tensor, col_scale: torch.Tensor, had: torch.Tensor, out: torch.Tensor
+def rdna_hint_flex_gemv2_rdna2(
+    x: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    blk_params: torch.Tensor,
+    param_off: torch.Tensor,
+    row_consts: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    out: torch.Tensor,
+    mt: int = 0,
+    rpw: int = 0,
+    wpb: int = 0,
+    x_pi: bool = False,
 ) -> None:
-    torch.ops._rocm_C.rdna_hint_flex_act_transform_rdna2(x, col_scale, had, out)
+    """GEMV v2 with an explicit (mt, rpw, wpb) configuration (0 = automatic).
+
+    x_pi: x is in the pair-interleaved layout written by
+    rdna_hint_flex_act_transform_rdna2(..., pair_interleaved=True).
+    """
+    torch.ops._rocm_C.rdna_hint_flex_gemv2_rdna2(
+        x, codes, code_off, blk_params, param_off, row_consts, row_nbits,
+        row_block, out, mt, rpw, wpb, x_pi,
+    )  # fmt: skip
+
+
+def rdna_hint_flex_act_transform_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    out: torch.Tensor,
+    pair_interleaved: bool = False,
+    silu_mul: bool = False,
+) -> None:
+    torch.ops._rocm_C.rdna_hint_flex_act_transform_rdna2(
+        x, col_scale, had, out, pair_interleaved, silu_mul
+    )
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(
@@ -1627,6 +1686,8 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         transform: bool,
         decode_max_m: int,
         mode: int,
+        silu_mul: bool = False,
+        prefill_gemm: int = 0,
     ) -> torch.Tensor:
         return x.new_empty((x.size(0), row_nbits.size(0)))
 
@@ -1711,7 +1772,48 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
 
     @register_fake("_rocm_C::rdna_hint_flex_act_transform_rdna2")
     def _rdna_hint_flex_act_transform_rdna2_fake(
-        x: torch.Tensor, col_scale: torch.Tensor, had: torch.Tensor, out: torch.Tensor
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        out: torch.Tensor,
+        pair_interleaved: bool = False,
+        silu_mul: bool = False,
+    ) -> None:
+        return
+
+
+# Own guards: a _rocm_C built before these ops existed still has the ops above, and
+# register_fake on a missing op raises at import, which would break every model.
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "rdna_hint_flex_dense_gemm_rdna2"
+):
+
+    @register_fake("_rocm_C::rdna_hint_flex_dense_gemm_rdna2")
+    def _rdna_hint_flex_dense_gemm_rdna2_fake(
+        x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, design: int = -1
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "rdna_hint_flex_gemv2_rdna2"
+):
+
+    @register_fake("_rocm_C::rdna_hint_flex_gemv2_rdna2")
+    def _rdna_hint_flex_gemv2_rdna2_fake(
+        x: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        blk_params: torch.Tensor,
+        param_off: torch.Tensor,
+        row_consts: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        out: torch.Tensor,
+        mt: int,
+        rpw: int,
+        wpb: int,
+        x_pi: bool,
     ) -> None:
         return
 
@@ -3547,6 +3649,80 @@ def rdna_moe_route_zero(
     """
     return torch.ops._rocm_C.rdna_moe_route_zero(
         topk_ids, block_size, num_experts, expert_map, zero1, zero2
+    )
+
+
+def rdna_moe_route_zero_stats(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    expert_map: torch.Tensor | None,
+    zero1: torch.Tensor,
+    zero2: torch.Tensor,
+    is_padding: torch.Tensor | None,
+    state: torch.Tensor,
+    ring: torch.Tensor | None,
+    gseq: torch.Tensor | None,
+    hist: torch.Tensor | None,
+    owner: torch.Tensor,
+    edges: torch.Tensor,
+    layer_pos: int,
+    sample_mask: int,
+    ranks: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``rdna_moe_route_zero`` plus the EPLB load counters, one launch.
+
+    One extra CTA counts the call's expert histogram into ``state`` / ``ring`` /
+    ``hist`` (layout: ``rdna_eplb_stats.py``) while CTA 0 routes.
+    """
+    return torch.ops._rocm_C.rdna_moe_route_zero_stats(
+        topk_ids,
+        block_size,
+        num_experts,
+        expert_map,
+        zero1,
+        zero2,
+        is_padding,
+        state,
+        ring,
+        gseq,
+        hist,
+        owner,
+        edges,
+        layer_pos,
+        sample_mask,
+        ranks,
+    )
+
+
+def rdna_eplb_stats(
+    topk_ids: torch.Tensor,
+    is_padding: torch.Tensor | None,
+    state: torch.Tensor,
+    ring: torch.Tensor | None,
+    gseq: torch.Tensor | None,
+    hist: torch.Tensor | None,
+    owner: torch.Tensor,
+    edges: torch.Tensor,
+    layer_pos: int,
+    sample_mask: int,
+    ranks: int,
+    num_experts: int,
+) -> None:
+    """The EPLB load counters alone (calls the routing CTA does not take)."""
+    torch.ops._rocm_C.rdna_eplb_stats(
+        topk_ids,
+        is_padding,
+        state,
+        ring,
+        gseq,
+        hist,
+        owner,
+        edges,
+        layer_pos,
+        sample_mask,
+        ranks,
+        num_experts,
     )
 
 

@@ -1,0 +1,129 @@
+# LeapQuant config guards: CPU receipts
+host: par1-cs25 (par1-cs25 build box), 2026-11-14T21:01:37Z
+base tree: first PR head 7b4aff7fe3 (/home/chenco_adm/w4a8_runs/leapquant/tree-lqguards-base); new tree: this branch (/home/chenco_adm/w4a8_runs/leapquant/tree-lqguards)
+GPU visibility: HIP_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are empty or unset in every command
+
+## 1. dry run: PRINT=1 RECIPE=flashnext-leapquant-mtp2, before (base launcher) and after (new launcher)
+after exit=0
+base-launcher exit=0
+command tokens before/after: 44 46
+after == before + '--replayssm-state-dtype leapquant' inserted after '--block-size 512': True
+env lines removed: ["export VLLM_RDNA_GDN_LEAPQUANT='1'"]
+env lines added: []
+other plan lines equal: True
+
+## 2. launcher checks (print mode)
+== stale env var =1 (environment)
+exit=1
+ERROR: VLLM_RDNA_GDN_LEAPQUANT=1 was replaced by REPLAYSSM_STATE_DTYPE=leapquant (--replayssm-state-dtype leapquant). Unset it: the engine ignores it and would serve FP32 state.
+== stale env var =0 (environment)
+exit=0
+== stale env var =1 given as a launcher override
+exit=1
+ERROR: VLLM_RDNA_GDN_LEAPQUANT=1 was replaced by REPLAYSSM_STATE_DTYPE=leapquant (--replayssm-state-dtype leapquant). Unset it: the engine ignores it and would serve FP32 state.
+== REPLAYSSM_STATE_DTYPE=auto override
+--block-size' '512' '--replayssm-state-dtype' 'auto
+== flashnext-mtp2 with the key
+--block-size' '1024' '--replayssm-state-dtype' 'leapquant
+== flashnext-mtp2 default: count of the flag in the plan
+0
+
+## 3. flag-off launcher plans of every recipe: base launcher and recipes versus new
+same    27b-awq (exit=0)
+same    27b-exl3 (exit=0)
+same    dsv4-flash (exit=0)
+same    flashnext-dflash2 (exit=0)
+same    flashnext (exit=0)
+same    flashnext-exl3 (exit=0)
+DIFFERS flashnext-leapquant-mtp2
+same    flashnext-mtp0 (exit=0)
+same    flashnext-mtp2 (exit=0)
+same    flashnext-pp3 (exit=0)
+same    flashnext-pp3-mtp2 (exit=0)
+same    flashnext-tp4pp2-mtp2 (exit=0)
+same    flashnext-tp8-mtp2 (exit=0)
+same    full (exit=0)
+recipes identical: 13; differing: 1
+
+## 4. config hashes and flag-off state calculators, base versus new
+-- tree-lqguards-base
+cache_default d94033010197c7242a379904bb013b1f9616b0d25dd147bd18ed0385926f8624
+cache_block1024 39f6b341d479ce8702a8a51b6322010158730eae7d5a79e7d6c2173bff0d60f5
+vllm_default 5a3fcb0883
+-- tree-lqguards
+cache_default d94033010197c7242a379904bb013b1f9616b0d25dd147bd18ed0385926f8624
+cache_block1024 39f6b341d479ce8702a8a51b6322010158730eae7d5a79e7d6c2173bff0d60f5
+vllm_default 5a3fcb0883
+flag-off dtype/shape/copy/spec lines: identical in base and new
+dtype torch.bfloat16 auto auto (torch.bfloat16, torch.bfloat16)
+dtype torch.float16 auto float16 (torch.float16, torch.float16)
+dtype torch.float16 float16 float32 (torch.float16, torch.float32)
+shape 4 16 48 2 ((5, 2560), (12, 128, 128))
+shape 4 16 48 0 ((3, 2560), (12, 128, 128))
+shape 1 16 48 0 ((3, 10240), (48, 128, 128))
+shape 2 16 48 3 ((6, 5120), (24, 128, 128))
+copy ['get_conv_copy_spec', 'get_temporal_copy_spec']
+spec 512 418816 1675264 True
+spec 1024 418816 1675264 True
+
+## 4b. vllm:cache_config_info labels (CacheConfig.metrics_info), base versus new
+-- tree-lqguards-base
+metrics_info has replayssm_state_dtype: False None
+metrics_info keys: 37
+-- tree-lqguards
+metrics_info has replayssm_state_dtype: True auto
+metrics_info keys: 38
+
+## 5. real Flash-Next config (AWQ snapshot, config.json only), flag off, block 512, prefix caching, TP1
+-- tree-lqguards-base nomtp
+vllm_hash 7c5848228a
+cache_hash bdd87699dfdff708caa6c222f05146bb868e39f990833eb58ab09f4080d74a06
+fields 512 512 align auto float32 False 16
+-- tree-lqguards-base mtp
+vllm_hash c916d43bb5
+cache_hash bdd87699dfdff708caa6c222f05146bb868e39f990833eb58ab09f4080d74a06
+fields 512 512 align auto float32 False 16
+-- tree-lqguards nomtp
+vllm_hash 7c5848228a
+cache_hash bdd87699dfdff708caa6c222f05146bb868e39f990833eb58ab09f4080d74a06
+fields 512 512 align auto float32 False 16
+-- tree-lqguards mtp
+vllm_hash c916d43bb5
+cache_hash bdd87699dfdff708caa6c222f05146bb868e39f990833eb58ab09f4080d74a06
+fields 512 512 align auto float32 False 16
+
+## 6. real Flash-Next config through EngineArgs.create_engine_config with --replayssm-state-dtype (on_rdna2_hip and device capability stubbed)
+-- auto nomtp
+OK auto nomtp mamba_cache_mode align arch Qwen4ExpForConditionalGeneration k/v 128 128
+-- leapquant nomtp
+OK leapquant nomtp mamba_cache_mode align arch Qwen4ExpForConditionalGeneration k/v 128 128
+-- leapquant mtp
+OK leapquant mtp mamba_cache_mode align arch Qwen4ExpForConditionalGeneration k/v 128 128
+draft arch Qwen4ExpMTP draft dims 128 128 same_obj False
+
+## 7. engine report of the removed environment variable
+Unknown vLLM environment variable detected: VLLM_RDNA_GDN_LEAPQUANT
+soft: no exception
+hard: ValueError Unknown vLLM environment variable detected: VLLM_RDNA_GDN_LEAPQUANT
+
+## 8. unit tests on the new tree (CPU, no GPU visible)
+-- tests/config/test_leapquant_config.py
+38 passed, 14 warnings in 14.08s
+-- tests/v1/kv_connector/unit/test_leapquant_state_refused.py
+6 passed, 14 warnings in 2.57s
+-- tests/v1/core/test_leapquant_scheduling.py
+SKIPPED [1] tests/v1/core/test_leapquant_scheduling.py:328: requires two concurrently scheduled batches
+25 passed, 1 skipped, 14 warnings in 17.55s
+-- tests/kernels/mamba/test_gdn_leapquant_rdna2.py
+SKIPPED [1] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:116: RDNA2 (gfx103x) GPU required
+SKIPPED [1] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:144: RDNA2 (gfx103x) GPU required
+SKIPPED [1] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:159: RDNA2 (gfx103x) GPU required
+SKIPPED [4] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:191: RDNA2 (gfx103x) GPU required
+SKIPPED [6] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:236: RDNA2 (gfx103x) GPU required
+SKIPPED [1] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:302: RDNA2 (gfx103x) GPU required
+SKIPPED [2] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:360: RDNA2 (gfx103x) GPU required
+SKIPPED [2] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:416: RDNA2 (gfx103x) GPU required
+SKIPPED [4] tests/kernels/mamba/test_gdn_leapquant_rdna2.py:471: RDNA2 (gfx103x) GPU required
+22 skipped, 14 warnings in 0.09s
+-- all three new or changed CPU files together
+69 passed, 1 skipped, 14 warnings in 36.21s

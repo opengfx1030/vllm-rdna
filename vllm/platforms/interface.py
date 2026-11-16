@@ -951,6 +951,9 @@ class Platform:
         from vllm.model_executor.layers.mamba.abstract import (
             get_mamba_prefill_checkpoint_alignment,
         )
+        from vllm.model_executor.layers.mamba.ops.leapquant_gdn import (
+            leapquant_gdn_pack_enabled,
+        )
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -1117,6 +1120,11 @@ class Platform:
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
         assert attn_page_size >= mamba_page_size
+
+        # Packed LeapQuant GDN pages keep their natural size; the KV-cache
+        # planner fits them into the attention block by bytes.
+        if leapquant_gdn_pack_enabled(cache_config):
+            return
 
         if attn_page_size == mamba_page_size:
             return

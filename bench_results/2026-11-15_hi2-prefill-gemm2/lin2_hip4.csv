@@ -1,0 +1,161 @@
+phase,kind,variant,shape,N,K,M,us,us_min,tflops,vs_rb,max_abs,rel_fro,rel_fp32,vgpr,lds,scratch,threads,blocks_per_wgp,waves_per_simd,gfx_mhz,power_w,note
+lin2,rocblas_heur,default,gate_up,17408,5120,1025,11514.6,11359.3,15.87,1.0,,,0.00e+00,,,,,,,1369.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,gate_up,17408,5120,1025,9635.2,9576.8,18.96,1.195,,,2.31e-05,,,,,,,1391.0,175.0,mode 1 vs_heur 1.195
+lin2,hip_tail,prefill_gemm=2,gate_up,17408,5120,1025,8655.5,8528.4,21.11,1.33,,,2.31e-05,,,,,,,1430.0,175.0,mode 2 vs_heur 1.330
+lin2,hip_tail,prefill_gemm=3,gate_up,17408,5120,1025,9308.4,9222.8,19.63,1.237,,,2.31e-05,,,,,,,1665.0,174.0,mode 3 vs_heur 1.237
+lin2,rocblas_heur,default,gate_up,17408,5120,1031,11538.5,11452.3,15.93,1.0,,,0.00e+00,,,,,,,1361.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,gate_up,17408,5120,1031,9720.6,9675.3,18.91,1.187,,,2.29e-05,,,,,,,1381.5,175.0,mode 1 vs_heur 1.187
+lin2,hip_tail,prefill_gemm=2,gate_up,17408,5120,1031,8894.7,8769.2,20.66,1.297,,,2.30e-05,,,,,,,1434.0,175.0,mode 2 vs_heur 1.297
+lin2,hip_tail,prefill_gemm=3,gate_up,17408,5120,1031,9372.0,9220.5,19.61,1.231,,,2.29e-05,,,,,,,1671.0,174.0,mode 3 vs_heur 1.231
+lin2,rocblas_heur,default,gate_up,17408,5120,1038,11676.1,11588.3,15.85,1.0,,,0.00e+00,,,,,,,1342.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,gate_up,17408,5120,1038,9780.2,9740.6,18.92,1.194,,,2.32e-05,,,,,,,1367.0,175.0,mode 1 vs_heur 1.194
+lin2,hip_tail,prefill_gemm=2,gate_up,17408,5120,1038,9181.5,9060.2,20.15,1.272,,,2.31e-05,,,,,,,1440.0,174.0,mode 2 vs_heur 1.272
+lin2,hip_tail,prefill_gemm=3,gate_up,17408,5120,1038,9362.6,9285.7,19.76,1.247,,,2.32e-05,,,,,,,1658.0,174.0,mode 3 vs_heur 1.247
+lin2,rocblas_heur,default,gate_up,17408,5120,1045,11716.2,11622.7,15.9,1.0,,,0.00e+00,,,,,,,1336.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,gate_up,17408,5120,1045,9826.3,9785.2,18.96,1.192,,,2.26e-05,,,,,,,1362.0,175.0,mode 1 vs_heur 1.192
+lin2,hip_tail,prefill_gemm=2,gate_up,17408,5120,1045,9482.9,9360.9,19.64,1.236,,,2.26e-05,,,,,,,1440.0,174.0,mode 2 vs_heur 1.236
+lin2,hip_tail,prefill_gemm=3,gate_up,17408,5120,1045,9443.8,9287.4,19.73,1.241,,,2.26e-05,,,,,,,1646.0,174.0,mode 3 vs_heur 1.241
+lin2,rocblas_heur,default,gate_up,17408,5120,1056,11854.0,11725.9,15.88,1.0,,,0.00e+00,,,,,,,1318.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,gate_up,17408,5120,1056,9879.4,9845.9,19.05,1.2,,,2.29e-05,,,,,,,1353.0,175.0,mode 1 vs_heur 1.200
+lin2,hip_tail,prefill_gemm=2,gate_up,17408,5120,1056,9861.9,9718.0,19.09,1.202,,,2.29e-05,,,,,,,1452.5,174.0,mode 2 vs_heur 1.202
+lin2,hip_tail,prefill_gemm=3,gate_up,17408,5120,1056,9413.7,9302.4,20.0,1.259,,,2.29e-05,,,,,,,1634.0,174.0,mode 3 vs_heur 1.259
+lin2,rocblas_heur,default,gate_up,17408,5120,1072,11888.1,11841.0,16.07,1.0,,,0.00e+00,,,,,,,1316.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,gate_up,17408,5120,1072,9901.8,9877.8,19.3,1.201,,,2.26e-05,,,,,,,1351.0,174.0,mode 1 vs_heur 1.201
+lin2,hip_tail,prefill_gemm=2,gate_up,17408,5120,1072,10449.6,10345.6,18.29,1.138,,,2.25e-05,,,,,,,1468.0,174.0,mode 2 vs_heur 1.138
+lin2,hip_tail,prefill_gemm=3,gate_up,17408,5120,1072,9582.0,9520.7,19.94,1.241,,,2.26e-05,,,,,,,1563.0,174.0,mode 3 vs_heur 1.241
+lin2,rocblas_heur,default,gate_up,17408,5120,2055,22268.0,22138.8,16.45,1.0,,,0.00e+00,,,,,,,1292.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,gate_up,17408,5120,2055,18372.1,18265.6,19.94,1.212,,,2.28e-05,,,,,,,1454.0,174.0,mode 1 vs_heur 1.212
+lin2,hip_tail,prefill_gemm=2,gate_up,17408,5120,2055,16639.7,16552.2,22.01,1.338,,,2.28e-05,,,,,,,1520.0,175.0,mode 2 vs_heur 1.338
+lin2,hip_tail,prefill_gemm=3,gate_up,17408,5120,2055,17061.0,17014.8,21.47,1.305,,,2.28e-05,,,,,,,1614.5,174.0,mode 3 vs_heur 1.305
+lin2,rocblas_heur,default,gate_up,17408,5120,2080,22509.8,22411.1,16.47,1.0,,,0.00e+00,,,,,,,1278.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,gate_up,17408,5120,2080,18443.6,18392.0,20.1,1.22,,,2.26e-05,,,,,,,1450.0,175.0,mode 1 vs_heur 1.220
+lin2,hip_tail,prefill_gemm=2,gate_up,17408,5120,2080,17582.7,17457.1,21.09,1.28,,,2.26e-05,,,,,,,1533.0,175.0,mode 2 vs_heur 1.280
+lin2,hip_tail,prefill_gemm=3,gate_up,17408,5120,2080,17064.2,17025.6,21.73,1.319,,,2.26e-05,,,,,,,1606.0,174.0,mode 3 vs_heur 1.319
+lin2,rocblas_heur,default,down,5120,8704,1025,5182.1,5155.7,17.63,1.0,,,0.00e+00,,,,,,,1660.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,down,5120,8704,1025,4692.1,4668.8,19.47,1.104,,,2.53e-05,,,,,,,1428.0,175.0,mode 1 vs_heur 1.104
+lin2,hip_tail,prefill_gemm=2,down,5120,8704,1025,4294.8,4276.3,21.27,1.207,,,2.53e-05,,,,,,,1449.0,174.0,mode 2 vs_heur 1.207
+lin2,hip_tail,prefill_gemm=3,down,5120,8704,1025,4461.3,4441.8,20.48,1.162,,,2.53e-05,,,,,,,1556.0,174.0,mode 3 vs_heur 1.162
+lin2,rocblas_heur,default,down,5120,8704,1031,5198.0,5171.8,17.68,1.0,,,0.00e+00,,,,,,,1654.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,down,5120,8704,1031,4693.2,4670.5,19.58,1.108,,,2.49e-05,,,,,,,1424.0,175.0,mode 1 vs_heur 1.108
+lin2,hip_tail,prefill_gemm=2,down,5120,8704,1031,4381.5,4377.7,20.97,1.186,,,2.49e-05,,,,,,,1463.0,175.0,mode 2 vs_heur 1.186
+lin2,hip_tail,prefill_gemm=3,down,5120,8704,1031,4457.2,4450.6,20.62,1.166,,,2.49e-05,,,,,,,1554.0,174.0,mode 3 vs_heur 1.166
+lin2,rocblas_heur,default,down,5120,8704,1038,5200.9,5172.6,17.79,1.0,,,0.00e+00,,,,,,,1655.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,down,5120,8704,1038,4711.2,4692.2,19.64,1.104,,,2.46e-05,,,,,,,1420.0,175.0,mode 1 vs_heur 1.104
+lin2,hip_tail,prefill_gemm=2,down,5120,8704,1038,4526.5,4515.6,20.44,1.149,,,2.47e-05,,,,,,,1471.0,174.0,mode 2 vs_heur 1.149
+lin2,hip_tail,prefill_gemm=3,down,5120,8704,1038,4467.0,4452.1,20.71,1.164,,,2.46e-05,,,,,,,1551.0,174.0,mode 3 vs_heur 1.164
+lin2,rocblas_heur,default,down,5120,8704,1045,5214.6,5194.1,17.86,1.0,,,0.00e+00,,,,,,,1650.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,down,5120,8704,1045,4707.5,4693.3,19.79,1.108,,,2.40e-05,,,,,,,1423.0,175.0,mode 1 vs_heur 1.108
+lin2,hip_tail,prefill_gemm=2,down,5120,8704,1045,4663.9,4635.2,19.97,1.118,,,2.41e-05,,,,,,,1476.0,174.0,mode 2 vs_heur 1.118
+lin2,hip_tail,prefill_gemm=3,down,5120,8704,1045,4466.9,4452.1,20.85,1.167,,,2.40e-05,,,,,,,1552.0,174.0,mode 3 vs_heur 1.167
+lin2,rocblas_heur,default,down,5120,8704,1056,5230.2,5195.9,18.0,1.0,,,0.00e+00,,,,,,,1646.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,down,5120,8704,1056,4704.0,4694.0,20.01,1.112,,,2.40e-05,,,,,,,1419.0,175.0,mode 1 vs_heur 1.112
+lin2,hip_tail,prefill_gemm=2,down,5120,8704,1056,4859.7,4834.9,19.37,1.076,,,2.41e-05,,,,,,,1483.0,175.0,mode 2 vs_heur 1.076
+lin2,hip_tail,prefill_gemm=3,down,5120,8704,1056,4473.6,4459.7,21.04,1.169,,,2.40e-05,,,,,,,1549.0,174.0,mode 3 vs_heur 1.169
+lin2,rocblas_heur,default,down,5120,8704,1072,5270.2,5242.3,18.13,1.0,,,0.00e+00,,,,,,,1634.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,down,5120,8704,1072,4727.9,4709.4,20.21,1.115,,,2.44e-05,,,,,,,1415.0,175.0,mode 1 vs_heur 1.115
+lin2,hip_tail,prefill_gemm=2,down,5120,8704,1072,5171.4,5156.1,18.48,1.019,,,2.44e-05,,,,,,,1492.0,174.0,mode 2 vs_heur 1.019
+lin2,hip_tail,prefill_gemm=3,down,5120,8704,1072,4583.9,4555.3,20.84,1.15,,,2.44e-05,,,,,,,1550.0,174.0,mode 3 vs_heur 1.150
+lin2,rocblas_heur,default,down,5120,8704,2055,9497.1,9436.4,19.29,1.0,,,0.00e+00,,,,,,,1506.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,down,5120,8704,2055,8895.4,8859.0,20.59,1.068,,,2.50e-05,,,,,,,1508.0,175.0,mode 1 vs_heur 1.068
+lin2,hip_tail,prefill_gemm=2,down,5120,8704,2055,8143.9,8132.0,22.49,1.166,,,2.50e-05,,,,,,,1530.0,174.0,mode 2 vs_heur 1.166
+lin2,hip_tail,prefill_gemm=3,down,5120,8704,2055,8211.4,8202.1,22.31,1.157,,,2.50e-05,,,,,,,1575.0,174.0,mode 3 vs_heur 1.157
+lin2,rocblas_heur,default,down,5120,8704,2080,9522.6,9474.8,19.47,1.0,,,0.00e+00,,,,,,,1500.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,down,5120,8704,2080,8885.5,8874.1,20.86,1.072,,,2.43e-05,,,,,,,1508.0,175.0,mode 1 vs_heur 1.072
+lin2,hip_tail,prefill_gemm=2,down,5120,8704,2080,8606.2,8588.6,21.54,1.106,,,2.43e-05,,,,,,,1539.0,174.0,mode 2 vs_heur 1.106
+lin2,hip_tail,prefill_gemm=3,down,5120,8704,2080,8218.5,8208.3,22.56,1.159,,,2.43e-05,,,,,,,1575.0,174.0,mode 3 vs_heur 1.159
+lin2,rocblas_heur,default,in_proj_qkvz,8192,5120,1025,4899.1,4871.1,17.55,1.0,,,0.00e+00,,,,,,,1654.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,in_proj_qkvz,8192,5120,1025,4482.6,4473.4,19.18,1.093,,,0.00e+00,,,,,,,1446.0,175.0,mode 1 vs_heur 1.093
+lin2,hip_tail,prefill_gemm=2,in_proj_qkvz,8192,5120,1025,4098.3,4084.2,20.98,1.195,,,5.71e-07,,,,,,,1499.0,174.0,mode 2 vs_heur 1.195
+lin2,hip_tail,prefill_gemm=3,in_proj_qkvz,8192,5120,1025,4249.8,4230.9,20.23,1.153,,,0.00e+00,,,,,,,1553.0,174.0,mode 3 vs_heur 1.153
+lin2,rocblas_heur,default,in_proj_qkvz,8192,5120,1031,4906.6,4894.4,17.63,1.0,,,0.00e+00,,,,,,,1647.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,in_proj_qkvz,8192,5120,1031,4481.1,4467.0,19.3,1.095,,,0.00e+00,,,,,,,1442.0,175.0,mode 1 vs_heur 1.095
+lin2,hip_tail,prefill_gemm=2,in_proj_qkvz,8192,5120,1031,4177.2,4160.5,20.7,1.175,,,1.47e-06,,,,,,,1515.0,174.0,mode 2 vs_heur 1.175
+lin2,hip_tail,prefill_gemm=3,in_proj_qkvz,8192,5120,1031,4256.1,4243.9,20.32,1.153,,,0.00e+00,,,,,,,1551.0,174.0,mode 3 vs_heur 1.153
+lin2,rocblas_heur,default,in_proj_qkvz,8192,5120,1038,4923.1,4886.9,17.69,1.0,,,0.00e+00,,,,,,,1646.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,in_proj_qkvz,8192,5120,1038,4487.6,4455.4,19.4,1.097,,,0.00e+00,,,,,,,1438.0,175.0,mode 1 vs_heur 1.097
+lin2,hip_tail,prefill_gemm=2,in_proj_qkvz,8192,5120,1038,4293.5,4280.0,20.28,1.147,,,2.43e-06,,,,,,,1517.0,174.0,mode 2 vs_heur 1.147
+lin2,hip_tail,prefill_gemm=3,in_proj_qkvz,8192,5120,1038,4247.8,4233.5,20.5,1.159,,,0.00e+00,,,,,,,1548.0,174.0,mode 3 vs_heur 1.159
+lin2,rocblas_heur,default,in_proj_qkvz,8192,5120,1045,4929.9,4910.7,17.78,1.0,,,0.00e+00,,,,,,,1642.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,in_proj_qkvz,8192,5120,1045,4495.6,4475.1,19.5,1.097,,,0.00e+00,,,,,,,1431.0,175.0,mode 1 vs_heur 1.097
+lin2,hip_tail,prefill_gemm=2,in_proj_qkvz,8192,5120,1045,4403.6,4389.0,19.91,1.119,,,2.51e-06,,,,,,,1522.0,175.0,mode 2 vs_heur 1.119
+lin2,hip_tail,prefill_gemm=3,in_proj_qkvz,8192,5120,1045,4257.9,4242.9,20.59,1.158,,,0.00e+00,,,,,,,1544.0,174.0,mode 3 vs_heur 1.158
+lin2,rocblas_heur,default,in_proj_qkvz,8192,5120,1056,4962.9,4933.7,17.85,1.0,,,0.00e+00,,,,,,,1632.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,in_proj_qkvz,8192,5120,1056,4491.9,4471.3,19.72,1.105,,,0.00e+00,,,,,,,1434.0,175.0,mode 1 vs_heur 1.105
+lin2,hip_tail,prefill_gemm=2,in_proj_qkvz,8192,5120,1056,4573.0,4559.3,19.37,1.085,,,3.14e-06,,,,,,,1536.0,175.0,mode 2 vs_heur 1.085
+lin2,hip_tail,prefill_gemm=3,in_proj_qkvz,8192,5120,1056,4255.3,4249.5,20.82,1.166,,,0.00e+00,,,,,,,1536.0,175.0,mode 3 vs_heur 1.166
+lin2,rocblas_heur,default,in_proj_qkvz,8192,5120,1072,4978.6,4948.0,18.06,1.0,,,0.00e+00,,,,,,,1629.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,in_proj_qkvz,8192,5120,1072,4505.0,4484.2,19.96,1.105,,,0.00e+00,,,,,,,1434.0,175.0,mode 1 vs_heur 1.105
+lin2,hip_tail,prefill_gemm=2,in_proj_qkvz,8192,5120,1072,4830.6,4807.9,18.62,1.031,,,4.43e-06,,,,,,,1551.0,174.0,mode 2 vs_heur 1.031
+lin2,hip_tail,prefill_gemm=3,in_proj_qkvz,8192,5120,1072,4345.4,4333.9,20.69,1.146,,,0.00e+00,,,,,,,1527.0,175.0,mode 3 vs_heur 1.146
+lin2,rocblas_heur,default,in_proj_qkvz,8192,5120,2055,9413.7,9373.4,18.31,1.0,,,0.00e+00,,,,,,,1427.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,in_proj_qkvz,8192,5120,2055,8417.9,8391.1,20.48,1.118,,,2.28e-05,,,,,,,1498.0,175.0,mode 1 vs_heur 1.118
+lin2,hip_tail,prefill_gemm=2,in_proj_qkvz,8192,5120,2055,7725.4,7708.8,22.31,1.219,,,2.28e-05,,,,,,,1565.0,174.0,mode 2 vs_heur 1.219
+lin2,hip_tail,prefill_gemm=3,in_proj_qkvz,8192,5120,2055,7779.6,7765.1,22.16,1.21,,,2.28e-05,,,,,,,1585.0,174.0,mode 3 vs_heur 1.210
+lin2,rocblas_heur,default,in_proj_qkvz,8192,5120,2080,9446.7,9429.9,18.47,1.0,,,0.00e+00,,,,,,,1423.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,in_proj_qkvz,8192,5120,2080,8439.4,8426.4,20.67,1.119,,,2.30e-05,,,,,,,1493.0,174.0,mode 1 vs_heur 1.119
+lin2,hip_tail,prefill_gemm=2,in_proj_qkvz,8192,5120,2080,8122.0,8105.5,21.48,1.163,,,2.29e-05,,,,,,,1579.0,174.0,mode 2 vs_heur 1.163
+lin2,hip_tail,prefill_gemm=3,in_proj_qkvz,8192,5120,2080,7780.3,7770.3,22.43,1.214,,,2.30e-05,,,,,,,1585.0,174.0,mode 3 vs_heur 1.214
+lin2,rocblas_heur,default,out_proj,5120,3072,1025,1872.1,1860.0,17.22,1.0,,,0.00e+00,,,,,,,1562.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,out_proj,5120,3072,1025,1694.2,1689.8,19.03,1.105,,,2.07e-05,,,,,,,1577.0,175.0,mode 1 vs_heur 1.105
+lin2,hip_tail,prefill_gemm=2,out_proj,5120,3072,1025,1548.9,1539.2,20.82,1.209,,,2.07e-05,,,,,,,1623.0,174.0,mode 2 vs_heur 1.209
+lin2,hip_tail,prefill_gemm=3,out_proj,5120,3072,1025,1634.3,1632.3,19.73,1.145,,,2.07e-05,,,,,,,1696.0,174.0,mode 3 vs_heur 1.145
+lin2,rocblas_heur,default,out_proj,5120,3072,1031,1874.6,1861.7,17.3,1.0,,,0.00e+00,,,,,,,1560.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,out_proj,5120,3072,1031,1701.4,1697.1,19.06,1.102,,,2.10e-05,,,,,,,1568.0,175.0,mode 1 vs_heur 1.102
+lin2,hip_tail,prefill_gemm=2,out_proj,5120,3072,1031,1579.0,1575.2,20.54,1.187,,,2.10e-05,,,,,,,1637.0,174.0,mode 2 vs_heur 1.187
+lin2,hip_tail,prefill_gemm=3,out_proj,5120,3072,1031,1635.0,1631.8,19.84,1.147,,,2.10e-05,,,,,,,1694.0,174.0,mode 3 vs_heur 1.147
+lin2,rocblas_heur,default,out_proj,5120,3072,1038,1880.8,1865.7,17.36,1.0,,,0.00e+00,,,,,,,1558.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,out_proj,5120,3072,1038,1699.4,1692.2,19.21,1.107,,,2.00e-05,,,,,,,1574.0,175.0,mode 1 vs_heur 1.107
+lin2,hip_tail,prefill_gemm=2,out_proj,5120,3072,1038,1630.1,1624.3,20.03,1.154,,,1.99e-05,,,,,,,1630.0,174.0,mode 2 vs_heur 1.154
+lin2,hip_tail,prefill_gemm=3,out_proj,5120,3072,1038,1636.6,1634.7,19.95,1.149,,,2.00e-05,,,,,,,1695.5,174.0,mode 3 vs_heur 1.149
+lin2,rocblas_heur,default,out_proj,5120,3072,1045,1886.3,1875.2,17.43,1.0,,,0.00e+00,,,,,,,1556.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,out_proj,5120,3072,1045,1699.1,1696.9,19.35,1.11,,,2.03e-05,,,,,,,1575.0,175.0,mode 1 vs_heur 1.110
+lin2,hip_tail,prefill_gemm=2,out_proj,5120,3072,1045,1682.2,1677.5,19.54,1.121,,,2.03e-05,,,,,,,1626.0,174.0,mode 2 vs_heur 1.121
+lin2,hip_tail,prefill_gemm=3,out_proj,5120,3072,1045,1638.0,1635.4,20.07,1.152,,,2.03e-05,,,,,,,1693.0,174.0,mode 3 vs_heur 1.152
+lin2,rocblas_heur,default,out_proj,5120,3072,1056,1891.9,1878.1,17.56,1.0,,,0.00e+00,,,,,,,1551.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,out_proj,5120,3072,1056,1700.7,1698.9,19.53,1.112,,,2.12e-05,,,,,,,1574.0,174.0,mode 1 vs_heur 1.112
+lin2,hip_tail,prefill_gemm=2,out_proj,5120,3072,1056,1749.7,1746.9,18.99,1.081,,,2.12e-05,,,,,,,1625.0,174.0,mode 2 vs_heur 1.081
+lin2,hip_tail,prefill_gemm=3,out_proj,5120,3072,1056,1640.1,1638.1,20.25,1.154,,,2.12e-05,,,,,,,1693.0,174.0,mode 3 vs_heur 1.154
+lin2,rocblas_heur,default,out_proj,5120,3072,1072,1901.3,1888.9,17.74,1.0,,,0.00e+00,,,,,,,1546.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,out_proj,5120,3072,1072,1701.3,1698.7,19.82,1.118,,,2.00e-05,,,,,,,1569.0,175.0,mode 1 vs_heur 1.118
+lin2,hip_tail,prefill_gemm=2,out_proj,5120,3072,1072,1860.2,1855.2,18.13,1.022,,,2.00e-05,,,,,,,1627.0,174.0,mode 2 vs_heur 1.022
+lin2,hip_tail,prefill_gemm=3,out_proj,5120,3072,1072,1672.6,1671.7,20.16,1.137,,,2.00e-05,,,,,,,1693.0,174.0,mode 3 vs_heur 1.137
+lin2,rocblas_heur,default,out_proj,5120,3072,2055,3440.4,3430.4,18.79,1.0,,,0.00e+00,,,,,,,1689.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,out_proj,5120,3072,2055,3220.7,3212.6,20.07,1.068,,,0.00e+00,,,,,,,1534.0,175.0,mode 1 vs_heur 1.068
+lin2,hip_tail,prefill_gemm=2,out_proj,5120,3072,2055,2952.8,2948.7,21.89,1.165,,,1.30e-06,,,,,,,1563.0,174.0,mode 2 vs_heur 1.165
+lin2,hip_tail,prefill_gemm=3,out_proj,5120,3072,2055,2973.1,2961.1,21.74,1.157,,,0.00e+00,,,,,,,1620.0,174.0,mode 3 vs_heur 1.157
+lin2,rocblas_heur,default,out_proj,5120,3072,2080,3453.6,3436.1,18.95,1.0,,,0.00e+00,,,,,,,1685.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,out_proj,5120,3072,2080,3219.1,3204.8,20.33,1.073,,,0.00e+00,,,,,,,1535.0,175.0,mode 1 vs_heur 1.073
+lin2,hip_tail,prefill_gemm=2,out_proj,5120,3072,2080,3116.2,3109.6,21.0,1.108,,,2.22e-06,,,,,,,1567.0,174.0,mode 2 vs_heur 1.108
+lin2,hip_tail,prefill_gemm=3,out_proj,5120,3072,2080,2973.5,2967.7,22.0,1.161,,,0.00e+00,,,,,,,1622.0,174.0,mode 3 vs_heur 1.161
+lin2,rocblas_heur,default,qkv_proj,7168,5120,1025,4329.4,4323.8,17.38,1.0,,,0.00e+00,,,,,,,1673.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,qkv_proj,7168,5120,1025,3936.1,3918.9,19.11,1.1,,,0.00e+00,,,,,,,1460.0,175.0,mode 1 vs_heur 1.100
+lin2,hip_tail,prefill_gemm=2,qkv_proj,7168,5120,1025,3591.8,3579.9,20.95,1.205,,,1.29e-07,,,,,,,1504.5,174.5,mode 2 vs_heur 1.205
+lin2,hip_tail,prefill_gemm=3,qkv_proj,7168,5120,1025,3722.4,3717.8,20.21,1.163,,,0.00e+00,,,,,,,1567.0,174.0,mode 3 vs_heur 1.163
+lin2,rocblas_heur,default,qkv_proj,7168,5120,1031,4332.9,4309.1,17.47,1.0,,,0.00e+00,,,,,,,1672.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,qkv_proj,7168,5120,1031,3938.3,3924.4,19.22,1.1,,,0.00e+00,,,,,,,1454.0,175.0,mode 1 vs_heur 1.100
+lin2,hip_tail,prefill_gemm=2,qkv_proj,7168,5120,1031,3667.7,3641.4,20.63,1.181,,,1.79e-06,,,,,,,1514.0,174.0,mode 2 vs_heur 1.181
+lin2,hip_tail,prefill_gemm=3,qkv_proj,7168,5120,1031,3723.7,3715.7,20.32,1.164,,,0.00e+00,,,,,,,1566.0,174.0,mode 3 vs_heur 1.164
+lin2,rocblas_heur,default,qkv_proj,7168,5120,1038,4339.7,4315.1,17.56,1.0,,,0.00e+00,,,,,,,1670.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,qkv_proj,7168,5120,1038,3935.4,3927.6,19.36,1.103,,,0.00e+00,,,,,,,1454.5,175.0,mode 1 vs_heur 1.103
+lin2,hip_tail,prefill_gemm=2,qkv_proj,7168,5120,1038,3782.8,3771.5,20.14,1.147,,,2.74e-06,,,,,,,1515.0,174.0,mode 2 vs_heur 1.147
+lin2,hip_tail,prefill_gemm=3,qkv_proj,7168,5120,1038,3730.9,3709.2,20.42,1.163,,,0.00e+00,,,,,,,1568.0,174.0,mode 3 vs_heur 1.163
+lin2,rocblas_heur,default,qkv_proj,7168,5120,1045,4350.9,4324.0,17.63,1.0,,,0.00e+00,,,,,,,1670.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,qkv_proj,7168,5120,1045,3936.7,3923.3,19.48,1.105,,,0.00e+00,,,,,,,1454.0,175.0,mode 1 vs_heur 1.105
+lin2,hip_tail,prefill_gemm=2,qkv_proj,7168,5120,1045,3887.0,3867.9,19.73,1.119,,,3.75e-06,,,,,,,1522.0,174.0,mode 2 vs_heur 1.119
+lin2,hip_tail,prefill_gemm=3,qkv_proj,7168,5120,1045,3727.7,3716.4,20.58,1.167,,,0.00e+00,,,,,,,1566.0,174.0,mode 3 vs_heur 1.167
+lin2,rocblas_heur,default,qkv_proj,7168,5120,1056,4356.4,4336.0,17.79,1.0,,,0.00e+00,,,,,,,1667.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,qkv_proj,7168,5120,1056,3941.0,3928.3,19.67,1.105,,,0.00e+00,,,,,,,1453.0,175.0,mode 1 vs_heur 1.105
+lin2,hip_tail,prefill_gemm=2,qkv_proj,7168,5120,1056,4039.5,4027.6,19.19,1.078,,,3.42e-06,,,,,,,1526.0,174.0,mode 2 vs_heur 1.078
+lin2,hip_tail,prefill_gemm=3,qkv_proj,7168,5120,1056,3720.1,3709.3,20.84,1.171,,,0.00e+00,,,,,,,1571.0,174.0,mode 3 vs_heur 1.171
+lin2,rocblas_heur,default,qkv_proj,7168,5120,1072,4383.9,4354.6,17.95,1.0,,,0.00e+00,,,,,,,1661.0,174.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,qkv_proj,7168,5120,1072,3944.8,3921.4,19.95,1.111,,,0.00e+00,,,,,,,1451.0,175.0,mode 1 vs_heur 1.111
+lin2,hip_tail,prefill_gemm=2,qkv_proj,7168,5120,1072,4292.0,4279.9,18.33,1.021,,,4.45e-06,,,,,,,1528.0,174.0,mode 2 vs_heur 1.021
+lin2,hip_tail,prefill_gemm=3,qkv_proj,7168,5120,1072,3812.1,3800.9,20.64,1.15,,,0.00e+00,,,,,,,1554.0,174.0,mode 3 vs_heur 1.150
+lin2,rocblas_heur,default,qkv_proj,7168,5120,2055,8285.9,8258.7,18.2,1.0,,,0.00e+00,,,,,,,1432.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,qkv_proj,7168,5120,2055,7393.4,7374.2,20.4,1.121,,,2.29e-05,,,,,,,1499.0,175.0,mode 1 vs_heur 1.121
+lin2,hip_tail,prefill_gemm=2,qkv_proj,7168,5120,2055,6788.7,6773.0,22.22,1.221,,,2.29e-05,,,,,,,1552.0,174.0,mode 2 vs_heur 1.221
+lin2,hip_tail,prefill_gemm=3,qkv_proj,7168,5120,2055,6824.4,6811.2,22.1,1.214,,,2.29e-05,,,,,,,1582.0,174.0,mode 3 vs_heur 1.214
+lin2,rocblas_heur,default,qkv_proj,7168,5120,2080,8317.4,8278.3,18.36,1.0,,,0.00e+00,,,,,,,1426.0,175.0, vs_heur 1.000
+lin2,hip,prefill_gemm=1,qkv_proj,7168,5120,2080,7389.3,7373.7,20.66,1.126,,,2.30e-05,,,,,,,1500.0,174.0,mode 1 vs_heur 1.126
+lin2,hip_tail,prefill_gemm=2,qkv_proj,7168,5120,2080,7156.1,7153.4,21.33,1.162,,,2.30e-05,,,,,,,1559.0,174.0,mode 2 vs_heur 1.162
+lin2,hip_tail,prefill_gemm=3,qkv_proj,7168,5120,2080,6825.1,6814.3,22.37,1.219,,,2.30e-05,,,,,,,1582.0,174.0,mode 3 vs_heur 1.219

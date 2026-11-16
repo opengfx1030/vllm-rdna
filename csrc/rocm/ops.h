@@ -99,6 +99,16 @@ void mono_gdn_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
                     torch::Tensor& y, torch::Tensor& scratch,
                     int64_t num_k_heads, double scale, double eps,
                     int64_t gate_sigmoid);
+void mono_gdn_lq_rdna2(const torch::Tensor& qkvz, const torch::Tensor& ba,
+                       const torch::Tensor& conv_w, const torch::Tensor& conv_b,
+                       torch::Tensor& conv_state, torch::Tensor& blob,
+                       const torch::Tensor& A_log, const torch::Tensor& dt_bias,
+                       const torch::Tensor& norm_w, const torch::Tensor& sidx,
+                       const torch::Tensor& nacc, const torch::Tensor& qsl,
+                       torch::Tensor& y, torch::Tensor& scratch,
+                       int64_t num_k_heads, double scale, double eps,
+                       int64_t gate_sigmoid, int64_t num_comp, int64_t capacity,
+                       int64_t window);
 int64_t mono_gdn_rdna2_scratch_bytes(int64_t M, int64_t HV, int64_t H);
 void mono_qsa_decode_rdna2(const torch::Tensor& q, const torch::Tensor& k_cache,
                            const torch::Tensor& v_cache,
@@ -168,6 +178,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero(
     const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
     const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
     at::Tensor& zero2);
+std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero_stats(
+    const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
+    const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
+    at::Tensor& zero2, const std::optional<at::Tensor>& is_padding,
+    at::Tensor& state, const std::optional<at::Tensor>& ring,
+    const std::optional<at::Tensor>& gseq,
+    const std::optional<at::Tensor>& hist, const at::Tensor& owner,
+    const at::Tensor& edges, int64_t layer_pos, int64_t sample_mask,
+    int64_t ranks);
+void rdna_eplb_stats(const at::Tensor& topk_ids,
+                     const std::optional<at::Tensor>& is_padding,
+                     at::Tensor& state, const std::optional<at::Tensor>& ring,
+                     const std::optional<at::Tensor>& gseq,
+                     const std::optional<at::Tensor>& hist,
+                     const at::Tensor& owner, const at::Tensor& edges,
+                     int64_t layer_pos, int64_t sample_mask, int64_t ranks,
+                     int64_t num_experts);
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
@@ -563,6 +590,28 @@ void gdn_spec_verify_rdna2(
     torch::Tensor ssm_state_indices,  // [N, S] or [N] int32
     torch::Tensor num_accepted_tokens,  // [N] int32 or undefined
     double scale);
+
+// LeapQuant INT8 GDN recurrent state (arXiv 2609.38166) for AMD RDNA2.
+// Blob layout and FP32 oracle: vllm/model_executor/layers/mamba/ops/
+// leapquant_gdn.py. blob is uint8 [blocks, HV, nbytes].
+void gdn_lq_normalize_rdna2(torch::Tensor blob, torch::Tensor state_indices,
+                            const std::optional<torch::Tensor>& num_accepted,
+                            int64_t head_v_dim, int64_t num_comp,
+                            int64_t capacity, int64_t window,
+                            int64_t power_iters,
+                            const std::optional<torch::Tensor>& layer_offsets);
+void gdn_lq_decode_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
+                         torch::Tensor a, torch::Tensor b, torch::Tensor A_log,
+                         torch::Tensor dt_bias, torch::Tensor out,
+                         torch::Tensor blob, torch::Tensor cu_seqlens,
+                         torch::Tensor state_indices, double scale,
+                         int64_t num_comp, int64_t capacity, int64_t window);
+void gdn_lq_materialize_rdna2(torch::Tensor blob, torch::Tensor state,
+                              torch::Tensor state_indices, int64_t num_comp,
+                              int64_t capacity, int64_t window);
+void gdn_lq_store_rdna2(torch::Tensor state, torch::Tensor blob,
+                        torch::Tensor state_indices, int64_t num_comp,
+                        int64_t capacity, int64_t window, int64_t power_iters);
 
 // GDN prefill kernels for AMD RDNA2 (gfx1030). Hand ports of the Triton/FLA
 // chain `chunk_gated_delta_rule_fwd` (chunk.py:23-86) decomposed into 5 HIP
@@ -1330,13 +1379,19 @@ void spec_insert_resampled_rdna2(
 // rdna_hint_flex_rdna2.cu.
 void rdna_hint_flex_act_transform_rdna2(torch::Tensor x,
                                         torch::Tensor col_scale,
-                                        torch::Tensor had, torch::Tensor out);
+                                        torch::Tensor had, torch::Tensor out,
+                                        bool pair_interleaved, bool silu_mul);
 void rdna_hint_flex_gemv_rdna2(torch::Tensor x, torch::Tensor codes,
                                torch::Tensor code_off, torch::Tensor blk_params,
                                torch::Tensor param_off,
                                torch::Tensor row_consts,
                                torch::Tensor row_nbits, torch::Tensor row_block,
                                torch::Tensor out);
+void rdna_hint_flex_gemv2_rdna2(
+    torch::Tensor x, torch::Tensor codes, torch::Tensor code_off,
+    torch::Tensor blk_params, torch::Tensor param_off, torch::Tensor row_consts,
+    torch::Tensor row_nbits, torch::Tensor row_block, torch::Tensor out,
+    int64_t mt, int64_t rpw, int64_t wpb, bool x_pi);
 void rdna_hint_flex_dequant_rdna2(torch::Tensor codes, torch::Tensor code_off,
                                   torch::Tensor blk_params,
                                   torch::Tensor param_off,
@@ -1347,8 +1402,15 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
     torch::Tensor x, torch::Tensor col_scale, torch::Tensor had,
     torch::Tensor codes, torch::Tensor code_off, torch::Tensor blk_params,
     torch::Tensor param_off, torch::Tensor row_consts, torch::Tensor row_nbits,
-    torch::Tensor row_block, bool transform, int64_t decode_max_m,
-    int64_t mode);
+    torch::Tensor row_block, bool transform, int64_t decode_max_m, int64_t mode,
+    bool silu_mul, int64_t prefill_gemm);
+// Dense fp16 GEMM out = x . w^T of the prefill path (see
+// rdna_hint_flex_dense_gemm_rdna2.cu): design < 0 lets the dispatch table pick
+// (rocBLAS when it says so), design >= 0 forces one; _pick returns the table's
+// choice (-1 = rocBLAS).
+void rdna_hint_flex_dense_gemm_rdna2(torch::Tensor x, torch::Tensor w,
+                                     torch::Tensor out, int64_t design);
+int64_t rdna_hint_flex_dense_gemm_pick_rdna2(int64_t M, int64_t N, int64_t K);
 void rdna_hint_flex_act_quant_rdna2(torch::Tensor x, torch::Tensor col_scale,
                                     torch::Tensor had, bool transform,
                                     torch::Tensor xq, torch::Tensor sx,

@@ -19,7 +19,7 @@ MODEL=/path/to/checkpoint VENV=/path/to/venv \
 ```
 
 `PRINT=1` dry-runs it. Recipes live in `tools/rdna/recipes/*.env` (`flashnext*`,
-`27b-awq`, `27b-exl3`, `dsv4-flash`, `full`); override with a trailing
+`27b-awq`, `27b-exl3`, `27b-hi2-tp2*`, `dsv4-flash`, `full`); override with a trailing
 `KEY=value`, add flags with `EXTRA_ARGS='...'`. PLE table: `PLE=bf16` (default,
 ~95 GB host RAM) or `PLE=int4[-disk]` with `PLE_QUANT_DIR=/path/to/ples_int4`.
 

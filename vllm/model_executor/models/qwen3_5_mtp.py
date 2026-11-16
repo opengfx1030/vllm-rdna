@@ -63,6 +63,8 @@ _QUANT_PARAM_SUFFIXES = (
     ".trellis",
     ".suh",
     ".svh",
+    # rdna_hint_flex (HI2): every quantized linear stores a ``.hi2_codes``.
+    ".hi2_codes",
 )
 
 
@@ -70,8 +72,9 @@ def _mtp_weights_unquantized(model_config) -> bool:
     """Whether the checkpoint stores its mtp.* tensors unquantized despite
     the model carrying a quant config.
 
-    Quantized params use packed names (.qweight/.qzeros/...) or EXL3's
-    trellis/suh/svh; unquantized ones are plain .weight or bare fused-MoE
+    Quantized params use packed names (.qweight/.qzeros/...), EXL3's
+    trellis/suh/svh or rdna_hint_flex's .hi2_codes; unquantized ones are plain
+    .weight or bare fused-MoE
     names (experts.gate_up_proj / experts.down_proj). Returns False when the
     checkpoint has no mtp tensors at all or metadata is unavailable.
     """

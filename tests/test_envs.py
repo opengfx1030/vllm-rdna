@@ -331,6 +331,30 @@ def test_rocm_mlock_pinned_host_env(monkeypatch: pytest.MonkeyPatch):
             env_func()
 
 
+def test_leapquant_pack_env_is_registered(monkeypatch: pytest.MonkeyPatch):
+    """VLLM_RDNA_GDN_LEAPQUANT_PACK is a known variable: the platform check no
+    longer warns about it, and it is not a compile-cache factor (it changes the
+    KV-cache page layout, not the compiled graph)."""
+    from vllm.platforms.interface import Platform
+
+    name = "VLLM_RDNA_GDN_LEAPQUANT_PACK"
+    assert name in environment_variables and name in dir(envs)
+    env_func = environment_variables[name]
+    monkeypatch.delenv(name, raising=False)
+    assert env_func() is False
+    assert envs.VLLM_RDNA_GDN_LEAPQUANT_PACK is False
+    assert not envs.is_set(name)
+
+    for value, expected in (("1", True), ("0", False), ("", False), ("2", False)):
+        monkeypatch.setenv(name, value)
+        assert env_func() is expected
+    monkeypatch.setenv(name, "1")
+    assert envs.is_set(name)
+    assert envs.VLLM_RDNA_GDN_LEAPQUANT_PACK is True
+    Platform.validate_environ(hard_fail=True)
+    assert name not in envs.compile_factors()
+
+
 class TestEnvListWithChoices:
     """Test cases for env_list_with_choices function."""
 

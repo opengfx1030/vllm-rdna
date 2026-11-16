@@ -155,6 +155,10 @@ TP=${TP:-4}
 PP=${PP:-1}                      # pipeline-parallel stages (3x V620: PP=3 TP=1)
 PP_PARTITION=${PP_PARTITION:-}  # layers per stage, e.g. 16,16,16 -> VLLM_PP_LAYER_PARTITION
 BLOCK_SIZE=${BLOCK_SIZE:-}
+# --replayssm-state-dtype: auto (the model's own GDN state) or leapquant
+# (lossy INT8 GDN state, docs/rdna2/leapquant-gdn-2026-11-13.md).
+REPLAYSSM_STATE_DTYPE=${REPLAYSSM_STATE_DTYPE:-}
+[[ ${VLLM_RDNA_GDN_LEAPQUANT:-} != 1 ]] || rdna_die "VLLM_RDNA_GDN_LEAPQUANT=1 was replaced by REPLAYSSM_STATE_DTYPE=leapquant (--replayssm-state-dtype leapquant). Unset it: the engine ignores it and would serve FP32 state."
 LPTH=${LPTH:-}
 PREFILL_INTERVAL=${PREFILL_INTERVAL:-}
 DIST_TIMEOUT=${DIST_TIMEOUT:-}
@@ -319,13 +323,18 @@ rdse_tunableop_report() {
         return
     fi
     if [[ -f $lib ]] && command -v sha256sum >/dev/null 2>&1; then
-        local sha match
+        local sha picked mode name
         sha=$(sha256sum -- "$lib")
         sha=${sha:0:12}
-        match=$(_tunableop_profiles "$rows_root/profiles.json" |
-            awk -F'\t' -v h="$sha" 'substr($3, 1, 12) == h { print $1; exit }')
-        if [[ -n $match ]]; then
-            rdse_profile_line="$match (auto-selected for librocblas.so.5 $sha)"
+        picked=$(_tunableop_pick "$rows_root/profiles.json" "$sha" "" "${TUNABLEOP_PREFER:-}")
+        IFS=$'\t' read -r mode name _ <<< "$picked"
+        if [[ $mode == preferred ]]; then
+            rdse_profile_line="$name (preferred via TUNABLEOP_PREFER for librocblas.so.5 $sha)"
+        elif [[ -n $name ]]; then
+            rdse_profile_line="$name (auto-selected for librocblas.so.5 $sha)"
+            if [[ -n ${TUNABLEOP_PREFER:-} ]]; then
+                rdse_profile_line+="; preferred ${TUNABLEOP_PREFER} is not registered for this build"
+            fi
         else
             rdse_profile_line="no profile matches librocblas.so.5 $sha; per-user fallback row set"
         fi
@@ -381,6 +390,7 @@ cmd+=(--tensor-parallel-size "$TP" --dtype float16)
 (( PP > 1 )) && cmd+=(--pipeline-parallel-size "$PP")
 [[ -n $PP_PARTITION ]] && export VLLM_PP_LAYER_PARTITION=$PP_PARTITION
 [[ -n $BLOCK_SIZE ]] && cmd+=(--block-size "$BLOCK_SIZE")
+[[ -n $REPLAYSSM_STATE_DTYPE ]] && cmd+=(--replayssm-state-dtype "$REPLAYSSM_STATE_DTYPE")
 [[ -n $MAXLEN ]] && cmd+=(--max-model-len "$MAXLEN")
 cmd+=(--max-num-seqs "$SEQS" --max-num-batched-tokens "$MAXBAT")
 [[ -n $LPTH ]] && cmd+=(--long-prefill-token-threshold "$LPTH")
@@ -449,6 +459,7 @@ RDSE_ENV_KEYS=(
     RDNA_DFLASH2_DRAFT_BF16
     VLLM_USE_BREAKABLE_CUDAGRAPH VLLM_RDNA_FUSED_HC VLLM_RDNA_HC_PREFILL_FUSED
     VLLM_GDN_HIP_PREFILL VLLM_RDNA_FUSED_SE
+    VLLM_RDNA_GDN_LEAPQUANT_PACK
     VLLM_RDNA_DENSE_INT8 VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_DENSE_GEMV
     VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA2_W4A8_DEBUG
     VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA_W4A8_KBLOCK
@@ -460,10 +471,18 @@ RDSE_ENV_KEYS=(
     VLLM_RDNA_MOE_HIST_DIR VLLM_RDNA_MOE_HIST_MIN_TOKENS
     VLLM_EXPERT_STATS_DIR VLLM_EXPERT_STATS_INTERVAL_S VLLM_EXPERT_STATS_PAIRS
     VLLM_EXPERT_STATS_PAIRS_EVERY VLLM_EXPERT_STATS_DECODE_MAX_TOKENS
+    VLLM_RDNA_EPLB_STATS_DIR VLLM_RDNA_EPLB_STATS_RING VLLM_RDNA_EPLB_STATS_HIST
+    VLLM_RDNA_EPLB_STATS_EVERY VLLM_RDNA_EPLB_STATS_INTERVAL_S
+    VLLM_RDNA_EPLB_STATS_DECODE_MAX VLLM_RDNA_EPLB_STATS_KERNEL
     VLLM_ENABLE_STARTUP_PLAN VLLM_TUNED_CONFIG_FOLDER
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
     VLLM_PLE_CPU_OFFLOAD VLLM_PLE_OFFLOAD_READY_TIMEOUT VLLM_PLE_QUANT_DIR
     VLLM_EXL3_DEBUG
+    VLLM_RDNA_HINT_FLEX_COMPUTE_MODE RDNA_HINT_FLEX_GEMV RDNA_HINT_FLEX_GEMV_SPLIT
+    RDNA_HINT_FLEX_FUSE_SILU RDNA_HINT_FLEX_PREFILL RDNA_HINT_FLEX_PREFILL_GEMM
+    RDNA_HINT_FLEX_MOE_GROUPED_MIN
+    VLLM_FA_RDNA2_UNFUSED_PREFILL VLLM_RDNA_GEMMA_RESIDUAL_DIRECT VLLM_RDNA_GDN_DECODE_INPLACE
+    VLLM_RDNA_LM_HEAD_GEMV_MAX_M
     VLLM_RDNA_DECODE_STALL_MS VLLM_RDNA_DECODE_SHARE VLLM_DECODE_STALL_MAX_OVERHEAD VLLM_DECODE_STALL_FIT_ALL
     NCCL_P2P_LEVEL NCCL_P2P_DISABLE RCCL_P2P_NET_DISABLE RCCL_P2P_BATCH_ENABLE NCCL_PROTO
     RCCL_MSCCL_ENABLE

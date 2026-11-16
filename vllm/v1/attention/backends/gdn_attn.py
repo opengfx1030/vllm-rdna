@@ -11,11 +11,12 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
-from vllm.platforms.rdna import on_rdna_family
+from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -38,6 +39,69 @@ _SPEC_ROW_SLICE = os.environ.get("VLLM_GDN_SPEC_ROW_SLICE", "1") != "0"
 # GDN kernels treat index 0 as NULL_BLOCK_ID, so arena slot 0 is unused and
 # live decode rows occupy 1..num. Arenas are therefore (max_bs + 1, *shape).
 GDN_ARENA_NULL_SLOT = 0
+
+logger = init_logger(__name__)
+
+# The layer switches that make `_rdna_strided_decode_inputs` true
+# (qwen_gdn_linear_attn.py): the in-place decode was validated with all of them on.
+_STRIDED_DECODE_ENVS = (
+    "VLLM_RDNA_GDN_OPAQUE",
+    "VLLM_GDN_DECODE_RDNA2",
+    "VLLM_GDN_STRIDED_INPUTS",
+)
+
+
+def _gdn_decode_rdna2_loaded() -> bool:
+    return hasattr(torch.ops, "_rocm_C") and hasattr(
+        torch.ops._rocm_C, "gdn_decode_rdna2"
+    )
+
+
+def gdn_decode_inplace_enabled(vllm_config: VllmConfig) -> bool:
+    """``VLLM_RDNA_GDN_DECODE_INPLACE=1``: decode-only batches run on the paged
+    GDN state in place instead of through the per-layer state arenas.
+
+    The arenas exist because the FULL-graph decode kernels once read stale or
+    ephemeral block-table views (a captured graph replays the address it was
+    captured with). ``build()`` now stages the slot indices in static buffers
+    (as upstream's CUDA FULL graphs do), which is all the graph needs, and the
+    kernels already index the paged state: ``gdn_decode_rdna2`` and the Triton
+    conv update skip NULL slots (zero output row, no state access). So the
+    gather/scatter copies the arenas cost per layer are dead weight.
+
+    Only the validated envelope: the gfx10x HIP kernels, an fp16 model, the HIP
+    GDN decode with strided inputs (``_rdna_strided_decode_inputs``) and the
+    Triton conv update (the HIP conv update runs a NULL slot as an ordinary
+    line, harmless in a private arena but a write into the paged cache's null
+    block), and not LeapQuant state, whose kernels were validated against the
+    arenas. Anything else keeps the arenas.
+    """
+    if os.environ.get("VLLM_RDNA_GDN_DECODE_INPLACE", "0") != "1":
+        return False
+    if not on_rdna2_hip():
+        reason = "it needs the gfx10x HIP kernels (VLLM_RDNA_ALL_HIP=1)"
+    elif vllm_config.model_config.dtype != torch.float16:
+        reason = "it needs an fp16 model"
+    elif os.environ.get("VLLM_CAUSAL_CONV1D_RDNA2_UPDATE", "1") != "0":
+        reason = "it needs VLLM_CAUSAL_CONV1D_RDNA2_UPDATE=0 (Triton conv update)"
+    elif any(os.environ.get(name, "1") == "0" for name in _STRIDED_DECODE_ENVS):
+        reason = (
+            "it needs the HIP decode with strided inputs, none of "
+            + ", ".join(_STRIDED_DECODE_ENVS)
+            + " may be 0"
+        )
+    elif not _gdn_decode_rdna2_loaded():
+        reason = "the gdn_decode_rdna2 op is not built"
+    elif vllm_config.cache_config.replayssm_state_dtype == "leapquant":
+        reason = "it does not cover LeapQuant state"
+    else:
+        return True
+    logger.warning_once(
+        "VLLM_RDNA_GDN_DECODE_INPLACE=1 ignored, the GDN decode keeps its "
+        "state arenas: %s",
+        reason,
+    )
+    return False
 
 
 def gdn_decode_arena_max_bs(vllm_config: VllmConfig, num_spec: int = 0) -> int:
@@ -291,6 +355,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self._rdna_state_arenas = on_rdna_family()
         self.use_static_state_buffers: bool = (
             self._rdna_state_arenas and mode is not None and bool(mode)
+        )
+        # VLLM_RDNA_GDN_DECODE_INPLACE=1: decode-only batches index the paged
+        # state in place (slot indices staged in non_spec_state_indices_tensor
+        # below), with no per-layer state arenas. Not isinstance: subclasses
+        # (KDA) keep their own metadata.
+        self._decode_inplace: bool = (
+            self.use_static_state_buffers
+            and type(self) is GDNAttentionMetadataBuilder
+            and gdn_decode_inplace_enabled(vllm_config)
         )
 
         self.decode_cudagraph_max_bs: int = gdn_decode_arena_max_bs(
@@ -847,6 +920,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         if (
             self.use_static_state_buffers
+            # The block-table copy only feeds the arena gather's slots.
+            and not self._decode_inplace
             and num_prefills == 0
             and block_table_tensor is not None
             and block_table_tensor.numel() > 0
@@ -903,6 +978,35 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_accepted_tokens[:num_spec_decodes].copy_(num_accepted_tokens)
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
+
+        if (
+            self._decode_inplace
+            and num_prefills == 0
+            and num_spec_decodes == 0
+            and num_decodes <= self.decode_cudagraph_max_bs
+            and block_table_tensor is not None
+            and block_table_tensor.numel() > 0
+        ):
+            # The paged slots the arena gather would have read, staged in this
+            # builder's own buffer: block_table_tensor is a new tensor every
+            # step in mamba align mode, and a FULL graph replays the address it
+            # was captured with. Padded rows are NULL_BLOCK_ID: the decode
+            # kernels write a zero row for them and touch no state.
+            assert non_spec_state_indices_tensor is not None
+            self.non_spec_state_indices_tensor[:num_decodes].copy_(
+                non_spec_state_indices_tensor[:num_decodes]
+            )
+            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                :batch_size
+            ]
+            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
+
+            self.non_spec_query_start_loc[: num_decodes + 1].copy_(
+                non_spec_query_start_loc
+            )
+            non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
+            non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
+            non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
         if (
             self.use_static_state_buffers
@@ -989,9 +1093,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     def _stage_decode(
         self, num_prefills: int, num_decodes: int, num_spec_decodes: int
     ) -> bool:
-        """Whether decode metadata goes into the FULL cudagraph buffers."""
+        """Whether decode metadata goes into the FULL cudagraph buffers (or, for
+        the in-place decode, this builder's own static slot buffer: update_block_table
+        runs this for the KV groups after the first, whose captured graphs read
+        the addresses of their own buffers)."""
         return (
-            self.use_full_cuda_graph
+            (self.use_full_cuda_graph or self._decode_inplace)
             and num_prefills == 0
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs

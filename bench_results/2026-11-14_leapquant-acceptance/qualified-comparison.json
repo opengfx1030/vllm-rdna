@@ -1,0 +1,1057 @@
+{
+  "protocol": {
+    "baseline_arms": [
+      "A1",
+      "A2"
+    ],
+    "candidate_arms": [
+      "C1",
+      "C2"
+    ],
+    "order": "A1, rejected B1, C1, C2, A2; the accepted controls bracket the repeated candidate, not an uninterrupted ABBA",
+    "baseline": "LeapQuant off, block1024, mixed-step budget0",
+    "candidate": "LeapQuant on, window32, block512, adaptive mixed-step budget450ms, decode_share0, max_overhead1",
+    "shared": "Flash-Next AWQ-W4A16, MTP2, greedy/one-hot drafting, MonoKernel, FULL_AND_PIECEWISE, TP4 b4 HIP2-5 (d9/dc/df/e2)",
+    "sampling": "Thinking T1/.95/k20/min0/pres0/rep1 except explicit greedy T0 cell. Random cells have dataset seed12345, no API seed; templated agentic cells API seed12345, EOS allowed. KL T0 seed12345, ignore EOS, 128x512 per boot.",
+    "aggregation": "Rates and latency summaries are means of two boot summaries, including per-boot p99 values; acceptance is pooled as 1+sum(accepted)/sum(draft_steps). Effective-wave prefill = concurrency*mean_input/p99_TTFT, not separately timed GPU throughput."
+  },
+  "preemptions_total": {
+    "A1": 14.0,
+    "A2": 10.0,
+    "C1": 0.0,
+    "C2": 0.0
+  },
+  "capacity_tokens": {
+    "baseline": 266945,
+    "candidate": 273456,
+    "percent_delta": 2.439079211073447
+  },
+  "comparisons": {
+    "bench-1024x512-c1.json": {
+      "baseline": {
+        "prefill_per_request_tps": 2517.8562346563153,
+        "prefill_effective_wave_tps": 2466.7276482365137,
+        "decode_per_request_tps": 88.00703710900318,
+        "output_aggregate_tps": 82.38294444579583,
+        "ttft_mean_s": 0.4067079229389492,
+        "ttft_p99_s": 0.41513236717000834,
+        "itl_mean_ms": 23.675173532820306,
+        "itl_median_ms": 23.68379247491248,
+        "itl_p99_ms": 24.20597830612678,
+        "maximum_stream_gap_ms": 25.585468480130658,
+        "acceptance_length": 2.076864535768645,
+        "acceptance_length_per_boot": [
+          2.2285714285714286,
+          1.9444048467569495
+        ],
+        "output_aggregate_tps_per_boot": [
+          87.60096785165912,
+          77.16492103993254
+        ],
+        "completed": 32,
+        "corruption_flag_counts_per_boot": [
+          4,
+          1
+        ]
+      },
+      "candidate": {
+        "prefill_per_request_tps": 2054.0647460859786,
+        "prefill_effective_wave_tps": 2013.7236082900133,
+        "decode_per_request_tps": 91.32320526413608,
+        "output_aggregate_tps": 84.0099027384095,
+        "ttft_mean_s": 0.49853082837580587,
+        "ttft_p99_s": 0.5085128714083111,
+        "itl_mean_ms": 23.596989390356235,
+        "itl_median_ms": 23.59654124302324,
+        "itl_p99_ms": 24.23233177163638,
+        "maximum_stream_gap_ms": 25.328585994429886,
+        "acceptance_length": 2.1580819391384534,
+        "acceptance_length_per_boot": [
+          2.2020962106960495,
+          2.115762273901809
+        ],
+        "output_aggregate_tps_per_boot": [
+          85.53603706166338,
+          82.4837684151556
+        ],
+        "completed": 32,
+        "corruption_flag_counts_per_boot": [
+          0,
+          2
+        ]
+      },
+      "percent_delta": {
+        "prefill_per_request_tps": -18.42009413351766,
+        "prefill_effective_wave_tps": -18.36457463272677,
+        "decode_per_request_tps": 3.768071581623156,
+        "output_aggregate_tps": 1.9748727161410518,
+        "ttft_mean_s": 22.577112531599287,
+        "ttft_p99_s": 22.494151654539827,
+        "itl_mean_ms": -0.33023682954503863,
+        "itl_median_ms": -0.36840059285970783,
+        "itl_p99_ms": 0.10887172241631493,
+        "maximum_stream_gap_ms": -1.0040171275357501,
+        "acceptance_length": 3.9105777950871445
+      }
+    },
+    "bench-32768x2048-c8.json": {
+      "baseline": {
+        "prefill_per_request_tps": 407.2159994972895,
+        "prefill_effective_wave_tps": 1799.2981072950984,
+        "decode_per_request_tps": 20.210457017911544,
+        "output_aggregate_tps": 82.31701601501254,
+        "ttft_mean_s": 80.56362891624667,
+        "ttft_p99_s": 145.694371291867,
+        "itl_mean_ms": 113.33798366754365,
+        "itl_median_ms": 44.58355699898675,
+        "itl_p99_ms": 434.90863372571766,
+        "maximum_stream_gap_ms": 455.97916550468653,
+        "acceptance_length": 2.280999791129987,
+        "acceptance_length_per_boot": [
+          2.120590329471163,
+          2.4676508247345033
+        ],
+        "output_aggregate_tps_per_boot": [
+          78.54624888374738,
+          86.08778314627769
+        ],
+        "completed": 32,
+        "corruption_flag_counts_per_boot": [
+          3,
+          4
+        ]
+      },
+      "candidate": {
+        "prefill_per_request_tps": 536.3846215419022,
+        "prefill_effective_wave_tps": 1909.8842110340095,
+        "decode_per_request_tps": 23.409080422075576,
+        "output_aggregate_tps": 100.45949176573534,
+        "ttft_mean_s": 61.11852181294125,
+        "ttft_p99_s": 137.31352753602695,
+        "itl_mean_ms": 97.2865884474271,
+        "itl_median_ms": 45.69040652131662,
+        "itl_p99_ms": 436.1885846001678,
+        "maximum_stream_gap_ms": 441.6392714774702,
+        "acceptance_length": 2.2767605878469928,
+        "acceptance_length_per_boot": [
+          2.2235190337246387,
+          2.332621386871707
+        ],
+        "output_aggregate_tps_per_boot": [
+          101.03564463216186,
+          99.88333889930881
+        ],
+        "completed": 32,
+        "corruption_flag_counts_per_boot": [
+          3,
+          6
+        ]
+      },
+      "percent_delta": {
+        "prefill_per_request_tps": 31.719928049013824,
+        "prefill_effective_wave_tps": 6.146069030504142,
+        "decode_per_request_tps": 15.826576318037965,
+        "output_aggregate_tps": 22.039763622401075,
+        "ttft_mean_s": -24.13633467717846,
+        "ttft_p99_s": -5.752345599577646,
+        "itl_mean_ms": -14.162414665149148,
+        "itl_median_ms": 2.482640679286807,
+        "itl_p99_ms": 0.29430339505684966,
+        "maximum_stream_gap_ms": -3.144857289991465,
+        "acceptance_length": -0.18584847308968921
+      }
+    },
+    "greedy-1024x512-c1.json": {
+      "baseline": {
+        "prefill_per_request_tps": 2532.122175504175,
+        "prefill_effective_wave_tps": 2466.046708883563,
+        "decode_per_request_tps": 85.9373030177309,
+        "output_aggregate_tps": 80.61735697609461,
+        "ttft_mean_s": 0.4044041465349437,
+        "ttft_p99_s": 0.4152406490786234,
+        "itl_mean_ms": 23.48317176418994,
+        "itl_median_ms": 23.481810989324003,
+        "itl_p99_ms": 24.047488028299995,
+        "maximum_stream_gap_ms": 24.78781051468104,
+        "acceptance_length": 2.0206096507466373,
+        "acceptance_length_per_boot": [
+          2.0083456062837506,
+          2.0330106726234796
+        ],
+        "output_aggregate_tps_per_boot": [
+          80.2010718896197,
+          81.03364206256953
+        ],
+        "completed": 32,
+        "corruption_flag_counts_per_boot": [
+          2,
+          3
+        ]
+      },
+      "candidate": {
+        "prefill_per_request_tps": 2053.2499418249477,
+        "prefill_effective_wave_tps": 2015.415586412402,
+        "decode_per_request_tps": 88.93250016609886,
+        "output_aggregate_tps": 81.98053170225919,
+        "ttft_mean_s": 0.498724023496834,
+        "ttft_p99_s": 0.5080926415292197,
+        "itl_mean_ms": 23.420604571939812,
+        "itl_median_ms": 23.42107647564262,
+        "itl_p99_ms": 24.07252019038424,
+        "maximum_stream_gap_ms": 28.539560007629916,
+        "acceptance_length": 2.084372613896666,
+        "acceptance_length_per_boot": [
+          2.021229326092323,
+          2.151562910428159
+        ],
+        "output_aggregate_tps_per_boot": [
+          79.73630601295496,
+          84.22475739156343
+        ],
+        "completed": 32,
+        "corruption_flag_counts_per_boot": [
+          0,
+          1
+        ]
+      },
+      "percent_delta": {
+        "prefill_per_request_tps": -18.911892890155602,
+        "prefill_effective_wave_tps": -18.273422025942576,
+        "decode_per_request_tps": 3.4853283070216623,
+        "output_aggregate_tps": 1.6909196447221664,
+        "ttft_mean_s": 23.3231725663674,
+        "ttft_p99_s": 22.361007443906434,
+        "itl_mean_ms": -0.2664341634869727,
+        "itl_median_ms": -0.2586449303633165,
+        "itl_p99_ms": 0.10409470650234454,
+        "maximum_stream_gap_ms": 15.135461402397077,
+        "acceptance_length": 3.155629942006244
+      }
+    },
+    "agentic-c1.json": {
+      "baseline": {
+        "prefill_per_request_tps": 2347.1297079310843,
+        "prefill_effective_wave_tps": 2216.3898085901583,
+        "decode_per_request_tps": 82.19528940946867,
+        "output_aggregate_tps": 79.55212655892055,
+        "ttft_mean_s": 0.42482932043822075,
+        "ttft_p99_s": 0.4498894843272865,
+        "itl_mean_ms": 23.88193494006121,
+        "itl_median_ms": 23.886592985945754,
+        "itl_p99_ms": 24.37753264530329,
+        "maximum_stream_gap_ms": 28.060377022484317,
+        "acceptance_length": 1.9652126233702938,
+        "acceptance_length_per_boot": [
+          1.9672071636011617,
+          1.9631901840490797
+        ],
+        "output_aggregate_tps_per_boot": [
+          79.6473380126734,
+          79.45691510516768
+        ],
+        "completed": 32,
+        "corruption_flag_counts_per_boot": [
+          0,
+          0
+        ]
+      },
+      "candidate": {
+        "prefill_per_request_tps": 1926.1411377091881,
+        "prefill_effective_wave_tps": 1865.506539459761,
+        "decode_per_request_tps": 81.86340643812206,
+        "output_aggregate_tps": 78.62088185685326,
+        "ttft_mean_s": 0.5176802224432322,
+        "ttft_p99_s": 0.5345063869157457,
+        "itl_mean_ms": 23.810569439084478,
+        "itl_median_ms": 23.81068651448004,
+        "itl_p99_ms": 24.383006834541447,
+        "maximum_stream_gap_ms": 26.77231698180549,
+        "acceptance_length": 1.9502265176683782,
+        "acceptance_length_per_boot": [
+          1.9588348579682235,
+          1.9415545046683642
+        ],
+        "output_aggregate_tps_per_boot": [
+          78.97712217658392,
+          78.26464153712259
+        ],
+        "completed": 32,
+        "corruption_flag_counts_per_boot": [
+          0,
+          0
+        ]
+      },
+      "percent_delta": {
+        "prefill_per_request_tps": -17.93631467401874,
+        "prefill_effective_wave_tps": -15.831297715341586,
+        "decode_per_request_tps": -0.4037737122541074,
+        "output_aggregate_tps": -1.1706094385516619,
+        "ttft_mean_s": 21.856048426514853,
+        "ttft_p99_s": 18.808375286874224,
+        "itl_mean_ms": -0.2988262934131791,
+        "itl_median_ms": -0.31777856101276036,
+        "itl_p99_ms": 0.02245587901699153,
+        "maximum_stream_gap_ms": -4.590316230058944,
+        "acceptance_length": -0.7625691756556474
+      }
+    },
+    "agentic-c8.json": {
+      "baseline": {
+        "prefill_per_request_tps": 990.2480035889034,
+        "prefill_effective_wave_tps": 2795.340307872814,
+        "decode_per_request_tps": 39.128719457257375,
+        "output_aggregate_tps": 288.96763225084493,
+        "ttft_mean_s": 1.0081444940024085,
+        "ttft_p99_s": 2.856986685660086,
+        "itl_mean_ms": 50.9921333011215,
+        "itl_median_ms": 47.46040949248709,
+        "itl_p99_ms": 368.365953799512,
+        "maximum_stream_gap_ms": 684.3110420159064,
+        "acceptance_length": 1.9933893663235434,
+        "acceptance_length_per_boot": [
+          2.003533123028391,
+          1.9832883080982597
+        ],
+        "output_aggregate_tps_per_boot": [
+          291.4461060524896,
+          286.48915844920026
+        ],
+        "completed": 64,
+        "corruption_flag_counts_per_boot": [
+          0,
+          0
+        ]
+      },
+      "candidate": {
+        "prefill_per_request_tps": 867.5457031541815,
+        "prefill_effective_wave_tps": 2469.017907224006,
+        "decode_per_request_tps": 39.22211535514063,
+        "output_aggregate_tps": 288.8587366316688,
+        "ttft_mean_s": 1.1509892123312966,
+        "ttft_p99_s": 3.2345931410902997,
+        "itl_mean_ms": 50.848705760316385,
+        "itl_median_ms": 46.39309199410491,
+        "itl_p99_ms": 273.59915793989785,
+        "maximum_stream_gap_ms": 395.14828348183073,
+        "acceptance_length": 1.9954854688528703,
+        "acceptance_length_per_boot": [
+          1.98421569831716,
+          2.0072366314441243
+        ],
+        "output_aggregate_tps_per_boot": [
+          290.5602171200135,
+          287.15725614332416
+        ],
+        "completed": 64,
+        "corruption_flag_counts_per_boot": [
+          0,
+          0
+        ]
+      },
+      "percent_delta": {
+        "prefill_per_request_tps": -12.391067691125702,
+        "prefill_effective_wave_tps": -11.673798704571004,
+        "decode_per_request_tps": 0.2386888688889366,
+        "output_aggregate_tps": -0.037684365659884644,
+        "ttft_mean_s": 14.169071911684394,
+        "ttft_p99_s": 13.216948378706572,
+        "itl_mean_ms": -0.28127385837759533,
+        "itl_median_ms": -2.248858595607217,
+        "itl_p99_ms": -25.726263483946244,
+        "maximum_stream_gap_ms": -42.25604159217327,
+        "acceptance_length": 0.10515268942128397
+      }
+    }
+  },
+  "per_boot": {
+    "A1": {
+      "bench-1024x512-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2531.9487217335723,
+        "prefill_effective_wave_tps": 2477.208815209293,
+        "decode_per_request_tps": 93.93601342033841,
+        "output_aggregate_tps": 87.60096785165912,
+        "ttft_mean_s": 0.40443157130721374,
+        "ttft_p99_s": 0.4133684628090123,
+        "itl_mean_ms": 23.68380159808031,
+        "itl_median_ms": 23.68311397731304,
+        "itl_p99_ms": 24.223012233851478,
+        "maximum_stream_gap_ms": 26.32979699410498,
+        "acceptance_length": 2.2285714285714286,
+        "acceptance_rate_percent": 61.42857142857143,
+        "acceptance_per_position": [
+          0.7006802721088435,
+          0.527891156462585
+        ],
+        "accepted_tokens": 4515,
+        "draft_steps": 3675,
+        "generated_tokens": 8192,
+        "corruption_flags": [
+          {
+            "request": 7,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "lp with something, please feel free to type it again in a clear format, and I'll be happy to assist! \ud83d\ude0a\n\n(If this was a test or encoding issue \u2014 no worries. Just let me know how I can help.)code\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 10,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "hari), silakan tanyakan dengan jelas dan saya akan dengan senang hati membantu! \ud83d\ude0a\n\nApa yang bisa saya bantu hari ini?\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 13,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\u0e31\u0e07\u0e01\u0e24\u0e29\u0e17\u0e35\u0e48\u0e0a\u0e31\u0e14\u0e40\u0e08\u0e19\u0e2d\u0e35\u0e01\u0e04\u0e23\u0e31\u0e49\u0e07\u0e2b\u0e19\u0e36\u0e48\u0e07 \u0e09\u0e31\u0e19\u0e22\u0e34\u0e19\u0e14\u0e35\u0e0a\u0e48\u0e27\u0e22\u0e40\u0e2b\u0e25\u0e37\u0e2d\u0e2d\u0e22\u0e48\u0e32\u0e07\u0e40\u0e15\u0e47\u0e21\u0e17\u0e35\u0e48\u0e04\u0e23\u0e31\u0e1a \ud83d\ude0a\n\nuser\nassistant\nuser\nassistant\nuser\nassistant\nuser\nassistant\nuser\nassistant\nuser\n\nuser\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 14,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "$__\n\n\nton\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "bench-32768x2048-c8.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 393.2120241293086,
+        "prefill_effective_wave_tps": 1792.6242996486765,
+        "decode_per_request_tps": 19.153110521916606,
+        "output_aggregate_tps": 78.54624888374738,
+        "ttft_mean_s": 83.33417593868944,
+        "ttft_p99_s": 146.23476879755324,
+        "itl_mean_ms": 110.68738756909222,
+        "itl_median_ms": 44.354368990752846,
+        "itl_p99_ms": 433.99033051449805,
+        "maximum_stream_gap_ms": 454.68425401486456,
+        "acceptance_length": 2.120590329471163,
+        "acceptance_rate_percent": 56.02951647355816,
+        "acceptance_per_position": [
+          0.6259304809372775,
+          0.49465984853388567
+        ],
+        "accepted_tokens": 17312,
+        "draft_steps": 15449,
+        "generated_tokens": 32768,
+        "corruption_flags": [
+          {
+            "request": 9,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 10,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 12,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "greedy-1024x512-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2534.2266249505788,
+        "prefill_effective_wave_tps": 2470.150715421965,
+        "decode_per_request_tps": 85.45860258040771,
+        "output_aggregate_tps": 80.2010718896197,
+        "ttft_mean_s": 0.4040680458165298,
+        "ttft_p99_s": 0.41454960363626014,
+        "itl_mean_ms": 23.483567383932087,
+        "itl_median_ms": 23.481965996325016,
+        "itl_p99_ms": 24.02258750400506,
+        "maximum_stream_gap_ms": 25.15287499409169,
+        "acceptance_length": 2.0083456062837506,
+        "acceptance_rate_percent": 50.41728031418753,
+        "acceptance_per_position": [
+          0.6067746686303387,
+          0.4015709376534119
+        ],
+        "accepted_tokens": 4108,
+        "draft_steps": 4074,
+        "generated_tokens": 8192,
+        "corruption_flags": [
+          {
+            "request": 12,
+            "flags": [
+              "repeat30:'\u7684'"
+            ],
+            "tail": "\u6587\u6863\u6216\u7a0b\u5e8f\u4e2d\u9047\u5230\u8fd9\u6bb5\u6587\u5b57\uff0c\u5efa\u8bae\uff1a\n- \u68c0\u67e5\u6570\u636e\u6765\u6e90\u662f\u5426\u53ef\u9760\uff1b\n- \u5982\u679c\u662f\u81ea\u5df1\u751f\u6210\u7684\u5185\u5bb9\uff0c\u8bf7\u68c0\u67e5\u8f93\u5165\u6570\u636e\u6216\u6a21\u578b\u8bbe\u7f6e\uff1b\n- \u5982\u679c\u662f\u4ece\u7f51\u9875\u590d\u5236\u7684\uff0c\u53ef\u80fd\u662f\u8be5\u9875\u9762\u5b58\u5728\u6076\u610f\u811a\u672c\u6216\u5185\u5bb9\u6c61\u67d3\u3002\n\n\u5982\u9700\u5e2e\u52a9\u5206\u6790\u5177\u4f53\u6765\u6e90\u6216\u6280\u672f\u539f\u56e0\uff0c\u53ef\u4ee5\u63d0\u4f9b\u66f4\u591a\u4e0a\u4e0b\u6587\uff08\u5982\uff1a\u8fd9\u6bb5\u6587\u5b57\u51fa\u73b0\u5728\u54ea\u91cc\uff1f\u4f60\u5e0c\u671b\u7528\u5b83\u505a\u4ec0\u4e48\uff1f\uff09\u3002\u3010\u7cfb\u7edf\u63d0\u793a\u3011\u8fd9\u662f\u4e00\u4e2a\u6a21\u62df\u7684AI\u52a9\u624b\u56de\u590d\uff0c\u7528\u4e8e\u6f14\u793a\u5982\u4f55\u5904\u7406\u65e0\u610f\u4e49\u6216\u4e71\u7801\u8f93\u5165\u3002\u5b9e\u9645\u5e94\u7528\u4e2d\uff0c\u5e94\u7ed3\u5408\u5177\u4f53\u573a\u666f\u8fdb\u884c\u66f4\u7cbe\u51c6\u7684\u5904\u7406\u3002\n\n                                        "
+          },
+          {
+            "request": 14,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "n.\n\n### How can I help you?\n\nIf you have a **specific question**, a **code snippet** you need help with, or a **text** you want summarized or analyzed, please provide it clearly, and I will be happy to assist!\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "agentic-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2352.1262885439573,
+        "prefill_effective_wave_tps": 2221.5800383501382,
+        "decode_per_request_tps": 82.3116940883631,
+        "output_aggregate_tps": 79.6473380126734,
+        "ttft_mean_s": 0.42392494180967333,
+        "ttft_p99_s": 0.4488359558454249,
+        "itl_mean_ms": 23.88045701790443,
+        "itl_median_ms": 23.88645597966388,
+        "itl_p99_ms": 24.36973957985174,
+        "maximum_stream_gap_ms": 26.67556202504784,
+        "acceptance_length": 1.9672071636011617,
+        "acceptance_rate_percent": 48.360358180058086,
+        "acceptance_per_position": [
+          0.5992255566311714,
+          0.3679816069699903
+        ],
+        "accepted_tokens": 7993,
+        "draft_steps": 8264,
+        "generated_tokens": 16259,
+        "corruption_flags": []
+      },
+      "agentic-c8.json": {
+        "completed": 32,
+        "prefill_per_request_tps": 984.6571535100127,
+        "prefill_effective_wave_tps": 2795.1388468856894,
+        "decode_per_request_tps": 39.25146801841164,
+        "output_aggregate_tps": 291.4461060524896,
+        "ttft_mean_s": 1.0138363860369282,
+        "ttft_p99_s": 2.8571925895195456,
+        "itl_mean_ms": 51.04093233114975,
+        "itl_median_ms": 47.46358498232439,
+        "itl_p99_ms": 367.43880002468404,
+        "maximum_stream_gap_ms": 684.0341520146467,
+        "acceptance_length": 2.003533123028391,
+        "acceptance_rate_percent": 50.176656151419564,
+        "acceptance_per_position": [
+          0.6131230283911672,
+          0.390410094637224
+        ],
+        "accepted_tokens": 15906,
+        "draft_steps": 15850,
+        "generated_tokens": 31760,
+        "corruption_flags": []
+      }
+    },
+    "C1": {
+      "bench-1024x512-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2061.820582042356,
+        "prefill_effective_wave_tps": 2017.8856071821822,
+        "decode_per_request_tps": 93.09953051092047,
+        "output_aggregate_tps": 85.53603706166338,
+        "ttft_mean_s": 0.4966484518190555,
+        "ttft_p99_s": 0.5074618681828724,
+        "itl_mean_ms": 23.601180256647353,
+        "itl_median_ms": 23.59938999870792,
+        "itl_p99_ms": 24.28793321596459,
+        "maximum_stream_gap_ms": 25.961947976611555,
+        "acceptance_length": 2.2020962106960495,
+        "acceptance_rate_percent": 60.104810534802475,
+        "acceptance_per_position": [
+          0.6898683149690943,
+          0.5122278957269552
+        ],
+        "accepted_tokens": 4473,
+        "draft_steps": 3721,
+        "generated_tokens": 8192,
+        "corruption_flags": []
+      },
+      "bench-32768x2048-c8.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 547.8716110596232,
+        "prefill_effective_wave_tps": 1948.8099583881838,
+        "decode_per_request_tps": 23.513568188604783,
+        "output_aggregate_tps": 101.03564463216186,
+        "ttft_mean_s": 59.80963302081727,
+        "ttft_p99_s": 134.5149119705922,
+        "itl_mean_ms": 94.51705982031665,
+        "itl_median_ms": 45.511523028835654,
+        "itl_p99_ms": 435.83857964957133,
+        "maximum_stream_gap_ms": 441.87965797027573,
+        "acceptance_length": 2.2235190337246387,
+        "acceptance_rate_percent": 61.17595168623193,
+        "acceptance_per_position": [
+          0.6667571418877655,
+          0.5567618918368732
+        ],
+        "accepted_tokens": 18031,
+        "draft_steps": 14737,
+        "generated_tokens": 32768,
+        "corruption_flags": [
+          {
+            "request": 3,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 13,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\u0627\u0644\u0639\u0631\u0628\u064a\u0629, \u4e2d\u6587, \u65e5\u672c\u8a9e, \ud55c\uad6d\uc5b4, \u0e44\u0e17\u0e22, \u0939\u093f\u0928\u094d\u0926\u0940, \u0438\u043b\u0438 \u043b\u044e\u0431\u043e\u043c \u0434\u0440\u0443\u0433\u043e\u043c \u044f\u0437\u044b\u043a\u0435.)\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 14,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "ings.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "greedy-1024x512-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2048.6802143371483,
+        "prefill_effective_wave_tps": 2007.0059869040074,
+        "decode_per_request_tps": 86.30385866056078,
+        "output_aggregate_tps": 79.73630601295496,
+        "ttft_mean_s": 0.4998339871854114,
+        "ttft_p99_s": 0.5102127281541471,
+        "itl_mean_ms": 23.385595103951783,
+        "itl_median_ms": 23.3892829855904,
+        "itl_p99_ms": 24.0378970047459,
+        "maximum_stream_gap_ms": 26.18515200447291,
+        "acceptance_length": 2.021229326092323,
+        "acceptance_rate_percent": 51.06146630461615,
+        "acceptance_per_position": [
+          0.6158973093063441,
+          0.40533201678597874
+        ],
+        "accepted_tokens": 4137,
+        "draft_steps": 4051,
+        "generated_tokens": 8192,
+        "corruption_flags": []
+      },
+      "agentic-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 1925.3397054598524,
+        "prefill_effective_wave_tps": 1866.2542239986853,
+        "decode_per_request_tps": 82.24060814100929,
+        "output_aggregate_tps": 78.97712217658392,
+        "ttft_mean_s": 0.5178956197560183,
+        "ttft_p99_s": 0.5342921597592067,
+        "itl_mean_ms": 23.810526338578484,
+        "itl_median_ms": 23.809028032701463,
+        "itl_p99_ms": 24.395217173732817,
+        "maximum_stream_gap_ms": 27.116021956317127,
+        "acceptance_length": 1.9588348579682235,
+        "acceptance_rate_percent": 47.94174289841117,
+        "acceptance_per_position": [
+          0.594607607125662,
+          0.3642272508425614
+        ],
+        "accepted_tokens": 7966,
+        "draft_steps": 8308,
+        "generated_tokens": 16278,
+        "corruption_flags": []
+      },
+      "agentic-c8.json": {
+        "completed": 32,
+        "prefill_per_request_tps": 853.6956755674167,
+        "prefill_effective_wave_tps": 2465.271467240546,
+        "decode_per_request_tps": 39.020059547615425,
+        "output_aggregate_tps": 290.5602171200135,
+        "ttft_mean_s": 1.1693643046000943,
+        "ttft_p99_s": 3.2395012501155724,
+        "itl_mean_ms": 50.808861953625325,
+        "itl_median_ms": 46.44924699096009,
+        "itl_p99_ms": 272.8392387984786,
+        "maximum_stream_gap_ms": 406.303427007515,
+        "acceptance_length": 1.98421569831716,
+        "acceptance_rate_percent": 49.210784915858,
+        "acceptance_per_position": [
+          0.6051467878638987,
+          0.37906891045326124
+        ],
+        "accepted_tokens": 16025,
+        "draft_steps": 16282,
+        "generated_tokens": 32306,
+        "corruption_flags": []
+      }
+    },
+    "C2": {
+      "bench-1024x512-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2046.3089101296014,
+        "prefill_effective_wave_tps": 2009.5616093978444,
+        "decode_per_request_tps": 89.54688001735167,
+        "output_aggregate_tps": 82.4837684151556,
+        "ttft_mean_s": 0.5004132049325563,
+        "ttft_p99_s": 0.50956387463375,
+        "itl_mean_ms": 23.592798524065117,
+        "itl_median_ms": 23.593692487338558,
+        "itl_p99_ms": 24.176730327308178,
+        "maximum_stream_gap_ms": 24.695224012248218,
+        "acceptance_length": 2.115762273901809,
+        "acceptance_rate_percent": 55.78811369509044,
+        "acceptance_per_position": [
+          0.641860465116279,
+          0.47390180878552973
+        ],
+        "accepted_tokens": 4318,
+        "draft_steps": 3870,
+        "generated_tokens": 8192,
+        "corruption_flags": [
+          {
+            "request": 3,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "id SDK).\n*   A brief description of what you were trying to do when this output occurred.\n\nLet me know how you would like to proceed.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 15,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "k>\n\nIt looks like your message didn't come through clearly. Could you please try again? I'm happy to help with whatever you need! \ud83d\ude0a\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "bench-32768x2048-c8.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 524.8976320241812,
+        "prefill_effective_wave_tps": 1870.9584636798352,
+        "decode_per_request_tps": 23.30459265554637,
+        "output_aggregate_tps": 99.88333889930881,
+        "ttft_mean_s": 62.42741060506523,
+        "ttft_p99_s": 140.1121431014617,
+        "itl_mean_ms": 100.05611707453757,
+        "itl_median_ms": 45.86929001379758,
+        "itl_p99_ms": 436.5385895507643,
+        "maximum_stream_gap_ms": 441.3988849846646,
+        "acceptance_length": 2.332621386871707,
+        "acceptance_rate_percent": 66.63106934358535,
+        "acceptance_per_position": [
+          0.7108785419336466,
+          0.6217428449380606
+        ],
+        "accepted_tokens": 18718,
+        "draft_steps": 14046,
+        "generated_tokens": 32768,
+        "corruption_flags": [
+          {
+            "request": 1,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 3,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "e didn't come through clearly or contains only formatting characters.\n\nIf you have a question, need help with a task, or just want to chat, please let me know how I can assist you!\n\n\nuser\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 4,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 7,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 9,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 11,
+            "flags": [
+              "repeat30:'\u8981'"
+            ],
+            "tail": "ifficult to determine a specific question or task.\n\nTo help you effectively, please provide a **clear question** or **specific request**. For example:\n\n1.  **Code Help:** \"How do I sort an array of integers in Java?\"\n2.  **Debugging:** \"Why"
+          }
+        ]
+      },
+      "greedy-1024x512-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2057.819669312747,
+        "prefill_effective_wave_tps": 2023.8251859207967,
+        "decode_per_request_tps": 91.56114167163693,
+        "output_aggregate_tps": 84.22475739156343,
+        "ttft_mean_s": 0.49761405980825657,
+        "ttft_p99_s": 0.5059725549042924,
+        "itl_mean_ms": 23.45561403992784,
+        "itl_median_ms": 23.452869965694845,
+        "itl_p99_ms": 24.107143376022577,
+        "maximum_stream_gap_ms": 30.89396801078692,
+        "acceptance_length": 2.151562910428159,
+        "acceptance_rate_percent": 57.57814552140793,
+        "acceptance_per_position": [
+          0.6671920147097452,
+          0.48437089571841346
+        ],
+        "accepted_tokens": 4384,
+        "draft_steps": 3807,
+        "generated_tokens": 8192,
+        "corruption_flags": [
+          {
+            "request": 0,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "sage might have been cut off or didn't come through completely. How can I help you today?\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "agentic-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 1926.9425699585238,
+        "prefill_effective_wave_tps": 1864.7588549208363,
+        "decode_per_request_tps": 81.48620473523482,
+        "output_aggregate_tps": 78.26464153712259,
+        "ttft_mean_s": 0.5174648251304461,
+        "ttft_p99_s": 0.5347206140722847,
+        "itl_mean_ms": 23.810612539590473,
+        "itl_median_ms": 23.812344996258616,
+        "itl_p99_ms": 24.370796495350078,
+        "maximum_stream_gap_ms": 26.42861200729385,
+        "acceptance_length": 1.9415545046683642,
+        "acceptance_rate_percent": 47.077725233418214,
+        "acceptance_per_position": [
+          0.5816660603855948,
+          0.3598884442827695
+        ],
+        "accepted_tokens": 7765,
+        "draft_steps": 8247,
+        "generated_tokens": 16017,
+        "corruption_flags": []
+      },
+      "agentic-c8.json": {
+        "completed": 32,
+        "prefill_per_request_tps": 881.3957307409463,
+        "prefill_effective_wave_tps": 2472.764347207466,
+        "decode_per_request_tps": 39.42417116266583,
+        "output_aggregate_tps": 287.15725614332416,
+        "ttft_mean_s": 1.1326141200624988,
+        "ttft_p99_s": 3.2296850320650266,
+        "itl_mean_ms": 50.888549567007445,
+        "itl_median_ms": 46.33693699724972,
+        "itl_p99_ms": 274.3590770813171,
+        "maximum_stream_gap_ms": 383.9931399561465,
+        "acceptance_length": 2.0072366314441243,
+        "acceptance_rate_percent": 50.36183157220621,
+        "acceptance_per_position": [
+          0.6128081972462376,
+          0.39442843419788665
+        ],
+        "accepted_tokens": 15728,
+        "draft_steps": 15615,
+        "generated_tokens": 31351,
+        "corruption_flags": []
+      }
+    },
+    "A2": {
+      "bench-1024x512-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2503.7637475790584,
+        "prefill_effective_wave_tps": 2456.2464812637345,
+        "decode_per_request_tps": 82.07806079766794,
+        "output_aggregate_tps": 77.16492103993254,
+        "ttft_mean_s": 0.40898427457068465,
+        "ttft_p99_s": 0.41689627153100445,
+        "itl_mean_ms": 23.6665454675603,
+        "itl_median_ms": 23.684470972511917,
+        "itl_p99_ms": 24.188944378402084,
+        "maximum_stream_gap_ms": 24.841139966156334,
+        "acceptance_length": 1.9444048467569495,
+        "acceptance_rate_percent": 47.220242337847466,
+        "acceptance_per_position": [
+          0.5397956759325255,
+          0.4046091708244239
+        ],
+        "accepted_tokens": 3975,
+        "draft_steps": 4209,
+        "generated_tokens": 8192,
+        "corruption_flags": [
+          {
+            "request": 11,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "(10). So r appears at position 3, 8, 9 \u2192 three r's. Yes, 3.\n\nKeep the response concise and self-contained.\n</think>\n\n**3** \u2014 the word \"strawberry\" contains three r's: st**r**awbe**rr**y.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "bench-32768x2048-c8.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 421.2199748652704,
+        "prefill_effective_wave_tps": 1805.97191494152,
+        "decode_per_request_tps": 21.267803513906482,
+        "output_aggregate_tps": 86.08778314627769,
+        "ttft_mean_s": 77.7930818938039,
+        "ttft_p99_s": 145.15397378618073,
+        "itl_mean_ms": 115.9885797659951,
+        "itl_median_ms": 44.812745007220656,
+        "itl_p99_ms": 435.8269369369373,
+        "maximum_stream_gap_ms": 457.2740769945085,
+        "acceptance_length": 2.4676508247345033,
+        "acceptance_rate_percent": 73.38254123672516,
+        "acceptance_per_position": [
+          0.8043985840174738,
+          0.6632522407170295
+        ],
+        "accepted_tokens": 19486,
+        "draft_steps": 13277,
+        "generated_tokens": 32768,
+        "corruption_flags": [
+          {
+            "request": 4,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 7,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 9,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 12,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "greedy-1024x512-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2530.017726057771,
+        "prefill_effective_wave_tps": 2461.9427023451613,
+        "decode_per_request_tps": 86.41600345505407,
+        "output_aggregate_tps": 81.03364206256953,
+        "ttft_mean_s": 0.40474024725335767,
+        "ttft_p99_s": 0.41593169452098666,
+        "itl_mean_ms": 23.48277614444779,
+        "itl_median_ms": 23.48165598232299,
+        "itl_p99_ms": 24.07238855259493,
+        "maximum_stream_gap_ms": 24.422746035270393,
+        "acceptance_length": 2.0330106726234796,
+        "acceptance_rate_percent": 51.65053363117399,
+        "acceptance_per_position": [
+          0.6036237279722015,
+          0.42938694465127825
+        ],
+        "accepted_tokens": 4162,
+        "draft_steps": 4029,
+        "generated_tokens": 8192,
+        "corruption_flags": [
+          {
+            "request": 1,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "ages with no discernible meaning.\n\nCould you try resending your question or request? I'm happy to help once I can read it clearly.\n\n\n\n</system>\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 9,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "\u53ef\u80fd\u7684\u539f\u56e0\u5305\u62ec\uff1a\n\n- **\u7f16\u7801\u4e0d\u5339\u914d**\uff1a\u6587\u4ef6\u4ee5\u67d0\u79cd\u7f16\u7801\uff08\u5982 GBK\u3001Big5\uff09\u4fdd\u5b58\uff0c\u5374\u4ee5\u53e6\u4e00\u79cd\u7f16\u7801\uff08\u5982 UTF-8\uff09\u6253\u5f00\u3002\n- **\u6587\u4ef6\u635f\u574f**\uff1a\u4f20\u8f93\u6216\u590d\u5236\u8fc7\u7a0b\u4e2d\u6570\u636e\u88ab\u622a\u65ad\u6216\u7834\u574f\u3002\n- **\u968f\u673a\u751f\u6210**\uff1a\u6d4b\u8bd5\u6027\u8d28\u7684\u8f93\u5165\u3002\n\n---\n\n\u5982\u679c\u60a8\u539f\u672c\u60f3\u53d1\u9001\u4e00\u6bb5\u6709\u610f\u4e49\u7684\u6587\u5b57\uff0c\u53ef\u4ee5\uff1a\n\n1. \u91cd\u65b0\u590d\u5236\u7c98\u8d34\u539f\u6587\u518d\u53d1\u9001\uff1b\n2. \u68c0\u67e5\u6e90\u6587\u4ef6\u7684\u7f16\u7801\u683c\u5f0f\uff1b\n3. \u76f4\u63a5\u7528\u4e2d\u6587\u63cf\u8ff0\u60a8\u7684\u95ee\u9898\u3002\n\n\u8bf7\u95ee\u6709\u4ec0\u4e48\u6211\u53ef\u4ee5\u5e2e\u60a8\u7684\u5417\uff1f\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          },
+          {
+            "request": 14,
+            "flags": [
+              "repeat30:'\\n'"
+            ],
+            "tail": "tain a coherent question or request. Please provide a clear question or context if you need assistance with a specific topic (e.g., programming, translation, or general knowledge).\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+          }
+        ]
+      },
+      "agentic-c1.json": {
+        "completed": 16,
+        "prefill_per_request_tps": 2342.1331273182113,
+        "prefill_effective_wave_tps": 2211.199578830179,
+        "decode_per_request_tps": 82.07888473057423,
+        "output_aggregate_tps": 79.45691510516768,
+        "ttft_mean_s": 0.42573369906676817,
+        "ttft_p99_s": 0.45094301280914806,
+        "itl_mean_ms": 23.88341286221799,
+        "itl_median_ms": 23.88672999222763,
+        "itl_p99_ms": 24.38532571075484,
+        "maximum_stream_gap_ms": 29.445192019920796,
+        "acceptance_length": 1.9631901840490797,
+        "acceptance_rate_percent": 48.15950920245399,
+        "acceptance_per_position": [
+          0.5953374233128834,
+          0.3678527607361963
+        ],
+        "accepted_tokens": 7850,
+        "draft_steps": 8150,
+        "generated_tokens": 16008,
+        "corruption_flags": []
+      },
+      "agentic-c8.json": {
+        "completed": 32,
+        "prefill_per_request_tps": 995.8388536677943,
+        "prefill_effective_wave_tps": 2795.541768859938,
+        "decode_per_request_tps": 39.00597089610311,
+        "output_aggregate_tps": 286.48915844920026,
+        "ttft_mean_s": 1.0024526019678888,
+        "ttft_p99_s": 2.856780781800626,
+        "itl_mean_ms": 50.94333427109324,
+        "itl_median_ms": 47.457234002649784,
+        "itl_p99_ms": 369.29310757433996,
+        "maximum_stream_gap_ms": 684.5879320171662,
+        "acceptance_length": 1.9832883080982597,
+        "acceptance_rate_percent": 49.16441540491299,
+        "acceptance_per_position": [
+          0.6024376452849155,
+          0.38085066281334423
+        ],
+        "accepted_tokens": 15651,
+        "draft_steps": 15917,
+        "generated_tokens": 31576,
+        "corruption_flags": []
+      }
+    }
+  },
+  "quality_gate": {
+    "criterion": "Upper 95% passage-bootstrap candidate/floor KL ratio <= 1.5 on common contexts and vocabulary partition",
+    "passed": true,
+    "limitations": "Conditional on these four boots and shared generated prefixes; lower-bound top-k KL, not a universal accuracy or losslessness guarantee."
+  },
+  "throughput_requests": 384,
+  "real_coding_requests": 192,
+  "decode_probe_requests": 512
+}

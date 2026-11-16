@@ -710,9 +710,16 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        rdna_residual_direct = self.layers[
+            self.start_layer
+        ].input_layernorm.rdna_residual_direct
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+                if rdna_residual_direct:
+                    # Caller-owned (persistent runner) buffer: the in-place
+                    # residual stream must not write through it.
+                    hidden_states = hidden_states.clone()
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
@@ -727,6 +734,10 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             assert residual is None
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        if aux_hidden_states and residual is None and rdna_residual_direct:
+            # Layer 0 captures the embedding itself, which becomes the residual
+            # stream and is updated in place by the first fused add-norm.
+            aux_hidden_states[0] = aux_hidden_states[0].clone()
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -895,6 +906,7 @@ class Qwen3NextForCausalLM(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
+            replayssm_state_dtype=vllm_config.cache_config.replayssm_state_dtype,
         )
 
     @classmethod
@@ -917,6 +929,7 @@ class Qwen3NextForCausalLM(
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            replayssm_state_dtype=vllm_config.cache_config.replayssm_state_dtype,
         )
 
     @classmethod

@@ -22,6 +22,9 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     """Base class for GatedDeltaNet attention layer."""
 
+    # Layers whose forward reads LeapQuant blobs (--replayssm-state-dtype leapquant).
+    supports_leapquant_state: bool = False
+
     def __init__(
         self,
         config: PreTrainedConfig,
@@ -45,6 +48,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             if self.speculative_config
             else 0
         )
+        if (
+            self.cache_config.replayssm_state_dtype == "leapquant"
+            and not self.supports_leapquant_state
+        ):
+            raise ValueError(
+                f"--replayssm-state-dtype leapquant is not implemented for "
+                f"{type(self).__name__}"
+            )
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
@@ -55,4 +66,5 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
+            self.cache_config.replayssm_state_dtype,
         )

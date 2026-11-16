@@ -49,6 +49,13 @@ class KVConnectorFactory:
         kv_transfer_config = config.kv_transfer_config
         if kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set to create a connector")
+        if formats := kv_cache_config.mamba_state_formats:
+            raise ValueError(
+                f"KV connector {kv_transfer_config.kv_connector} cannot run with "
+                f"quantized Mamba state ({', '.join(sorted(formats))}). A "
+                "connector moves state blocks and does not know their format. "
+                "Remove --kv-transfer-config and --kv-offloading-size."
+            )
         connector_cls = cls.get_connector_class(kv_transfer_config)
 
         # check if the connector supports HMA

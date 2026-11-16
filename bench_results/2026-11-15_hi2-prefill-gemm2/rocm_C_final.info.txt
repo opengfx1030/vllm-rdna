@@ -1,0 +1,1 @@
+built from feat/hi2-prefill-gemm2 224f2eb89ef74e98da87faa86e5387ad95d4c7de (csrc, tools, tests, rdna_hint_flex.py, _custom_ops.py rsynced from the worktree); torch/ROCm of ~/Apps/vllm/venv-7.14.0_0.31.0-final
