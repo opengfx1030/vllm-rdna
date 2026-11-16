@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.platforms import current_platform
@@ -10,6 +11,7 @@ from vllm.platforms import current_platform
 from ...utils import (
     assert_request_outputs_match,
     compute_acceptance_len,
+    get_spec_decode_metric_value,
     get_test_prompts,
 )
 from .._correctness import check_mtp_correctness
@@ -42,6 +44,66 @@ def test_mtp_correctness(
         mm_enabled,
         expected_accuracy_threshold,
         vllm_runner,
+    )
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graphs"])
+@single_gpu_only
+def test_mtp_multimodal_chunked_prefill_coordinates(
+    monkeypatch: pytest.MonkeyPatch, vllm_runner, image_assets, enforce_eager: bool
+):
+    """Real MTP loading and mixed image/text batches preserve target outputs."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    image = image_assets[0].pil_image
+    image_marker = "<|vision_start|><|image_pad|><|vision_end|>"
+    prompts = [
+        f"{image_marker} Describe the image.",
+        "A note before the image. " * 80 + f"{image_marker} Describe the image.",
+        "Repeat the word hello ten times:",
+    ]
+    results = []
+    for speculate in (False, True):
+        with vllm_runner(
+            "Qwen/Qwen3.5-0.8B-Base",
+            dtype="half",
+            block_size=None,
+            max_model_len=2048,
+            max_num_seqs=4,
+            max_num_batched_tokens=128,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=False,
+            enforce_eager=enforce_eager,
+            limit_mm_per_prompt={"image": 1, "video": 0},
+            mm_processor_kwargs={"min_pixels": 3136, "max_pixels": 50176},
+            speculative_config=(
+                {"method": "mtp", "num_speculative_tokens": 3}
+                if speculate else None
+            ),
+            disable_log_stats=False,
+            seed=0,
+        ) as runner:
+            mixed = runner.generate_greedy_logprobs(
+                prompts, max_tokens=16, num_logprobs=5, images=[image, image, None]
+            )
+            # Reuse freed request slots and a smaller captured batch.
+            recycled = runner.generate_greedy_logprobs(
+                ["Count from one to ten:"], max_tokens=16, num_logprobs=5
+            )
+            assert all(output[0] for output in mixed + recycled)
+            results.append(mixed + recycled)
+            if speculate:
+                metrics = runner.llm.get_metrics()
+                assert get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_draft_tokens"
+                ) > 0
+                assert get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_accepted_tokens"
+                ) > 0
+    check_logprobs_close(
+        outputs_0_lst=results[0],
+        outputs_1_lst=results[1],
+        name_0="target",
+        name_1="multimodal MTP",
     )
 
 

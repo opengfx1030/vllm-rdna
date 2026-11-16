@@ -74,6 +74,11 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   is a good default to start with.
 - If your model does not support MTP, use another method such as EAGLE or draft
   model speculation.
+- With Model Runner V2, multimodal MTP drafters that use M-RoPE receive the
+  target's per-axis coordinates during prefill and continue from each
+  request's sampled coordinates during draft decoding. This also applies to
+  chunked multimodal prefills; logical KV-cache and sampling positions remain
+  independent of M-RoPE coordinates. No additional configuration is required.
 - When the MTP head shares the target's unquantized lm_head (most MTP models),
   `"draft_lm_head_quantization": "fp8"` or `"nvfp4"` in `--speculative-config`
   gives the drafter a quantized copy of that head (Model Runner V2). The target
