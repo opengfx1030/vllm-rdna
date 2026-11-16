@@ -1096,7 +1096,13 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 ngram.lookup_dtype if ngram.supports_prefetch else ngram.params_dtype
             )
             embeddings = hidden_states.new_empty(
-                (input_ids.shape[0], self.ple_embedding.embedding_dim), dtype=dtype
+                (
+                    hidden_states.shape[0]
+                    if self.use_sequence_parallel
+                    else input_ids.shape[0],
+                    self.ple_embedding.embedding_dim,
+                ),
+                dtype=dtype,
             )
             torch.ops.vllm.qwen4_exp_amd_ple_embedding_rdna(
                 input_ids, query_start_loc, ngram_context, embeddings, self.prefix
@@ -1220,7 +1226,13 @@ def qwen4_exp_amd_ple_embedding_rdna(
     layer = get_forward_context().no_compile_layers[layer_name]
     if not isinstance(layer, Qwen4ExpPLELayer):
         raise TypeError(f"{layer_name} is not a Qwen4Exp PLE owner")
-    output.copy_(layer.ple_embedding(input_ids, query_start_loc, ngram_context))
+    result = layer.ple_embedding(input_ids, query_start_loc, ngram_context)
+    if output.shape != result.shape:
+        raise ValueError(
+            f"opaque PLE output shape {tuple(output.shape)} does not match "
+            f"lookup shape {tuple(result.shape)}"
+        )
+    output.copy_(result)
 
 
 @eager_break_during_piecewise_capture

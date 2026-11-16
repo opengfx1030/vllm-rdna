@@ -310,3 +310,102 @@ def test_moe_sp_equivalence(monkeypatch) -> None:
 def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
     """Padding in compiled SP collectives must not specialize on the traced size."""
     mp.spawn(_run_sp, args=(get_open_port(), False, True), nprocs=2)
+
+
+def _run_opaque_ple_rows(rank, port, checkpoint):
+    from vllm.config import ModelConfig
+    from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+
+    torch.cuda.set_device(rank)
+    model = ModelConfig(
+        model=checkpoint, tokenizer=checkpoint, skip_tokenizer_init=True,
+        dtype="float16", max_model_len=64, enforce_eager=True,
+    )
+    configs = [
+        VllmConfig(
+            model_config=model,
+            parallel_config=ParallelConfig(tensor_parallel_size=2, enable_hc_sp=sp),
+            engram_config=EngramConfig(cpu_offload=False),
+        )
+        for sp in (False, True)
+    ]
+    init_distributed_environment(
+        world_size=2, rank=rank, local_rank=rank,
+        distributed_init_method=f"tcp://127.0.0.1:{port}",
+    )
+    try:
+        with set_current_vllm_config(configs[0]):
+            initialize_model_parallel(tensor_model_parallel_size=2)
+        init_workspace_manager(torch.device(f"cuda:{rank}"))
+        with torch.device(f"cuda:{rank}"), torch.inference_mode():
+            layers = []
+            for config, sp in zip(configs, (False, True)):
+                with set_current_vllm_config(config):
+                    layer = Qwen4ExpPLELayer(
+                        model.hf_text_config, config, layer_idx=0,
+                        ple_dense_layer_id=0, prefix="layers.0.ple",
+                        use_sequence_parallel=sp,
+                    )
+                    torch.manual_seed(17)
+                    for parameter in layer.parameters():
+                        nn.init.uniform_(parameter, -0.05, 0.05)
+                    layers.append(layer)
+            for tokens in (3, 1, 5):
+                ids = torch.arange(tokens, dtype=torch.int64)
+                starts = torch.tensor([0, tokens], dtype=torch.int32)
+                context = torch.zeros(1, layers[0].short_conv_dilation - 1).long()
+                hidden = torch.arange(tokens * 256).reshape(tokens, 256).half() / 128
+                outputs = []
+                for config, layer in zip(configs, layers):
+                    local = sp_shard(hidden) if layer.use_sequence_parallel else hidden
+                    with set_current_vllm_config(config), set_forward_context(None, config):
+                        output = layer(local, ids, starts, context)
+                        assert output.shape == local.shape
+                        stream = torch.cuda.Stream()
+                        stream.wait_stream(torch.cuda.current_stream())
+                        with torch.cuda.stream(stream):
+                            layer(local, ids, starts, context)
+                        torch.cuda.current_stream().wait_stream(stream)
+                        graph = torch.cuda.CUDAGraph()
+                        try:
+                            with torch.cuda.graph(graph):
+                                captured = layer(local, ids, starts, context)
+                            ids.add_(1)
+                            graph.replay()
+                            torch.testing.assert_close(
+                                captured, layer(local, ids, starts, context), atol=0, rtol=0
+                            )
+                            ids.sub_(1)
+                        finally:
+                            graph.reset()
+                            torch.cuda.synchronize()
+                        outputs.append(
+                            sp_all_gather(output.contiguous())[:tokens]
+                            if layer.use_sequence_parallel else output
+                        )
+                torch.testing.assert_close(outputs[1], outputs[0], atol=0.002, rtol=0.02)
+    finally:
+        reset_workspace_manager()
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="RDNA opaque PLE boundary")
+@multi_gpu_test(num_gpus=2)
+def test_opaque_ple_sp_allocates_local_rows_eager_and_graph(tmp_path):
+    from transformers import Qwen4ExpConfig
+    from vllm.platforms.rdna import on_rdna_family
+
+    if not on_rdna_family():
+        pytest.skip("the opaque PLE embedding is RDNA-only")
+    text = Qwen4ExpTextConfig(
+        vocab_size=128, eos_token_id=0, hidden_size=128, hc_count=2,
+        hc_lowrank=16, num_hidden_layers=1, layer_types=["linear_attention"],
+        num_experts=4, num_experts_per_tok=2, moe_intermediate_size=256,
+        shared_expert_intermediate_size=256, ple_layer_ids=[1], ple_embed_dim=128,
+        heads_per_ngram=2, ngram_vocab_size_base=32,
+        make_ngram_vocab_size_divisible_by=64,
+    )
+    Qwen4ExpConfig(
+        text_config=text.to_dict(), architectures=["Qwen4ExpForConditionalGeneration"]
+    ).save_pretrained(tmp_path)
+    mp.spawn(_run_opaque_ple_rows, args=(get_open_port(), str(tmp_path)), nprocs=2)
