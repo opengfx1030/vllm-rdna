@@ -4,6 +4,37 @@
 
 #include <torch/all.h>
 
+void oq_affine_linear_rdna2(const torch::Tensor& x, const torch::Tensor& codes,
+                            const torch::Tensor& scales,
+                            const torch::Tensor& biases, torch::Tensor& out,
+                            int64_t bits, int64_t group_size,
+                            int64_t logical_k_start, int64_t code_bit_offset,
+                            int64_t metadata_group_start, int64_t output_offset,
+                            int64_t block_m, int64_t tile_n);
+void oq_affine_linear_staged_rdna2(
+    const torch::Tensor& x, const torch::Tensor& codes,
+    const torch::Tensor& scales, const torch::Tensor& biases,
+    torch::Tensor& out, torch::Tensor& workspace, int64_t bits,
+    int64_t group_size, int64_t logical_k_start, int64_t code_bit_offset,
+    int64_t metadata_group_start, int64_t output_offset);
+void oq_affine_embedding_rdna2(const torch::Tensor& ids,
+                               const torch::Tensor& codes,
+                               const torch::Tensor& scales,
+                               const torch::Tensor& biases, torch::Tensor& out,
+                               int64_t bits, int64_t group_size,
+                               int64_t embedding_dim);
+void moe_oq_affine_gemm_rdna2(
+    const torch::Tensor& x, const torch::Tensor& codes,
+    const torch::Tensor& scales, const torch::Tensor& biases,
+    const torch::Tensor& topk_ids, const torch::Tensor& expert_map,
+    const torch::Tensor& sorted_ids, const torch::Tensor& expert_ids,
+    const torch::Tensor& post_pad, torch::Tensor& out, int64_t bits,
+    int64_t group_size, int64_t input_divisor, int64_t block_m, int64_t tile_n);
+void oq_silu_mul_rdna2(const torch::Tensor& gate_up, torch::Tensor& act);
+void oq_moe_reduce_rdna2(const torch::Tensor& slots,
+                         const torch::Tensor& topk_weights,
+                         torch::Tensor& output, bool mul_router_weight);
+
 torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
                     const int64_t rows_per_block);
 

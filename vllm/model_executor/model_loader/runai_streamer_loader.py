@@ -17,6 +17,10 @@ from vllm.config.load import LoadConfig
 from vllm.distributed import get_pp_group, get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.mlx_affine_checkpoint import (
+    MlxAffineCheckpoint,
+    load_mlx_affine_checkpoint,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -227,15 +231,20 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_or_path: str,
         revision: str | None,
         is_unused_weight: Callable[[str], bool] | None = None,
+        checkpoint: MlxAffineCheckpoint | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
-        hf_weights_files = self._prepare_weights(model_or_path, revision)
+        hf_weights_files = (
+            list(checkpoint.shard_paths)
+            if checkpoint is not None
+            else self._prepare_weights(model_or_path, revision)
+        )
         selected_files = hf_weights_files
         distributed = self._is_distributed and torch.distributed.is_initialized()
         # Drafts load only on the last PP stage; RunAI is invoked without a
         # model-specific group, so retain its existing full-list path with PP.
         can_select = not distributed or get_pp_group().world_size == 1
-        if is_unused_weight is not None and can_select:
+        if checkpoint is None and is_unused_weight is not None and can_select:
             if is_runai_obj_uri(model_or_path):
                 selected_files = _filter_remote_weights(
                     hf_weights_files, model_or_path, is_unused_weight
@@ -258,6 +267,13 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             else:
                 # Do not substitute another node's local checkpoint paths.
                 selected_files = hf_weights_files
+        if checkpoint is not None:
+            return runai_safetensors_weights_iterator(
+                selected_files,
+                self.load_config.use_tqdm_on_load,
+                self._is_distributed,
+                selected_tensor_names=checkpoint.tensor_names,
+            )
         return runai_safetensors_weights_iterator(
             selected_files, self.load_config.use_tqdm_on_load, self._is_distributed
         )
@@ -272,14 +288,45 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model: nn.Module,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         model_weights = model_config.model
+        checkpoint = None
+        if model_config.quantization == "mlx_affine":
+            if model_config.model_weights:
+                raise ValueError(
+                    "Native affine views do not accept model_weights overrides"
+                )
+            if (
+                self._is_distributed
+                or os.environ.get("RUNAI_STREAMER_CONCURRENCY") != "1"
+                or os.environ.get("RUNAI_STREAMER_MEMORY_LIMIT") != "2147483648"
+            ):
+                raise ValueError(
+                    "Native affine loading requires RunAI CPU staging, "
+                    "concurrency1 and a 2147483648-byte streamer limit"
+                )
+            checkpoint = load_mlx_affine_checkpoint(
+                model_weights, model_config.hf_config.to_dict()
+            )
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
         yield from self._get_weights_iterator(
             model_weights,
             model_config.revision,
             getattr(model, "is_unused_checkpoint_weight", None),
+            checkpoint=checkpoint,
         )
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         """Load weights into a model."""
-        model.load_weights(self.get_all_weights(model_config, model))
+        loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
+        if model_config.quantization == "mlx_affine":
+            if not isinstance(loaded_weights, set):
+                raise ValueError(
+                    "Native affine loading must return its actual loaded set"
+                )
+            from vllm.model_executor.model_loader.default_loader import (
+                DefaultModelLoader,
+            )
+
+            DefaultModelLoader(LoadConfig()).track_weights_loading(
+                model, loaded_weights, quantized=True
+            )

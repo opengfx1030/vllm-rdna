@@ -718,6 +718,397 @@ def gptq_gemm_rdna2(
     )
 
 
+def oq_affine_linear_rdna2(
+    x: torch.Tensor,
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    biases: torch.Tensor,
+    out: torch.Tensor,
+    bits: int,
+    group_size: int,
+    logical_k_start: int,
+    code_bit_offset: int,
+    metadata_group_start: int,
+    output_offset: int,
+    block_m: int,
+    tile_n: int,
+) -> None:
+    torch.ops.vllm.oq_affine_linear_rdna2_runtime(
+        x,
+        codes,
+        scales,
+        biases,
+        out,
+        bits,
+        group_size,
+        logical_k_start,
+        code_bit_offset,
+        metadata_group_start,
+        output_offset,
+        block_m,
+        tile_n,
+    )
+
+
+@torch.library.custom_op("vllm::oq_affine_linear_rdna2_runtime", mutates_args=("out",))
+def _oq_affine_linear_rdna2_runtime(
+    x: torch.Tensor,
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    biases: torch.Tensor,
+    out: torch.Tensor,
+    bits: int,
+    group_size: int,
+    logical_k_start: int,
+    code_bit_offset: int,
+    metadata_group_start: int,
+    output_offset: int,
+    block_m: int,
+    tile_n: int,
+) -> None:
+    # Select scratch only at execution time, in the current ubatch/lane.
+    # Keeping the M boundary opaque avoids Dynamo guards and decode allocation.
+    if x.shape[0] >= 256:
+        torch._check(
+            block_m in (2, 4, 8) and tile_n in (4, 8),
+            lambda: "unsupported native affine tile geometry",
+        )
+        from vllm.v1.worker.workspace import current_workspace_manager
+
+        (workspace,) = current_workspace_manager().get_simultaneous(
+            ((codes.shape[0], x.shape[1]), torch.float16),
+        )
+        torch.ops._rocm_C.oq_affine_linear_staged_rdna2(
+            x,
+            codes,
+            scales,
+            biases,
+            out,
+            workspace,
+            bits,
+            group_size,
+            logical_k_start,
+            code_bit_offset,
+            metadata_group_start,
+            output_offset,
+        )
+    else:
+        torch.ops._rocm_C.oq_affine_linear_rdna2(
+            x,
+            codes,
+            scales,
+            biases,
+            out,
+            bits,
+            group_size,
+            logical_k_start,
+            code_bit_offset,
+            metadata_group_start,
+            output_offset,
+            block_m,
+            tile_n,
+        )
+
+
+def oq_affine_embedding_rdna2(
+    ids: torch.Tensor,
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    biases: torch.Tensor,
+    out: torch.Tensor,
+    bits: int,
+    group_size: int,
+    embedding_dim: int,
+) -> None:
+    torch.ops._rocm_C.oq_affine_embedding_rdna2(
+        ids,
+        codes,
+        scales,
+        biases,
+        out,
+        bits,
+        group_size,
+        embedding_dim,
+    )
+
+
+def moe_oq_affine_gemm_rdna2(
+    x: torch.Tensor,
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    biases: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    post_pad: torch.Tensor,
+    out: torch.Tensor,
+    bits: int,
+    group_size: int,
+    input_divisor: int,
+    block_m: int,
+    tile_n: int,
+) -> None:
+    torch.ops._rocm_C.moe_oq_affine_gemm_rdna2(
+        x,
+        codes,
+        scales,
+        biases,
+        topk_ids,
+        expert_map,
+        sorted_ids,
+        expert_ids,
+        post_pad,
+        out,
+        bits,
+        group_size,
+        input_divisor,
+        block_m,
+        tile_n,
+    )
+
+
+def oq_silu_mul_rdna2(gate_up: torch.Tensor, act: torch.Tensor) -> None:
+    torch.ops._rocm_C.oq_silu_mul_rdna2(gate_up, act)
+
+
+def oq_moe_reduce_rdna2(
+    slots: torch.Tensor,
+    topk_weights: torch.Tensor,
+    output: torch.Tensor,
+    mul_router_weight: bool,
+) -> None:
+    torch.ops._rocm_C.oq_moe_reduce_rdna2(
+        slots,
+        topk_weights,
+        output,
+        mul_router_weight,
+    )
+
+
+def _oq_affine_fake_packed(codes, scales, biases, out, bits, group_size, rank):
+    torch._check(bits in (6, 8) and group_size in (32, 64, 128))
+    torch._check(codes.dim() == rank and scales.dim() == rank)
+    torch._check(biases.shape == scales.shape)
+    torch._check(codes.shape[:-1] == scales.shape[:-1])
+    torch._check(codes.dtype == torch.int32)
+    torch._check(scales.dtype == torch.bfloat16 and biases.dtype == torch.bfloat16)
+    for tensor in (codes, scales, biases):
+        torch._check(tensor.device == out.device and tensor.is_contiguous())
+    torch._check(out.is_contiguous())
+
+
+def _oq_affine_fake_linear(
+    x,
+    codes,
+    scales,
+    biases,
+    out,
+    bits,
+    group_size,
+    logical_k_start,
+    code_bit_offset,
+    metadata_group_start,
+    output_offset,
+):
+    _oq_affine_fake_packed(codes, scales, biases, out, bits, group_size, 2)
+    torch._check(x.dim() == 2 and out.dim() == 2)
+    torch._check(x.dtype == torch.float16 and out.dtype == torch.float16)
+    torch._check(x.device == out.device and x.is_contiguous())
+    torch._check(out.shape[0] == x.shape[0])
+    torch._check(output_offset >= 0)
+    torch._check(output_offset + codes.shape[0] <= out.shape[1])
+    torch._check(logical_k_start >= 0)
+    torch._check(x.shape[1] > 0)
+    torch._check(logical_k_start <= 2147483647 - x.shape[1])
+    torch._check(code_bit_offset == logical_k_start * bits % 32)
+    torch._check(metadata_group_start == logical_k_start // group_size)
+    torch._check(codes.shape[-1] == cdiv(code_bit_offset + x.shape[1] * bits, 32))
+    torch._check(
+        scales.shape[-1]
+        == cdiv(logical_k_start + x.shape[1], group_size) - metadata_group_start
+    )
+
+
+@_oq_affine_linear_rdna2_runtime.register_fake
+def _oq_affine_linear_rdna2_runtime_fake(
+    x,
+    codes,
+    scales,
+    biases,
+    out,
+    bits,
+    group_size,
+    logical_k_start,
+    code_bit_offset,
+    metadata_group_start,
+    output_offset,
+    block_m,
+    tile_n,
+):
+    _oq_affine_fake_linear(
+        x,
+        codes,
+        scales,
+        biases,
+        out,
+        bits,
+        group_size,
+        logical_k_start,
+        code_bit_offset,
+        metadata_group_start,
+        output_offset,
+    )
+    torch._check(
+        (block_m == 1 and x.shape[0] <= 32 and tile_n in (4, 8, 16))
+        or (block_m in (2, 4, 8) and tile_n in (4, 8))
+    )
+
+
+if hasattr(torch.ops._rocm_C, "oq_affine_linear_rdna2"):
+    register_fake("_rocm_C::oq_affine_linear_rdna2")(
+        _oq_affine_linear_rdna2_runtime_fake
+    )
+
+
+if hasattr(torch.ops._rocm_C, "oq_affine_linear_staged_rdna2"):
+
+    @register_fake("_rocm_C::oq_affine_linear_staged_rdna2")
+    def _oq_affine_linear_staged_rdna2_fake(
+        x,
+        codes,
+        scales,
+        biases,
+        out,
+        workspace,
+        bits,
+        group_size,
+        logical_k_start,
+        code_bit_offset,
+        metadata_group_start,
+        output_offset,
+    ):
+        _oq_affine_fake_linear(
+            x,
+            codes,
+            scales,
+            biases,
+            out,
+            bits,
+            group_size,
+            logical_k_start,
+            code_bit_offset,
+            metadata_group_start,
+            output_offset,
+        )
+        torch._check(workspace.dim() == 2 and workspace.is_contiguous())
+        torch._check(workspace.device == x.device)
+        torch._check(workspace.dtype == torch.float16)
+        torch._check(workspace.shape[0] == codes.shape[0])
+        torch._check(workspace.shape[1] == x.shape[1])
+
+
+if hasattr(torch.ops._rocm_C, "oq_affine_embedding_rdna2"):
+
+    @register_fake("_rocm_C::oq_affine_embedding_rdna2")
+    def _oq_affine_embedding_rdna2_fake(
+        ids,
+        codes,
+        scales,
+        biases,
+        out,
+        bits,
+        group_size,
+        embedding_dim,
+    ):
+        _oq_affine_fake_packed(codes, scales, biases, out, bits, group_size, 2)
+        torch._check(ids.dtype in (torch.int32, torch.int64))
+        torch._check(ids.device == out.device and ids.is_contiguous())
+        torch._check(out.dtype == torch.float16)
+        torch._check(embedding_dim > 0 and out.numel() == ids.numel() * embedding_dim)
+        torch._check(codes.shape[-1] == cdiv(embedding_dim * bits, 32))
+        torch._check(scales.shape[-1] == cdiv(embedding_dim, group_size))
+
+
+if hasattr(torch.ops._rocm_C, "moe_oq_affine_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_oq_affine_gemm_rdna2")
+    def _moe_oq_affine_gemm_rdna2_fake(
+        x,
+        codes,
+        scales,
+        biases,
+        topk_ids,
+        expert_map,
+        sorted_ids,
+        expert_ids,
+        post_pad,
+        out,
+        bits,
+        group_size,
+        input_divisor,
+        block_m,
+        tile_n,
+    ):
+        _oq_affine_fake_packed(codes, scales, biases, out, bits, group_size, 3)
+        torch._check(x.dim() == 2 and topk_ids.dim() == 2 and out.dim() == 2)
+        torch._check(x.shape[1] > 0 and topk_ids.shape[1] > 0)
+        torch._check(x.dtype == torch.float16 and out.dtype == torch.float32)
+        torch._check(x.device == out.device and x.is_contiguous())
+        torch._check(topk_ids.dtype in (torch.int32, torch.int64))
+        torch._check(input_divisor == 1 or input_divisor == topk_ids.shape[1])
+        torch._check(x.shape[0] * input_divisor == topk_ids.numel())
+        torch._check(out.shape[0] == topk_ids.numel())
+        torch._check(out.shape[1] == codes.shape[1])
+        torch._check(codes.shape[-1] == cdiv(x.shape[1] * bits, 32))
+        torch._check(scales.shape[-1] == cdiv(x.shape[1], group_size))
+        torch._check(
+            expert_map.numel() == 512
+            or (expert_map.numel() == 0 and codes.shape[0] == 512)
+        )
+        torch._check(codes.shape[0] <= 512)
+        for tensor in (topk_ids, expert_map, sorted_ids, expert_ids, post_pad):
+            torch._check(tensor.device == out.device and tensor.is_contiguous())
+        for tensor in (expert_map, sorted_ids, expert_ids, post_pad):
+            torch._check(tensor.dim() == 1)
+            torch._check(tensor.dtype == torch.int32)
+        if sorted_ids.numel() != 0:
+            torch._check(post_pad.numel() == 1)
+            torch._check(expert_ids.numel() == cdiv(sorted_ids.numel(), block_m))
+            torch._check(block_m in (2, 4, 8) and tile_n in (4, 8))
+        else:
+            torch._check(expert_ids.numel() == 0 and post_pad.numel() == 0)
+            torch._check(topk_ids.shape[0] <= 32 and tile_n in (4, 8, 16))
+
+
+if hasattr(torch.ops._rocm_C, "oq_silu_mul_rdna2"):
+
+    @register_fake("_rocm_C::oq_silu_mul_rdna2")
+    def _oq_silu_mul_rdna2_fake(gate_up, act):
+        torch._check(gate_up.dim() == 2 and act.dim() == 2)
+        torch._check(gate_up.dtype == torch.float32 and act.dtype == torch.float16)
+        torch._check(gate_up.device == act.device)
+        torch._check(gate_up.is_contiguous() and act.is_contiguous())
+        torch._check(gate_up.shape[0] == act.shape[0])
+        torch._check(gate_up.shape[1] == 2 * act.shape[1])
+
+
+if hasattr(torch.ops._rocm_C, "oq_moe_reduce_rdna2"):
+
+    @register_fake("_rocm_C::oq_moe_reduce_rdna2")
+    def _oq_moe_reduce_rdna2_fake(slots, topk_weights, output, mul_router_weight):
+        torch._check(slots.dim() == 3 and topk_weights.dim() == 2 and output.dim() == 2)
+        torch._check(
+            slots.dtype == torch.float32 and topk_weights.dtype == torch.float32
+        )
+        torch._check(output.dtype == torch.float16)
+        torch._check(slots.shape[:2] == topk_weights.shape)
+        torch._check(output.shape == (slots.shape[0], slots.shape[2]))
+        for tensor in (slots, topk_weights):
+            torch._check(tensor.device == output.device and tensor.is_contiguous())
+        torch._check(output.is_contiguous())
+
+
 def hc_grouped_gemma_rmsnorm_rdna2(
     x: torch.Tensor,
     weight: torch.Tensor,

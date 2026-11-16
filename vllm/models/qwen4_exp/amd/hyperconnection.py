@@ -36,6 +36,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import maybe_prefix
 
 from ..common.hyperconnection import (
@@ -94,6 +95,7 @@ class GatedResidual(nn.Module):
         config: HyperConnectionConfig,
         use_combine: bool = True,
         prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -101,6 +103,10 @@ class GatedResidual(nn.Module):
         self.hc_count = config.hc_count
         self.hidden_size = config.hidden_size
         self.use_combine = use_combine
+        self._mlx_affine = (
+            quant_config is not None and quant_config.get_name() == "mlx_affine"
+        )
+        projection_quant = quant_config if self._mlx_affine else None
 
         norm_size = (
             self.hyper_hidden_size if config.hc_per_branch_norm else config.hidden_size
@@ -126,7 +132,7 @@ class GatedResidual(nn.Module):
                 + ([self.pad_size] if self.pad_size else []),
                 bias=False,
                 params_dtype=config.params_dtype,
-                quant_config=None,
+                quant_config=projection_quant,
                 prefix=maybe_prefix(prefix, "input_mix_weight_down_block_inject"),
                 return_bias=False,
                 disable_tp=True,
@@ -137,7 +143,7 @@ class GatedResidual(nn.Module):
                 self.hc_lowrank,
                 bias=False,
                 params_dtype=config.params_dtype,
-                quant_config=None,
+                quant_config=projection_quant,
                 prefix=maybe_prefix(prefix, "input_mix_weight_down"),
                 return_bias=False,
             )
@@ -146,7 +152,7 @@ class GatedResidual(nn.Module):
             self.hyper_hidden_size,
             bias=False,
             params_dtype=config.params_dtype,
-            quant_config=None,
+            quant_config=projection_quant,
             prefix=maybe_prefix(prefix, "input_mix_weight_up"),
             return_bias=False,
         )
@@ -161,7 +167,7 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        if _rdna_fused_ok(xn):
+        if not self._mlx_affine and _rdna_fused_ok(xn):
             # T46 (gfx1030): one opaque op; decode (M <= 8) runs two fused
             # kernels (down+inject GEMV with silu, up GEMV + sigmoid + gated
             # mean), prefill runs the torch sequence inside the op.
@@ -245,7 +251,7 @@ class GatedResidual(nn.Module):
             except Exception:
                 pass
 
-        if _rdna_fused_ok(xn):
+        if not self._mlx_affine and _rdna_fused_ok(xn):
             # T46 (gfx1030): one opaque op; decode (M <= 8) runs two fused
             # kernels (down+inject GEMV with silu, up GEMV + sigmoid + gated
             # mean), prefill runs the torch sequence inside the op.

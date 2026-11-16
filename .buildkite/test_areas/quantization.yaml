@@ -200,3 +200,27 @@ steps:
       - vllm/model_executor/model_loader/
       commands:
       - pytest -v -s models/quantization
+
+- label: "Native MLX affine metadata (CPU)"
+  key: native-mlx-affine-metadata-cpu
+  depends_on:
+  - image-build-cpu
+  device: cpu-small
+  timeout_in_minutes: 5
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/mlx_affine_format.py
+  - vllm/model_executor/model_loader/mlx_affine_checkpoint.py
+  - tools/rdna/prepare_oq6e.py
+  - tests/quantization/test_mlx_affine_format.py
+  - tests/model_executor/model_loader/test_mlx_affine_checkpoint.py
+  - tests/model_executor/model_loader/test_prepare_oq6e.py
+  - tests/quantization/test_mlx_affine_construction.py
+  - tests/model_executor/model_loader/test_mlx_affine_loading.py
+  - vllm/model_executor/layers/quantization/mlx_affine.py
+  - vllm/model_executor/layers/quantization/mlx_affine_tuning.py
+  - vllm/model_executor/model_loader/mlx_affine_loading.py
+  - vllm/model_executor/parameter.py
+  - vllm/models/qwen4_exp/
+  commands:
+  - pytest --noconftest -v -s quantization/test_mlx_affine_format.py model_executor/model_loader/test_mlx_affine_checkpoint.py model_executor/model_loader/test_prepare_oq6e.py
+  - pytest -v -s quantization/test_mlx_affine_construction.py model_executor/model_loader/test_mlx_affine_loading.py

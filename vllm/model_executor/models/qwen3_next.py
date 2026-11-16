@@ -140,6 +140,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
+        native_affine = (
+            quant_config is not None and quant_config.get_name() == "mlx_affine"
+        )
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -152,7 +155,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         # Resolve shared-expert fusion first (when enabled, TP alignment constraint no
         # longer applies)
         self.is_fused_shared_expert_enabled = False
-        if config.shared_expert_intermediate_size > 0:
+        if config.shared_expert_intermediate_size > 0 and not native_affine:
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config,
                 prefix,
@@ -206,7 +209,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.hidden_size,
             1,
             bias=False,
-            quant_config=None,
+            quant_config=quant_config if native_affine else None,
             prefix=f"{prefix}.shared_expert_gate",
         )
 

@@ -3,6 +3,7 @@
 """GPU-resident Qwen4Exp position-learning enhancement layers."""
 
 from collections.abc import Iterable, Sequence
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -49,6 +50,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
+    Qwen4ExpPLEMlxAffineEmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
 )
@@ -385,6 +387,20 @@ class Qwen4ExpNGramEmbedding(_NGramEmbeddingBase):  # type: ignore[valid-type,mi
                 "checkpoint with a BF16 or FP8 PLE table."
             )
         engram_config = get_current_vllm_config().engram_config
+        if isinstance(embedding_quant_method, Qwen4ExpPLEMlxAffineEmbeddingMethod):
+            if (
+                (engram_config is not None and engram_config.cpu_offload)
+                or envs.VLLM_PLE_CPU_OFFLOAD
+                or envs.VLLM_PLE_QUANT_DIR
+            ):
+                raise ValueError("native MLX affine PLE forbids CPU/external tables")
+            if (
+                self.eos_token_id != 248044
+                or self.eos_token_id >= self.unigram_vocab_size
+            ):
+                raise ValueError("native MLX affine PLE requires published EOS 248044")
+            if self.split_ngram_parts != 128:
+                raise ValueError("native MLX affine PLE requires all 128 source shards")
         embedding_cls = (
             Qwen4ExpPLEPinnedHostEmbedding
             if engram_config is not None
@@ -409,6 +425,16 @@ class Qwen4ExpNGramEmbedding(_NGramEmbeddingBase):  # type: ignore[valid-type,mi
             data_parallel_rank=data_parallel_rank,
             reduce_results=not self.use_reduce_scatter,
         )
+        if isinstance(embedding_quant_method, Qwen4ExpPLEMlxAffineEmbeddingMethod):
+            self._bind_native_hash_buffers(
+                embedding_quant_method,
+                {
+                    "layer_multipliers": tuple(multipliers),
+                    "ngram_heads_vocab_sizes": tuple(sizes),
+                    "ngram_heads_offsets": tuple(offsets),
+                },
+                padded_vocab_size,
+            )
         logger.info(
             "Initialized AMD PLE embedding %s: "
             "quantization_config=%s, quantization_method=%s, "
@@ -437,6 +463,97 @@ class Qwen4ExpNGramEmbedding(_NGramEmbeddingBase):  # type: ignore[valid-type,mi
                 ),
                 persistent=False,
             )
+
+    def _bind_native_hash_buffers(self, method, expected, padded_vocab_size):
+        from vllm.model_executor.layers.quantization.mlx_affine_format import (
+            MlxAffineDestination,
+            MlxAffineInterval,
+            MlxAffineSourcePlan,
+        )
+        from vllm.model_executor.model_loader.mlx_affine_loading import (
+            MlxAffineLoadBinding,
+        )
+
+        if (
+            sum(expected["ngram_heads_vocab_sizes"]) > padded_vocab_size
+            or expected["ngram_heads_offsets"][0] != 0
+            or any(
+                offset + size != next_offset
+                for offset, size, next_offset in zip(
+                    expected["ngram_heads_offsets"],
+                    expected["ngram_heads_vocab_sizes"],
+                    expected["ngram_heads_offsets"][1:],
+                )
+            )
+        ):
+            raise ValueError("invalid native PLE head bounds or padded row allocation")
+        original = method.quant_config._resolve(f"{method.prefix}.shards.0")
+        original_parent = original.removesuffix(".ngram_embedding.shards.0")
+        bindings = []
+        for name, values in expected.items():
+            source_name = f"{original_parent}.{name}"
+            entry = method.quant_config.checkpoint.manifest["tensors"][source_name]
+            if entry["dtype"] != "I64" or entry["shape"] != [len(values)]:
+                raise ValueError(f"invalid published PLE hash buffer: {source_name}")
+            interval = MlxAffineInterval(0, len(values))
+            bindings.append(
+                MlxAffineLoadBinding(
+                    source_name,
+                    MlxAffineSourcePlan(
+                        (interval,), (), (MlxAffineDestination(name, interval),)
+                    ),
+                    {name: len(values)},
+                    partial(self._load_native_hash_buffer, name, values),
+                    (name,),
+                )
+            )
+        scale_name = f"{original_parent}.ngram_embedding.weight_scale"
+        entry = method.quant_config.checkpoint.manifest["tensors"][scale_name]
+        if entry["dtype"] != "BF16" or entry["shape"] != [1]:
+            raise ValueError("invalid native PLE global identity scale")
+        interval = MlxAffineInterval(0, 1)
+        bindings.append(
+            MlxAffineLoadBinding(
+                scale_name,
+                MlxAffineSourcePlan(
+                    (interval,),
+                    (),
+                    (MlxAffineDestination("ngram_embedding.weight_scale", interval),),
+                ),
+                {"ngram_embedding.weight_scale": 1},
+                self._load_native_identity_scale,
+                ("ngram_embedding.weight_scale",),
+            )
+        )
+        self._mlx_affine_load_bindings = tuple(bindings)
+
+    def _load_native_hash_buffer(self, name, expected, source):
+        from vllm.model_executor.model_loader.mlx_affine_loading import (
+            copy_mlx_affine_tensor,
+        )
+
+        if (
+            source.device.type != "cpu"
+            or source.dtype != torch.int64
+            or tuple(source.shape) != (len(expected),)
+            or tuple(source.tolist()) != expected
+        ):
+            raise ValueError(f"published PLE hash buffer disagrees with config: {name}")
+        copy_mlx_affine_tensor(getattr(self, name), source)
+
+    def _load_native_identity_scale(self, source):
+        from vllm.model_executor.model_loader.mlx_affine_loading import (
+            copy_mlx_affine_tensor,
+        )
+
+        if (
+            source.device.type != "cpu"
+            or source.dtype != torch.bfloat16
+            or tuple(source.shape) != (1,)
+            or source.item() != 1.0
+        ):
+            raise ValueError("native PLE global scale must be the published BF16 one")
+        copy_mlx_affine_tensor(self.ngram_embedding.weight_scale, source)
 
     def _materialize_workspace(self, device: torch.device) -> None:
         """Rebuild workspace buffers left on meta by the sidecar's meta build."""
@@ -709,7 +826,7 @@ class Qwen4ExpNGramEmbedding(_NGramEmbeddingBase):  # type: ignore[valid-type,mi
                 continue
             if name.startswith(shard_prefix) and name.endswith(".weight"):
                 method = getattr(self.ngram_embedding, "embedding_method", None)
-                if getattr(method, "lookup_dequantizes", False):
+                if getattr(method, "external_table_source", False):
                     # The table comes from VLLM_PLE_QUANT_DIR after loading.
                     loaded.add("ngram_embedding.weight")
                     continue

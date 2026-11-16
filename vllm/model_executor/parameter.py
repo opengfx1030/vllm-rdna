@@ -23,10 +23,23 @@ __all__ = [
     "ChannelQuantScaleParameter",
     "GroupQuantScaleParameter",
     "PackedColumnParameter",
+    "MlxAffineParameter",
     "RowvLLMParameter",
 ]
 
 logger = init_logger(__name__)
+
+
+def _copy_weight(destination: torch.Tensor, source: torch.Tensor) -> None:
+    from vllm.model_executor.model_loader.mlx_affine_loading import (
+        copy_mlx_affine_tensor,
+        is_mlx_affine_loading,
+    )
+
+    if is_mlx_affine_loading():
+        copy_mlx_affine_tensor(destination, source)
+    else:
+        destination.copy_(source)
 
 
 class BasevLLMParameter(Parameter):
@@ -92,7 +105,7 @@ class BasevLLMParameter(Parameter):
         assert self.data.shape == loaded_weight.shape or self._is_1d_and_scalar(
             loaded_weight
         )
-        self.data.copy_(loaded_weight)
+        _copy_weight(self.data, loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._assert_and_load(loaded_weight)
@@ -124,6 +137,102 @@ class BasevLLMParameter(Parameter):
         return super().__torch_function__(func, types, args, kwargs)
 
 
+class MlxAffineParameter(Parameter):
+    """Canonical compact storage with bounded CPU-to-destination copies.
+
+    ``copy_source`` slices leading expert/output/row axes explicitly. Its last
+    axis is selected from the immutable packed-word or metadata-group shard.
+    U32 checkpoint codes are bit-viewed, never numerically converted.
+    """
+
+    MAX_COPY_BYTES = 1024 * 1024
+
+    def __new__(cls, data: torch.Tensor, **kwargs):
+        return super().__new__(cls, data=data, requires_grad=False)
+
+    def __init__(
+        self,
+        data: torch.Tensor,
+        *,
+        component: str,
+        weight_loader: Callable | None = None,
+    ):
+        if component not in ("weight", "scales", "biases"):
+            raise ValueError(f"invalid affine component: {component}")
+        expected = torch.int32 if component == "weight" else torch.bfloat16
+        if data.dtype != expected:
+            raise ValueError(f"{component} storage must have dtype {expected}")
+        self.component = component
+        self.weight_loader = weight_loader
+        self.copy_bytes = 0
+        self.copy_tiles = 0
+        self.max_copy_tile_bytes = 0
+
+    @staticmethod
+    def _leading_slices(tensor, selections):
+        if selections is None:
+            return tensor
+        if len(selections) != tensor.ndim - 1:
+            raise ValueError("affine slices must explicitly select every leading axis")
+        for size, selection in zip(tensor.shape, selections):
+            if not isinstance(selection, slice) or selection.step not in (None, 1):
+                raise ValueError("affine ownership requires unit-stride slices")
+            start = 0 if selection.start is None else selection.start
+            stop = size if selection.stop is None else selection.stop
+            if not 0 <= start < stop <= size:
+                raise ValueError("affine slice outside source/destination bounds")
+        return tensor[(*selections, slice(None))]
+
+    def _copy_tiles(self, destination, source):
+        from vllm.model_executor.model_loader.mlx_affine_loading import (
+            copy_mlx_affine_tensor,
+        )
+
+        stats = copy_mlx_affine_tensor(destination, source)
+        self.copy_bytes += stats.copy_bytes
+        self.copy_tiles += stats.copy_tiles
+        self.max_copy_tile_bytes = max(
+            self.max_copy_tile_bytes, stats.max_copy_tile_bytes
+        )
+
+    def copy_source(
+        self,
+        source: torch.Tensor,
+        *,
+        source_shape: tuple[int, ...],
+        shard,
+        source_slices: tuple[slice, ...] | None = None,
+        destination_slices: tuple[slice, ...] | None = None,
+    ) -> None:
+        """Copy owned compact slices synchronously without GPU staging."""
+        from vllm.model_executor.layers.quantization.mlx_affine_format import (
+            MlxAffineShard,
+        )
+
+        if not isinstance(shard, MlxAffineShard):
+            raise ValueError("affine copy requires an immutable shard descriptor")
+        expected = torch.uint32 if self.component == "weight" else torch.bfloat16
+        if (
+            source.device.type != "cpu"
+            or source.dtype != expected
+            or tuple(source.shape) != tuple(source_shape)
+            or source.ndim < 2
+        ):
+            raise ValueError("affine source must match its original CPU shape/dtype")
+        if self.component == "weight":
+            source = source.view(torch.int32)
+            start, size = shard.copied_word_start, shard.copied_word_count
+        else:
+            start, size = shard.metadata_group_start, shard.metadata_group_count
+        if start + size > source.shape[-1]:
+            raise ValueError("affine shard extends beyond original source")
+        source = self._leading_slices(source, source_slices).narrow(-1, start, size)
+        destination = self._leading_slices(self.data, destination_slices)
+        if source.shape != destination.shape:
+            raise ValueError("affine owned source and final destination shapes differ")
+        self._copy_tiles(destination, source)
+
+
 class _ColumnvLLMParameter(BasevLLMParameter):
     """Private class defining weight loading functionality
     (load_merged_column_weight, load_qkv_weight)
@@ -148,7 +257,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert self.data.shape == loaded_weight.shape
-        self.data.copy_(loaded_weight)
+        _copy_weight(self.data, loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_offset: int = kwargs["shard_offset"]
@@ -170,7 +279,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        _copy_weight(param_data, loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_offset: int = kwargs["shard_offset"]
@@ -195,7 +304,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         )
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        _copy_weight(param_data, loaded_weight)
 
 
 class RowvLLMParameter(BasevLLMParameter):
@@ -223,7 +332,7 @@ class RowvLLMParameter(BasevLLMParameter):
             loaded_weight = loaded_weight.reshape(1)
 
         assert self.data.shape == loaded_weight.shape
-        self.data.copy_(loaded_weight)
+        _copy_weight(self.data, loaded_weight)
 
 
 class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
@@ -297,7 +406,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
 
         param_data = param_data[shard_id]
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        _copy_weight(param_data, loaded_weight)
 
 
 class PackedColumnParameter(_ColumnvLLMParameter):

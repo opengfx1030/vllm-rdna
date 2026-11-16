@@ -25,6 +25,48 @@ actually sets. The human walkthrough of the launcher and every recipe is
   upstream/Triton path on gfx11. Nothing here is validated on RDNA3 yet, and
   the shipped TunableOp rows are for one gfx1030 rocBLAS build only.
 
+## Native oQ6e / MLX affine checkpoints
+
+`--quantization mlx_affine` supports normalized Qwen3.8-Flash-Next oQ6e
+target and standalone MTP views on gfx1030. It keeps published 6/8-bit codes
+and BF16 scales/biases with group sizes 32/64/128. Activations and reconstructed
+weights are FP16; affine reconstruction and routed reductions retain FP32
+rounding. Other quantizers and non-RDNA kernels retain their existing paths.
+
+Create metadata-only views with `tools/rdna/prepare_oq6e.py`. Supply
+`--source`, `--destination`, `--acquisition-manifest`, `--acquisition-result`,
+`--assets-source`, `--assets-manifest`, and `--protected-root`. The exporter
+validates the pinned source revision and acquired-file hashes, copies tokenizer
+metadata, and publishes relative links to unchanged original safetensors.
+It never downloads, repacks, deletes, or rewrites source weights. Target and MTP
+views have distinct hash-pinned `mlx-affine-manifest.json` files and explicit
+per-module quantization maps; an unnormalized MLX directory is not accepted.
+
+Serve through the recipe launcher with `PLE=mlx-affine`,
+`EXTRA_ARGS='--quantization mlx_affine'`, and the normalized target as `MODEL`.
+Set the speculative draft model to the normalized MTP view. This representation
+uses checkpoint GPU PLE tables, not CPU/external PLE tables or INT8 shadows.
+The loader requires lazy CPU safetensors staging; RunAI additionally requires
+`RUNAI_STREAMER_CONCURRENCY=1` and `RUNAI_STREAMER_MEMORY_LIMIT=2147483648`.
+Manifest selection, source ownership and destination coverage are checked before
+completing the load. Target/draft embedding and head aliases share target storage.
+
+Optional `--additional-config '{"rdna_oq_affine": {...}}'` requires every field:
+
+| Field | Default | Allowed |
+| --- | ---: | --- |
+| `decode_tile_n` | 8 | 4, 8, 16 |
+| `prefill_tile_n` | 8 | 4, 8 |
+| `prefill_block_m` | 4 | 2, 4, 8 |
+| `dense_prefill_block_m` | 8 | 2, 4, 8 |
+| `chunk_tokens` | 256 | 128, 256, 512, 1024 |
+
+Small dense/decode calls use direct projection. Large dense calls reconstruct
+into bounded workspace and use rocBLAS with FP32 accumulation. Aligned routed
+BM4 prefill with `prefill_tile_n=8` uses 16-column workgroups internally to reuse
+activation staging; direct/decode dispatch is unchanged. Synthetic kernel
+timings are not whole-model throughput or quality evidence.
+
 ## Fork CLI / config parameters
 
 | Flag | Default | What it does |

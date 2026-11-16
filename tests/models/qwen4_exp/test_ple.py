@@ -59,6 +59,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.platforms import current_platform
+from vllm.platforms.rdna import on_rdna2
 from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
@@ -2837,3 +2838,570 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
     )
     expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+def _make_mlx_affine_ple_checkpoint(tmp_path):
+    """Publish a small real 128-shard table using the native manifest contract."""
+    import hashlib
+    import json
+    import struct
+
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.layers.quantization.mlx_affine import MlxAffineConfig
+    from vllm.model_executor.layers.quantization.mlx_affine_format import (
+        MlxAffineSpecMap,
+    )
+
+    prefix = "model.layers.1.ple.ple_embedding"
+    config = Qwen4ExpTextConfig(
+        ngram_size=3,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=5,
+        make_ngram_vocab_size_divisible_by=256,
+        split_ngram_parts=128,
+        ple_embed_dim=320,
+        eos_token_id=248044,
+        vocab_size=248320,
+    )
+    specs = {
+        f"{prefix}.ngram_embedding.shards.{i}": {
+            "bits": 6,
+            "group_size": 32,
+            "mode": "affine",
+        }
+        for i in range(128)
+    }
+    quant = {"quant_method": "mlx_affine", "format_version": 1, "module_specs": specs}
+    tensors = {}
+    expected = []
+    for shard in range(128):
+        words = []
+        for row in range(2):
+            codes = [(column + 2 * shard + row) % 64 for column in range(160)]
+            packed = sum(code << (6 * column) for column, code in enumerate(codes))
+            words.append([(packed >> (32 * word)) & 0xFFFFFFFF for word in range(30)])
+            expected.append([(code / 32.0) - 1.0 for code in codes])
+        name = f"{prefix}.ngram_embedding.shards.{shard}"
+        tensors[f"{name}.weight"] = torch.tensor(words, dtype=torch.uint32)
+        tensors[f"{name}.scales"] = torch.full((2, 5), 1 / 32, dtype=torch.bfloat16)
+        tensors[f"{name}.biases"] = torch.full((2, 5), -1, dtype=torch.bfloat16)
+    multipliers = amd_ple_layer.Qwen4ExpNGramEmbedding._make_layer_multipliers(
+        ngram_size=3,
+        unigram_vocab_size=config.vocab_size,
+        seed=getattr(config, "seed", 1234),
+        ple_dense_layer_id=0,
+    )
+    sizes, offsets, _ = amd_ple_layer.Qwen4ExpNGramEmbedding._make_vocab_layout(
+        ngram_vocab_size_base=5, ngram_heads=2, ple_dense_layer_id=0
+    )
+    for name, values in (
+        ("layer_multipliers", multipliers),
+        ("ngram_heads_vocab_sizes", sizes),
+        ("ngram_heads_offsets", offsets),
+    ):
+        tensors[f"{prefix}.{name}"] = torch.tensor(values, dtype=torch.int64)
+    tensors[f"{prefix}.ngram_embedding.weight_scale"] = torch.ones(
+        1, dtype=torch.bfloat16
+    )
+    source = tmp_path / "source.safetensors"
+    save_file(tensors, source)
+    with source.open("rb") as stream:
+        header = json.loads(stream.read(struct.unpack("<Q", stream.read(8))[0]))
+    view = tmp_path / "native"
+    view.mkdir()
+    (view / source.name).symlink_to("../source.safetensors")
+    manifest = {
+        "format_version": 1,
+        "view": "target",
+        "source_revision": "a" * 40,
+        "module_specs_sha256": MlxAffineSpecMap.from_config(quant).sha256,
+        "tensors": {
+            name: {
+                "file": source.name,
+                "dtype": entry["dtype"],
+                "shape": entry["shape"],
+                "data_offsets": entry["data_offsets"],
+                "runtime_name": name,
+                "layout": "identity",
+            }
+            for name, entry in header.items()
+            if name != "__metadata__"
+        },
+    }
+    raw = json.dumps(manifest).encode()
+    (view / "mlx-affine-manifest.json").write_bytes(raw)
+    hf_config = {
+        "num_hidden_layers": 48,
+        "quantization_config": quant,
+        "mlx_affine": {
+            "manifest": "mlx-affine-manifest.json",
+            "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+            "view": "target",
+        },
+    }
+    (view / "config.json").write_text(json.dumps(hf_config))
+    quant_config = MlxAffineConfig.from_config(quant)
+    quant_config.maybe_update_config(str(view), hf_config)
+    return config, quant_config, tensors, torch.tensor(expected, dtype=torch.float16)
+
+
+def _make_native_ple_owner(tmp_path, device, *, sp=False, world_size=1):
+    """Real compact owner/config; only projection/conv weights are synthetic."""
+    from safetensors import safe_open
+    from transformers import Qwen4ExpConfig
+
+    from vllm.config import (
+        EngramConfig,
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        set_current_vllm_config,
+    )
+    from vllm.model_executor.model_loader.mlx_affine_loading import (
+        load_mlx_affine_weights,
+    )
+
+    text, quant, _, _ = _make_mlx_affine_ple_checkpoint(tmp_path)
+    values = text.to_dict()
+    values.update(
+        hidden_size=64,
+        hc_count=2,
+        hc_lowrank=16,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=1,
+        head_dim=8,
+        layer_types=["linear_attention"] * 2,
+        ple_layer_ids=[1],
+        intermediate_size=128,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        num_experts=4,
+        num_experts_per_tok=2,
+        mtp_num_hidden_layers=1,
+        mtp={"hybrid": True},
+        max_position_embeddings=128,
+    )
+    text = Qwen4ExpTextConfig(**values)
+    metadata = tmp_path / "owner-config"
+    Qwen4ExpConfig(
+        text_config=text.to_dict(),
+        architectures=["Qwen4ExpForConditionalGeneration"],
+    ).save_pretrained(metadata)
+    model = ModelConfig(
+        model=str(metadata),
+        dtype=torch.float16,
+        max_model_len=128,
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+    )
+    parallel = ParallelConfig(tensor_parallel_size=world_size, enable_hc_sp=sp)
+    speculative = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=2,
+        target_model_config=model,
+        target_parallel_config=parallel,
+    )
+    config = VllmConfig(
+        model_config=model,
+        parallel_config=parallel,
+        speculative_config=speculative,
+        quant_config=quant,
+        engram_config=EngramConfig(cpu_offload=False),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=128,
+            max_num_batched_tokens=32,
+            max_num_seqs=2,
+            enable_chunked_prefill=True,
+        ),
+    )
+    with set_current_vllm_config(config), torch.device(device):
+        owner = amd_ple_layer.Qwen4ExpPLELayer(
+            text,
+            config,
+            layer_idx=1,
+            ple_dense_layer_id=0,
+            prefix="model.layers.1.ple",
+            use_sequence_parallel=sp,
+        )
+        torch.manual_seed(23)
+        for name, parameter in owner.named_parameters():
+            if not name.startswith("ple_embedding."):
+                parameter.uniform_(-0.15, 0.15)
+        with safe_open(tmp_path / "source.safetensors", framework="pt") as source:
+            load_mlx_affine_weights(
+                owner.ple_embedding,
+                (
+                    (name, source.get_tensor(name))
+                    for name in source.keys()  # noqa: SIM118
+                ),
+                owner.ple_embedding.load_weights,
+            )
+    assert owner._rdna_opaque_embedding and owner.num_spec_tokens == 2
+    return config, owner
+
+
+def _native_ple_step(
+    config,
+    owner,
+    state,
+    ids,
+    hidden,
+    context,
+    accepted=None,
+    *,
+    graph=None,
+):
+    from dataclasses import MISSING, fields
+
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.common.ops.sequence_parallel import sp_shard
+    from vllm.v1.attention.backends.short_conv_attn import (
+        PleShortConvAttentionMetadata,
+    )
+
+    tokens = ids.numel()
+    case = (
+        _ConvBatchCase(prefill_query_lens=(tokens,), include_null_state=False)
+        if accepted is None
+        else _ConvBatchCase(
+            spec_query_lens=(tokens,),
+            num_accepted=(accepted,),
+            spec_query_len=3,
+            include_null_state=False,
+        )
+    )
+    layout, _ = _make_conv_metadata(case, ids.device)
+    required = {
+        field.name: None
+        for field in fields(PleShortConvAttentionMetadata)
+        if field.default is MISSING and field.default_factory is MISSING
+    }
+    metadata = PleShortConvAttentionMetadata(**(required | vars(layout)))
+    qsl = torch.tensor([0, tokens], dtype=torch.int32, device=ids.device)
+    owner.kv_cache = (state,)
+    local = sp_shard(hidden) if owner.use_sequence_parallel else hidden
+    with (
+        set_current_vllm_config(config),
+        set_forward_context(
+            {owner.prefix: metadata},
+            config,
+        ),
+    ):
+        if graph is None:
+            result = owner(local, ids, qsl, context)
+        else:
+            # Eager-created graph inputs must outlive every replay.
+            graph._native_ple_test_inputs = (metadata, qsl, local, ids, context, state)
+            with torch.cuda.graph(graph):
+                result = owner(local, ids, qsl, context)
+    assert result.shape == local.shape
+    return result
+
+
+@pytest.mark.skipif(not on_rdna2(), reason="native RDNA2 affine PLE")
+@pytest.mark.parametrize("accepted", [1, 2, 3])
+@torch.inference_mode()
+def test_mlx_affine_ple_rejection_matches_pristine_history(
+    tmp_path,
+    monkeypatch,
+    dist_init,
+    workspace_init,
+    accepted,
+):
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+
+    monkeypatch.setenv("V620_MODEL_ROOT", str(tmp_path))
+    device = torch.device("cuda:0")
+    config, owner = _make_native_ple_owner(tmp_path, device)
+    state = torch.zeros(
+        3,
+        owner.hc_hidden_size,
+        owner.conv_state_len + 2,
+        device=device,
+        dtype=torch.float16,
+    )
+    state[0].fill_(7)
+    state[2].fill_(11)
+    if not is_conv_state_dim_first():
+        state = state.transpose(-1, -2).contiguous()
+    pristine = state.clone()
+    prefix = torch.arange(17, device=device, dtype=torch.int64) + 31
+    candidates = torch.tensor([101, 211, 307], device=device)
+    next_ids = torch.tensor([401], device=device)
+    torch.manual_seed(71)
+    prefix_hidden = torch.randn(17, owner.hc_hidden_size, device=device).half()
+    candidate_hidden = torch.randn(3, owner.hc_hidden_size, device=device).half()
+    next_hidden = torch.randn(1, owner.hc_hidden_size, device=device).half()
+    empty_context = torch.zeros(1, 2, device=device, dtype=torch.int64)
+    for cache in (state, pristine):
+        _native_ple_step(
+            config,
+            owner,
+            cache,
+            prefix,
+            prefix_hidden,
+            empty_context,
+        )
+    prefix_context = prefix[-2:].reshape(1, 2)
+
+    def conv_rows(ids, hidden, history):
+        from vllm.config import set_current_vllm_config
+        from vllm.forward_context import set_forward_context
+
+        starts = torch.tensor([0, ids.numel()], device=device, dtype=torch.int32)
+        with set_current_vllm_config(config), set_forward_context({}, config):
+            embeddings = owner.ple_embedding(ids, starts, history)
+            embeddings = owner.ple_embedding.ngram_embedding.dequantize(
+                embeddings,
+                hidden.dtype,
+            )
+            key_value, _ = owner.kv_proj(embeddings)
+            key, value = key_value.split(owner.kv_proj.output_sizes, dim=-1)
+            _, inputs = torch.ops.vllm.qwen4_exp_ple_gate(
+                key,
+                value,
+                hidden,
+                owner.norm_key.weight,
+                owner.norm_query.weight,
+                owner.norm_conv.weight,
+                owner.norm_key.eps,
+            )
+            return inputs
+
+    committed_inputs = torch.cat(
+        (
+            conv_rows(prefix, prefix_hidden, empty_context),
+            conv_rows(candidates, candidate_hidden, prefix_context)[:accepted],
+        )
+    ).T[:, -owner.conv_state_len :]
+    _native_ple_step(
+        config,
+        owner,
+        state,
+        candidates,
+        candidate_hidden,
+        prefix_context,
+        1,
+    )
+    _native_ple_step(
+        config,
+        owner,
+        pristine,
+        candidates[:accepted],
+        candidate_hidden[:accepted],
+        prefix_context,
+    )
+    context = torch.cat((prefix, candidates[:accepted]))[-2:].reshape(1, 2)
+    a = state if is_conv_state_dim_first() else state.transpose(-1, -2)
+    b = pristine if is_conv_state_dim_first() else pristine.transpose(-1, -2)
+    for window in (
+        a[1, :, accepted - 1 : accepted - 1 + owner.conv_state_len],
+        b[1, :, : owner.conv_state_len],
+    ):
+        torch.testing.assert_close(window, committed_inputs, atol=0.001, rtol=0.01)
+    embedding = owner.ple_embedding
+    qsl = torch.tensor([0, 1], device=device, dtype=torch.int32)
+    expected_hash = _reference_ngram_ids(
+        next_ids,
+        qsl,
+        context,
+        embedding.layer_multipliers,
+        embedding.ngram_heads_vocab_sizes,
+        embedding.ngram_heads_offsets,
+        embedding.eos_token_id,
+        embedding.heads_per_ngram,
+    )
+    actual_hash = torch.empty_like(expected_hash)
+    with set_current_vllm_config(config), set_forward_context({}, config):
+        torch.ops.vllm.qwen4_exp_amd_ple_ngram_ids(
+            next_ids,
+            qsl,
+            context,
+            actual_hash,
+            owner.prefix,
+        )
+    torch.testing.assert_close(actual_hash, expected_hash, atol=0, rtol=0)
+    actual = _native_ple_step(
+        config,
+        owner,
+        state,
+        next_ids,
+        next_hidden,
+        context,
+        accepted,
+    )
+    expected = _native_ple_step(
+        config,
+        owner,
+        pristine,
+        next_ids,
+        next_hidden,
+        context,
+        1,
+    )
+    torch.testing.assert_close(actual, expected, atol=0.001, rtol=0.01)
+    assert (
+        torch.linalg.vector_norm((actual - expected).float())
+        / (torch.linalg.vector_norm(expected.float()).clamp_min(1e-30))
+        < 0.001
+    )
+    a = state if is_conv_state_dim_first() else state.transpose(-1, -2)
+    b = pristine if is_conv_state_dim_first() else pristine.transpose(-1, -2)
+    torch.testing.assert_close(
+        a[1, :, : owner.conv_state_len],
+        b[1, :, : owner.conv_state_len],
+        atol=0.001,
+        rtol=0.01,
+    )
+    for cache in (state, pristine):
+        assert torch.all(cache[0] == 7) and torch.all(cache[2] == 11)
+
+
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+def test_mlx_affine_ple_materialization_rejects_host_storage(
+    tmp_path, monkeypatch, dist_init, default_vllm_config, device
+):
+    monkeypatch.setenv("V620_MODEL_ROOT", str(tmp_path))
+    config, quant, _, _ = _make_mlx_affine_ple_checkpoint(tmp_path)
+
+    def construct():
+        with torch.device(device):
+            return amd_ple_layer.Qwen4ExpNGramEmbedding(
+                config,
+                320,
+                0,
+                8,
+                "model.layers.1.ple.ple_embedding",
+                "model.layers.1.ple",
+                quant_config=quant,
+                params_dtype=torch.float16,
+            )
+
+    if device == "cpu":
+        with pytest.raises(ValueError):
+            construct()
+    else:
+        table = construct().ngram_embedding
+        assert table.weight.is_meta
+        assert table.scales.is_meta
+        assert table.biases.is_meta
+        assert table.weight_scale.is_meta
+
+
+@pytest.mark.skipif(not on_rdna2(), reason="native RDNA2 affine PLE")
+def test_mlx_affine_ple_streamed_ownership_and_graph(
+    tmp_path, monkeypatch, dist_init, default_vllm_config
+):
+    """All components load once; invalid IDs must not leak an owner's affine bias."""
+    from vllm.model_executor.model_loader.mlx_affine_loading import (
+        load_mlx_affine_weights,
+    )
+
+    monkeypatch.setenv("V620_MODEL_ROOT", str(tmp_path))
+    config, quant, sources, expected = _make_mlx_affine_ple_checkpoint(tmp_path)
+    with torch.device("cuda"):
+        module = amd_ple_layer.Qwen4ExpNGramEmbedding(
+            config,
+            320,
+            0,
+            8,
+            "model.layers.1.ple.ple_embedding",
+            "model.layers.1.ple",
+            quant_config=quant,
+            params_dtype=torch.float16,
+        )
+    loaded = load_mlx_affine_weights(module, iter(sources.items()), module.load_weights)
+    assert loaded == {
+        "layer_multipliers",
+        "ngram_heads_vocab_sizes",
+        "ngram_heads_offsets",
+        "ngram_embedding.weight",
+        "ngram_embedding.scales",
+        "ngram_embedding.biases",
+        "ngram_embedding.weight_scale",
+    }
+    table = module.ngram_embedding
+    assert table.weight.shape == (256, 30)
+    assert table.weight.dtype == torch.int32
+    assert table.scales.dtype == table.biases.dtype == torch.bfloat16
+    ids = torch.tensor([-1, 0, 1, 2, 127, 128, 254, 255, 256], device="cuda")
+    for lookup_ids in (ids, ids.flip(0)):
+        output = table(lookup_ids)
+        reference = torch.zeros((ids.numel(), 160), dtype=torch.float16)
+        valid = (lookup_ids.cpu() >= 0) & (lookup_ids.cpu() < 256)
+        reference[valid] = expected[lookup_ids.cpu()[valid]]
+        torch.testing.assert_close(output.cpu(), reference, atol=0, rtol=0)
+        assert table.dequantize(output, torch.float16) is output
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        table(ids)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = table(ids)
+    for changed in (ids.flip(0).clone(), torch.full_like(ids, -1)):
+        ids.copy_(changed)
+        graph.replay()
+        torch.testing.assert_close(captured, table(changed), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not on_rdna2(), reason="native RDNA2 affine PLE")
+@pytest.mark.parametrize("failure", ["missing", "duplicate", "hash", "global_scale"])
+def test_mlx_affine_ple_rejects_incomplete_or_conflicting_sources(
+    tmp_path, monkeypatch, dist_init, default_vllm_config, failure
+):
+    from vllm.model_executor.model_loader.mlx_affine_loading import (
+        load_mlx_affine_weights,
+    )
+
+    monkeypatch.setenv("V620_MODEL_ROOT", str(tmp_path))
+    config, quant, sources, _ = _make_mlx_affine_ple_checkpoint(tmp_path)
+    with torch.device("cuda"):
+        module = amd_ple_layer.Qwen4ExpNGramEmbedding(
+            config,
+            320,
+            0,
+            8,
+            "model.layers.1.ple.ple_embedding",
+            "model.layers.1.ple",
+            quant_config=quant,
+            params_dtype=torch.float16,
+        )
+    items = list(sources.items())
+    if failure == "missing":
+        items = [(n, t) for n, t in items if not n.endswith(".shards.63.biases")]
+    elif failure == "duplicate":
+        items.append(items[0])
+    else:
+        suffix = (
+            ".layer_multipliers"
+            if failure == "hash"
+            else ".ngram_embedding.weight_scale"
+        )
+        items = [(n, t + 1 if n.endswith(suffix) else t) for n, t in items]
+    with pytest.raises(ValueError):
+        load_mlx_affine_weights(module, iter(items), module.load_weights)
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [("VLLM_PLE_CPU_OFFLOAD", "1"), ("VLLM_PLE_QUANT_DIR", "/external/table")],
+)
+def test_mlx_affine_ple_rejects_noncheckpoint_storage(monkeypatch, variable, value):
+    from vllm.model_executor.layers.quantization.mlx_affine import MlxAffineConfig
+    from vllm.model_executor.layers.quantization.mlx_affine_format import (
+        MlxAffineSpecMap,
+    )
+
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValueError):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+            MlxAffineConfig(MlxAffineSpecMap({})), "model.layers.1.ple.ple_embedding"
+        )
