@@ -865,6 +865,20 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
 
+    def native_output_dtype(self, input_dtype: torch.dtype) -> torch.dtype:
+        """Dtype written by the experts, before prepare/finalize combines it."""
+        return self.workspace_dtype(input_dtype)
+
+    def output_dtype(self, input_dtype: torch.dtype) -> torch.dtype:
+        """Finalized routed precision, independent of GEMM scratch."""
+        requested = self.moe_config.output_dtype
+        if requested is not None and requested != input_dtype:
+            raise ValueError(
+                f"{type(self).__name__} does not support output_dtype={requested} "
+                f"with input dtype {input_dtype}."
+            )
+        return input_dtype
+
     def output_hidden_dim(self, hidden_dim: int) -> int:
         """Hidden size of the finalized output. Experts that drop the hidden
         padding return the unpadded size."""
@@ -1123,7 +1137,7 @@ class FusedMoEKernelModularImpl:
 
     def _allocate_buffers(
         self,
-        out_dtype: torch.dtype,
+        input_dtype: torch.dtype,
         device: torch.device,
         M_chunk: int,
         M_full: int,
@@ -1134,10 +1148,12 @@ class FusedMoEKernelModularImpl:
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
         activation: MoEActivation,
+        output_alias: torch.Tensor | None = None,
+        output_alias_is_fresh: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
         """Allocate temporary and output buffers for the fused experts op.
         Inputs:
-        - out_dtype: output type of workspace and output tensors.
+        - input_dtype: original activation dtype, before prepare/quantization.
         - device: the device of the workspace and output tensors.
         See `workspace_shapes` for a description of the remainder of arguments.
         Returns the workspace tensors, output tensor, and whether the output
@@ -1145,7 +1161,8 @@ class FusedMoEKernelModularImpl:
         """
         assert M_full > 0 and M_chunk > 0
 
-        workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
+        workspace_dtype = self.fused_experts.workspace_dtype(input_dtype)
+        native_dtype = self.fused_experts.native_output_dtype(input_dtype)
 
         # Get intermediate workspace shapes based off the chunked M size.
         workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
@@ -1173,10 +1190,61 @@ class FusedMoEKernelModularImpl:
 
         fused_out_alias = self.prepare_finalize.allocate_fused_expert_output(
             fused_out_shape,
-            workspace_dtype,
+            native_dtype,
             device,
             self.fused_experts.finalize_weight_and_reduce_impl(),
         )
+
+        if native_dtype != workspace_dtype:
+            # GEMM1 and activation remain FP16; the down GEMM writes FP32
+            # natively into disjoint storage, never FP16 followed by widening.
+            use_alias = (
+                fused_out_alias is None
+                and output_alias is not None
+                and output_alias.shape == fused_out_shape
+                and output_alias.dtype == native_dtype
+                and output_alias.device == device
+                and output_alias.is_contiguous()
+            )
+            allocations = [
+                (workspace13_shape, workspace_dtype),
+                (workspace2_shape, workspace_dtype),
+            ]
+            if fused_out_alias is None and not use_alias:
+                allocations.append((fused_out_shape, native_dtype))
+            if current_platform.is_cpu():
+                buffers = [
+                    torch.empty(shape, dtype=dtype, device=device)
+                    for shape, dtype in allocations
+                ]
+            else:
+                buffers = current_workspace_manager().get_simultaneous(*allocations)
+            if (
+                use_alias
+                and not output_alias_is_fresh
+                and any(torch._C._overlaps(output_alias, buf) for buf in buffers)
+            ):
+                return self._allocate_buffers(
+                    input_dtype,
+                    device,
+                    M_chunk,
+                    M_full,
+                    N,
+                    K,
+                    top_k,
+                    global_num_experts,
+                    local_num_experts,
+                    expert_tokens_meta,
+                    activation,
+                )
+            if fused_out_alias is not None:
+                fused_out = fused_out_alias
+            elif use_alias:
+                assert output_alias is not None
+                fused_out = output_alias
+            else:
+                fused_out = buffers[2]
+            return buffers[0], buffers[1], fused_out, fused_out_alias is not None
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
@@ -1336,6 +1404,7 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
         output_alias: torch.Tensor | None = None,
+        output_alias_is_fresh: bool = False,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1349,7 +1418,39 @@ class FusedMoEKernelModularImpl:
         # the tensor.numel() == 0 case.
         if M_full == 0:
             out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
-            return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
+            return a1q.new_empty(
+                (*a1q.shape[:-1], out_dim),
+                dtype=self.fused_experts.native_output_dtype(in_dtype),
+            )
+
+        if (
+            output_alias is not None
+            and not output_alias_is_fresh
+            and any(
+                isinstance(tensor, torch.Tensor)
+                and torch._C._overlaps(output_alias, tensor)
+                for tensor in (
+                    a1q,
+                    a1q_scale,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    expert_map,
+                    self.fused_experts.a2_scale,
+                    self.fused_experts.w1_scale,
+                    self.fused_experts.w2_scale,
+                    self.fused_experts.w1_zp,
+                    self.fused_experts.w2_zp,
+                    self.fused_experts.a1_scale,
+                    self.fused_experts.a1_gscale,
+                    self.fused_experts.a2_gscale,
+                    self.fused_experts.w1_bias,
+                    self.fused_experts.w2_bias,
+                )
+            )
+        ):
+            output_alias = None
 
         workspace13, workspace2, fused_out, fused_out_is_specialized = (
             self._allocate_buffers(
@@ -1364,6 +1465,8 @@ class FusedMoEKernelModularImpl:
                 local_num_experts,
                 expert_tokens_meta,
                 activation,
+                output_alias=output_alias,
+                output_alias_is_fresh=output_alias_is_fresh,
             )
         )
 
@@ -1380,13 +1483,18 @@ class FusedMoEKernelModularImpl:
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
         # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
         # double-copy MoE write-back path).
-        if current_platform.is_rocm():
-            from vllm._aiter_ops import rocm_aiter_ops
+        # Mixed-precision aliases were already checked by the allocator.
+        if use_output_alias and (
+            self.fused_experts.native_output_dtype(in_dtype)
+            == self.fused_experts.workspace_dtype(in_dtype)
+        ):
+            if current_platform.is_rocm():
+                from vllm._aiter_ops import rocm_aiter_ops
 
-            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
+                if rocm_aiter_ops.is_fused_moe_enabled():
+                    fused_out = output_alias
+            else:
                 fused_out = output_alias
-        elif use_output_alias:
-            fused_out = output_alias
 
         unfinalized = self.fused_experts.apply(
             output=fused_out,
@@ -1533,11 +1641,27 @@ class FusedMoEKernelModularImpl:
             a fused consumer.
 
         """
+        output_dtype = self.fused_experts.output_dtype(hidden_states.dtype)
+        if output_dtype != hidden_states.dtype:
+            from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+                MoEPrepareAndFinalizeNoDPEPModular,
+            )
+
+            if type(self.prepare_finalize) is not MoEPrepareAndFinalizeNoDPEPModular:
+                raise ValueError("FP32 MoE output requires NoDPEP finalize.")
+            if (
+                self.fused_experts.native_output_dtype(hidden_states.dtype)
+                != output_dtype
+            ):
+                raise ValueError(
+                    "FP32 MoE output must be produced in native expert precision."
+                )
         output = hidden_states.new_empty(
             (
                 *hidden_states.shape[:-1],
                 self.fused_experts.output_hidden_dim(hidden_states.size(-1)),
-            )
+            ),
+            dtype=output_dtype,
         )
 
         local_num_experts = w1.shape[0]
@@ -1575,12 +1699,15 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
             output_alias=output,
+            output_alias_is_fresh=True,
         )
 
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
 
         if isinstance(fused_out, UnfinalizedMoEOutput):
+            if output_dtype != hidden_states.dtype:
+                raise ValueError("FP32 MoE output cannot defer finalization.")
             # Nothing below can run on an unfinalized output: finalize is the
             # local top-k reduction (and, for DP/EP, the combine) that the
             # consumer takes over.

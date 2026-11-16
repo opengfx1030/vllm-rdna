@@ -144,6 +144,8 @@ def FusedMoEFactory(
     moe_config_cls: type[FusedMoEConfig] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
     skip_padding: bool = False,
+    output_dtype: torch.dtype | None = None,
+    intermediate_partition: tuple[int, int] | None = None,
 ) -> MoERunner:
     """Factory function for creating MoE execution pipeline.
 
@@ -223,6 +225,8 @@ def FusedMoEFactory(
         moe_config_cls: Custom FusedMoEConfig class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
         skip_padding: Whether grouped routing should invalidate padding rows.
+        output_dtype: Requested finalized routed output precision (None = default).
+        intermediate_partition: Global logical intermediate start and rank-local width.
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
@@ -365,12 +369,14 @@ def FusedMoEFactory(
         hidden_dim=hidden_size,
         intermediate_size=intermediate_size,
         intermediate_pad=intermediate_pad,
+        intermediate_partition=intermediate_partition,
         num_local_experts=expert_map_manager.local_num_experts,
         num_logical_experts=logical_num_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=moe_in_dtype,
         moe_backend=vllm_config.kernel_config.moe_backend,
         router_logits_dtype=router_logits_dtype,
+        output_dtype=output_dtype,
         max_num_tokens=max_num_batched_tokens,
         elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
         has_bias=has_bias,

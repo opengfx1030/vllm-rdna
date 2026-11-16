@@ -1797,6 +1797,10 @@ class RowParallelLinear(LinearBase):
         self.update_param_tp_status()
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        if current_platform.is_rocm():
+            from vllm.model_executor.layers import rdna_dense_int8
+
+            rdna_dense_int8._prepare_source_absmax(self, loaded_weight)
         input_dim = getattr(param, "input_dim", None)
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
 
@@ -1815,6 +1819,10 @@ class RowParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
+        if current_platform.is_rocm():
+            from vllm.model_executor.layers import rdna_dense_int8
+
+            rdna_dense_int8._prepare_source_absmax(self, loaded_weight)
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:

@@ -25,6 +25,36 @@ actually sets. The human walkthrough of the launcher and every recipe is
   upstream/Triton path on gfx11. Nothing here is validated on RDNA3 yet, and
   the shipped TunableOp rows are for one gfx1030 rocBLAS build only.
 
+## Experimental Flash-Next TP3
+
+`RECIPE=flashnext-tp3-mtp2` ports the retained unequal RDNA2 implementation:
+whole-key-group GDN shards, rotating complete QSA groups with an empty owner,
+whole-trained-group AWQ expert shards, FP32 routed reduction, TP3-aligned
+vocabulary padding and replicated MTP fusion projections. Dense INT8 input
+shards retain full-source row scales rather than independently requantizing.
+
+The admitted topology is PP1/TP3/DP1, without EP, sequence/context parallelism
+or ReplaySSM/LeapQuant. GDN K/V head widths must both be 128. QSA and vision
+checkpoint projections must be unquantized; QSA main KV remains FP16/BF16.
+This is not native MLX affine/oQ6e TP3 support.
+
+`--additional-config` requires `rdna_moe_output_fp32: true` and
+`rdna_moe_tp_group_size` equal to the checkpoint's trained AWQ group size.
+The example recipe uses 128; do not use it unchanged for another group size.
+It also enables `VLLM_RDNA2_MOE_FP32_ACCUM=1` and disables W4A8 SDOT4;
+requesting FP32 output alone does not enable the required accumulator mode.
+`rdna_vision_uneven_tp: true` partitions vision on the existing text TP group,
+with weights encoder mode and eager encoder execution. It does not introduce
+independent encoder workers or pipeline-parallel vision.
+
+Related upstream work: [vLLM #47759](https://github.com/vllm-project/vllm/pull/47759).
+Whole-key-group GDN ownership overlaps; this port additionally integrates
+Flash-Next QSA, AWQ MoE, vocabulary, native MTP and uneven vision.
+The retained tree had historical hardware evidence, but this current-base port
+has **not** been freshly HIP-built or GPU-served. CPU arithmetic checks do not
+establish current model quality, graph correctness or performance.
+
+
 ## Fork CLI / config parameters
 
 | Flag | Default | What it does |

@@ -159,6 +159,44 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
     def activation_format() -> FusedMoEActivationFormat:
         return FusedMoEActivationFormat.Standard
 
+    def _validate_fp32_output(self, input_dtype: torch.dtype) -> None:
+        if input_dtype != torch.float16:
+            raise ValueError("RDNA2 FP32 MoE output requires FP16 input and scratch.")
+        if not ops._RDNA2_MOE_FP32_ACCUM:
+            raise ValueError(
+                "RDNA2 FP32 MoE output requires ordered accumulation "
+                "(VLLM_RDNA2_MOE_FP32_ACCUM=1)."
+            )
+        if not hasattr(self, "_w4a8"):
+            self._w4a8 = resolve_w4a8_moe()
+        if self._w4a8 or os.environ.get(W4A8_MOE_ENV_VAR) == "1":
+            raise ValueError(
+                "RDNA2 FP32 MoE output requires W4A8 disabled for all token counts "
+                "(VLLM_RDNA2_W4A8_SDOT4=0)."
+            )
+
+    def output_dtype(self, input_dtype: torch.dtype) -> torch.dtype:
+        if self.moe_config.output_dtype == torch.float32:
+            self._validate_fp32_output(input_dtype)
+            return torch.float32
+        return super().output_dtype(input_dtype)
+
+    def native_output_dtype(self, input_dtype: torch.dtype) -> torch.dtype:
+        if self.moe_config.output_dtype == torch.float32:
+            return self.output_dtype(input_dtype)
+        return super().native_output_dtype(input_dtype)
+
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        E, M, _, K, topk = super().moe_problem_size(a1, w1, w2, topk_ids)
+        # Native weights are K-first: [E, K // 8, N_gate_up].
+        return E, M, w1.size(2), K, topk
+
     def workspace_shapes(
         self,
         M: int,
@@ -193,6 +231,16 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         expert_tokens_meta,
         apply_router_weight_on_input: bool,
     ):
+        requested_dtype = self.output_dtype(hidden_states.dtype)
+        if self.moe_config.output_dtype is not None and output.dtype != requested_dtype:
+            raise ValueError(
+                f"RDNA2 MoE output buffer must have dtype {requested_dtype}."
+            )
+        if self.moe_config.output_dtype == torch.float32:
+            self._validate_fp32_output(hidden_states.dtype)
+            if workspace13.dtype != torch.float16:
+                raise ValueError("RDNA2 FP32 MoE output requires FP16 GEMM1 scratch.")
+
         if hidden_states.dtype != torch.float16:
             hidden_states = hidden_states.to(torch.float16)
 
@@ -279,12 +327,14 @@ class RDNA2W4A16MoEExperts(FusedMoEExpertsModular):
         else:
             activated = w1_out
 
+        direct_fp32 = self.moe_config.output_dtype == torch.float32
         out_buf = output
-        if out_buf.dtype != torch.float16:
+        if out_buf.dtype != torch.float16 and not direct_fp32:
             out_buf = torch.empty(
                 output.shape, dtype=torch.float16, device=output.device
             )
-        out_buf.zero_()
+        if not direct_fp32:
+            out_buf.zero_()
         if w4a8:
             ops.moe_w4a8_gemm_rdna2(
                 activated,

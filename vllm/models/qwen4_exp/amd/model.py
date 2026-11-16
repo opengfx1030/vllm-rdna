@@ -5,6 +5,7 @@
 import os
 from collections.abc import Iterable
 from itertools import islice
+from math import lcm
 
 import torch
 from torch import nn
@@ -12,12 +13,19 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.layers.gdn_parallel import gdn_head_partition
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -31,6 +39,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -75,6 +84,7 @@ from vllm.model_executor.models.utils import (
 from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -89,6 +99,15 @@ from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
 logger = init_logger(__name__)
+
+
+def _qwen4_vocab_padding_size() -> int:
+    """Keep the vocabulary's existing alignment compatible with text TP3."""
+    tp_size = get_tensor_model_parallel_world_size()
+    if tp_size == 3:
+        return lcm(DEFAULT_VOCAB_PADDING_SIZE, tp_size)
+    return DEFAULT_VOCAB_PADDING_SIZE
+
 
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
@@ -181,8 +200,89 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         prefix: str = "",
         reduce_results: bool = True,
     ) -> None:
+        parallel_config = vllm_config.parallel_config
+        additional_config = vllm_config.additional_config or {}
+        requested_fp32 = additional_config.get("rdna_moe_output_fp32", False)
+        if not isinstance(requested_fp32, bool):
+            raise ValueError("rdna_moe_output_fp32 must be a boolean")
+        config = vllm_config.model_config.hf_text_config
+        if get_tensor_model_parallel_world_size() == 3 and (
+            not requested_fp32 or "rdna_moe_tp_group_size" not in additional_config
+        ):
+            raise ValueError(
+                "Flash-Next TP3 requires rdna_moe_output_fp32 and "
+                "the checkpoint's rdna_moe_tp_group_size"
+            )
+        intermediate_partition = None
+        if "rdna_moe_tp_group_size" in additional_config:
+            group_size = additional_config["rdna_moe_tp_group_size"]
+            if type(group_size) is not int or group_size <= 0:
+                raise ValueError("rdna_moe_tp_group_size must be a positive integer")
+            if not requested_fp32:
+                raise ValueError(
+                    "rdna_moe_tp_group_size requires rdna_moe_output_fp32: true"
+                )
+            tp_size = get_tensor_model_parallel_world_size()
+            if tp_size != 3:
+                raise ValueError("rdna_moe_tp_group_size requires TP3")
+            if parallel_config.enable_expert_parallel:
+                raise ValueError(
+                    "rdna_moe_tp_group_size does not support expert parallelism"
+                )
+            intermediate_size = config.moe_intermediate_size
+            if (
+                type(intermediate_size) is not int
+                or intermediate_size <= 0
+                or intermediate_size % group_size != 0
+            ):
+                raise ValueError(
+                    "rdna_moe_tp_group_size must divide the global "
+                    "MoE intermediate size"
+                )
+            num_groups = intermediate_size // group_size
+            if num_groups < tp_size:
+                raise ValueError(
+                    "rdna_moe_tp_group_size requires at least one group per TP rank"
+                )
+            rank = get_tensor_model_parallel_rank()
+            layer_idx = extract_layer_index(prefix) if prefix else 0
+            # Rotate whole contiguous slots so the extra groups balance over layers.
+            partition_slot = (rank + layer_idx) % tp_size
+            groups_per_rank, extra_groups = divmod(num_groups, tp_size)
+            start_group = partition_slot * groups_per_rank + min(
+                partition_slot, extra_groups
+            )
+            local_groups = groups_per_rank + int(partition_slot < extra_groups)
+            intermediate_partition = (
+                start_group * group_size,
+                local_groups * group_size,
+            )
+        output_dtype = None
+        if requested_fp32:
+            if not current_platform.is_rocm():
+                raise ValueError("rdna_moe_output_fp32 requires RDNA2 (gfx10x)")
+            from vllm.platforms.rocm import on_gfx10x
+
+            if not on_gfx10x():
+                raise ValueError("rdna_moe_output_fp32 requires RDNA2 (gfx10x)")
+            if vllm_config.model_config.dtype != torch.float16:
+                raise ValueError("rdna_moe_output_fp32 requires FP16 activations")
+            if (
+                get_tensor_model_parallel_world_size() <= 1
+                and get_ep_group().world_size <= 1
+            ):
+                raise ValueError("rdna_moe_output_fp32 requires distributed TP or EP")
+            output_dtype = torch.float32
         super().__init__(
-            vllm_config=vllm_config, prefix=prefix, reduce_results=reduce_results
+            vllm_config=vllm_config,
+            prefix=prefix,
+            output_dtype=output_dtype,
+            reduce_results=reduce_results,
+            **(
+                {"intermediate_partition": intermediate_partition}
+                if intermediate_partition is not None
+                else {}
+            ),
         )
         if self.replicate_shared_expert and not self.is_sequence_parallel:
             # Reduce routed outputs before adding replicated shared outputs.
@@ -234,6 +334,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
+                unequal_tp=get_tensor_model_parallel_world_size() == 3,
                 reduce_results=not self.use_hc_sequence_parallel,
             )
         elif layer_type in _QSA_LAYER_TYPES:
@@ -479,6 +580,19 @@ class Qwen4ExpModel(nn.Module):
         )
         # MoE SP also enables HC SP, while HC SP can be enabled independently.
         self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
+        if get_tensor_model_parallel_world_size() == 3:
+            parallel = vllm_config.parallel_config
+            if (
+                self.use_hc_sequence_parallel
+                or parallel.enable_expert_parallel
+                or parallel.pipeline_parallel_size != 1
+                or parallel.data_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+            ):
+                raise ValueError(
+                    "Unequal Flash-Next TP3 requires PP1/DP1 without EP/SP/CP"
+                )
         self.vocab_size = config.vocab_size
         self._qsa_layer_ids = frozenset(
             layer_idx
@@ -486,7 +600,11 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
-        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(
+            self.vocab_size,
+            config.hidden_size,
+            padding_size=_qwen4_vocab_padding_size(),
+        )
         mono_decode_rdna2.install(vllm_config)  # --monokernel: checks + hooks
 
         def get_layer(prefix: str) -> Qwen4ExpDecoderLayer:
@@ -801,6 +919,7 @@ class Qwen4ExpForCausalLM(
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
+                padding_size=_qwen4_vocab_padding_size(),
                 quant_config=head_quant,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -893,6 +1012,27 @@ class Qwen4ExpForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
+        if tp_size == 3:
+            # Configuration-time planning has no rank; pad pages to the
+            # largest real owner, while layers bind only their actual heads.
+            largest = gdn_head_partition(
+                hf_config.linear_num_key_heads,
+                hf_config.linear_num_value_heads,
+                hf_config.linear_key_head_dim,
+                hf_config.linear_value_head_dim,
+                0,
+                tp_size,
+            )
+            return MambaStateShapeCalculator.gated_delta_net_state_shape(
+                1,
+                largest.key_count,
+                largest.value_count,
+                largest.head_k_dim,
+                largest.head_v_dim,
+                hf_config.linear_conv_kernel_dim,
+                num_spec,
+                replayssm_state_dtype=vllm_config.cache_config.replayssm_state_dtype,
+            )
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
@@ -1040,6 +1180,26 @@ class Qwen4ExpForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.language_model_only = multimodal_config.language_model_only
+        use_uneven_vision = (vllm_config.additional_config or {}).get(
+            "rdna_vision_uneven_tp", False
+        )
+        if type(use_uneven_vision) is not bool:
+            raise ValueError("rdna_vision_uneven_tp must be a boolean")
+        vision_group = None
+        if use_uneven_vision and not self.language_model_only:
+            parallel = vllm_config.parallel_config
+            if (
+                parallel.tensor_parallel_size != 3
+                or parallel.pipeline_parallel_size != 1
+                or parallel.data_parallel_size != 1
+                or multimodal_config.mm_encoder_tp_mode != "weights"
+                or vllm_config.compilation_config.cudagraph_mm_encoder
+            ):
+                raise ValueError(
+                    "Uneven vision requires PP1/TP3/DP1, weights encoder mode "
+                    "and eager multimodal encoder execution"
+                )
+            vision_group = get_tp_group()
         if self.language_model_only:
             self.use_data_parallel = False
             self.is_multimodal_pruning_enabled = False
@@ -1059,6 +1219,7 @@ class Qwen4ExpForConditionalGeneration(
                     norm_eps=config.text_config.rms_norm_eps,
                     quant_config=quant_config,
                     input_norm=build_mm_input_norm(self.model_config),
+                    vision_group=vision_group,
                     prefix=maybe_prefix(prefix, "visual"),
                 )
 

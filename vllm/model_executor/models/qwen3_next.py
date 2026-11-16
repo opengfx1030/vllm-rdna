@@ -134,6 +134,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         reduce_results: bool = True,
+        output_dtype: torch.dtype | None = None,
+        intermediate_partition: tuple[int, int] | None = None,
     ):
         super().__init__()
 
@@ -141,10 +143,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
 
+        self.output_dtype = output_dtype
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_size = self.ep_group.size()
+        self.ep_size = self.ep_group.size() if intermediate_partition is None else 1
         self.n_routed_experts = config.num_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
@@ -174,13 +177,22 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 # EXL3 Hadamard-rotates each 128-wide block of the
                 # intermediate axis; a TP shard must hold whole blocks.
                 shared_expert_group_size = 128
-            self.replicate_shared_expert = _should_replicate_misaligned_shared_expert(
-                config.shared_expert_intermediate_size,
-                self.tp_size,
-                shared_expert_group_size,
-                parallel_config.enable_expert_parallel,
-                self.is_sequence_parallel,
-            )
+            if (
+                intermediate_partition is not None
+                and config.shared_expert_intermediate_size % self.tp_size != 0
+            ):
+                # Unequal routed shards do not partition the shared MLP.
+                self.replicate_shared_expert = True
+            else:
+                self.replicate_shared_expert = (
+                    _should_replicate_misaligned_shared_expert(
+                        config.shared_expert_intermediate_size,
+                        self.tp_size,
+                        shared_expert_group_size,
+                        parallel_config.enable_expert_parallel,
+                        self.is_sequence_parallel,
+                    )
+                )
         if self.tp_size > config.num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -237,6 +249,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            intermediate_partition=intermediate_partition,
+            output_dtype=output_dtype,
             renormalize=getattr(config, "norm_topk_prob", True),
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -251,6 +265,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             if self.shared_expert is None
             else None,
         )
+        if intermediate_partition is not None:
+            self.ep_size = self.experts.moe_config.moe_parallel_config.ep_size
+            self.n_local_physical_experts = (
+                self.experts.routed_experts.expert_map_manager.local_num_experts
+            )
 
     def forward(
         self,
@@ -259,6 +278,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
     ) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
+        activation_dtype = hidden_states.dtype
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -281,6 +301,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 final_hidden_states, 0
             )
             final_hidden_states = final_hidden_states[:num_tokens]
+
+        if self.output_dtype is not None:
+            # Round only after routed reduction and shared-expert addition.
+            final_hidden_states = final_hidden_states.to(activation_dtype)
 
         return final_hidden_states.view(orig_shape)
 

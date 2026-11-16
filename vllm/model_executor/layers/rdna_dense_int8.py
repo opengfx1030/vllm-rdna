@@ -10,7 +10,7 @@ bytes at negligible accuracy cost. The fp16 weight is kept for prefill (rocBLAS,
 M > 8); the shadow is used only where the decode GEMV would run.
 
 Enabled with VLLM_RDNA_DENSE_INT8=1 on gfx10x (off by default until validated).
-VLLM_RDNA_DENSE_INT8_MIN_ROWS (default 64) skips tiny layers.
+VLLM_RDNA_DENSE_INT8_MIN_ROWS (default 64) applies to the unsharded output width.
 
 VLLM_RDNA_DENSE_INT8_ONLY=1 additionally RELEASES the fp16 weight once its shadow exists
 (the parameter becomes a 0-element placeholder), so the int8 copy is the only resident
@@ -130,30 +130,97 @@ def weight_for_gemm(
     return weight
 
 
+def _global_shape(layer: torch.nn.Module) -> tuple[int, int]:
+    n, k = layer.weight.shape
+    return getattr(
+        layer,
+        "_rdna_i8_global_shape",
+        (getattr(layer, "output_size", n), getattr(layer, "input_size", k)),
+    )
+
+
+def _eligible(layer: torch.nn.Module) -> bool:
+    w = layer.weight
+    global_n, global_k = _global_shape(layer)
+    n, k = w.shape
+    return (
+        n > 0
+        and k > 0
+        and k % 16 == 0
+        and global_k % 16 == 0
+        and global_n >= int(os.getenv("VLLM_RDNA_DENSE_INT8_MIN_ROWS", "64"))
+    )
+
+
+@torch.no_grad()
+def _prepare_source_absmax(layer: torch.nn.Module, source: torch.Tensor) -> None:
+    """Capture full-K statistics before a row loader discards input columns.
+
+    Only the FP32 row maxima survive loading, not the full source weight.
+    Checkpoint values are converted to the deployed FP16 dtype before absmax.
+    """
+    if not enabled():
+        return
+    w = layer.weight
+    if w.dtype != torch.float16 or w.ndim != 2 or not _eligible(layer):
+        return
+    n, k = w.shape
+    _, global_k = _global_shape(layer)
+    if global_k == k:
+        return
+    if source.shape != (n, global_k):
+        raise ValueError("RDNA INT8 input shards require the full-width source weight")
+    absmax = torch.empty(n, dtype=torch.float32, device=source.device)
+    rows = max(1, (64 << 20) // (global_k * 4))
+    for i in range(0, n, rows):
+        wi = source[i : i + rows].to(torch.float16)
+        absmax[i : i + rows] = wi.abs().amax(dim=1).float()
+    layer._rdna_i8_row_absmax = absmax
+
+
+@torch.no_grad()
+def _quantize_weight(
+    weight: torch.Tensor, row_absmax: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize FP16 [N,K], optionally using original full-K row maxima."""
+    n, k = weight.shape
+    scale = torch.empty(n, dtype=torch.float32, device=weight.device)
+    q = torch.empty((n, k), dtype=torch.int8, device=weight.device)
+    if row_absmax is not None:
+        if row_absmax.shape != (n,) or row_absmax.dtype != torch.float32:
+            raise ValueError("RDNA INT8 requires FP32 absmax for each output row")
+        row_absmax = row_absmax.to(device=weight.device)
+    # Bound row temporaries, including vocab-sized weights.
+    rows = max(1, (64 << 20) // (k * 4))
+    for i in range(0, n, rows):
+        wi = weight[i : i + rows]
+        amax = (
+            wi.abs().amax(dim=1).float()
+            if row_absmax is None
+            else row_absmax[i : i + rows]
+        )
+        si = amax.clamp_min(1e-8) / 127.0
+        scale[i : i + rows] = si
+        q[i : i + rows] = torch.round(wi.float() / si[:, None]).clamp_(-127, 127)
+    return q, scale.to(torch.float16).contiguous()
+
+
 @torch.no_grad()
 def make_shadow(layer: torch.nn.Module) -> None:
     """Attach `weight_i8` / `weight_i8_scale` to a layer with fp16 [N, K] `weight`."""
-    if not enabled():
+    if getattr(layer, "_rdna_dense_fp16", False) or not enabled():
         return
     w = getattr(layer, "weight", None)
     if w is None or w.dtype != torch.float16 or w.dim() != 2 or not w.is_cuda:
         return
-    n, k = w.shape
-    if k % 16 != 0 or n < int(os.getenv("VLLM_RDNA_DENSE_INT8_MIN_ROWS", "64")):
+    if not _eligible(layer):
         return
-    # Row chunks with the same per-element math: the whole-matrix fp16/fp32
-    # temporaries peaked at ~6 GiB for a vocab-sized weight (2.4 GiB for one
-    # fp32 copy), more than a full TP1 x PP3 stage has left.
-    scale = torch.empty(n, dtype=torch.float32, device=w.device)
-    q = torch.empty((n, k), dtype=torch.int8, device=w.device)
-    rows = max(1, (64 << 20) // (k * 4))
-    for i in range(0, n, rows):
-        wi = w[i : i + rows]
-        si = wi.abs().amax(dim=1).float().clamp_min(1e-8) / 127.0
-        scale[i : i + rows] = si
-        q[i : i + rows] = torch.round(wi.float() / si[:, None]).clamp_(-127, 127)
-    layer.weight_i8 = q
-    layer.weight_i8_scale = scale.to(torch.float16).contiguous()
+    row_absmax = getattr(layer, "_rdna_i8_row_absmax", None)
+    if _global_shape(layer)[1] != w.shape[1] and row_absmax is None:
+        raise ValueError("RDNA INT8 input shard was not loaded from full-width weights")
+    layer.weight_i8, layer.weight_i8_scale = _quantize_weight(w, row_absmax)
+    if row_absmax is not None:
+        del layer._rdna_i8_row_absmax
     if only_mode():
         # Release the fp16 copy: keep the Parameter object (loader attrs, registration)
         # but drop its storage. Every consumer of `weight` on the fp16 path goes through

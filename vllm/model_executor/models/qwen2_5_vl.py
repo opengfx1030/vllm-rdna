@@ -51,6 +51,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -70,6 +71,11 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
+)
+from vllm.model_executor.layers.vision_parallel import (
+    VisionColumnParallelLinear,
+    VisionOutputParallelLinear,
+    vision_partition,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -358,41 +364,71 @@ class Qwen2_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        vision_group: GroupCoordinator | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
-            1
-            if use_data_parallel
-            else parallel_state.get_tensor_model_parallel_world_size()
+            vision_group.world_size
+            if vision_group is not None
+            else (
+                1
+                if use_data_parallel
+                else parallel_state.get_tensor_model_parallel_world_size()
+            )
         )
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        self.tp_rank = (
+            vision_group.rank_in_group
+            if vision_group is not None
+            else parallel_state.get_tensor_model_parallel_rank()
+        )
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads
         )
-        self.num_attention_heads_per_partition = dist_utils.divide(
-            num_heads, self.tp_size
-        )
-
-        self.qkv = QKVParallelLinear(
-            hidden_size=embed_dim,
-            head_size=self.hidden_size_per_attention_head,
-            total_num_heads=num_heads,
-            total_num_kv_heads=num_heads,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv",
-            disable_tp=use_data_parallel,
-        )
-
-        self.proj = RowParallelLinear(
-            input_size=projection_size,
-            output_size=embed_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.proj",
-            disable_tp=use_data_parallel,
-        )
+        if vision_group is not None:
+            _, self.num_attention_heads_per_partition = vision_partition(
+                num_heads, vision_group
+            )
+            self.qkv = VisionColumnParallelLinear(
+                embed_dim,
+                projection_size,
+                bias=True,
+                vision_group=vision_group,
+                alignment=self.hidden_size_per_attention_head,
+                packed_qkv=True,
+                prefix=f"{prefix}.qkv",
+                quant_config=quant_config,
+            )
+            self.proj = VisionOutputParallelLinear(
+                projection_size,
+                embed_dim,
+                vision_group=vision_group,
+                alignment=self.hidden_size_per_attention_head,
+                prefix=f"{prefix}.proj",
+                quant_config=quant_config,
+            )
+        else:
+            self.num_attention_heads_per_partition = dist_utils.divide(
+                num_heads, self.tp_size
+            )
+            self.qkv = QKVParallelLinear(
+                hidden_size=embed_dim,
+                head_size=self.hidden_size_per_attention_head,
+                total_num_heads=num_heads,
+                total_num_kv_heads=num_heads,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv",
+                disable_tp=use_data_parallel,
+            )
+            self.proj = RowParallelLinear(
+                input_size=projection_size,
+                output_size=embed_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.proj",
+                disable_tp=use_data_parallel,
+            )
 
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,

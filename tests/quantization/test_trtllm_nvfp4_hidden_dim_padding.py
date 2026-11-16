@@ -194,7 +194,7 @@ def test_moe_forward_shared_gets_packed_shared_input_under_inductor():
         router_logits = torch.mm(x, gate_weight.t(), out_dtype=torch.float32)
         padded = F.pad(x, (0, padded_hidden - hidden))
         shared_out, fused_out = torch.ops.vllm.moe_forward_shared(
-            padded, router_logits, x, None, layer_name, 0
+            padded, router_logits, x, None, layer_name, 0, x.dtype
         )
         return shared_out + fused_out[..., :hidden]
 

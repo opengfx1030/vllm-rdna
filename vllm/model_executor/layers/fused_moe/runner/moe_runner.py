@@ -124,6 +124,7 @@ def _moe_forward(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    output_dtype: torch.dtype,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return cast(
@@ -144,14 +145,18 @@ def _moe_forward_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    output_dtype: torch.dtype,
 ) -> torch.Tensor:
     # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
     # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
     # as an op arg (not peeked from the layer registry) to keep the fake
     # a pure shape function of its inputs and preserve subgraph dedup.
-    if hidden_dim_unpadded > 0:
-        return hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
-    return torch.empty_like(hidden_states)
+    shape = (
+        (*hidden_states.shape[:-1], hidden_dim_unpadded)
+        if hidden_dim_unpadded > 0
+        else hidden_states.shape
+    )
+    return hidden_states.new_empty(shape, dtype=output_dtype)
 
 
 def _moe_forward_shared(
@@ -161,6 +166,7 @@ def _moe_forward_shared(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    output_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return cast(
@@ -181,16 +187,17 @@ def _moe_forward_shared_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    output_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
     # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
     # else `hidden_states`.
-    if hidden_dim_unpadded > 0:
-        fused_out = hidden_states.new_empty(
-            (*hidden_states.shape[:-1], hidden_dim_unpadded)
-        )
-    else:
-        fused_out = torch.empty_like(hidden_states)
+    shape = (
+        (*hidden_states.shape[:-1], hidden_dim_unpadded)
+        if hidden_dim_unpadded > 0
+        else hidden_states.shape
+    )
+    fused_out = hidden_states.new_empty(shape, dtype=output_dtype)
     if shared_experts_input is not None:
         shared_out = torch.empty_like(shared_experts_input)
     else:
@@ -361,6 +368,42 @@ class MoERunner(MoERunnerInterface):
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
         return self.routed_experts.quant_method
+
+    def _routed_output_dtype(self, input_dtype: torch.dtype) -> torch.dtype:
+        """Negotiate native FP32 output through runner-owned reduction."""
+        requested = self.moe_config.output_dtype
+        if requested is None or requested == input_dtype:
+            return input_dtype
+        if (
+            requested != torch.float32
+            or input_dtype != torch.float16
+            or self.routed_input_transform is not None
+            or self.routed_output_transform is not None
+            or self.routed_scaling_factor != 1.0
+            or self.moe_config.is_sequence_parallel
+            or self.moe_config.moe_parallel_config.use_ep
+            or self.moe_config.dp_size != 1
+            or self.moe_config.pcp_size != 1
+            or self.moe_config.skip_final_all_reduce
+            or self.moe_config.use_deferred_moe_finalize
+            or isinstance(self.router, ZeroExpertRouter)
+            or self.moe_config.tp_size != 3
+        ):
+            raise NotImplementedError(
+                "FP32 routed output requires ordinary TP3 FP16 MoE "
+                "with runner-owned reduction and no EP/SP/PCP, transforms or scaling"
+            )
+        self.routed_experts._ensure_moe_quant_config_init()
+        kernel = self._quant_method.moe_kernel
+        if (
+            kernel is None
+            or kernel.is_monolithic
+            or kernel.fused_experts.output_dtype(input_dtype) != requested
+        ):
+            raise NotImplementedError(
+                "The selected modular experts do not support FP32 routed output"
+            )
+        return requested
 
     def apply_routed_input_transform(
         self,
@@ -726,6 +769,7 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
+        routed_output_dtype = self._routed_output_dtype(hidden_states.dtype)
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
         # outside the runner (e.g. to overlap it on a separate stream), it
@@ -758,6 +802,7 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.hidden_dim_unpadded
             if self._quant_method.has_unpadded_output
             else 0,
+            routed_output_dtype,
         )
 
         #

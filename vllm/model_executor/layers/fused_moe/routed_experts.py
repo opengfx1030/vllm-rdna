@@ -170,6 +170,16 @@ class RoutedExperts(PluggableLayer):
             self.quant_config,
             self.moe_config,
         )
+        if self.moe_config.intermediate_partition is not None:
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_rdna2 import (  # noqa: E501
+                CompressedTensorsWNA16RDNA2MoEMethod,
+            )
+
+            if type(self.quant_method) is not CompressedTensorsWNA16RDNA2MoEMethod:
+                raise ValueError(
+                    "Explicit MoE intermediate partitions require the native "
+                    "CompressedTensors RDNA2 W4A16 method."
+                )
 
         # Round up hidden size and update moe_config.
         # TODO: move roundup to _get_quant_method?
@@ -405,7 +415,48 @@ class RoutedExperts(PluggableLayer):
 
         """
         padded_tp = self.moe_config.tp_shard_with_padding
-        if padded_tp:
+        partition = self.moe_config.intermediate_partition
+        if partition is not None:
+            start, width = partition
+            destination = expert_data
+            if shard_id in ("w1", "w3") and self.moe_config.is_act_and_mul:
+                if destination.shape[shard_dim] % 2:
+                    raise ValueError(
+                        "Gate/up intermediate axis must have equal halves."
+                    )
+                half = destination.shape[shard_dim] // 2
+                destination = destination.narrow(
+                    shard_dim, 0 if shard_id == "w1" else half, half
+                )
+            shard_size = destination.shape[shard_dim]
+            if shard_size <= 0:
+                raise ValueError(
+                    "Explicit MoE intermediate partitions must be nonempty."
+                )
+            logical_per_entry, remainder = divmod(width, shard_size)
+            if remainder or logical_per_entry <= 0:
+                raise ValueError(
+                    "MoE intermediate partition width must map exactly to "
+                    "the packed weight or group-scale axis."
+                )
+            global_width = self.moe_config.intermediate_size
+            if any(value % logical_per_entry for value in (global_width, start, width)):
+                raise ValueError(
+                    "MoE intermediate partition must preserve complete packed "
+                    "weight entries and quantization groups."
+                )
+            expected_shape = list(destination.shape)
+            expected_shape[shard_dim] = global_width // logical_per_entry
+            if tuple(loaded_weight.shape) != tuple(expected_shape):
+                raise ValueError(
+                    "Explicit MoE intermediate partition loading expects the full "
+                    f"checkpoint projection shape {tuple(expected_shape)}, got "
+                    f"{tuple(loaded_weight.shape)}."
+                )
+            loaded_weight = loaded_weight.narrow(
+                shard_dim, start // logical_per_entry, width // logical_per_entry
+            )
+        elif padded_tp:
             destination = expert_data
             if shard_id in ("w1", "w3") and self.moe_config.is_act_and_mul:
                 half = destination.shape[shard_dim] // 2
@@ -435,7 +486,7 @@ class RoutedExperts(PluggableLayer):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
-                load_full=padded_tp,
+                load_full=partition is not None or padded_tp,
             )
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -444,7 +495,7 @@ class RoutedExperts(PluggableLayer):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
-                load_full=padded_tp,
+                load_full=partition is not None or padded_tp,
             )
 
     def _load_per_channel_weight_scale(

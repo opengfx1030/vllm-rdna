@@ -24,12 +24,12 @@ from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, replace, set_current_vllm_config
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.exl3_ple import exl3_side_weights
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -64,6 +64,7 @@ from .model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
+    _qwen4_vocab_padding_size,
 )
 
 
@@ -211,7 +212,9 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         # loading (load_eagle_model), so the placeholder stays off the GPU.
         with _off_gpu_under_pp():
             self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size, self.hidden_size
+                self.vocab_size,
+                self.hidden_size,
+                padding_size=_qwen4_vocab_padding_size(),
             )
         draft_vllm_config = _make_draft_vllm_config(
             vllm_config,
@@ -222,19 +225,28 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             # embedding, fc_hidden (shared across HC branches) projects the
             # backbone hidden; the embedding is added as a residual to every
             # branch (see mtp_residual_linear_shared.md).
-            self.fc_embedding = ColumnParallelLinear(
+            # TP3 cannot evenly shard the checkpoint's 2560 output rows.
+            fusion_linear = (
+                ReplicatedLinear
+                if get_tensor_model_parallel_world_size() == 3
+                else ColumnParallelLinear
+            )
+            fusion_kwargs = (
+                {} if fusion_linear is ReplicatedLinear else {"gather_output": True}
+            )
+            self.fc_embedding = fusion_linear(
                 self.hidden_size,
                 self.hidden_size,
-                gather_output=True,
+                **fusion_kwargs,
                 bias=False,
                 return_bias=False,
                 quant_config=draft_vllm_config.quant_config,
                 prefix=f"{prefix}.fc_embedding",
             )
-            self.fc_hidden = ColumnParallelLinear(
+            self.fc_hidden = fusion_linear(
                 self.hidden_size,
                 self.hidden_size,
-                gather_output=True,
+                **fusion_kwargs,
                 bias=False,
                 return_bias=False,
                 quant_config=draft_vllm_config.quant_config,
@@ -456,6 +468,7 @@ class Qwen4ExpMTP(
                     self.lm_head = ParallelLMHead(
                         config.vocab_size,
                         config.hidden_size,
+                        padding_size=_qwen4_vocab_padding_size(),
                         prefix=maybe_prefix(prefix, "lm_head"),
                     )
         else:

@@ -33,6 +33,7 @@
 // dequant_4bit_8_fp16) come from q_gemm_rdna2_common.cuh and
 // qdq_4_rdna2.cuh in the vllm::gptq_rdna2:: namespace.
 
+#include <algorithm>
 #include <cstdint>
 
 #include <torch/all.h>
@@ -79,7 +80,7 @@ __forceinline__ __device__ void refresh_moe_group(
 // Fused MoE kernel.
 // ---------------------------------------------------------------------------
 
-template <typename T, typename C_T, int BLOCK_SIZE_M>
+template <typename T, typename C_T, int BLOCK_SIZE_M, bool PRIVATE_PARTIALS>
 __global__ void moe_gemm_q4_kernel_rdna2(
     const T* __restrict__ a,                  // [size_m, size_k] or [M*topk, K]
     C_T* __restrict__ c,                      // accumulator (fp16 or fp32)
@@ -100,14 +101,14 @@ __global__ void moe_gemm_q4_kernel_rdna2(
     const int expert_scales_stride,  // groups * N
     const int expert_zeros_stride,   // groups * (N/8)
     const bool mul_topk_weight,
-    const int output_topk,    // >0: reduce output by token_id/output_topk
-    const int zero_offset) {  // 1: GPTQv1 (stored zero - 1), 0: raw zero
+    const int output_topk,  // >0: reduce output by token_id/output_topk
+    const int zero_offset, const int n_begin, const int n_columns) {
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
   const int offset_n = blockIdx.y * BLOCK_KN_SIZE * 4;
   const int offset_k = blockIdx.z * BLOCK_KN_SIZE;
   const int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
-  const int n = offset_n + t * 4;
+  const int n = n_begin + offset_n + t * 4;
 
   // Early exit for padding blocks or invalid experts (expert_map = -1)
   if (token_block * BLOCK_SIZE_M >= num_tokens_post_padded[0]) return;
@@ -147,7 +148,7 @@ __global__ void moe_gemm_q4_kernel_rdna2(
   }
   __syncthreads();
 
-  if (n >= size_n) return;
+  if (n >= size_n || n >= n_begin + n_columns) return;
 
   // Group bookkeeping
   const int groupsize = size_k / groups;
@@ -246,7 +247,12 @@ __global__ void moe_gemm_q4_kernel_rdna2(
     // (multiple experts write to the same row via atomics)
     int64_t out_row = (output_topk > 0) ? (int64_t)(token_id / output_topk)
                                         : (int64_t)token_id;
-    if constexpr (std::is_same_v<C_T, long long>) {
+    if constexpr (PRIVATE_PARTIALS) {
+      const int64_t rows = static_cast<int64_t>(size_m) * top_k;
+      C_T* out = c + (blockIdx.z * rows + token_id) * n_columns + n - n_begin;
+  #pragma unroll
+      for (int j = 0; j < 4; ++j) out[j] = block_c[m][j];
+    } else if constexpr (std::is_same_v<C_T, long long>) {
       C_T* row = c + out_row * (size_n + 1);
       // An output element receives at most K-slices * top-k partials.
       // Their absolute sum stays below 2^30 before fixed-point scaling.
@@ -270,12 +276,12 @@ __global__ void moe_gemm_q4_kernel_rdna2(
 // the non-RDNA2 pass either fails to compile (arity) or exports a different
 // symbol than the launch references (order), which only shows up at runtime as
 // "Cannot find Symbol with name: ...".
-template <typename T, typename C_T, int BLOCK_SIZE_M>
+template <typename T, typename C_T, int BLOCK_SIZE_M, bool PRIVATE_PARTIALS>
 __global__ void moe_gemm_q4_kernel_rdna2(
     const T*, C_T*, const uint32_t*, const T*, const uint32_t*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const int, const int,
-    const bool, const int, const int) {}
+    const bool, const int, const int, const int, const int) {}
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
@@ -283,7 +289,7 @@ __global__ void moe_gemm_q4_kernel_rdna2(
 // Launcher
 // ---------------------------------------------------------------------------
 
-template <typename T, typename C_T, int BLOCK_SIZE_M>
+template <typename T, typename C_T, int BLOCK_SIZE_M, bool PRIVATE_PARTIALS>
 void launch_moe_gemm_q4(
     const T* a, C_T* c, const uint32_t* b_q_weight, const T* b_scales,
     const uint32_t* b_qzeros, const float* topk_weights,
@@ -291,20 +297,23 @@ void launch_moe_gemm_q4(
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
     int size_n, int size_k, int groups, int top_k, int expert_weight_stride,
     int expert_scales_stride, int expert_zeros_stride, bool mul_topk_weight,
-    int output_topk, int zero_offset, cudaStream_t stream) {
+    int output_topk, int zero_offset, cudaStream_t stream, int n_begin,
+    int n_columns) {
   dim3 block(THREADS_X);
   dim3 grid(num_token_blocks,
-            (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
+            (n_columns + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
 
-  moe_gemm_q4_kernel_rdna2<T, C_T, BLOCK_SIZE_M><<<grid, block, 0, stream>>>(
-      a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
-      expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups, top_k,
-      expert_weight_stride, expert_scales_stride, expert_zeros_stride,
-      mul_topk_weight, output_topk, zero_offset);
+  moe_gemm_q4_kernel_rdna2<T, C_T, BLOCK_SIZE_M, PRIVATE_PARTIALS>
+      <<<grid, block, 0, stream>>>(
+          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups,
+          top_k, expert_weight_stride, expert_scales_stride,
+          expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
+          n_begin, n_columns);
 }
 
-template <typename T, typename C_T>
+template <typename T, typename C_T, bool PRIVATE_PARTIALS = false>
 void dispatch_moe_gemm_q4(
     const T* a, C_T* c, const uint32_t* b_q_weight, const T* b_scales,
     const uint32_t* b_qzeros, const float* topk_weights,
@@ -312,40 +321,41 @@ void dispatch_moe_gemm_q4(
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
     int size_n, int size_k, int groups, int top_k, int block_size_m,
     int expert_weight_stride, int expert_scales_stride, int expert_zeros_stride,
-    bool mul_topk_weight, int output_topk, int zero_offset,
-    cudaStream_t stream) {
+    bool mul_topk_weight, int output_topk, int zero_offset, cudaStream_t stream,
+    int n_begin = 0, int n_columns = 0) {
+  if (n_columns == 0) n_columns = size_n;
   switch (block_size_m) {
     case 1:
-      launch_moe_gemm_q4<T, C_T, 1>(
+      launch_moe_gemm_q4<T, C_T, 1, PRIVATE_PARTIALS>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
-          stream);
+          stream, n_begin, n_columns);
       break;
     case 2:
-      launch_moe_gemm_q4<T, C_T, 2>(
+      launch_moe_gemm_q4<T, C_T, 2, PRIVATE_PARTIALS>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
-          stream);
+          stream, n_begin, n_columns);
       break;
     case 4:
-      launch_moe_gemm_q4<T, C_T, 4>(
+      launch_moe_gemm_q4<T, C_T, 4, PRIVATE_PARTIALS>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
-          stream);
+          stream, n_begin, n_columns);
       break;
     case 8:
-      launch_moe_gemm_q4<T, C_T, 8>(
+      launch_moe_gemm_q4<T, C_T, 8, PRIVATE_PARTIALS>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
           expert_zeros_stride, mul_topk_weight, output_topk, zero_offset,
-          stream);
+          stream, n_begin, n_columns);
       break;
     default:
       TORCH_CHECK(false,
@@ -353,6 +363,31 @@ void dispatch_moe_gemm_q4(
                   "got ",
                   block_size_m);
   }
+}
+
+// Native FP32 output reduces private K-split/routing-slot contributions in a
+// fixed order. No FP16 output buffer or FP16-then-widen boundary is involved.
+static __global__ void moe_reduce_fp32_partials(const float* partials,
+                                                float* out, int64_t numel,
+                                                int64_t rows, int n, int splits,
+                                                int output_topk, int n_begin,
+                                                int n_columns) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= numel) return;
+  const int routed = output_topk > 0 ? output_topk : 1;
+  const int64_t row = i / n_columns;
+  const int col = i % n_columns;
+  if (n_begin + col >= n) return;
+  float sum = 0.0f;
+  for (int expert = 0; expert < routed; ++expert) {
+    for (int split = 0; split < splits; ++split) {
+      sum += partials[(static_cast<int64_t>(split) * rows + row * routed +
+                       expert) *
+                          n_columns +
+                      col];
+    }
+  }
+  out[row * n + n_begin + col] = sum;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +440,12 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
   TORCH_CHECK(a.scalar_type() == torch::kHalf, "a must be half");
   TORCH_CHECK(a.scalar_type() == b_scales.scalar_type(),
               "b_scales dtype must match a");
+  TORCH_CHECK(c.scalar_type() == torch::kHalf ||
+                  c.scalar_type() == torch::kFloat ||
+                  c.scalar_type() == torch::kLong,
+              "c must be half, float or a fixed-point int64 accumulator");
+  TORCH_CHECK(c.scalar_type() != torch::kFloat || fp32_accum,
+              "native float c requires fp32_accum=true");
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -424,7 +465,52 @@ void moe_gptq_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       (topk_weights.numel() > 0) ? topk_weights.data_ptr<float>() : nullptr;
 
   if (a.scalar_type() == torch::kHalf) {
-    if (c.scalar_type() == torch::kLong) {
+    if (c.scalar_type() == torch::kFloat) {
+      const int64_t rows = static_cast<int64_t>(size_m) * top_k;
+      const int routed = output_topk > 0 ? output_topk : 1;
+      TORCH_CHECK(
+          c.device() == a.device() && c.is_contiguous() && rows % routed == 0 &&
+              c.size(0) == rows / routed && c.size(1) == size_n &&
+              size_n % 8 == 0,
+          "native float c must be contiguous with the routed output shape");
+      if (c.numel() == 0) return;
+      const int splits = (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE;
+      // Tile disjoint columns to bound prefill scratch without changing the
+      // expert-then-K-split summation order. Decode retains the full N grid.
+      constexpr int64_t max_elements = 64 * 1024 * 1024;
+      const int columns = static_cast<int>(std::min<int64_t>(
+          size_n,
+          std::max<int64_t>(
+              8,
+              (max_elements / std::max<int64_t>(1, rows * splits) / 8) * 8)));
+      auto partials = torch::empty({splits, rows, columns},
+                                   c.options().dtype(torch::kFloat));
+      float* scratch = partials.data_ptr<float>();
+      for (int begin = 0; begin < size_n; begin += columns) {
+        // Invalid/nonlocal routing slots contribute zero.
+        partials.zero_();
+        dispatch_moe_gemm_q4<half, float, true>(
+            (const half*)a.data_ptr(), scratch,
+            (const uint32_t*)b_q_weight.data_ptr<int32_t>(),
+            (const half*)b_scales.data_ptr(),
+            (const uint32_t*)b_qzeros.data_ptr<int32_t>(), topk_w_ptr,
+            sorted_token_ids.data_ptr<int32_t>(),
+            expert_ids.data_ptr<int32_t>(),
+            num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks,
+            size_m, size_n, size_k, groups, (int)top_k, (int)block_size_m,
+            expert_weight_stride, expert_scales_stride, expert_zeros_stride,
+            mul_topk_weight, (int)output_topk, use_v2_format ? 0 : 1, stream,
+            begin, columns);
+        const int64_t numel = c.size(0) * columns;
+        constexpr int threads = 256;
+        moe_reduce_fp32_partials<<<static_cast<unsigned>((numel + threads - 1) /
+                                                         threads),
+                                   threads, 0, stream>>>(
+            scratch, c.data_ptr<float>(), numel, rows, size_n, splits,
+            static_cast<int>(output_topk), begin, columns);
+      }
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    } else if (c.scalar_type() == torch::kLong) {
       const int64_t pairs = a.size(0) * top_k;
       const int64_t rows =
           output_topk > 0 ? (pairs + output_topk - 1) / output_topk : pairs;
