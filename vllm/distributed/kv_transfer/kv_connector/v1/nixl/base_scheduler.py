@@ -439,6 +439,9 @@ class NixlBaseConnectorScheduler:
             request.num_prompt_tokens -= backoff
             request.max_tokens = 1
             params["_p_side_truncated"] = True
+            # The scheduler splits the cut prompt as a monolithic engine splits the
+            # whole one when the producer opts in (`prefill_monolithic_split`).
+            params["_p_side_backoff"] = backoff
 
     def _build_save_meta(
         self,

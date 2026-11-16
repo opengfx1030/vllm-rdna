@@ -17,6 +17,7 @@ import torch
 from tests.v1.core.test_prefix_caching import make_request
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_coordinator import replay_boundaries
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -275,6 +276,125 @@ def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
 
     assert with_drop == MAMBA_BLOCK_SIZE
     assert without_drop == 2 * MAMBA_BLOCK_SIZE
+
+
+# P/D prefiller chunking (Flash-Next: mamba, scheduler and hash block are all 1024
+# tokens, 2048 tokens per step, MTP2). The prefiller prefills the prompt minus the
+# trailing token the decoder recomputes. The state handed over is exact only if its
+# chunk ends are the ones a monolithic engine schedules for the whole prompt.
+PD_BLOCK = 1024
+PD_BUDGET = 2048
+
+
+def _pd_stub(
+    *, eagle_drop: bool, lookahead: int, monolithic_split: bool = False
+) -> SimpleNamespace:
+    """Scheduler of a monolithic engine (lookahead hashes, no EAGLE block drop) or of
+    an engine with a KV connector (legacy hashes, EAGLE block drop)."""
+    return SimpleNamespace(
+        block_size=PD_BLOCK,
+        cache_config=SimpleNamespace(block_size=PD_BLOCK),
+        use_eagle_block_drop=eagle_drop,
+        num_hash_lookahead_tokens=lookahead,
+        # what a connector engine's scheduler records of the monolithic engine
+        monolithic_eagle_block_drop=False,
+        monolithic_hash_lookahead_tokens=1,
+        prefill_monolithic_split=monolithic_split,
+        max_num_scheduled_tokens=PD_BUDGET,
+        mamba_state_block_size=PD_BLOCK,
+        kv_cache_manager=SimpleNamespace(
+            coordinator=SimpleNamespace(
+                scheduler_block_size=PD_BLOCK,
+                get_replay_boundaries=lambda request: replay_boundaries(
+                    request.num_prompt_tokens, PD_BLOCK, use_eagle=eagle_drop
+                ),
+            )
+        ),
+        _effective_lpt=lambda: 0,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        mamba_partial_cache_hit=False,
+        mamba_shared_prefix_checkpoint=False,
+        hash_block_size=PD_BLOCK,
+        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
+    )
+
+
+def _chunk_ends(stub: SimpleNamespace, request: Request) -> list[int]:
+    """End positions of the prefill chunks the aligned split schedules."""
+    ends: list[int] = []
+    start = 0
+    while start < request.num_prompt_tokens:
+        request.num_computed_tokens = start
+        num_new = Scheduler._mamba_block_aligned_split(
+            stub, request, min(PD_BUDGET, request.num_prompt_tokens - start)
+        )
+        assert num_new > 0
+        start += num_new
+        ends.append(start)
+    return ends
+
+
+def _prefiller_request(prompt_len: int, *, backoff: int | None) -> Request:
+    """The request a NIXL prefiller schedules for a `prompt_len` prompt: cut to
+    `prompt_len - 1` tokens, with `_p_side_backoff` recorded when it is cut."""
+    (request,) = create_requests(
+        1, num_tokens=prompt_len - 1, block_size=ATTN_BLOCK_SIZE
+    )
+    request.kv_transfer_params = {"do_remote_decode": True, "_p_side_truncated": True}
+    if backoff is not None:
+        request.kv_transfer_params["_p_side_backoff"] = backoff
+    return request
+
+
+@pytest.mark.parametrize(
+    "prompt_len", [1025, 2048, 2049, 3073, 4097, 8193, 16384, 16385, 65537]
+)
+def test_prefiller_split_matches_monolithic_engine(prompt_len: int) -> None:
+    (whole,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    monolithic = _chunk_ends(_pd_stub(eagle_drop=False, lookahead=1), whole)
+    # the decoder recomputes the last token, so the prefiller covers N - 1
+    expected = [end for end in monolithic if end <= prompt_len - 1]
+    assert expected[-1] == prompt_len - 1
+
+    opted_in = _chunk_ends(
+        _pd_stub(eagle_drop=True, lookahead=0, monolithic_split=True),
+        _prefiller_request(prompt_len, backoff=1),
+    )
+    assert opted_in == expected
+
+
+@pytest.mark.parametrize(
+    "prompt_len", [2048, 2049, 3073, 4097, 8193, 16384, 16385, 65537]
+)
+def test_prefiller_split_without_opt_in_is_unchanged(prompt_len: int) -> None:
+    """Neither the flag alone nor the cut alone changes how the prefiller splits, and
+    the split differs from the monolithic engine's (the mismatch the flag removes)."""
+    (whole,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    monolithic = _chunk_ends(_pd_stub(eagle_drop=False, lookahead=1), whole)
+    expected = [end for end in monolithic if end <= prompt_len - 1]
+
+    connector = _pd_stub(eagle_drop=True, lookahead=0)
+    cut = _prefiller_request(prompt_len, backoff=1)
+    uncut = _prefiller_request(prompt_len, backoff=None)
+    legacy = _chunk_ends(connector, cut)
+    assert legacy != expected
+    # no opt-in: the cut is ignored even though the scheduler recorded it
+    assert _chunk_ends(connector, uncut) == legacy
+    # opt-in without a recorded cut (the request was not truncated): unchanged
+    opted_in = _pd_stub(eagle_drop=True, lookahead=0, monolithic_split=True)
+    assert _chunk_ends(opted_in, _prefiller_request(prompt_len, backoff=None)) == legacy
+
+
+@pytest.mark.parametrize("prompt_len", [1024, 1025])
+def test_prefiller_split_short_prompts_need_no_opt_in(prompt_len: int) -> None:
+    """One chunk ends the prompt in either engine: both views agree, so the opt-in
+    changes nothing (the lengths a decoder already reproduced exactly)."""
+    (whole,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    monolithic = _chunk_ends(_pd_stub(eagle_drop=False, lookahead=1), whole)
+    expected = [end for end in monolithic if end <= prompt_len - 1]
+    connector = _pd_stub(eagle_drop=True, lookahead=0)
+    assert _chunk_ends(connector, _prefiller_request(prompt_len, backoff=1)) == expected
 
 
 def _run_chunked_prefill(

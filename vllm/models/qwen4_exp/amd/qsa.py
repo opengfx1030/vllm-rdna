@@ -237,7 +237,10 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 
     @classmethod
     def supports_kv_connector(cls) -> bool:
-        return False
+        # G0a spike (docs/rdna2/disagg-g0-2026-11-06.md): lifted so the NIXL
+        # connector can register this backend's cache groups; branch
+        # spike/disagg-g0 only.
+        return True
 
 
 class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):

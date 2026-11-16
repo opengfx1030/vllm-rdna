@@ -683,8 +683,13 @@ class VllmConfig:
         return 1
 
     @property
-    def num_hash_lookahead_tokens(self) -> int:
-        """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
+    def monolithic_num_hash_lookahead_tokens(self) -> int:
+        """Lookahead a monolithic engine (no KV connector) hashes with.
+
+        `num_hash_lookahead_tokens` ignoring the connector exclusion. A P/D
+        prefiller schedules the prompt's chunks as this engine would so the
+        decoder resumes from the state it would have computed itself.
+        """
         speculative_config = self.speculative_config
         if (
             speculative_config is None
@@ -693,11 +698,16 @@ class VllmConfig:
             or not self.cache_config.enable_prefix_caching
         ):
             return 0
+        # The drafter's KV at a block's last position reads this far ahead.
+        return self.num_prefill_lookahead_tokens
+
+    @property
+    def num_hash_lookahead_tokens(self) -> int:
+        """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
         # KV connectors, including HiSparse's, keep the legacy hashes.
         if self.kv_transfer_config is not None:
             return 0
-        # The drafter's KV at a block's last position reads this far ahead.
-        return self.num_prefill_lookahead_tokens
+        return self.monolithic_num_hash_lookahead_tokens
 
     @property
     def uniform_decode_query_len(self) -> int:
