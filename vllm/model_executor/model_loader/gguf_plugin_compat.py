@@ -23,6 +23,7 @@ name and a missing one is reported, with no version floor guessed.
 
 from __future__ import annotations
 
+import functools
 import importlib
 from typing import Any
 
@@ -65,6 +66,36 @@ def _symbol(module: str, name: str) -> Any:
 def get_gguf_moe_method_cls() -> type:
     """``GGUFMoEMethod``: the packed-expert fused-MoE quant method."""
     return _symbol(_MOE_MODULE, "GGUFMoEMethod")
+
+
+@functools.cache
+def _skip_unrouted_experts(base: type) -> type:
+    class SkipUnroutedExpertsMoEMethod(base):  # type: ignore[misc, valid-type]
+        """``topk_ids < 0`` means "no expert" in vLLM; the plugin kernels read
+        ``expert * stride`` unchecked, so -1 is an out-of-bounds weight read
+        (GPU memory fault seen on gfx1030 during CUDA-graph warmup, where the
+        dummy batch routes every slot to -1). Route those slots to expert 0
+        with weight 0: they add exactly zero to the output.
+        """
+
+        def apply(self, layer, x, topk_weights, topk_ids, *args, **kwargs):
+            valid = topk_ids >= 0
+            return super().apply(
+                layer,
+                x,
+                topk_weights * valid,
+                topk_ids.clamp(min=0),
+                *args,
+                **kwargs,
+            )
+
+    SkipUnroutedExpertsMoEMethod.__name__ = f"SkipUnrouted{base.__name__}"
+    return SkipUnroutedExpertsMoEMethod
+
+
+def get_loader_moe_method_cls() -> type:
+    """The plugin's MoE method, hardened against ``topk_ids == -1``."""
+    return _skip_unrouted_experts(get_gguf_moe_method_cls())
 
 
 def store_gguf_weight_type(

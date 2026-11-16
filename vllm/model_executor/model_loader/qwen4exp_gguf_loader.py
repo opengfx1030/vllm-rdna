@@ -45,7 +45,7 @@ from vllm.model_executor.model_loader.gguf_manifest import (
 )
 from vllm.model_executor.model_loader.gguf_packed import dequantize as dequantize_packed
 from vllm.model_executor.model_loader.gguf_plugin_compat import (
-    get_gguf_moe_method_cls,
+    get_loader_moe_method_cls,
     store_gguf_weight_type,
 )
 from vllm.model_executor.model_loader.qwen4exp_gguf_mapping import (
@@ -197,7 +197,7 @@ class Qwen4ExpGGUFQuantConfig(QuantizationConfig):
         )
 
         if isinstance(layer, RoutedExperts):
-            return get_gguf_moe_method_cls()(self, layer.moe_config)
+            return get_loader_moe_method_cls()(self, layer.moe_config)
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         if isinstance(layer, VocabParallelEmbedding):

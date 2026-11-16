@@ -91,3 +91,32 @@ def test_symbols_are_returned_and_called_through(monkeypatch):
     compat.store_gguf_weight_type(param, value)
     compat.store_gguf_weight_type(param, value, 3)
     assert calls == [(param, value, None), (param, value, 3)]
+
+
+def test_unrouted_expert_slots_are_made_harmless(monkeypatch):
+    # topk_ids == -1 is "no expert" in vLLM; the plugin kernels would read
+    # weights[-1] unchecked (GPU memory fault on gfx1030 in graph warmup).
+    seen: dict[str, torch.Tensor] = {}
+
+    class FakeMoEMethod:
+        def apply(self, layer, x, topk_weights, topk_ids, shared, shared_in):
+            seen["w"], seen["ids"] = topk_weights, topk_ids
+            return x
+
+    monkeypatch.setattr(
+        compat.importlib,
+        "import_module",
+        _fake_import(
+            {compat._MOE_MODULE: types.SimpleNamespace(GGUFMoEMethod=FakeMoEMethod)}
+        ),
+    )
+    method = compat.get_loader_moe_method_cls()()
+    assert isinstance(method, FakeMoEMethod)
+    ids = torch.tensor([[3, -1], [-1, -1]], dtype=torch.int32)
+    weights = torch.tensor([[0.5, 0.25], [0.125, 0.0625]])
+    x = torch.zeros(2, 4)
+    assert method.apply(None, x, weights, ids, None, None) is x
+    assert seen["ids"].dtype == torch.int32
+    assert seen["ids"].tolist() == [[3, 0], [0, 0]]
+    assert seen["w"].tolist() == [[0.5, 0.0], [0.0, 0.0]]
+    assert ids.tolist() == [[3, -1], [-1, -1]]  # caller's tensors are untouched
