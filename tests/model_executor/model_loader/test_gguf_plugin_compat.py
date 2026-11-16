@@ -122,7 +122,12 @@ def test_unrouted_expert_slots_are_made_harmless(monkeypatch):
     assert ids.tolist() == [[3, -1], [-1, -1]]  # caller's tensors are untouched
 
 
-def _chunk_probe(monkeypatch):
+@pytest.fixture(autouse=True)
+def _no_limit_override(monkeypatch):
+    monkeypatch.delenv(compat._MMQ_MAX_EXPERTS_ENV, raising=False)
+
+
+def _chunk_probe(monkeypatch, **plugin_attrs):
     calls: list[int] = []
 
     class FakeMoEMethod:
@@ -134,7 +139,10 @@ def _chunk_probe(monkeypatch):
         compat.importlib,
         "import_module",
         _fake_import(
-            {compat._MOE_MODULE: types.SimpleNamespace(GGUFMoEMethod=FakeMoEMethod)}
+            {
+                compat._MOE_MODULE: types.SimpleNamespace(GGUFMoEMethod=FakeMoEMethod),
+                compat._PLUGIN: types.SimpleNamespace(**plugin_attrs),
+            }
         ),
     )
     return compat.get_loader_moe_method_cls()(), calls
@@ -173,6 +181,19 @@ def test_a_fixed_plugin_can_lift_the_expert_limit(monkeypatch):
     method, calls = _chunk_probe(monkeypatch)
     _run(method, 150, 512)
     assert calls == [150]
+
+
+def test_a_plugin_that_declares_no_expert_bound_keeps_the_fast_kernel(monkeypatch):
+    method, calls = _chunk_probe(monkeypatch, MOE_MMQ_MAX_EXPERTS=1 << 20)
+    _run(method, 150, 512)
+    assert calls == [150]
+
+
+def test_the_environment_overrides_what_the_plugin_declares(monkeypatch):
+    monkeypatch.setenv(compat._MMQ_MAX_EXPERTS_ENV, "256")
+    method, calls = _chunk_probe(monkeypatch, MOE_MMQ_MAX_EXPERTS=1 << 20)
+    _run(method, 150, 512)
+    assert calls == [64, 64, 22]
 
 
 def test_mmq_expert_weights_get_slack_after_their_last_byte(monkeypatch):

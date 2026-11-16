@@ -12,6 +12,9 @@ Before serving a GGUF model, make sure to install the [vllm-gguf-plugin](https:/
 uv pip install vllm-gguf-plugin
 ```
 
+!!! note "RDNA2 / gfx1030 fork"
+    Use [opengfx1030/vllm-gguf-plugin](https://github.com/opengfx1030/vllm-gguf-plugin) (branch `rdna_extras`) instead of the PyPI release, and build it from source for your gfx target (`PYTORCH_ROCM_ARCH=gfx1030 pip install --no-build-isolation --no-deps .`). It carries the Qwen3.5 config import fix (upstream PR #148) and a fix for the MMQ MoE kernel, which silently dropped experts above id 255 (Qwen3.8 Flash-Next has 512: PPL 9.79 instead of 4.80). It declares `MOE_MMQ_MAX_EXPERTS`, so the `qwen4exp_gguf` loader uses the fast kernel automatically; with the PyPI plugin the loader stays correct but slices large batches onto the slower per-slot kernel (16k prefill TTFT 21.4 s instead of 8.2 s).
+
 To run a GGUF model with vLLM, you can use the `repo_id:quant_type` format to load directly from HuggingFace. For example, to load a Q4_K_M quantized model from [unsloth/Qwen3-0.6B-GGUF](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF):
 
 ```bash
