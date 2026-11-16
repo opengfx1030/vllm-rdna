@@ -34,6 +34,12 @@ from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.rdna_eplb_stats import (
+    COLLECTOR as _EPLB_STATS,
+)
+from vllm.model_executor.layers.fused_moe.rdna_eplb_stats import (
+    LayerStats,
+)
 from vllm.model_executor.layers.fused_moe.rdna_routing_hist import (
     RoutingHistogram,
 )
@@ -312,6 +318,11 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             result = x.new_empty(x.shape)
             _apply_cached_moe(result, layer, x, topk_weights, topk_ids, activation)
             return result
+        eplb_stats = (
+            _EPLB_STATS.layer_stats(layer, topk_ids)
+            if _EPLB_STATS is not None
+            else None
+        )
         return _rdna2_fused_moe(
             x,
             topk_weights,
@@ -323,6 +334,7 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             expert_map=layer.expert_map,
             w4a8=getattr(self, "_w4a8", False),
             zero_v2=getattr(self, "_zero_v2", False),
+            eplb_stats=eplb_stats,
         )
 
 
@@ -376,6 +388,7 @@ def _rdna2_fused_moe(
     zero_v2: bool = False,
     ignore_invalid_experts: bool = False,
     routed_accumulator: torch.Tensor | None = None,
+    eplb_stats: LayerStats | None = None,
 ) -> torch.Tensor:
     """Fused MoE forward using the RDNA2 W4A16 HIP kernel.
 
@@ -451,6 +464,7 @@ def _rdna2_fused_moe(
                 zero_v2=zero_v2,
                 ignore_invalid_experts=ignore_invalid_experts,
                 routed_accumulator=accumulator,
+                eplb_stats=eplb_stats,
             )
             result = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
             ops.moe_fixedpoint_to_half_rdna2(accumulator, result)
@@ -479,10 +493,16 @@ def _rdna2_fused_moe(
                 total_tokens, intermediate_size, dtype=dtype, device=device
             )
         out = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
-        sorted_token_ids, expert_ids, num_tokens_post_padded = ops.rdna_moe_route_zero(
+        if eplb_stats is not None:  # + the EPLB counter CTA in the same launch
+            route = eplb_stats.route_zero
+        else:
+            route = ops.rdna_moe_route_zero
+        sorted_token_ids, expert_ids, num_tokens_post_padded = route(
             topk_ids, block_size_m, global_num_experts, expert_map, w1_out, out
         )
     else:
+        if eplb_stats is not None:  # the routing CTA does not take this call
+            eplb_stats.count(topk_ids)
         # With expert parallelism the align kernel itself drops the experts
         # that live on other ranks and emits local expert ids. Without it the
         # wrapper would remap expert_ids afterwards with expert_map[expert_ids]:

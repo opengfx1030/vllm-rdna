@@ -9,6 +9,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.rdna_eplb_stats import (
+    COLLECTOR as _EPLB_STATS,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_rdna2 import (  # noqa: E501
     CompressedTensorsWNA16RDNA2MoEMethod,
 )
@@ -89,6 +92,9 @@ def apply_resident(layer, x, topk_weights, topk_ids):
     if not isinstance(activation, MoEActivation):
         activation = MoEActivation.from_str(activation)
     native = layer._rdna2_resident
+    eplb_stats = (
+        _EPLB_STATS.layer_stats(layer, topk_ids) if _EPLB_STATS is not None else None
+    )
     # The sibling kernel reads the same resident weights; larger verification
     # batches and other activations retain the qualified tiled path.
     if (
@@ -104,6 +110,8 @@ def apply_resident(layer, x, topk_weights, topk_ids):
         and topk_weights.is_contiguous()
         and x.shape[0] * topk_ids.shape[1] <= native.rdna2_act_buf.shape[0]
     ):
+        if eplb_stats is not None:  # the skinny kernel routes by itself
+            eplb_stats.count(topk_ids)
         m, topk = topk_ids.shape
         intermediate = native.w13_weight_packed.shape[2] // 2
         act = native.rdna2_act_buf[: m * topk].view(m, topk, intermediate)
@@ -133,4 +141,5 @@ def apply_resident(layer, x, topk_weights, topk_ids):
         global_num_experts=layer.global_num_experts,
         expert_map=layer.expert_map,
         w4a8=False,
+        eplb_stats=eplb_stats,
     )

@@ -24,13 +24,17 @@
 //                        (shared expert down GEMV + expert-gate mul)
 //   rdna_moe_route_zero  moe_align_block_size + count_and_sort + both MoE
 //                        accumulator zero fills, one launch (tokens * top_k
-//                        <= 1024 routed entries)
+//                        <= 1024 routed entries); with the EPLB counter
+//                        variant (rdna_moe_route_zero_stats, opt-in) one
+//                        extra CTA of the same launch counts the call's
+//                        expert load
 //
 // Weights are fp16 [N,K] or int8 [N,K] with a per-row fp16 scale (the T45
 // shadows). Same wave-per-row streaming design as gemv_f16_rdna2 /
 // gemv_i8_rdna2.
 #include <algorithm>
 #include <cstdint>
+#include <type_traits>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -582,14 +586,208 @@ struct RouteArgs {
   int vec;  // 1: 16-byte stores (cols % 8 == 0, ld % 8 == 0, 16-byte aligned)
 };
 
+// ---- EPLB load counters (opt-in, VLLM_RDNA_EPLB_STATS_DIR) ----------------
+//
+// Expert-parallel load balancing needs, per MoE layer, how often every GLOBAL
+// expert is routed to and what that means per rank: touched experts T_r (the
+// decode kernel reads each touched expert's weights once) and routed pairs P_r
+// (the prefill kernel is compute bound). One extra CTA of the routing launch
+// (or the standalone eplb_stats_k for calls the routing CTA does not take)
+// builds the call's histogram while CTA 0 routes, so there is no extra launch
+// and nothing on the routing critical path. Every state word has ONE writer
+// (this CTA) and the kernels of a stream run in order, so the counters are
+// plain read-modify-write, no atomics in global memory. Single stream only.
+//
+// The layout is the contract with
+// vllm/model_executor/layers/fused_moe/rdna_eplb_stats.py (a test compares the
+// constants). Per-layer `state` (int64 words):
+//   pairs[2][E]  routed pairs per global expert, phase 0 decode / 1 prefill
+//   touch[nb][E] decode calls that touched the expert, per band of valid rows
+//   calls[nb+1]  calls per band, last = prefill calls
+//   rows[2]      valid rows summed per phase
+//   ord          calls of this layer so far (sampled or not)
+//   hcalls       prefill histograms written
+//   hrows[hist_n] valid rows of each histogram slot
+// One ring record = kEplbWords int32: 0 layer position, 1 valid rows, 2 rows
+// incl. padding, 3 id hash (additive, order independent: ranks compare it),
+// 4/5 wall_clock64 lo/hi, 6 phase, 7 layer call ordinal, 8.. T[rank],
+// 16.. P[rank].
+constexpr int kEplbWords = 32;
+constexpr int kEplbMaxRanks = 8;
+constexpr int kEplbMaxBands = 32;
+
+struct StatsArgs {
+  int64_t* state;
+  int32_t* ring;           // [ring_n, kEplbWords] or null
+  int64_t* gseq;           // [1] ring records written so far (with ring)
+  int16_t* hist;           // [hist_n, E] prefill histograms or null
+  const uint8_t* owner;    // [E] rank of every global expert
+  const uint8_t* padding;  // [rows] 1 = padded row, or null
+  const int32_t* edges;    // [nb] ascending decode row bands
+  int nb, ring_n, hist_n, layer_pos, sample_mask, ranks, top_k, E;
+};
+
+__device__ __forceinline__ unsigned eplb_mix(unsigned i, int e) {
+  unsigned x = (i * 0x9E3779B1u) ^ (((unsigned)e + 1u) * 0x85EBCA6Bu);
+  x ^= x >> 15;
+  x *= 0x2C1B3C6Du;
+  x ^= x >> 12;
+  return x;
+}
+
+// One CTA of kRouteThreads threads; every __syncthreads() is reached by all
+// threads (thread 0 publishes the call ordinal first, so the early return for
+// an unsampled call is uniform and no thread can read the bumped ordinal).
+__device__ void eplb_stats_cta(const StatsArgs& s, const int32_t* ids,
+                               int numel) {
+  __shared__ int s_h[kRouteMaxExperts];
+  __shared__ int s_T[kEplbMaxRanks];
+  __shared__ int s_P[kEplbMaxRanks];
+  __shared__ unsigned s_hash;
+  __shared__ int s_valid;
+  __shared__ unsigned long long s_ts;
+  __shared__ int64_t s_ord;
+  const int tid = threadIdx.x;
+  const int E = s.E, K = s.top_k, nb = s.nb;
+  const int64_t off_touch = 2LL * E;
+  const int64_t off_calls = off_touch + (int64_t)nb * E;
+  const int64_t off_rows = off_calls + nb + 1;
+  const int64_t off_ord = off_rows + 2;
+  const int64_t off_hcalls = off_ord + 1;
+  const int64_t off_hrows = off_hcalls + 1;
+  if (tid == 0) s_ord = s.state[off_ord];
+  __syncthreads();
+  const int64_t ord = s_ord;
+  if ((ord & (int64_t)s.sample_mask) != 0) {  // not a sampled call
+    if (tid == 0) s.state[off_ord] = ord + 1;
+    return;
+  }
+  for (int e = tid; e < E; e += kRouteThreads) s_h[e] = 0;
+  if (tid < kEplbMaxRanks) {
+    s_T[tid] = 0;
+    s_P[tid] = 0;
+  }
+  if (tid == 0) {
+    s_hash = 0;
+    s_valid = 0;
+  }
+  __syncthreads();
+  unsigned h = 0;
+  int valid = 0;
+  for (int i = tid; i < numel; i += kRouteThreads) {
+    const int row = i / K;
+    if (s.padding && s.padding[row]) continue;
+    const int e = ids[i];
+    if (e >= 0 && e < E) atomicAdd(&s_h[e], 1);
+    h += eplb_mix((unsigned)i, e);
+    valid += (i == row * K);  // once per valid row
+  }
+  atomicAdd(&s_hash, h);
+  atomicAdd(&s_valid, valid);
+  __syncthreads();
+  const int rows_valid = s_valid;
+  const int phase = rows_valid <= s.edges[nb - 1] ? 0 : 1;
+  int band = 0;
+  while (band < nb - 1 && s.edges[band] < rows_valid) band++;
+  const bool count = rows_valid > 0;
+  const int64_t hc = s.hist ? s.state[off_hcalls] : 0;
+  const bool want_hist = s.hist != nullptr && phase == 1 && count;
+  int64_t* pairs = s.state + (int64_t)phase * E;
+  int64_t* touch = s.state + off_touch + (int64_t)band * E;
+  int16_t* hslot = s.hist ? s.hist + (size_t)(hc % s.hist_n) * E : nullptr;
+  for (int e = tid; e < E; e += kRouteThreads) {
+    const int c = s_h[e];
+    if (want_hist) hslot[e] = (int16_t)min(c, 32767);
+    if (c == 0) continue;
+    pairs[e] += c;
+    if (phase == 0) touch[e] += 1;
+    const int r = min((int)s.owner[e], kEplbMaxRanks - 1);
+    atomicAdd(&s_T[r], 1);
+    atomicAdd(&s_P[r], c);
+  }
+  if (tid == 0) s_ts = wall_clock64();
+  __syncthreads();
+  const int64_t seq = s.ring ? *s.gseq : 0;
+  if (s.ring && tid < kEplbWords) {
+    int32_t w = 0;
+    switch (tid) {
+      case 0:
+        w = s.layer_pos;
+        break;
+      case 1:
+        w = rows_valid;
+        break;
+      case 2:
+        w = numel / K;
+        break;
+      case 3:
+        w = (int32_t)s_hash;
+        break;
+      case 4:
+        w = (int32_t)(unsigned)(s_ts & 0xffffffffull);
+        break;
+      case 5:
+        w = (int32_t)(unsigned)(s_ts >> 32);
+        break;
+      case 6:
+        w = phase;
+        break;
+      case 7:
+        w = (int32_t)ord;
+        break;
+      default:
+        if (tid >= 8 && tid < 8 + kEplbMaxRanks)
+          w = s_T[tid - 8];
+        else if (tid >= 16 && tid < 16 + kEplbMaxRanks)
+          w = s_P[tid - 16];
+    }
+    s.ring[(size_t)(seq % s.ring_n) * kEplbWords + tid] = w;
+  }
+  __syncthreads();
+  if (tid == 0) {
+    if (count) {
+      s.state[off_calls + (phase == 0 ? band : nb)] += 1;
+      s.state[off_rows + phase] += rows_valid;
+      if (want_hist) {
+        s.state[off_hrows + hc % s.hist_n] = rows_valid;
+        s.state[off_hcalls] = hc + 1;
+      }
+    }
+    if (s.ring) *s.gseq = seq + 1;
+    s.state[off_ord] = ord + 1;
+  }
+}
+
+// Calls the routing CTA does not take (more than 1024 routed entries, the
+// deterministic accumulator path): a launch of its own, a few microseconds
+// next to a prefill step of milliseconds.
 __global__ void __launch_bounds__(kRouteThreads)
-    moe_route_zero_k(const RouteArgs a) {
+    eplb_stats_k(const StatsArgs s, const int32_t* ids, int numel) {
+  eplb_stats_cta(s, ids, numel);
+}
+
+struct RouteArgsStats : RouteArgs {
+  StatsArgs st;
+};
+// The counter-free instantiation keeps the exact RouteArgs kernel signature.
+template <bool kStats>
+using RouteKernelArgs = std::conditional_t<kStats, RouteArgsStats, RouteArgs>;
+
+template <bool kStats>
+__global__ void __launch_bounds__(kRouteThreads)
+    moe_route_zero_k(const RouteKernelArgs<kStats> a) {
   const int tid = threadIdx.x;
   if (blockIdx.x != 0) {  // ---- zero the two accumulators
+    if constexpr (kStats) {
+      if (blockIdx.x == gridDim.x - 1) {  // ---- count the expert load
+        eplb_stats_cta(a.st, a.topk_ids, a.numel);
+        return;
+      }
+    }
     const int cpr1 = a.vec ? a.cols1 >> 3 : a.cols1;
     const int cpr2 = a.vec ? a.cols2 >> 3 : a.cols2;
     const int n1 = a.rows1 * cpr1, total = n1 + a.rows2 * cpr2;
-    const int step = (gridDim.x - 1) * kRouteThreads;
+    const int step = (gridDim.x - 1 - (kStats ? 1 : 0)) * kRouteThreads;
     for (int it = (blockIdx.x - 1) * kRouteThreads + tid; it < total;
          it += step) {
       const bool first = it < n1;
@@ -819,11 +1017,12 @@ at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,
 // Routing for the fused MoE plus both accumulator zero fills, one launch.
 // Returns (sorted_ids, expert_ids, num_tokens_post_padded) laid out as
 // moe_align_block_size does for the same arguments; zero1 / zero2 are fp16
-// 2-D buffers (unit column stride) that are set to zero.
-std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero(
+// 2-D buffers (unit column stride) that are set to zero. `stats` (nullable)
+// adds the EPLB counter CTA to the same launch.
+static std::tuple<at::Tensor, at::Tensor, at::Tensor> route_zero_impl(
     const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
     const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
-    at::Tensor& zero2) {
+    at::Tensor& zero2, const StatsArgs* stats) {
   TORCH_CHECK(topk_ids.is_cuda() && topk_ids.scalar_type() == at::kInt &&
                   topk_ids.is_contiguous(),
               "rdna_moe_route_zero: topk_ids must be contiguous int32 on GPU");
@@ -890,8 +1089,139 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero(
   // two items per thread, at most 64 zeroing CTAs next to the routing CTA
   const int zero_ctas =
       (int)std::min<int64_t>(64, std::max<int64_t>(1, (items + 511) / 512));
-  moe_route_zero_k<<<1 + zero_ctas, kRouteThreads, 0,
-                     at::cuda::getCurrentCUDAStream()>>>(a);
+  if (stats != nullptr) {
+    RouteArgsStats sa;
+    static_cast<RouteArgs&>(sa) = a;
+    sa.st = *stats;
+    moe_route_zero_k<true>
+        <<<2 + zero_ctas, kRouteThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+            sa);
+  } else {
+    moe_route_zero_k<false>
+        <<<1 + zero_ctas, kRouteThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+            a);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {sorted_ids, expert_ids, post_pad};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero(
+    const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
+    const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
+    at::Tensor& zero2) {
+  return route_zero_impl(topk_ids, block_size, num_experts, expert_map, zero1,
+                         zero2, nullptr);
+}
+
+// ---- EPLB counters: argument checks shared by the two entry points ---------
+static StatsArgs make_stats_args(
+    const at::Tensor& topk_ids, const std::optional<at::Tensor>& is_padding,
+    at::Tensor& state, const std::optional<at::Tensor>& ring,
+    const std::optional<at::Tensor>& gseq,
+    const std::optional<at::Tensor>& hist, const at::Tensor& owner,
+    const at::Tensor& edges, int64_t layer_pos, int64_t sample_mask,
+    int64_t ranks, int64_t num_experts, const char* who) {
+  TORCH_CHECK(topk_ids.is_cuda() && topk_ids.scalar_type() == at::kInt &&
+                  topk_ids.is_contiguous() && topk_ids.dim() == 2 &&
+                  topk_ids.size(1) >= 1,
+              who, ": topk_ids must be contiguous int32 [rows, top_k] on GPU");
+  const int64_t rows = topk_ids.size(0);
+  TORCH_CHECK(num_experts >= 1 && num_experts <= kRouteMaxExperts, who, ": 1..",
+              kRouteMaxExperts, " experts, got ", num_experts);
+  TORCH_CHECK(ranks >= 1 && ranks <= kEplbMaxRanks, who, ": 1..", kEplbMaxRanks,
+              " ranks, got ", ranks);
+  TORCH_CHECK(sample_mask >= 0 && layer_pos >= 0, who,
+              ": sample_mask and layer_pos must be >= 0");
+  TORCH_CHECK(owner.is_cuda() && owner.scalar_type() == at::kByte &&
+                  owner.is_contiguous() && owner.numel() == num_experts,
+              who, ": owner must be uint8 [num_experts] on GPU");
+  TORCH_CHECK(edges.is_cuda() && edges.scalar_type() == at::kInt &&
+                  edges.is_contiguous() && edges.numel() >= 1 &&
+                  edges.numel() <= kEplbMaxBands,
+              who, ": edges must be int32 [1..", kEplbMaxBands, "] on GPU");
+  TORCH_CHECK(ring.has_value() == gseq.has_value(), who,
+              ": ring and gseq go together");
+  const int64_t nb = edges.numel();
+  const int64_t hist_n = hist.has_value() ? hist->size(0) : 0;
+  const int64_t need =
+      2 * num_experts + nb * num_experts + nb + 1 + 2 + 1 + 1 + hist_n;
+  TORCH_CHECK(state.is_cuda() && state.scalar_type() == at::kLong &&
+                  state.is_contiguous() && state.numel() == need,
+              who, ": state must be int64 [", need, "] on GPU");
+  StatsArgs s{};
+  if (is_padding.has_value()) {
+    const at::Tensor& p = *is_padding;
+    TORCH_CHECK(
+        (p.scalar_type() == at::kBool || p.scalar_type() == at::kByte) &&
+            p.is_cuda() && p.is_contiguous() && p.numel() >= rows,
+        who, ": is_padding must be bool [>= rows] on GPU");
+    s.padding = reinterpret_cast<const uint8_t*>(p.const_data_ptr());
+  }
+  if (ring.has_value()) {
+    TORCH_CHECK(ring->is_cuda() && ring->scalar_type() == at::kInt &&
+                    ring->is_contiguous() && ring->dim() == 2 &&
+                    ring->size(1) == kEplbWords && ring->size(0) >= 1,
+                who, ": ring must be int32 [N, ", kEplbWords, "] on GPU");
+    TORCH_CHECK(gseq->is_cuda() && gseq->scalar_type() == at::kLong &&
+                    gseq->numel() == 1,
+                who, ": gseq must be int64 [1] on GPU");
+    s.ring = ring->mutable_data_ptr<int32_t>();
+    s.gseq = gseq->mutable_data_ptr<int64_t>();
+    s.ring_n = (int)ring->size(0);
+  }
+  if (hist.has_value()) {
+    TORCH_CHECK(hist->is_cuda() && hist->scalar_type() == at::kShort &&
+                    hist->is_contiguous() && hist->dim() == 2 &&
+                    hist->size(1) == num_experts && hist->size(0) >= 1,
+                who, ": hist must be int16 [H, num_experts] on GPU");
+    s.hist = hist->mutable_data_ptr<int16_t>();
+    s.hist_n = (int)hist_n;
+  }
+  s.state = state.mutable_data_ptr<int64_t>();
+  s.owner = owner.const_data_ptr<uint8_t>();
+  s.edges = edges.const_data_ptr<int32_t>();
+  s.nb = (int)nb;
+  s.layer_pos = (int)layer_pos;
+  s.sample_mask = (int)sample_mask;
+  s.ranks = (int)ranks;
+  s.top_k = (int)topk_ids.size(1);
+  s.E = (int)num_experts;
+  return s;
+}
+
+// rdna_moe_route_zero plus the EPLB counters in the same launch (one extra
+// CTA). Same outputs and, for the routing itself, the same kernel code.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero_stats(
+    const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
+    const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
+    at::Tensor& zero2, const std::optional<at::Tensor>& is_padding,
+    at::Tensor& state, const std::optional<at::Tensor>& ring,
+    const std::optional<at::Tensor>& gseq,
+    const std::optional<at::Tensor>& hist, const at::Tensor& owner,
+    const at::Tensor& edges, int64_t layer_pos, int64_t sample_mask,
+    int64_t ranks) {
+  const StatsArgs st = make_stats_args(
+      topk_ids, is_padding, state, ring, gseq, hist, owner, edges, layer_pos,
+      sample_mask, ranks, num_experts, "rdna_moe_route_zero_stats");
+  return route_zero_impl(topk_ids, block_size, num_experts, expert_map, zero1,
+                         zero2, &st);
+}
+
+// The counters alone, for the calls the routing CTA does not take (more than
+// 1024 routed entries, the deterministic accumulator path).
+void rdna_eplb_stats(const at::Tensor& topk_ids,
+                     const std::optional<at::Tensor>& is_padding,
+                     at::Tensor& state, const std::optional<at::Tensor>& ring,
+                     const std::optional<at::Tensor>& gseq,
+                     const std::optional<at::Tensor>& hist,
+                     const at::Tensor& owner, const at::Tensor& edges,
+                     int64_t layer_pos, int64_t sample_mask, int64_t ranks,
+                     int64_t num_experts) {
+  const StatsArgs st = make_stats_args(
+      topk_ids, is_padding, state, ring, gseq, hist, owner, edges, layer_pos,
+      sample_mask, ranks, num_experts, "rdna_eplb_stats");
+  const at::cuda::OptionalCUDAGuard guard(topk_ids.device());
+  eplb_stats_k<<<1, kRouteThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      st, topk_ids.const_data_ptr<int32_t>(), (int)topk_ids.numel());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

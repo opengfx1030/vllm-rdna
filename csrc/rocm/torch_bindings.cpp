@@ -130,6 +130,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor? expert_map, Tensor! zero1, Tensor! zero2) -> (Tensor, Tensor, "
       "Tensor)");
   rocm_ops.impl("rdna_moe_route_zero", torch::kCUDA, &rdna_moe_route_zero);
+  // EPLB load counters (opt-in, VLLM_RDNA_EPLB_STATS_DIR): the route op above
+  // plus one counter CTA in the same launch, and the counters alone for the
+  // calls that route elsewhere. See rdna_fused_glue.cu for the state layout.
+  rocm_ops.def(
+      "rdna_moe_route_zero_stats(Tensor topk_ids, int block_size, "
+      "int num_experts, Tensor? expert_map, Tensor! zero1, Tensor! zero2, "
+      "Tensor? is_padding, Tensor! state, Tensor!? ring, Tensor!? gseq, "
+      "Tensor!? hist, Tensor owner, Tensor edges, int layer_pos, "
+      "int sample_mask, int ranks) -> (Tensor, Tensor, Tensor)");
+  rocm_ops.impl("rdna_moe_route_zero_stats", torch::kCUDA,
+                &rdna_moe_route_zero_stats);
+  rocm_ops.def(
+      "rdna_eplb_stats(Tensor topk_ids, Tensor? is_padding, Tensor! state, "
+      "Tensor!? ring, Tensor!? gseq, Tensor!? hist, Tensor owner, "
+      "Tensor edges, int layer_pos, int sample_mask, int ranks, "
+      "int num_experts) -> ()");
+  rocm_ops.impl("rdna_eplb_stats", torch::kCUDA, &rdna_eplb_stats);
   // Qwen4Exp RDNA2 MonoKernel (vllm/models/qwen4_exp/amd/mono/rdna2/): K1 + K2.
   rocm_ops.def(
       "mono_k2_rdna2_workspace_bytes(int H, int R, int ND, int E, int Ise, "

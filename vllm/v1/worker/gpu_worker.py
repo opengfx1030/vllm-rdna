@@ -62,6 +62,9 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.fused_moe.rdna_eplb_stats import (
+    COLLECTOR as _EPLB_STATS,
+)
 from vllm.model_executor.layers.fused_moe.rdna_expert_stats import (
     COLLECTOR as _EXPERT_STATS,
 )
@@ -1494,6 +1497,9 @@ class Worker(WorkerBase):
         if _EXPERT_STATS is not None:
             # Opt-in MoE routing statistics: non-blocking drain between steps.
             _EXPERT_STATS.tick()
+        if _EPLB_STATS is not None:
+            # Opt-in EPLB load counters: non-blocking drain between steps.
+            _EPLB_STATS.tick()
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
@@ -1825,6 +1831,8 @@ class Worker(WorkerBase):
 
         if _EXPERT_STATS is not None:
             _EXPERT_STATS.close()
+        if _EPLB_STATS is not None:
+            _EPLB_STATS.close()
 
         if self._ple_offload_worker_handle is not None:
             self._ple_offload_worker_handle.close()
