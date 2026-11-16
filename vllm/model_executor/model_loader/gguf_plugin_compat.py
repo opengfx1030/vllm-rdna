@@ -77,13 +77,18 @@ _PLUGIN_MMQ_MIN_TOKENS = 65
 # `moe_q` returns early for expert ids above 255 (hard-coded in the plugin's
 # moe.cuh), so it silently drops the contribution of experts 256+ . Models with
 # more experts than this are fed to the vector kernel in slices instead. A plugin
-# built without that bound can lift the limit with the variable below.
+# built without that bound says so with ``MOE_MMQ_MAX_EXPERTS`` (the
+# opengfx1030/vllm-gguf-plugin fork does); the variable below overrides it.
 _MMQ_MAX_EXPERTS_ENV = "VLLM_QWEN4EXP_GGUF_MMQ_MAX_EXPERTS"
 _PLUGIN_MMQ_MAX_EXPERTS = 256
+_PLUGIN_MMQ_MARKER = "MOE_MMQ_MAX_EXPERTS"
 
 
 def _mmq_max_experts() -> int:
-    return int(os.environ.get(_MMQ_MAX_EXPERTS_ENV, _PLUGIN_MMQ_MAX_EXPERTS))
+    env = os.environ.get(_MMQ_MAX_EXPERTS_ENV)
+    if env is not None:
+        return int(env)
+    return int(getattr(_import(_PLUGIN), _PLUGIN_MMQ_MARKER, _PLUGIN_MMQ_MAX_EXPERTS))
 
 
 # The MMQ tile loader reads up to a few blocks past the end of the last row when a
