@@ -4,7 +4,7 @@
 
 💬 [Discord](https://discord.gg/n4VYYE9vAZ) · [gfx1030 wiki](https://blivioniag.github.io/gfx1030-wiki/) · [Recipes](docs/rdna/serving.md) · [Tuning](docs/rdna2/tuning.md)
 
-This is [`opengfx1030/vllm-rdna`](https://github.com/opengfx1030/vllm-rdna). The default branch, **`rdna_extras`**, is upstream vLLM **v0.31.0** plus the RDNA port. Serve from this checkout with [`tools/rdna/serve_rdna.sh`](tools/rdna/serve_rdna.sh) and a recipe. The logo section further down is upstream's README.
+This is [`opengfx1030/vllm-rdna`](https://github.com/opengfx1030/vllm-rdna). The default branch, **`rdna_extras`**, is upstream vLLM **v0.33.0** plus the RDNA port. Serve from this checkout with [`tools/rdna/serve_rdna.sh`](tools/rdna/serve_rdna.sh) and a recipe. The logo section further down is upstream's README.
 
 ## Hardware
 
@@ -16,7 +16,7 @@ gfx1030 has no BF16 dot (`kHasDot2Bf16` is false for RDNA2 in [`csrc/rocm/rdna/c
 
 ## What this fork adds
 
-On top of upstream v0.31.0, for gfx1030:
+On top of upstream v0.33.0, for gfx1030:
 
 - **FA-RDNA2 attention** (`--attention-backend RDNA_ATTN`), including GQA decode. An opt-in packed KV dtype, `--kv-cache-dtype int4_fp16_block`, is read by that backend ([`docs/explore/kv-int4-fp16-scales/README.md`](docs/explore/kv-int4-fp16-scales/README.md)). No recipe turns it on.
 - **W4A16** HIP GEMMs for AWQ / compressed-tensors, and an opt-in **W4A8** sdot4 prefill path. `27b-awq` sets `W4A8=1`. Decode stays W4A16 ([tuning guide](docs/rdna2/tuning.md)).
@@ -26,6 +26,8 @@ On top of upstream v0.31.0, for gfx1030:
 - **PLE** n-gram table for Flash-Next: `bf16`, `int4`, `int4-disk`, or `exl3` (the table that ships beside an EXL3 checkpoint).
 - **RDNA one-shot all-reduce** for small tensor-parallel messages over PCIe (`VLLM_RDNA_AR=1`, 64 KiB; 256 KiB in `flashnext-mtp2`), with RCCL above that.
 - **DeepSeek-V4-Flash** (fp8 dense, MXFP4 experts, fp8 KV) via `dsv4-flash`.
+- **GGUF** Flash-Next (Unsloth `UD-Q4_K_XL`, `--load-format qwen4exp_gguf`) via `flashnext-gguf-mtp0`: PPL 4.80, 16k TTFT 8.2 s, text only, no MTP. It needs the plugin fork [`opengfx1030/vllm-gguf-plugin`](https://github.com/opengfx1030/vllm-gguf-plugin) (the container image has it); see [`docs/rdna2/gguf-flashnext-2026-11-16.md`](docs/rdna2/gguf-flashnext-2026-11-16.md).
+- **Expert load counters** for the expert-parallel MoE, opt-in (`VLLM_RDNA_EPLB_STATS_DIR`); off by default and byte-identical when off. Upstream EPLB itself does not start on our quantized MoE ([study](docs/rdna2/eplb-lean-design-2026-11-16.md), knobs in the [tuning guide](docs/rdna2/tuning.md)).
 - **Pipeline parallel** for three gfx1030 cards (`flashnext-pp3`, `flashnext-pp3-mtp2`) and for two stages of four cards (`flashnext-tp4pp2-mtp2`). Tensor parallel in the other recipes is 4, 2 for `full`, and 8 for `flashnext-tp8-mtp2`.
 - **TunableOp** rocBLAS rows for the ROCm 7.14 build, under [`tunableop/rocm7.14-rocblas5.5/`](tunableop/rocm7.14-rocblas5.5/).
 
@@ -151,6 +153,11 @@ Builds are not cancelled by subsequent pushes. Only promotion is serialized:
 the current branch tip can promote its built manifest digest, while stale
 builds retain their commit tags. Ref deletions do not publish images.
 
+The image also carries the GGUF plugin fork (`opengfx1030/vllm-gguf-plugin`),
+built for gfx1030 from the commit pinned in `docker/Dockerfile.rdna`
+(`GGUF_PLUGIN_REF`), so `flashnext-gguf-mtp0` works inside it. Bump that ref to
+take a plugin change.
+
 Version builds use GitHub's `create` event, not a second tag-push trigger, so
 creating a tag starts only one build. Branch creation is ignored. Create no
 more than three tags at once; GitHub does not emit creation events above that
@@ -248,6 +255,7 @@ affect the native RDNA2 backend; see the
 | Qwen Flash-Next, AWQ-W4A16, same parsers, no MTP | `flashnext` | 4, TP=4 |
 | Flash-Next AWQ, plain decode, 262K context | `flashnext-mtp0` | 4, TP=4 |
 | Flash-Next AWQ, MTP=2 | `flashnext-mtp2` | 4, TP=4 |
+| Flash-Next UD-Q4_K_XL GGUF, plain decode, text only | `flashnext-gguf-mtp0` | 4, TP=4 |
 | Flash-Next AWQ plus an Inco DFlash2 drafter | `flashnext-dflash2` | 4, TP=4 |
 | Flash-Next AWQ on three cards | `flashnext-pp3` | 3, PP=3 |
 | Three cards, MTP=2, about four streams | `flashnext-pp3-mtp2` | 3, PP=3 |
