@@ -76,6 +76,11 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.utils import (
+    WORKER_KILL_TIMEOUT_S,
+    WORKER_TERMINATE_TIMEOUT_S,
+    get_worker_shutdown_timeout,
+)
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -564,10 +569,11 @@ class MultiprocExecutor(Executor):
         return future if non_block else future.result()
 
     @staticmethod
-    def _ensure_worker_termination(worker_procs: list[BaseProcess]):
-        """Ensure that all worker processes are terminated. Assumes workers have
-        received termination requests. Waits for processing, then sends
-        termination and kill signals if needed."""
+    def _ensure_worker_termination(worker_procs: list[BaseProcess]) -> bool:
+        """Bound shutdown and reap every child, including after SIGKILL.
+
+        False means ownership/cleanup is incomplete, not successful teardown.
+        """
 
         def wait_for_termination(procs, timeout):
             if not time:
@@ -589,56 +595,65 @@ class MultiprocExecutor(Executor):
             "[shutdown] Executor: waiting for worker exit count=%d",
             initial_count,
         )
-        if wait_for_termination(
-            active_procs(), timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
-        ):
-            logger.info_once("[shutdown] Executor: all workers exited gracefully")
-            return
-
-        # Send SIGTERM if still running
-        remaining = active_procs()
-        logger.warning(
-            "[shutdown] Executor: workers still running after grace period; "
-            "sending SIGTERM count=%d",
-            len(remaining),
+        graceful = wait_for_termination(
+            active_procs(),
+            timeout=get_worker_shutdown_timeout(is_rocm=current_platform.is_rocm()),
         )
-        for p in remaining:
-            p.terminate()
-        if not wait_for_termination(active_procs(), 4):
-            # Send SIGKILL if still running
+        if not graceful:
             remaining = active_procs()
             logger.warning(
-                "[shutdown] Executor: workers still running after SIGTERM; "
-                "sending SIGKILL count=%d",
+                "[shutdown] Executor: workers still running after grace period; "
+                "sending SIGTERM count=%d",
                 len(remaining),
             )
             for p in remaining:
-                p.kill()
+                p.terminate()
+            if not wait_for_termination(active_procs(), WORKER_TERMINATE_TIMEOUT_S):
+                remaining = active_procs()
+                logger.warning(
+                    "[shutdown] Executor: workers still running after SIGTERM; "
+                    "sending SIGKILL count=%d",
+                    len(remaining),
+                )
+                for p in remaining:
+                    p.kill()
+                wait_for_termination(active_procs(), WORKER_KILL_TIMEOUT_S)
+
+        for proc in worker_procs:
+            proc.join(timeout=0)
+        remaining = active_procs()
+        if remaining:
+            logger.error(
+                "[shutdown] Executor: incomplete cleanup; unreaped worker pids=%s",
+                [proc.pid for proc in remaining],
+            )
+            return False
+        logger.info("[shutdown] Executor: all workers reaped (graceful=%s)", graceful)
+        return True
 
     def shutdown(self):
         """Properly shut down the executor and its workers."""
-        if not getattr(self, "shutting_down", False):
-            worker_count = len(getattr(self, "workers", None) or [])
-            logger.debug(
-                "[shutdown] Executor: start worker_count=%d",
-                worker_count,
-            )
-            self.shutting_down = True
+        if getattr(self, "shutting_down", False):
+            return
+        worker_count = len(getattr(self, "workers", None) or [])
+        logger.debug("[shutdown] Executor: start worker_count=%d", worker_count)
+        self.shutting_down = True
 
-            # Make sure all the worker processes are terminated first.
-            if workers := getattr(self, "workers", None):
-                for w in workers:
-                    # Close death_writer to signal child processes to exit
-                    if w.death_writer is not None:
-                        w.death_writer.close()
-                        w.death_writer = None
-                self._ensure_worker_termination([w.proc for w in workers])
+        # Keep ownership if a child cannot be reaped. A repeated shutdown must
+        # not report success or release queues underneath that child.
+        if workers := getattr(self, "workers", None):
+            for w in workers:
+                if w.death_writer is not None:
+                    w.death_writer.close()
+                    w.death_writer = None
+            if not self._ensure_worker_termination([w.proc for w in workers]):
+                self.cleanup_incomplete = True
+                return
 
-                for w in workers:
-                    # Shutdown response queues
-                    if w.worker_response_mq is not None:
-                        w.worker_response_mq.shutdown()
-                        w.worker_response_mq = None
+            for w in workers:
+                if w.worker_response_mq is not None:
+                    w.worker_response_mq.shutdown()
+                    w.worker_response_mq = None
 
         if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
             rpc_broadcast_mq.shutdown()

@@ -44,6 +44,19 @@ logger = init_logger(__name__)
 
 T = TypeVar("T")
 
+# Keep nested process deadlines tied to the executor's actual escalation stages.
+PROCESS_SHUTDOWN_TIMEOUT_S = 5.0
+ROCM_WORKER_SHUTDOWN_TIMEOUT_S = 15.0
+WORKER_TERMINATE_TIMEOUT_S = 4.0
+WORKER_KILL_TIMEOUT_S = 4.0
+
+
+def get_worker_shutdown_timeout(*, is_rocm: bool) -> float:
+    """Natural worker cleanup grace; explicit environment values win."""
+    if is_rocm and not envs.is_set("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"):
+        return ROCM_WORKER_SHUTDOWN_TIMEOUT_S
+    return float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+
 
 class ConstantList(Generic[T], Sequence):
     def __init__(self, x: list[T]) -> None:
@@ -613,7 +626,7 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     if timeout is None:
         # Keep a small grace period for best-effort cleanup paths that do not
         # have a user-configured shutdown timeout.
-        timeout = 5.0
+        timeout = PROCESS_SHUTDOWN_TIMEOUT_S
 
     logger.debug(
         "[shutdown] Process manager: start process_count=%d timeout=%ss names=%s",

@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import multiprocessing
 import os
+import signal
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -11,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from tests.v1.executor.shutdown_process import shutdown_process
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     KVConnectorOutput,
@@ -67,12 +70,17 @@ class _FakeProcess:
         self.clock = clock
         self.exits_at = exits_at
         self.terminate_called = False
+        self.joined = False
 
     def is_alive(self) -> bool:
         return self.clock.time() < self.exits_at
 
     def terminate(self) -> None:
         self.terminate_called = True
+
+    def join(self, timeout: float) -> None:
+        assert timeout == 0
+        self.joined = True
 
 
 @pytest.mark.parametrize(
@@ -93,6 +101,7 @@ def test_multiproc_executor_worker_termination_timeout(
     proc = _FakeProcess(clock, exits_at=exits_at)
     executor._ensure_worker_termination([proc])  # type: ignore[list-item]
     assert proc.terminate_called is expected_terminate
+    assert proc.joined
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
@@ -321,3 +330,50 @@ def test_ft_rpc_failure_keeps_next_rpc_responses_aligned(
         "recovered0",
         "recovered1",
     ]
+
+
+@pytest.mark.parametrize("force_kill", [False, True])
+def test_worker_shutdown_reaps_real_process(monkeypatch, force_kill):
+    """A normal child exits naturally; a TERM-resistant child is killed and reaped."""
+    monkeypatch.setenv(
+        "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "0" if force_kill else "5"
+    )
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=shutdown_process, args=(child, force_kill))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(10), "child never became ready"
+        assert parent.recv() == "ready"
+        if not force_kill:
+            parent.send("stop")
+        assert MultiprocExecutor._ensure_worker_termination([process])
+        assert not process.is_alive()
+        assert process.exitcode == (-signal.SIGKILL if force_kill else 0)
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(timeout=5)
+        parent.close()
+        process.close()
+
+
+@pytest.mark.parametrize("is_rocm", [False, True])
+@pytest.mark.parametrize("override", [None, "0", "6"])
+def test_worker_cleanup_grace_respects_explicit_environment(
+    monkeypatch, is_rocm, override
+):
+    from vllm import envs
+    from vllm.v1.utils import get_worker_shutdown_timeout
+
+    if override is None:
+        monkeypatch.delenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", override)
+    expected = (
+        15.0
+        if is_rocm and override is None
+        else float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+    )
+    assert get_worker_shutdown_timeout(is_rocm=is_rocm) == expected
