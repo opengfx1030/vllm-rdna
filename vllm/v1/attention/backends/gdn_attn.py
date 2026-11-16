@@ -16,7 +16,6 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
-from vllm.model_executor.layers.mamba.ops.leapquant_gdn import leapquant_gdn_enabled
 from vllm.platforms.rdna import on_rdna2_hip, on_rdna_family
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -93,7 +92,7 @@ def gdn_decode_inplace_enabled(vllm_config: VllmConfig) -> bool:
         )
     elif not _gdn_decode_rdna2_loaded():
         reason = "the gdn_decode_rdna2 op is not built"
-    elif leapquant_gdn_enabled():
+    elif vllm_config.cache_config.replayssm_state_dtype == "leapquant":
         reason = "it does not cover LeapQuant state"
     else:
         return True
