@@ -504,6 +504,12 @@ flip. Raw runs: infrastructure `bench_results/2026-10-13_pp3-mtp2/` and
 
 ### PLE table (Flash-Next)
 
+The opaque AMD PLE lookup allocates embedding rows from the local hidden-state
+shard when HC sequence parallelism is enabled, including padded token counts.
+Its output must match the actual reduce-scatter result exactly; a shape mismatch
+is rejected rather than accepted through broadcasting. The non-SP allocation
+continues to use the input-token count.
+
 | Mode | Env | Host RAM peak | Notes |
 | --- | --- | ---: | --- |
 | `PLE=bf16` | (none) | ~160 GB | Upstream pinned BF16 table. |
