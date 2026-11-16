@@ -461,6 +461,7 @@ steps:
       - vllm/model_executor/layers/quantization
       - vllm/config/
       - tests/kernels/quantization
+      - tests/quantization/test_rdna2_moe_asymmetric.py
       - tests/kernels/quantization/test_rocm_skinny_gemms.py
       - vllm/_aiter_ops.py
       - vllm/kernels/aiter_ops.py
@@ -475,7 +476,7 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/quantization quantization/test_rdna2_moe_asymmetric.py -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test

@@ -425,13 +425,26 @@ def _rdna2_fused_moe(
         and dtype == torch.float16
         and hidden_size == 2560
         and intermediate_size == 640
-        and layer.w13_weight_packed.shape[0] == 128
         and top_k == 10
         and global_num_experts == 512
-        and layer.w13_weight_scale.shape[1] == 20
-        and layer.w2_weight_scale.shape[1] == 5
+        and (
+            (
+                layer.w13_weight_packed.shape[0] == 128
+                and layer.w13_weight_scale.shape[1] == 20
+                and layer.w2_weight_scale.shape[1] == 5
+            )
+            or (
+                not w4a8
+                and zero_v2
+                and hidden_states.shape[1] == 2560
+                and layer.w13_weight_packed.shape == (64, 320, 1280)
+                and layer.w2_weight_packed.shape == (64, 80, 2560)
+                and layer.w13_weight_scale.shape == (64, 80, 1280)
+                and layer.w2_weight_scale.shape == (64, 20, 2560)
+            )
+        )
     )
-    # Tile 8 is measured for this Qwen4-Exp geometry; retain existing choices elsewhere.
+    # Keep the existing tile choices outside these Qwen4-Exp geometries.
     block_size_m = 8 if use_large_prefill_tile8 else (1 if num_tokens <= 4 else 4)
     if w4a8 and _W4A8_BLOCK_M:
         block_size_m = _W4A8_BLOCK_M
@@ -439,7 +452,12 @@ def _rdna2_fused_moe(
     if use_large_prefill_tile8:
         logger.info_once(
             "RDNA2 resident MoE: tile8 prefill active "
-            "(hidden=2560, intermediate=640, local/global experts=128/512, topk=10)"
+            "(hidden=2560, intermediate=640, local/global experts=%d/512, "
+            "topk=10, scale groups=%d/%d, asymmetric-v2=%s)",
+            layer.w13_weight_packed.shape[0],
+            layer.w13_weight_scale.shape[1],
+            layer.w2_weight_scale.shape[1],
+            zero_v2,
         )
 
     if _DETERMINISTIC and routed_accumulator is None:

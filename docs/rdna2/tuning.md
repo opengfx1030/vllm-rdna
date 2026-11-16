@@ -396,6 +396,13 @@ QSA ring alignment requirements remain independent of graph sizes.
 | `VLLM_RDNA_SE_DECODE_MAX` | 32 | Largest token count the fused shared-expert kernels take (fp16 weights; int8 shadows stay at 8). MTP2 verify batches are 18-24 tokens: 9 kernels per call became 2 (gate computed in-kernel). 0 = off (A/B). |
 | `VLLM_RDNA_SE_TILE_MIN` | 9 | From this token count up (fp16 weights, within `VLLM_RDNA_SE_DECODE_MAX`) the shared-expert gate_up runs as one ticketed split-K tile GEMM with the silu*mul in its epilogue and the expert gate in an extra tile (`rdna_se_gate_up_tile`) instead of `se_gate_up_silu_k`, whose one-wave-per-output-pair blocks each re-read all M activation rows (161 waves at TP4; 46 us at M=24). Cold-weight graph replay of the whole shared expert (gate_up + down), us per call at M = 9, 12, 16, 18, 24, 32: 25.4, 33.5, 37.2, 42.4, 50.1, 67.8 -> 18.6, 19.1, 19.9, 21.8, 22.7, 31.6; the gate_up kernel alone at M=24 45.6-50.1 -> 9.7 us. rocprofv3 of a TP4 `flashnext-mtp2` decode step (6 decoders + a 16k prefill, 49 calls per step): the gate_up kernel 2.26 -> 0.60 ms. Below 9 rows the wave kernel stays faster (4.6-5.9 vs ~9.6 us). 0 keeps the wave kernel for every M (A/B). |
 
+The existing `VLLM_RDNA2_MOE_TILE8_MIN_TOKENS` threshold also applies to the
+Qwen4-Exp asymmetric-v2 W4A16 EP8 layout: 64 local experts, group32 scales,
+hidden size 2560, intermediate size 640 and top-10 routing. Other layouts and
+W4A8 retain their existing dispatch. This is a tile-selection extension, not a
+claim of a model-serving speedup; qualify the intended threshold on the target
+recipe before changing its value.
+
 ### Hybrid models (GDN, conv1d, Qwen4Exp hyper-connection, QSA, PLE conv)
 
 | Env | Default | Notes |
