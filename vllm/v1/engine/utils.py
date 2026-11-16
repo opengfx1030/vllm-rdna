@@ -33,7 +33,15 @@ from vllm.utils.system_utils import get_mp_context, set_env_var
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor, UniProcExecutor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
-from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdown
+from vllm.v1.utils import (
+    PROCESS_SHUTDOWN_TIMEOUT_S,
+    WORKER_KILL_TIMEOUT_S,
+    WORKER_TERMINATE_TIMEOUT_S,
+    _SubprocessWrapper,
+    get_engine_client_zmq_addr,
+    get_worker_shutdown_timeout,
+    shutdown,
+)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -41,7 +49,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
-ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S = 15.0
 
 
 def get_engine_process_shutdown_timeout(
@@ -54,21 +61,29 @@ def get_engine_process_shutdown_timeout(
     drain. A value of zero therefore tells EngineCore to abort requests as soon
     as it receives SIGTERM. The parent process manager still needs a separate
     window in which the EngineCore can release device resources before it is
-    force-killed. An explicitly set ``VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS``
-    sets that window on every platform. Otherwise ROCm gets a fixed window:
-    its teardown can take longer than the generic best-effort window, and
-    force-killing during teardown can leave VRAM resident.
+    force-killed. With no explicit worker-timeout override, ROCm workers get
+    the existing 15s natural cleanup grace. The implicit engine window adds
+    the executor's TERM/KILL waits and the generic best-effort process grace
+    for reaping children and finishing EngineCore cleanup. An explicitly set
+    ``VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS`` remains an operator-owned total
+    engine window on every platform; it is not automatically extended.
 
     ``process_timeout`` may be a remaining budget computed by an outer process
-    manager. Keep it unchanged unless both values are zero: a zero remaining
-    budget for a positive request timeout must not receive a fresh grace period
-    because EngineCore relies on that deadline to enforce request draining.
+    manager. Preserve supplied positive windows and exhausted positive request
+    drains. With immediate request abort, zero or an unspecified process timeout
+    needs the same cleanup window: AsyncLLM's best-effort shutdown otherwise
+    falls back to5s and cuts off the workers'15s natural cleanup.
     """
-    if request_timeout == 0 and process_timeout == 0:
+    if request_timeout == 0 and process_timeout in (0, None):
         if envs.is_set("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"):
             return float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
         if current_platform.is_rocm():
-            return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
+            return (
+                get_worker_shutdown_timeout(is_rocm=current_platform.is_rocm())
+                + WORKER_TERMINATE_TIMEOUT_S
+                + WORKER_KILL_TIMEOUT_S
+                + PROCESS_SHUTDOWN_TIMEOUT_S
+            )
     return process_timeout
 
 

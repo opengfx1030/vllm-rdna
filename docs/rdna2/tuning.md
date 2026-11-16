@@ -526,6 +526,16 @@ path (correctness A/B only).
 
 ### Other
 
+ROCm workers have 15 seconds for natural shutdown unless
+`VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS` is explicitly set (including zero). TERM
+and KILL escalation each retain a four-second wait. With immediate request abort
+and no supplied positive process deadline, the implicit ROCm EngineCore window
+is 28 seconds: worker cleanup, both escalation waits, and five seconds for final
+process cleanup. Explicit worker-timeout overrides remain operator-owned total
+engine windows and are not extended; exhausted positive request-drain deadlines
+are not renewed. If a worker remains alive after escalation, the executor keeps
+its queues and records incomplete cleanup rather than releasing live owners.
+
 - `VLLM_USE_BREAKABLE_CUDAGRAPH`: auto-enabled for models whose RDNA path
   needs eager breaks inside FULL graphs (DeepSeek-V4, Qwen3.5/3.8 hybrids).
   Set it explicitly only to override.
