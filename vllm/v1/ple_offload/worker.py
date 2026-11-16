@@ -411,6 +411,8 @@ class _PleQuantTable:
 
         from safetensors import safe_open
 
+        from vllm.platforms import current_platform
+
         with open(os.path.join(quant_dir, "META.json")) as fh:
             meta = json.load(fh)
         self.layout = meta["layout"]
@@ -465,11 +467,22 @@ class _PleQuantTable:
                 .float()
                 .numpy()
             )
+        self._native_int4 = None
+        if (
+            self.layout == "group16_int4_fp16scale_lownibblefirst"
+            and current_platform.is_rocm()
+        ):
+            import vllm._C  # noqa: F401
+
+            self._native_int4 = torch.classes._C.PleInt4Table(
+                self._q, self._s, self.ROWS_PER_SHARD
+            )
         logger.info(
-            "PLE quant table: %s, %d shards mmapped from %s",
+            "PLE quant table: %s, %d shards mmapped from %s, small_gather=%s",
             self.layout,
             n_shards,
             quant_dir,
+            "native" if self._native_int4 is not None else "numpy",
         )
 
     def populate_page_tables(self) -> bool:
@@ -527,6 +540,9 @@ class _PleQuantTable:
                 scl[k] = s_np[sh][row]
             assert self._lut_np is not None
             out[:] = self._lut_np[raw] * scl[:, None]
+            return
+        if self._native_int4 is not None:
+            self._native_int4.gather(torch.from_numpy(ids), torch.from_numpy(out))
             return
         packed = np.empty((n, self.width // 2), dtype=np.uint8)
         g_per_row = self._s_np[0].shape[1]

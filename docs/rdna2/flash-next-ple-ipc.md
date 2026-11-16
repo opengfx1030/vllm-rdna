@@ -1,5 +1,21 @@
 # Flash-Next PLE offload on gfx1030 — CUDA-IPC failure and fix
 
+## Quantized PLE small-batch gather
+
+With `VLLM_PLE_CPU_OFFLOAD=1` and `VLLM_PLE_QUANT_DIR` pointing to a
+`group16_int4_fp16scale_lownibblefirst` sidecar, ROCm builds automatically use
+the native CPU INT4 gather. Rebuild the ROCm `vllm._C` extension when upgrading:
+this layout requires its `PleInt4Table` registration and does not silently
+fall back if the extension is missing or stale. No additional flag is needed.
+FP8 sidecars, other layouts and non-ROCm platforms retain the NumPy path.
+
+The native gather retains the mmap-backed shard tensors and writes directly to
+the caller's FP32 output without temporary dequantization buffers. It promotes
+FP16 group scales to FP32 before multiplication, preserving signed zero, and
+rejects invalid IDs, incompatible layouts/storage and overlapping outputs
+before writing any rows. Shard contents and tensor metadata must not be
+mutated concurrently with a gather.
+
 **Status**: root-caused and fixed 2026-09-14. `expandable_segments` and the
 `is_pinned()` probe were the two blockers; a third (`CpuGpuSemaphore.signal`
 returning `hipError_t(709)`) remains open.
