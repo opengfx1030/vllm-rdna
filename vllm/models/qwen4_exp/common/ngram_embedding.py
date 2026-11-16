@@ -203,6 +203,21 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         embedding_dtype: str | None = None,
     ) -> "Qwen4ExpPLEEmbeddingMethod":
         """Select the concrete PLE embedding format for a layer."""
+        payload = getattr(quant_config, "gguf_ple_payload", None)
+        if payload is not None:
+            if embedding_dtype is not None:
+                raise ValueError("GGUF IQ4_NL PLE is incompatible with embedding_dtype")
+            if envs.VLLM_PLE_QUANT_DIR:
+                raise ValueError("GGUF IQ4_NL PLE conflicts with VLLM_PLE_QUANT_DIR")
+            if envs.VLLM_PLE_CPU_OFFLOAD:
+                raise ValueError(
+                    "GGUF IQ4_NL PLE does not support VLLM_PLE_CPU_OFFLOAD"
+                )
+            if quant_config.get_name() != "gguf":
+                raise ValueError("gguf_ple_payload requires GGUF quantization")
+            from .gguf_ple_embedding import Qwen4ExpPLEGGUFIQ4NLEmbeddingMethod
+
+            return Qwen4ExpPLEGGUFIQ4NLEmbeddingMethod(payload)
         if embedding_dtype == "nvfp4":
             return Qwen4ExpPLENvFp4EmbeddingMethod()
         if embedding_dtype == "float8_e4m3fn":

@@ -14,6 +14,9 @@ from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.modelexpress_loader import (
     ModelExpressModelLoader,
 )
+from vllm.model_executor.model_loader.qwen4exp_gguf_loader import (
+    Qwen4ExpGGUFModelLoader,
+)
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )
@@ -41,6 +44,7 @@ LoadFormats = Literal[
     "modelexpress",
     "npcache",
     "pt",
+    "qwen4exp_gguf",
     "runai_streamer",
     "runai_streamer_sharded",
     "safetensors",
@@ -58,6 +62,7 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "modelexpress": ModelExpressModelLoader,
     "npcache": DefaultModelLoader,
     "pt": DefaultModelLoader,
+    "qwen4exp_gguf": Qwen4ExpGGUFModelLoader,
     "runai_streamer": RunaiModelStreamerLoader,
     "runai_streamer_sharded": ShardedStateLoader,
     "safetensors": DefaultModelLoader,
