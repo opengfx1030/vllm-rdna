@@ -196,6 +196,9 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
     # applied inside the lookup); dequantize() is then the identity.
     lookup_dequantizes: bool = False
 
+    # A decoded lookup does not imply that checkpoint table sources are skipped.
+    external_table_source: bool = False
+
     @staticmethod
     def from_quant_config(
         quant_config: QuantizationConfig | None,
@@ -203,6 +206,14 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         embedding_dtype: str | None = None,
     ) -> "Qwen4ExpPLEEmbeddingMethod":
         """Select the concrete PLE embedding format for a layer."""
+        if quant_config is not None and quant_config.get_name() == "mlx_affine":
+            if embedding_dtype is not None:
+                raise ValueError("native MLX affine PLE cannot override its format")
+            if envs.VLLM_PLE_CPU_OFFLOAD or envs.VLLM_PLE_QUANT_DIR:
+                raise ValueError(
+                    "native MLX affine PLE requires checkpoint GPU weights"
+                )
+            return Qwen4ExpPLEMlxAffineEmbeddingMethod(quant_config, prefix)
         payload = getattr(quant_config, "gguf_ple_payload", None)
         if payload is not None:
             if embedding_dtype is not None:
@@ -566,6 +577,200 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         return embeddings.to(output_dtype)
 
 
+class Qwen4ExpPLEMlxAffineEmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
+    """Whole-row compact checkpoint storage; decode only requested GPU rows."""
+
+    lookup_dequantizes = True
+
+    def __init__(self, quant_config: QuantizationConfig, prefix: str) -> None:
+        self.quant_config = quant_config
+        self.prefix = prefix
+
+    def create_weights(
+        self,
+        layer: Qwen4ExpPLEEmbedding,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size, extra_weight_attrs
+        from functools import partial
+
+        from vllm.model_executor.layers.quantization.mlx_affine_format import (
+            MlxAffineDestination,
+            MlxAffineInterval,
+            MlxAffineSourcePlan,
+        )
+        from vllm.model_executor.model_loader.mlx_affine_loading import (
+            MlxAffineLoadBinding,
+        )
+
+        if not isinstance(layer, Qwen4ExpPLEDeviceEmbedding):
+            raise ValueError("native MLX affine PLE forbids pinned/UVA storage")
+        if params_dtype != torch.float16 or input_size_per_partition != 160:
+            raise ValueError("native MLX affine PLE requires FP16 rows of width 160")
+        checkpoint = self.quant_config.checkpoint
+        if checkpoint is None:
+            raise ValueError("bind native PLE to its checkpoint before construction")
+        rows = sum(output_partition_sizes)
+        for component, width, dtype in (
+            ("weight", 30, torch.int32),
+            ("scales", 5, torch.bfloat16),
+            ("biases", 5, torch.bfloat16),
+        ):
+            parameter = nn.Parameter(
+                layer.allocate_embedding_weight(rows, width, dtype),
+                requires_grad=False,
+            )
+            # Meta construction owns no storage. Materialized tables must stay
+            # on the owning GPU, never in CPU or pinned/UVA memory.
+            if parameter.device.type not in ("cuda", "meta"):
+                raise ValueError("native MLX affine PLE weights must reside on GPU")
+            layer.register_parameter(component, parameter)
+        layer.register_buffer(
+            "weight_scale",
+            torch.empty(1, dtype=torch.bfloat16, device=layer.weight.device),
+        )
+        bindings = []
+        checkpoint_start = 0
+        specs = []
+        for shard_index in range(128):
+            original = self.quant_config._resolve(f"{self.prefix}.shards.{shard_index}")
+            if original is None:
+                raise ValueError(f"missing native PLE shard {shard_index}")
+            spec = self.quant_config.resolve_checkpoint_quantization(original)
+            if (spec.bits, spec.group_size) != (6, 32):
+                raise ValueError("native PLE requires affine6/group32")
+            specs.append(spec)
+            shard_rows = checkpoint.manifest["tensors"][f"{original}.weight"]["shape"][
+                0
+            ]
+            overlap = layer._compute_shard_overlap(
+                checkpoint_start=checkpoint_start, checkpoint_rows=shard_rows
+            )
+            local = ()
+            nonlocal_ = []
+            if overlap is None:
+                nonlocal_.append(MlxAffineInterval(0, shard_rows))
+            else:
+                first = overlap.source_start
+                last = first + overlap.row_count
+                local = (MlxAffineInterval(first, last),)
+                if first:
+                    nonlocal_.append(MlxAffineInterval(0, first))
+                if last < shard_rows:
+                    nonlocal_.append(MlxAffineInterval(last, shard_rows))
+            for component, width, dtype in (
+                ("weight", 30, "U32"),
+                ("scales", 5, "BF16"),
+                ("biases", 5, "BF16"),
+            ):
+                name = f"{original}.{component}"
+                entry = checkpoint.manifest["tensors"][name]
+                if (
+                    entry["shape"] != [shard_rows, width]
+                    or entry["dtype"] != dtype
+                    or entry["layout"] != "identity"
+                ):
+                    raise ValueError(f"invalid native PLE component: {name}")
+                destinations = ()
+                if overlap is not None:
+                    destinations = (
+                        MlxAffineDestination(
+                            component,
+                            MlxAffineInterval(
+                                overlap.destination_start,
+                                overlap.destination_start + overlap.row_count,
+                            ),
+                        ),
+                    )
+                bindings.append(
+                    MlxAffineLoadBinding(
+                        name,
+                        MlxAffineSourcePlan(
+                            local,
+                            tuple(nonlocal_),
+                            destinations,
+                            "PLE vocabulary ownership" if nonlocal_ else None,
+                        ),
+                        {component: rows},
+                        partial(
+                            self._load_component,
+                            layer,
+                            component,
+                            checkpoint_start,
+                            shard_rows,
+                            width,
+                        ),
+                        (component,) if overlap is not None else (),
+                    )
+                )
+            checkpoint_start += shard_rows
+        if checkpoint_start != layer.org_vocab_size or rows != (
+            layer.shard_indices.org_vocab_end_index
+            - layer.shard_indices.org_vocab_start_index
+        ):
+            raise ValueError("native PLE shards must cover complete padded owner rows")
+        self.spec = specs[0]
+        layer._mlx_affine_load_bindings = tuple(bindings)
+        layer.quant_config = self.quant_config
+
+    @staticmethod
+    def _load_component(layer, component, checkpoint_start, rows, width, source):
+        from vllm.model_executor.model_loader.mlx_affine_loading import (
+            copy_mlx_affine_tensor,
+        )
+
+        expected_dtype = torch.uint32 if component == "weight" else torch.bfloat16
+        if source.dtype != expected_dtype or tuple(source.shape) != (rows, width):
+            raise ValueError(f"invalid native PLE {component} source")
+        overlap = layer._compute_shard_overlap(
+            checkpoint_start=checkpoint_start, checkpoint_rows=rows
+        )
+        if overlap is None:
+            return
+        source = source.narrow(0, overlap.source_start, overlap.row_count)
+        if component == "weight":
+            source = source.view(torch.int32)
+        destination = getattr(layer, component).data.narrow(
+            0, overlap.destination_start, overlap.row_count
+        )
+        copy_mlx_affine_tensor(destination, source)
+
+    def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
+        return torch.float16
+
+    def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        from vllm import _custom_ops as ops
+
+        output = torch.empty(
+            (*input_.shape, layer.embedding_dim),
+            dtype=torch.float16,
+            device=input_.device,
+        )
+        ops.oq_affine_embedding_rdna2(
+            input_.reshape(-1).contiguous(),
+            layer.weight,
+            layer.scales,
+            layer.biases,
+            output.view(-1, layer.embedding_dim),
+            6,
+            32,
+            layer.embedding_dim,
+        )
+        return output
+
+    def dequantize(self, layer, embeddings, output_dtype):
+        if output_dtype != torch.float16 or embeddings.dtype != torch.float16:
+            raise ValueError("native PLE lookup must already return FP16")
+        if embeddings.device != layer.weight.device:
+            raise ValueError("native PLE lookup output must remain on its owner GPU")
+        return embeddings
+
+
 class Qwen4ExpPLEInt4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     """INT4 group-16 PLE table loaded from a quantized-table directory.
 
@@ -580,6 +785,7 @@ class Qwen4ExpPLEInt4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     LAYOUT = "group16_int4_fp16scale_lownibblefirst"
     GROUP_SIZE = 16
     lookup_dequantizes = True
+    external_table_source = True
 
     def __init__(self, quant_dir: str) -> None:
         with open(os.path.join(quant_dir, "META.json")) as fh:
@@ -806,7 +1012,19 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
         """Gather ETP IDs, optionally reduce lookup results, and select local rows."""
         slot_size, slot_offset = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
-        embeddings = super().forward(gathered_ids)
+        if isinstance(self.embedding_method, Qwen4ExpPLEMlxAffineEmbeddingMethod):
+            start = self.shard_indices.org_vocab_start_index
+            end = self.shard_indices.org_vocab_end_index
+            local_ids = torch.where(
+                (gathered_ids >= start) & (gathered_ids < end),
+                gathered_ids - start,
+                -1,
+            ).long()
+            embeddings = self.embedding_method.embedding(self, local_ids)
+            if self.reduce_results and self.tp_size > 1:
+                embeddings = self.parallel_group.all_reduce(embeddings)
+        else:
+            embeddings = super().forward(gathered_ids)
         return self._select_embeddings(
             embeddings,
             ngram_ids.shape[0],

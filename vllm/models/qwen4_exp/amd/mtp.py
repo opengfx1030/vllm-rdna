@@ -64,6 +64,7 @@ from .model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
+    is_mlx_affine,
 )
 
 
@@ -96,7 +97,7 @@ def _remap_quantized_layers(
     }
 
 
-def _remap_mtp_weight_name(name: str) -> str | None:
+def _remap_mtp_weight_name(name: str, *, native_affine: bool = False) -> str | None:
     """Map Qwen4Exp checkpoint paths into the standalone draft model."""
     for checkpoint_prefix in (
         "model.language_model.",
@@ -121,6 +122,18 @@ def _remap_mtp_weight_name(name: str) -> str | None:
     if name.startswith("mtp."):
         return name.replace("mtp.", "model.", 1)
     if name.startswith("model.embed_tokens.") or name.startswith("lm_head."):
+        return name
+    # Registered draft indices differ from layer-48 construction prefixes.
+    if native_affine and name.startswith(
+        (
+            "model.fc_embedding.",
+            "model.fc_hidden.",
+            "model.pre_fc_norm_embedding.",
+            "model.pre_fc_norm_hidden.",
+            "model.hyper_connection_mixer.",
+            "model.layers.",
+        )
+    ):
         return name
     return None
 
@@ -207,16 +220,20 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         self.hidden_size = config.hidden_size
         self.hc_count = config.hc_count
 
-        # Under PP the drafter borrows the target embedding of the last stage after
-        # loading (load_eagle_model), so the placeholder stays off the GPU.
-        with _off_gpu_under_pp():
-            self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size, self.hidden_size
-            )
         draft_vllm_config = _make_draft_vllm_config(
             vllm_config,
             self.mtp_start_layer_idx,
         )
+        self.quant_config = draft_vllm_config.quant_config
+        if is_mlx_affine(self.quant_config):
+            if self.num_mtp_layers != 1:
+                raise ValueError("Native affine MTP requires one trained layer")
+            self.embed_tokens = PPMissingLayer()
+        else:
+            with _off_gpu_under_pp():
+                self.embed_tokens = VocabParallelEmbedding(
+                    self.vocab_size, self.hidden_size
+                )
         with set_current_vllm_config(draft_vllm_config, prefix=prefix):
             # residual_linear_shared fusion: fc_embedding projects the token
             # embedding, fc_hidden (shared across HC branches) projects the
@@ -273,6 +290,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             hc_config,
             use_combine=False,
             prefix=maybe_prefix(prefix, "hyper_connection_mixer"),
+            quant_config=draft_vllm_config.quant_config,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.hidden_size * self.hc_count
@@ -445,8 +463,18 @@ class Qwen4ExpMTP(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "mtp"),
         )
+        self.quant_config = self.model.quant_config
+        if is_mlx_affine(self.quant_config):
+            self.has_own_embed_tokens = False
+            self.has_own_lm_head = False
+            self._mlx_affine_shared_aliases = {
+                "model.embed_tokens": "language_model.model.embed_tokens",
+                "lm_head": "language_model.lm_head",
+            }
 
-        if get_pp_group().is_last_rank:
+        if is_mlx_affine(self.quant_config):
+            self.lm_head = PPMissingLayer()
+        elif get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
@@ -495,14 +523,24 @@ class Qwen4ExpMTP(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # exllamav3 ships the drafter's mixer outside the model index.
+        if is_mlx_affine(self.quant_config):
+            from vllm.model_executor.model_loader.mlx_affine_loading import (
+                load_mlx_affine_weights,
+            )
+
+            return load_mlx_affine_weights(self, weights, self._load_weights)
+        # EXL3 alone supplies an out-of-index mixer patch.
         weights = itertools.chain(
             weights, exl3_side_weights("mtp_hyper_connection_mixer_patch.safetensors")
         )
+        return self._load_weights(weights)
 
+    def _load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names():
             for name, weight in weights:
-                remapped_name = _remap_mtp_weight_name(name)
+                remapped_name = _remap_mtp_weight_name(
+                    name, native_affine=is_mlx_affine(self.quant_config)
+                )
                 if remapped_name is not None:
                     yield remapped_name, weight
 

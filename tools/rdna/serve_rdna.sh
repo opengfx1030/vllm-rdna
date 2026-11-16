@@ -259,6 +259,14 @@ case $PLE in
             unset VLLM_PLE_CPU_OFFLOAD
         fi
         ;;
+    mlx-affine)
+        # Published compact checkpoint PLE stays on the owning GPU.
+        unset VLLM_PLE_QUANT_DIR
+        PLE_QUANT_DIR=
+        export VLLM_PLE_CPU_OFFLOAD=0
+        export VLLM_RDNA_DENSE_INT8=0 VLLM_RDNA_DENSE_INT8_ONLY=0
+        export VLLM_RDNA2_W4A8_SDOT4=0
+        ;;
     exl3)
         # exllamav3 checkpoints ship the table as ngram_embedding.safetensors;
         # the CPU sidecar mmaps and decodes it (no PLE_QUANT_DIR).
@@ -267,7 +275,7 @@ case $PLE in
         export VLLM_PLE_CPU_OFFLOAD=1
         export VLLM_PLE_OFFLOAD_READY_TIMEOUT=${VLLM_PLE_OFFLOAD_READY_TIMEOUT:-3600}
         ;;
-    *) rdna_die "PLE must be bf16, int4, int4-disk or exl3 (got '$PLE')." ;;
+    *) rdna_die "PLE must be bf16, int4, int4-disk, exl3 or mlx-affine (got '$PLE')." ;;
 esac
 
 if [[ $TUNED_CONFIG == 1 ]]; then
@@ -405,6 +413,10 @@ elif [[ -n $comp_config ]]; then
     cmd+=(--compilation-config "$comp_config")
 fi
 ((${#spec_args[@]})) && cmd+=("${spec_args[@]}")
+if [[ $PLE == mlx-affine ]]; then
+    # VllmConfig otherwise defaults Engram tables to pinned CPU storage.
+    cmd+=(--engram-config '{"cpu_offload":false}')
+fi
 
 for feat in $FEATURES; do
     case $feat in

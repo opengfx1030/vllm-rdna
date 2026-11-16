@@ -22,6 +22,10 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
 )
+from vllm.model_executor.model_loader.mlx_affine_checkpoint import (
+    MlxAffineCheckpoint,
+    load_mlx_affine_checkpoint,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -83,6 +87,9 @@ class DefaultModelLoader(BaseModelLoader):
         is_unused_weight: Callable[[str], bool] | None = None
         """If defined, safetensors shards holding only weights whose checkpoint
         name (before *prefix*) it accepts are not read."""
+
+        checkpoint: MlxAffineCheckpoint | None = None
+        """A pinned native view admitting tensor components before reading them."""
 
     counter_before_loading_weights: float = 0.0
     counter_after_loading_weights: float = 0.0
@@ -267,6 +274,13 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         extra_config = self.load_config.model_loader_extra_config
+        if source.checkpoint is not None and (
+            self.load_config.load_format not in ("auto", "safetensors")
+            or extra_config.get("enable_multithread_load")
+        ):
+            raise ValueError(
+                "Native affine views require the bounded CPU safetensors loader"
+            )
         hf_folder, hf_weights_files, use_safetensors, index_file = (
             self._prepare_weights(
                 source.model_or_path,
@@ -276,6 +290,10 @@ class DefaultModelLoader(BaseModelLoader):
                 source.allow_patterns_overrides,
             )
         )
+        if source.checkpoint is not None:
+            if not use_safetensors:
+                raise ValueError("Native affine views require safetensors")
+            hf_weights_files = list(source.checkpoint.shard_paths)
         if (
             self._encoder_only_lm_prefixes is not None
             and use_safetensors
@@ -294,7 +312,11 @@ class DefaultModelLoader(BaseModelLoader):
                     f"`{source.model_or_path}`; check language_model prefixes "
                     f"{self._encoder_only_lm_prefixes}"
                 )
-        if source.is_unused_weight is not None and use_safetensors:
+        if (
+            source.checkpoint is None
+            and source.is_unused_weight is not None
+            and use_safetensors
+        ):
             hf_weights_files = filter_safetensors_files_by_weight_name(
                 hf_weights_files, source.is_unused_weight
             )
@@ -340,6 +362,11 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
                         local_expert_ids=self.local_expert_ids,
+                        selected_tensor_names=(
+                            source.checkpoint.tensor_names
+                            if source.checkpoint is not None
+                            else None
+                        ),
                         safetensors_prefetch_num_threads=(
                             self.load_config.safetensors_prefetch_num_threads
                         ),
@@ -374,6 +401,15 @@ class DefaultModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         model: nn.Module,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        checkpoint = None
+        if model_config.quantization == "mlx_affine":
+            if model_config.model_weights:
+                raise ValueError(
+                    "Native affine views do not accept model_weights overrides"
+                )
+            checkpoint = load_mlx_affine_checkpoint(
+                model_config.model, model_config.hf_config.to_dict()
+            )
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
             model_config.revision,
@@ -381,6 +417,7 @@ class DefaultModelLoader(BaseModelLoader):
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
             is_unused_weight=getattr(model, "is_unused_checkpoint_weight", None),
+            checkpoint=checkpoint,
         )
         yield from self._get_weights_iterator(primary_weights)
 
@@ -488,6 +525,9 @@ class DefaultModelLoader(BaseModelLoader):
 
     @instrument(span_name="Load weights")
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+        native_affine = model_config.quantization == "mlx_affine"
+        if native_affine and self.enable_weights_track is False:
+            raise ValueError("Native affine destination validation cannot be disabled")
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)
             if (
@@ -501,17 +541,17 @@ class DefaultModelLoader(BaseModelLoader):
         self._init_mm_encoder_only_weight_filter(model, model_config)
 
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
+        if native_affine and not isinstance(loaded_weights, set):
+            raise ValueError("Native affine loading must return its actual loaded set")
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
         )
-        # We only enable strict check for non-quantized models
-        # that have loaded weights tracking by default.
         default_enable_weights_track = (
-            model_config.quantization is None and loaded_weights is not None
-        )
+            model_config.quantization is None or native_affine
+        ) and loaded_weights is not None
         enable_weights_track = (
             self.enable_weights_track
             if self.enable_weights_track is not None

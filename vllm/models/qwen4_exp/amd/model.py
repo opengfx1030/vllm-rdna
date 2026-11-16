@@ -95,6 +95,10 @@ logger = init_logger(__name__)
 _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
 
 
+def is_mlx_affine(quant_config: QuantizationConfig | None) -> bool:
+    return quant_config is not None and quant_config.get_name() == "mlx_affine"
+
+
 def without_modelopt_fp4(
     quant_config: QuantizationConfig | None,
 ) -> QuantizationConfig | None:
@@ -158,12 +162,12 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
 # into adjacent logical shards of a MergedColumnParallelLinear.
 _EXTRA_WEIGHTS_MAPPER = WeightsMapper(
     orig_to_new_stacked={
-        "hyper_connection.input_mix_weight_down.weight": (
-            "hyper_connection.input_mix_weight_down_block_inject.weight",
+        "hyper_connection.input_mix_weight_down.": (
+            "hyper_connection.input_mix_weight_down_block_inject.",
             0,
         ),
-        "hyper_connection.block_inject_weight.weight": (
-            "hyper_connection.input_mix_weight_down_block_inject.weight",
+        "hyper_connection.block_inject_weight.": (
+            "hyper_connection.input_mix_weight_down_block_inject.",
             1,
         ),
         "ple.key_proj": ("ple.kv_proj", 0),
@@ -276,10 +280,12 @@ class Qwen4ExpDecoderLayer(nn.Module):
         self.attn_hyper_connection = GatedResidual(
             hc_config,
             prefix=maybe_prefix(prefix, "attn_hyper_connection"),
+            quant_config=quant_config,
         )
         self.mlp_hyper_connection = GatedResidual(
             hc_config,
             prefix=maybe_prefix(prefix, "mlp_hyper_connection"),
+            quant_config=quant_config,
         )
 
         # --monokernel (gfx10x): forward-context names of this layer's K1 / K2
@@ -486,7 +492,16 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
-        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(
+            self.vocab_size,
+            config.hidden_size,
+            quant_config=(
+                vllm_config.quant_config
+                if is_mlx_affine(vllm_config.quant_config)
+                else None
+            ),
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
         mono_decode_rdna2.install(vllm_config)  # --monokernel: checks + hooks
 
         def get_layer(prefix: str) -> Qwen4ExpDecoderLayer:
@@ -525,6 +540,7 @@ class Qwen4ExpModel(nn.Module):
                 hc_config,
                 use_combine=False,
                 prefix=maybe_prefix(prefix, "hyper_connection_mixer"),
+                quant_config=vllm_config.quant_config,
             )
         else:
             self.hyper_connection_mixer = None
@@ -791,7 +807,8 @@ class Qwen4ExpForCausalLM(
         # ship it dense.
         head_quant = (
             self.quant_config
-            if self.quant_config is not None and self.quant_config.get_name() == "exl3"
+            if self.quant_config is not None
+            and self.quant_config.get_name() in ("exl3", "mlx_affine")
             else None
         )
         # Only the last stage computes logits. Keeping the head elsewhere would
@@ -978,6 +995,15 @@ class Qwen4ExpForCausalLM(
         return positions.unsqueeze(0).expand(3, -1), 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if is_mlx_affine(self.quant_config):
+            from vllm.model_executor.model_loader.mlx_affine_loading import (
+                load_mlx_affine_weights,
+            )
+
+            return load_mlx_affine_weights(self, weights, self._load_weights)
+        return self._load_weights(weights)
+
+    def _load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={"mtp.": None}
         )
@@ -1030,6 +1056,7 @@ class Qwen4ExpForConditionalGeneration(
         nn.Module.__init__(self)
         config: Qwen4ExpConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is None:
             raise ValueError(
@@ -1179,6 +1206,15 @@ class Qwen4ExpForConditionalGeneration(
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if is_mlx_affine(self.quant_config):
+            from vllm.model_executor.model_loader.mlx_affine_loading import (
+                load_mlx_affine_weights,
+            )
+
+            return load_mlx_affine_weights(self, weights, self._load_weights)
+        return self._load_weights(weights)
+
+    def _load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={"mtp.": None},
             orig_to_new_prefix={"visual.": None} if self.language_model_only else {},

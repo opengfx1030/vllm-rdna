@@ -5,6 +5,7 @@ import glob
 import tempfile
 
 import huggingface_hub.constants
+import pytest
 import torch
 from safetensors.torch import save_file
 
@@ -34,6 +35,50 @@ def test_runai_safetensors_weights_iterator_clones_reused_buffers(
     assert actual_tensors["first"].data_ptr() != actual_tensors["second"].data_ptr()
     for name, expected_tensor in expected_tensors.items():
         assert torch.equal(actual_tensors[name], expected_tensor)
+
+
+@pytest.mark.parametrize(
+    "iterator", [runai_safetensors_weights_iterator, safetensors_weights_iterator]
+)
+def test_manifest_selection_preserves_only_the_selected_view(
+    tmp_path, monkeypatch, iterator
+):
+    """A mixed target/draft shard must not leak draft components into the target."""
+    monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "0")
+    weights_file = tmp_path / "mixed.safetensors"
+    tensors = {
+        "target.weight": torch.tensor([[0, 2**31, 2**32 - 1]], dtype=torch.uint32),
+        "target.scales": torch.tensor([[2**-130]], dtype=torch.bfloat16),
+        "target.biases": torch.tensor([[-(2**20)]], dtype=torch.bfloat16),
+        "mtp.weight": torch.tensor([[17, 29, 43]], dtype=torch.uint32),
+        "mtp.scales": torch.tensor([[1]], dtype=torch.bfloat16),
+        "mtp.biases": torch.tensor([[0]], dtype=torch.bfloat16),
+    }
+    save_file(tensors, weights_file)
+    for prefix in ("target.", "mtp."):
+        selected = frozenset(name for name in tensors if name.startswith(prefix))
+        actual = dict(
+            iterator([str(weights_file)], False, selected_tensor_names=selected)
+        )
+        assert actual.keys() == selected
+        for name in selected:
+            assert actual[name].dtype == tensors[name].dtype
+            assert torch.equal(actual[name], tensors[name])
+
+
+def test_manifest_selection_rejects_whole_shard_or_gpu_staging():
+    with pytest.raises(ValueError, match="CPU staging"):
+        list(
+            runai_safetensors_weights_iterator(
+                [], False, True, selected_tensor_names=frozenset({"target.weight"})
+            )
+        )
+    with pytest.raises(ValueError, match="lazy CPU"):
+        list(
+            safetensors_weights_iterator(
+                [], False, "eager", selected_tensor_names=frozenset({"target.weight"})
+            )
+        )
 
 
 def test_runai_model_loader():

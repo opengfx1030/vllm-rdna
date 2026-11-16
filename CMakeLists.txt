@@ -1667,6 +1667,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/int4_fp16_kv_cache.cu"
       "csrc/rocm/gemm_w8a8_fp8_dense_rdna2.cu"
       "csrc/rocm/moe_q_gemm_rdna2.cu"
+      "csrc/rocm/oq_affine_rdna2.cu"
+      "csrc/rocm/moe_oq_affine_rdna2.cu"
       "csrc/rocm/moe_w4a8_rdna2.cu"
       "csrc/rocm/gdn_decode_rdna2.cu"
       "csrc/rocm/gdn_leapquant_rdna2.cu"
@@ -1744,7 +1746,20 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     set_source_files_properties(
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.hip"
       PROPERTIES COMPILE_OPTIONS "-O3")
+    find_package(rocblas REQUIRED CONFIG
+      HINTS "${HIP_ROOT_DIR}/lib/cmake/rocblas")
+    target_link_libraries(_rocm_C PRIVATE roc::rocblas)
   endif()
+
+  # Published BF16 affine metadata is reconstructed with separate FP32
+  # multiply/add rounding before FP16 conversion, including subnormals.
+  get_target_property(_oq_affine_sources _rocm_C SOURCES)
+  foreach(_oq_affine_source IN LISTS _oq_affine_sources)
+    if(_oq_affine_source MATCHES "(^|/)(moe_)?oq_affine_rdna2\\.(cu|hip)$")
+      set_property(SOURCE "${_oq_affine_source}" APPEND PROPERTY COMPILE_OPTIONS
+        "-fno-fast-math" "-ffp-contract=off" "-fdenormal-fp-math=ieee")
+    endif()
+  endforeach()
   
   if(TARGET _rocm_C_skinny)
     target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)

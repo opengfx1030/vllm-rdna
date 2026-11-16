@@ -183,6 +183,37 @@ def test_qwen4_exp_mtp_override_sets_draft_config(
     assert draft_config.n_predict == 1
 
 
+@pytest.mark.parametrize("draft_first", [False, True])
+def test_standalone_mtp_config_preserves_target_identity(tmp_path, draft_first):
+    from vllm.transformers_utils.config import get_config
+
+    target = Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config=_text_config(hc_count=4),
+    )
+    target_path, draft_path = tmp_path / "target", tmp_path / "draft"
+    target.save_pretrained(target_path)
+    draft_document = target.to_dict()
+    draft_document.update(
+        model_type="qwen4_exp_mtp",
+        architectures=["Qwen4ExpMTP"],
+    )
+    draft_path.mkdir()
+    import json
+
+    (draft_path / "config.json").write_text(json.dumps(draft_document))
+    paths = [draft_path, target_path] if draft_first else [target_path, draft_path]
+    loaded = {path: get_config(path, trust_remote_code=False) for path in paths}
+    draft = SpeculativeConfig.hf_config_override(loaded[draft_path])
+    assert draft.model_type == "qwen4_exp_mtp"
+    assert draft.architectures == ["Qwen4ExpMTP"]
+    assert draft.hc_mult == 4 and draft.n_predict == 1
+    assert draft.text_config.num_hidden_layers == target.text_config.num_hidden_layers
+    assert draft.text_config.layer_types == target.text_config.layer_types
+    assert loaded[target_path].model_type == Qwen4ExpConfig.model_type == "qwen4_exp"
+    assert get_config(target_path, trust_remote_code=False).model_type == "qwen4_exp"
+
+
 def _pp_vllm_config(ple_layer_ids, pipeline_parallel_size=2):
     return SimpleNamespace(
         model_config=SimpleNamespace(

@@ -1118,6 +1118,7 @@ def safetensors_weights_iterator(
     safetensors_load_strategy: str | None = None,
     local_expert_ids: set[int] | None = None,
     *,
+    selected_tensor_names: frozenset[str] | None = None,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
@@ -1127,6 +1128,13 @@ def safetensors_weights_iterator(
     this rank are skipped **before** reading from disk, which drastically
     reduces storage I/O for MoE models under EP.
     """
+    if selected_tensor_names is not None and safetensors_load_strategy not in (
+        None,
+        "lazy",
+    ):
+        raise ValueError(
+            "Manifest-selected weights require lazy CPU safetensors loading"
+        )
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
@@ -1243,6 +1251,11 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
+                    if (
+                        selected_tensor_names is not None
+                        and name not in selected_tensor_names
+                    ):
+                        continue
                     if should_skip_weight(name, local_expert_ids):
                         continue
                     param = f.get_tensor(name)
@@ -1283,8 +1296,12 @@ def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     is_distributed: bool = False,
+    *,
+    selected_tensor_names: frozenset[str] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
+    if selected_tensor_names is not None and is_distributed:
+        raise ValueError("Manifest-selected RunAI weights require CPU staging")
     with SafetensorsStreamer() as streamer:
         is_cuda_alike = current_platform.is_cuda_alike()
         device = (
@@ -1313,6 +1330,8 @@ def runai_safetensors_weights_iterator(
         )
 
         for name, tensor in tensor_iter:
+            if selected_tensor_names is not None and name not in selected_tensor_names:
+                continue
             yield name, tensor.clone()
 
 
@@ -1528,6 +1547,16 @@ def multi_thread_pt_weights_iterator(
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
+    from vllm.model_executor.model_loader.mlx_affine_loading import (
+        copy_mlx_affine_tensor,
+        is_mlx_affine_loading,
+    )
+
+    if is_mlx_affine_loading():
+        if param.numel() == 1 and loaded_weight.numel() == 1:
+            loaded_weight = loaded_weight.view(param.shape)
+        copy_mlx_affine_tensor(param.data, loaded_weight)
+        return
     try:
         if param.numel() == 1 and loaded_weight.numel() == 1:
             # Sometimes scalar values aren't considered tensors with shapes

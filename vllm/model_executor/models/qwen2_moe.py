@@ -93,6 +93,8 @@ def _rdna_shared_expert_ok(mlp, x: torch.Tensor) -> bool:
     if _GCN_ARCH.split(":", 1)[0] != "gfx1030" or mlp._exl3_fp16_activation:
         return False
     for lin in (mlp.gate_up_proj, mlp.down_proj, mlp.expert_gate):
+        if getattr(lin, "_mlx_affine_load_bindings", None):
+            return False
         if getattr(lin, "bias", None) is not None:
             return False
         weight = getattr(lin, "weight", None)

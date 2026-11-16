@@ -321,6 +321,44 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 #endif  // VLLM_SKIP_SKINNY_GEMMS
 
 #ifdef VLLM_ROCM_GFX1030
+  rocm_ops.def(
+      "oq_affine_linear_rdna2(Tensor x, Tensor codes, Tensor scales, Tensor "
+      "biases, "
+      "Tensor(a!) out, int bits, int group_size, int logical_k_start, "
+      "int code_bit_offset, int metadata_group_start, int output_offset, "
+      "int block_m, int tile_n) -> ()");
+  rocm_ops.impl("oq_affine_linear_rdna2", torch::kCUDA,
+                &oq_affine_linear_rdna2);
+  rocm_ops.def(
+      "oq_affine_linear_staged_rdna2(Tensor x, Tensor codes, Tensor scales, "
+      "Tensor biases, Tensor(a!) out, Tensor(b!) workspace, int bits, "
+      "int group_size, int logical_k_start, int code_bit_offset, "
+      "int metadata_group_start, int output_offset) -> ()");
+  rocm_ops.impl("oq_affine_linear_staged_rdna2", torch::kCUDA,
+                &oq_affine_linear_staged_rdna2);
+  rocm_ops.def(
+      "oq_affine_embedding_rdna2(Tensor ids, Tensor codes, Tensor scales, "
+      "Tensor biases, Tensor(a!) out, int bits, int group_size, "
+      "int embedding_dim) -> ()");
+  rocm_ops.impl("oq_affine_embedding_rdna2", torch::kCUDA,
+                &oq_affine_embedding_rdna2);
+  rocm_ops.def(
+      "moe_oq_affine_gemm_rdna2(Tensor x, Tensor codes, Tensor scales, Tensor "
+      "biases, "
+      "Tensor topk_ids, Tensor expert_map, Tensor sorted_ids, Tensor "
+      "expert_ids, "
+      "Tensor post_pad, Tensor(a!) out, int bits, int group_size, "
+      "int input_divisor, int block_m, int tile_n) -> ()");
+  rocm_ops.impl("moe_oq_affine_gemm_rdna2", torch::kCUDA,
+                &moe_oq_affine_gemm_rdna2);
+  rocm_ops.def("oq_silu_mul_rdna2(Tensor gate_up, Tensor(a!) act) -> ()");
+  rocm_ops.impl("oq_silu_mul_rdna2", torch::kCUDA, &oq_silu_mul_rdna2);
+  rocm_ops.def(
+      "oq_moe_reduce_rdna2(Tensor slots, Tensor topk_weights, Tensor(a!) "
+      "output, "
+      "bool mul_router_weight) -> ()");
+  rocm_ops.impl("oq_moe_reduce_rdna2", torch::kCUDA, &oq_moe_reduce_rdna2);
+
   // W4A16 GPTQ kernel for AMD RDNA2 (gfx1030).
   rocm_ops.def(
       "gptq_gemm_rdna2(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "

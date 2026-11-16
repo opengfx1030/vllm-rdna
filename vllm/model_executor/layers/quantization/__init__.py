@@ -40,6 +40,7 @@ QuantizationMethods = Literal[
     "gpt_oss_mxfp4",
     "deepseek_v4_fp8",
     "exl3",
+    "mlx_affine",
     "online",
     # Below are online quant shorthand names (see vllm.config.quantization).
     # Listed here as strings to avoid a circular import; kept in sync with
@@ -155,6 +156,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fp_quant import FPQuantConfig
     from .humming import HummingConfig
     from .inc import INCConfig
+    from .mlx_affine import MlxAffineConfig
     from .modelopt import (
         ModelOptFp8Config,
         ModelOptMixedPrecisionConfig,
@@ -190,6 +192,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
         "exl3": Exl3Config,
+        "mlx_affine": MlxAffineConfig,
         **{name: RdnaHintFlexConfig for name in RDNA_HINT_FLEX_QUANT_METHOD_NAMES},
         "deepseek_v4_fp8": deepseek_config,
         "humming": HummingConfig,
