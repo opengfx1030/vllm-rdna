@@ -120,3 +120,56 @@ def test_unrouted_expert_slots_are_made_harmless(monkeypatch):
     assert seen["ids"].tolist() == [[3, 0], [0, 0]]
     assert seen["w"].tolist() == [[0.5, 0.0], [0.0, 0.0]]
     assert ids.tolist() == [[3, -1], [-1, -1]]  # caller's tensors are untouched
+
+
+def _chunk_probe(monkeypatch):
+    calls: list[int] = []
+
+    class FakeMoEMethod:
+        def apply(self, layer, x, topk_weights, topk_ids, shared, shared_in):
+            calls.append(x.shape[0])
+            return x + 1
+
+    monkeypatch.setattr(
+        compat.importlib,
+        "import_module",
+        _fake_import(
+            {compat._MOE_MODULE: types.SimpleNamespace(GGUFMoEMethod=FakeMoEMethod)}
+        ),
+    )
+    return compat.get_loader_moe_method_cls()(), calls
+
+
+def _run(method, rows, experts):
+    x = torch.arange(rows, dtype=torch.float32).view(rows, 1)
+    ids = torch.zeros(rows, 2, dtype=torch.int32)
+    out = method.apply(
+        types.SimpleNamespace(global_num_experts=experts),
+        x,
+        torch.ones(rows, 2),
+        ids,
+        None,
+        None,
+    )
+    assert torch.equal(out, x + 1)  # slices come back in order
+
+
+def test_big_batches_of_a_many_expert_model_stay_on_the_vector_kernel(monkeypatch):
+    # the plugin's MMQ kernel drops experts 256+ and handles > 64 tokens only
+    method, calls = _chunk_probe(monkeypatch)
+    _run(method, 150, 512)
+    assert calls == [64, 64, 22]
+
+
+def test_small_batches_and_small_expert_counts_are_passed_through(monkeypatch):
+    method, calls = _chunk_probe(monkeypatch)
+    _run(method, 64, 512)
+    _run(method, 150, 256)
+    assert calls == [64, 150]
+
+
+def test_a_fixed_plugin_can_lift_the_expert_limit(monkeypatch):
+    monkeypatch.setenv(compat._MMQ_MAX_EXPERTS_ENV, "512")
+    method, calls = _chunk_probe(monkeypatch)
+    _run(method, 150, 512)
+    assert calls == [150]

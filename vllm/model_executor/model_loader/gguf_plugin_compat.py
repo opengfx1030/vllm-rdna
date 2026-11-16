@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import os
 from typing import Any
 
 import torch
@@ -68,34 +69,69 @@ def get_gguf_moe_method_cls() -> type:
     return _symbol(_MOE_MODULE, "GGUFMoEMethod")
 
 
+# vllm-gguf-plugin runs the packed-expert GEMM with the MMQ kernel (`moe_q`) for
+# batches of more than this many tokens and with the per-slot vector kernel
+# (`moe_vec_q`) otherwise (fused_moe.py in the plugin).
+_PLUGIN_MMQ_MIN_TOKENS = 65
+
+# `moe_q` returns early for expert ids above 255 (hard-coded in the plugin's
+# moe.cuh), so it silently drops the contribution of experts 256+ . Models with
+# more experts than this are fed to the vector kernel in slices instead. A plugin
+# built without that bound can lift the limit with the variable below.
+_MMQ_MAX_EXPERTS_ENV = "VLLM_QWEN4EXP_GGUF_MMQ_MAX_EXPERTS"
+_PLUGIN_MMQ_MAX_EXPERTS = 256
+
+
+def _mmq_max_experts() -> int:
+    return int(os.environ.get(_MMQ_MAX_EXPERTS_ENV, _PLUGIN_MMQ_MAX_EXPERTS))
+
+
 @functools.cache
-def _skip_unrouted_experts(base: type) -> type:
-    class SkipUnroutedExpertsMoEMethod(base):  # type: ignore[misc, valid-type]
-        """``topk_ids < 0`` means "no expert" in vLLM; the plugin kernels read
-        ``expert * stride`` unchecked, so -1 is an out-of-bounds weight read
-        (GPU memory fault seen on gfx1030 during CUDA-graph warmup, where the
-        dummy batch routes every slot to -1). Route those slots to expert 0
-        with weight 0: they add exactly zero to the output.
+def _harden_moe_method(base: type) -> type:
+    class HardenedGGUFMoEMethod(base):  # type: ignore[misc, valid-type]
+        """The plugin's MoE method with two kernel limits worked around.
+
+        * ``topk_ids < 0`` means "no expert" in vLLM; the plugin kernels read
+          ``expert * stride`` unchecked, so -1 is an out-of-bounds weight read
+          (GPU memory fault seen on gfx1030 during CUDA-graph warmup, where the
+          dummy batch routes every slot to -1). Those slots go to expert 0 with
+          weight 0: they add exactly zero to the output.
+        * Batches above the plugin's MMQ threshold are split into slices that
+          stay on the vector kernel when the model has more experts than the
+          MMQ kernel supports (see ``_MMQ_MAX_EXPERTS_ENV``).
         """
 
         def apply(self, layer, x, topk_weights, topk_ids, *args, **kwargs):
-            valid = topk_ids >= 0
-            return super().apply(
-                layer,
-                x,
-                topk_weights * valid,
-                topk_ids.clamp(min=0),
-                *args,
-                **kwargs,
+            topk_weights = topk_weights * (topk_ids >= 0)
+            topk_ids = topk_ids.clamp(min=0)
+            rows = x.shape[0]
+            step = _PLUGIN_MMQ_MIN_TOKENS - 1
+            if (
+                rows <= step
+                or getattr(layer, "global_num_experts", 0) <= _mmq_max_experts()
+            ):
+                return super().apply(layer, x, topk_weights, topk_ids, *args, **kwargs)
+            return torch.cat(
+                [
+                    super(HardenedGGUFMoEMethod, self).apply(
+                        layer,
+                        x[i : i + step],
+                        topk_weights[i : i + step],
+                        topk_ids[i : i + step],
+                        *args,
+                        **kwargs,
+                    )
+                    for i in range(0, rows, step)
+                ]
             )
 
-    SkipUnroutedExpertsMoEMethod.__name__ = f"SkipUnrouted{base.__name__}"
-    return SkipUnroutedExpertsMoEMethod
+    HardenedGGUFMoEMethod.__name__ = f"Hardened{base.__name__}"
+    return HardenedGGUFMoEMethod
 
 
 def get_loader_moe_method_cls() -> type:
-    """The plugin's MoE method, hardened against ``topk_ids == -1``."""
-    return _skip_unrouted_experts(get_gguf_moe_method_cls())
+    """The plugin's MoE method with its kernel limits worked around."""
+    return _harden_moe_method(get_gguf_moe_method_cls())
 
 
 def store_gguf_weight_type(
