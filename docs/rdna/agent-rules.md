@@ -39,8 +39,9 @@
 - **Cudagraphs are the production path.** Serving runs `FULL_AND_PIECEWISE`;
   a change must stay correct both there and under `--enforce-eager`, and any
   speed change needs an A/B against the current branch.
-- **Benchmarks report four numbers per cell:** prefill tok/s, decode tok/s per
-  request, TTFT (s) and ITL (ms), for 16k/1k and 1k/512 at c=1 and c=8.
+- **Benchmarks follow the speed receipt** of `.github/CONTRIBUTING.md`: its cell
+  matrix, metrics and ABBA rule are the standard, and `tools/rdna/pr_receipt.sh`
+  produces the table.
 
 ## Where RDNA docs live
 
@@ -50,6 +51,7 @@
 | Serve launcher and recipes | `tools/rdna/serve_rdna.sh`, `tools/rdna/recipes/` |
 | Kernel and V620 notes | `docs/rdna2/` |
 | TunableOp profiles | `tunableop/` |
+| Contribution contract, PR receipt | `.github/CONTRIBUTING.md`, `tools/rdna/pr_receipt.sh`, `tools/rdna/archdiff.sh` |
 
 Do not invent tok/s or hardware claims. Prefer editing a recipe over hard-coding
 host paths.
