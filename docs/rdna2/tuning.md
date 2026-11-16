@@ -25,6 +25,21 @@ actually sets. The human walkthrough of the launcher and every recipe is
   upstream/Triton path on gfx11. Nothing here is validated on RDNA3 yet, and
   the shipped TunableOp rows are for one gfx1030 rocBLAS build only.
 
+## Long-context quality evidence
+
+`tools/rdna/port_v031/quality_ab.py collect` accepts `--key-file` for protected
+APIs and `--require-cold-cache` to require explicit zero cached-token usage.
+Enable server prompt-token details when requiring a cold cache. Each echo and
+greedy request uses a distinct recorded cache salt; bearer keys are not recorded.
+Freeze the input files and use the same `--files` for both arms.
+
+Collections retain raw responses and unrounded scores, including partial evidence
+if a request fails. `compare` rejects incomplete collections, mismatched passage
+bytes or tokenization, unequal counts, missing or nonfinite scores, and reused
+cache salts. It recomputes PPL from the actual scores rather than trusting stored
+summaries. Recollect legacy bundles lacking this evidence; do not edit old results
+to make them pass. Greedy divergence remains separate from the PPL verdict.
+
 ## Fork CLI / config parameters
 
 | Flag | Default | What it does |
