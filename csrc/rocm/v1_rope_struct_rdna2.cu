@@ -56,7 +56,7 @@ __global__ void prepare_rope_positions_kernel(
     const int32_t orig_pos = num_computed + i;
     for (int32_t j = 0; j < num_dims; ++j) {
       int64_t pos;
-      if (is_prefill) {
+      if (is_prefill && orig_pos < prefill_len) {
         pos = (int64_t)request[(int64_t)j * prefill_stride1 + orig_pos];
       } else {
         pos = (int64_t)(orig_pos + delta);

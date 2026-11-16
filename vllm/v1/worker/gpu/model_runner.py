@@ -465,6 +465,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
+        if isinstance(self.speculator, DraftModelSpeculator):
+            # Memory-profile proposals precede set_attn/KV-cache initialization.
+            self.speculator.model_state = self.model_state
 
         self.decode_query_len = (
             self.num_speculative_steps

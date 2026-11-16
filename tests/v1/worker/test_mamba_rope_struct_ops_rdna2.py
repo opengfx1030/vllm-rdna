@@ -846,6 +846,62 @@ def test_prepare_rope_positions_serving_boundaries():
     assert torch.equal(ref, got)
 
 
+@pytest.mark.parametrize("num_dims", [3, 4])
+@pytest.mark.parametrize("prefill_len", [8, 32])
+@torch.inference_mode()
+def test_prepare_rope_positions_cross_prompt_boundary(num_dims, prefill_len):
+    """Speculative rows use delta, not unstaged prompt data or the next axis."""
+    max_model_len = 32
+    # Extra backing storage makes an erroneous final-axis overread observable
+    # as poison rather than allowing the pre-fix kernel to fault the device.
+    storage = torch.full(
+        (num_dims * max_model_len + 4,), -9999, dtype=torch.int32, device=DEVICE
+    )
+    prefill_positions = storage[:num_dims * max_model_len].view(
+        num_dims, max_model_len
+    )
+    prompt = torch.arange(num_dims * prefill_len, device=DEVICE).view(
+        num_dims, prefill_len
+    ).to(torch.int32)
+    prefill_positions[:, :prefill_len].copy_(prompt)
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    query_start_loc = torch.tensor([0, 5], dtype=torch.int32, device=DEVICE)
+    prefill_lens = torch.tensor([prefill_len], dtype=torch.int32, device=DEVICE)
+    num_computed = torch.tensor([prefill_len - 2], dtype=torch.int32, device=DEVICE)
+    delta = torch.tensor([-3], dtype=torch.int32, device=DEVICE)
+    ref = torch.full((num_dims, 8), -12345, dtype=torch.int64, device=DEVICE)
+    got = ref.clone()
+
+    def prepare():
+        triton_rope(ref, prefill_positions, delta, idx_mapping, query_start_loc,
+                    prefill_lens, num_computed, num_dims, max_model_len)
+        hip_rope(got, prefill_positions, delta, idx_mapping, query_start_loc,
+                 prefill_lens, num_computed, num_dims, max_model_len)
+
+    prepare()
+    expected = torch.full_like(ref, -12345)
+    expected[:, :2] = prompt[:, -2:]
+    expected[:, 2:5] = torch.arange(prefill_len - 3, prefill_len, device=DEVICE)
+    assert torch.equal(ref, expected)
+    assert torch.equal(got, expected)
+
+    warmup = torch.cuda.Stream()
+    warmup.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup):
+        prepare()
+    torch.cuda.current_stream().wait_stream(warmup)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        prepare()
+    delta.add_(2)
+    prefill_positions[:, :prefill_len].add_(7)
+    graph.replay()
+    expected[:, :2].add_(7)
+    expected[:, 2:5].add_(2)
+    assert torch.equal(ref, expected)
+    assert torch.equal(got, expected)
+
+
 # ===========================================================================
 # _apply_grammar_bitmask_kernel
 # ===========================================================================

@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.mrope import MropeInputBuffers
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
@@ -47,6 +48,18 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
         self.sample_src_positions = torch.zeros(
             self.max_num_reqs, dtype=torch.int64, device=device
+        )
+
+        self.mrope_inputs = (
+            MropeInputBuffers(
+                self.draft_model_config.mrope_num_dims,
+                self.max_num_reqs,
+                self.max_num_tokens,
+                device,
+            )
+            if self.draft_model_config.uses_mrope
+            and vllm_config.model_config.uses_mrope
+            else None
         )
 
         self.inputs_embeds: torch.Tensor | None = None
@@ -245,6 +258,14 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             next_prefill_tokens,
             self.max_num_reqs,
         )
+        if self.mrope_inputs is not None:
+            rope_state = getattr(self.model_state, "rope_state", None)
+            assert rope_state is not None
+            self.mrope_inputs.prepare_prefill(
+                rope_state.get_positions(num_tokens_padded),
+                self.last_token_indices[:num_reqs],
+                self.input_buffers.positions[:num_tokens_padded],
+            )
 
         if self.pcp_manager is not None:
             self.pcp_manager.prepare_draft_prefill(
@@ -394,6 +415,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_buffers: InputBatch | InputBuffers = self.input_buffers
         is_padding = None
@@ -429,7 +451,11 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
             model_inputs = dict(
                 input_ids=input_buffers.input_ids[:num_tokens],
-                positions=input_buffers.positions[:num_tokens],
+                positions=(
+                    input_buffers.positions[:num_tokens]
+                    if positions is None
+                    else positions
+                ),
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
@@ -478,6 +504,11 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
+            positions=(
+                self.mrope_inputs.get_prefill_positions(num_tokens)
+                if self.mrope_inputs is not None
+                else None
+            ),
         )
         if self.pcp_manager is not None:
             last_hidden_states, hidden_states = self.pcp_manager.restore_draft_prefill(
@@ -666,6 +697,13 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
+            positions=(
+                self.mrope_inputs.get_decode_positions(
+                    self.input_buffers.positions[:num_tokens_padded]
+                )
+                if self.mrope_inputs is not None
+                else None
+            ),
         )
 
         # Sample the draft tokens.

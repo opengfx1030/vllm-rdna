@@ -223,8 +223,10 @@ def _prepare_rope_positions_kernel(
                     + req_state_idx * prefill_positions_stride0
                     + j * prefill_positions_stride1
                     + orig_pos,
-                    mask=mask,
+                    mask=mask & (orig_pos < prefill_len),
+                    other=0,
                 )
+                pos = tl.where(orig_pos < prefill_len, pos, orig_pos + delta)
             else:
                 pos = orig_pos + delta
             tl.store(
