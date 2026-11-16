@@ -2843,31 +2843,58 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
 @spawn_new_process_for_each_test
 def test_amd_ple_loads_regular_weights_before_advancing_stream(tmp_path):
     """A real loader must consume a staging tensor before its producer reuses it."""
-    from vllm.config import EngramConfig, set_current_vllm_config
+    from transformers import Qwen4ExpConfig
+
+    from vllm.config import EngramConfig, ModelConfig, set_current_vllm_config
     from vllm.distributed import (
         cleanup_dist_env_and_memory,
         init_distributed_environment,
         initialize_model_parallel,
     )
 
-    config = VllmConfig(engram_config=EngramConfig(cpu_offload=False))
     text = Qwen4ExpTextConfig(
-        ngram_size=3, heads_per_ngram=1, ngram_vocab_size_base=5,
-        make_ngram_vocab_size_divisible_by=8, split_ngram_parts=2,
-        ple_embed_dim=6, eos_token_id=0, vocab_size=64,
+        ngram_size=3,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=5,
+        make_ngram_vocab_size_divisible_by=8,
+        split_ngram_parts=2,
+        ple_embed_dim=6,
+        eos_token_id=0,
+        vocab_size=64,
+        ple_layer_ids=[1],
+    )
+    model_path = tmp_path / "model"
+    Qwen4ExpConfig(
+        text_config=text.to_dict(),
+        architectures=["Qwen4ExpForConditionalGeneration"],
+    ).save_pretrained(model_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            skip_tokenizer_init=True,
+            dtype="float32",
+        ),
+        engram_config=EngramConfig(cpu_offload=False),
     )
     with set_current_vllm_config(config):
         init_distributed_environment(
-            world_size=1, rank=0, local_rank=0, backend="gloo",
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            backend="gloo",
             distributed_init_method=f"file://{tmp_path / 'rendezvous'}",
         )
         initialize_model_parallel(tensor_model_parallel_size=1)
         try:
             with torch.device("cpu"):
                 module = amd_ple_layer.Qwen4ExpNGramEmbedding(
-                    text, embedding_dim=6, ple_dense_layer_id=0,
-                    max_total_tokens=4, prefix="stream.ple_embedding",
-                    layer_name="stream.ple", params_dtype=torch.float32,
+                    text,
+                    embedding_dim=6,
+                    ple_dense_layer_id=0,
+                    max_total_tokens=4,
+                    prefix="stream.ple_embedding",
+                    layer_name="stream.ple",
+                    params_dtype=torch.float32,
                 )
             destination = module.ngram_embedding.weight
             staging = torch.empty_like(destination)
