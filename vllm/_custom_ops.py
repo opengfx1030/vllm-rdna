@@ -3652,6 +3652,80 @@ def rdna_moe_route_zero(
     )
 
 
+def rdna_moe_route_zero_stats(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    expert_map: torch.Tensor | None,
+    zero1: torch.Tensor,
+    zero2: torch.Tensor,
+    is_padding: torch.Tensor | None,
+    state: torch.Tensor,
+    ring: torch.Tensor | None,
+    gseq: torch.Tensor | None,
+    hist: torch.Tensor | None,
+    owner: torch.Tensor,
+    edges: torch.Tensor,
+    layer_pos: int,
+    sample_mask: int,
+    ranks: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``rdna_moe_route_zero`` plus the EPLB load counters, one launch.
+
+    One extra CTA counts the call's expert histogram into ``state`` / ``ring`` /
+    ``hist`` (layout: ``rdna_eplb_stats.py``) while CTA 0 routes.
+    """
+    return torch.ops._rocm_C.rdna_moe_route_zero_stats(
+        topk_ids,
+        block_size,
+        num_experts,
+        expert_map,
+        zero1,
+        zero2,
+        is_padding,
+        state,
+        ring,
+        gseq,
+        hist,
+        owner,
+        edges,
+        layer_pos,
+        sample_mask,
+        ranks,
+    )
+
+
+def rdna_eplb_stats(
+    topk_ids: torch.Tensor,
+    is_padding: torch.Tensor | None,
+    state: torch.Tensor,
+    ring: torch.Tensor | None,
+    gseq: torch.Tensor | None,
+    hist: torch.Tensor | None,
+    owner: torch.Tensor,
+    edges: torch.Tensor,
+    layer_pos: int,
+    sample_mask: int,
+    ranks: int,
+    num_experts: int,
+) -> None:
+    """The EPLB load counters alone (calls the routing CTA does not take)."""
+    torch.ops._rocm_C.rdna_eplb_stats(
+        topk_ids,
+        is_padding,
+        state,
+        ring,
+        gseq,
+        hist,
+        owner,
+        edges,
+        layer_pos,
+        sample_mask,
+        ranks,
+        num_experts,
+    )
+
+
 def moe_skinny_int4_decode(
     input: torch.Tensor,
     w13: torch.Tensor,

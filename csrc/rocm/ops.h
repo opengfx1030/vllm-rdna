@@ -178,6 +178,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero(
     const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
     const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
     at::Tensor& zero2);
+std::tuple<at::Tensor, at::Tensor, at::Tensor> rdna_moe_route_zero_stats(
+    const at::Tensor& topk_ids, int64_t block_size, int64_t num_experts,
+    const std::optional<at::Tensor>& expert_map, at::Tensor& zero1,
+    at::Tensor& zero2, const std::optional<at::Tensor>& is_padding,
+    at::Tensor& state, const std::optional<at::Tensor>& ring,
+    const std::optional<at::Tensor>& gseq,
+    const std::optional<at::Tensor>& hist, const at::Tensor& owner,
+    const at::Tensor& edges, int64_t layer_pos, int64_t sample_mask,
+    int64_t ranks);
+void rdna_eplb_stats(const at::Tensor& topk_ids,
+                     const std::optional<at::Tensor>& is_padding,
+                     at::Tensor& state, const std::optional<at::Tensor>& ring,
+                     const std::optional<at::Tensor>& gseq,
+                     const std::optional<at::Tensor>& hist,
+                     const at::Tensor& owner, const at::Tensor& edges,
+                     int64_t layer_pos, int64_t sample_mask, int64_t ranks,
+                     int64_t num_experts);
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
