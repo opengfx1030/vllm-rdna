@@ -173,3 +173,27 @@ def test_a_fixed_plugin_can_lift_the_expert_limit(monkeypatch):
     method, calls = _chunk_probe(monkeypatch)
     _run(method, 150, 512)
     assert calls == [150]
+
+
+def test_mmq_expert_weights_get_slack_after_their_last_byte(monkeypatch):
+    monkeypatch.setenv(compat._MMQ_MAX_EXPERTS_ENV, "512")
+    method, _ = _chunk_probe(monkeypatch)
+    raw = torch.arange(2 * 3 * 5, dtype=torch.uint8).view(2, 3, 5)
+    layer = types.SimpleNamespace(
+        global_num_experts=512,
+        w13_weight=torch.nn.Parameter(raw.clone(), requires_grad=False),
+        w2_weight=torch.nn.Parameter(raw.clone(), requires_grad=False),
+    )
+    method.process_weights_after_loading(layer)
+    for p in (layer.w13_weight, layer.w2_weight):
+        assert torch.equal(p.data, raw)
+        slack = p.untyped_storage().nbytes() - p.data.numel()
+        assert slack >= compat._MMQ_TAIL_PAD_BYTES
+
+
+def test_weights_are_left_alone_when_the_slices_path_is_used(monkeypatch):
+    method, _ = _chunk_probe(monkeypatch)
+    p = torch.nn.Parameter(torch.zeros(2, 3, 5, dtype=torch.uint8), requires_grad=False)
+    layer = types.SimpleNamespace(global_num_experts=512, w13_weight=p, w2_weight=p)
+    method.process_weights_after_loading(layer)
+    assert p.untyped_storage().nbytes() == p.data.numel()

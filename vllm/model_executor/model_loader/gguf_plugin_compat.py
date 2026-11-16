@@ -86,10 +86,30 @@ def _mmq_max_experts() -> int:
     return int(os.environ.get(_MMQ_MAX_EXPERTS_ENV, _PLUGIN_MMQ_MAX_EXPERTS))
 
 
+# The MMQ tile loader reads up to a few blocks past the end of the last row when a
+# row's block count is not a multiple of its per-warp span (K 160 of Q5_1 / Q8_0 in
+# the TP4 Flash-Next down projections). The values are discarded, but on a tensor
+# whose allocation ends on a page boundary the read faults (157286400 bytes = 75 x
+# 2 MiB here: Memory Fault in moe_q5_1 on every rank). A few KiB of slack remove it.
+_MMQ_TAIL_PAD_BYTES = 4096
+
+
+def _pad_tail(param: torch.nn.Parameter) -> None:
+    data = param.data
+    flat = data.reshape(-1)
+    buf = torch.zeros(
+        flat.numel() + _MMQ_TAIL_PAD_BYTES // flat.element_size(),
+        dtype=flat.dtype,
+        device=flat.device,
+    )
+    buf[: flat.numel()].copy_(flat)
+    param.data = buf[: flat.numel()].view(data.shape)
+
+
 @functools.cache
 def _harden_moe_method(base: type) -> type:
     class HardenedGGUFMoEMethod(base):  # type: ignore[misc, valid-type]
-        """The plugin's MoE method with two kernel limits worked around.
+        """The plugin's MoE method with three kernel limits worked around.
 
         * ``topk_ids < 0`` means "no expert" in vLLM; the plugin kernels read
           ``expert * stride`` unchecked, so -1 is an out-of-bounds weight read
@@ -99,6 +119,8 @@ def _harden_moe_method(base: type) -> type:
         * Batches above the plugin's MMQ threshold are split into slices that
           stay on the vector kernel when the model has more experts than the
           MMQ kernel supports (see ``_MMQ_MAX_EXPERTS_ENV``).
+        * With the MMQ kernel allowed, the packed expert weights get a few KiB of
+          slack after their last byte (see ``_MMQ_TAIL_PAD_BYTES``).
         """
 
         def apply(self, layer, x, topk_weights, topk_ids, *args, **kwargs):
@@ -124,6 +146,14 @@ def _harden_moe_method(base: type) -> type:
                     for i in range(0, rows, step)
                 ]
             )
+
+        def process_weights_after_loading(self, layer):
+            process = getattr(super(), "process_weights_after_loading", None)
+            if process is not None:
+                process(layer)
+            if getattr(layer, "global_num_experts", 0) <= _mmq_max_experts():
+                for name in ("w13_weight", "w2_weight"):
+                    _pad_tail(getattr(layer, name))
 
     HardenedGGUFMoEMethod.__name__ = f"Hardened{base.__name__}"
     return HardenedGGUFMoEMethod
