@@ -367,6 +367,7 @@ endif()
 if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_EXT_SRC
     "csrc/rocm/quickreduce/torch_bindings.cpp"
+    "csrc/cpu/ple_quant_table.cpp"
     "csrc/rocm/quickreduce/custom_quickreduce.cu")
   # Octave KV cache (store, decode, rotation, prefill): only built for the
   # validated architectures, gfx1100 (RDNA3) and gfx942 (MI300).
@@ -400,6 +401,19 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/attention/octave_decode_mfma_cdna.hip"
       PROPERTIES COMPILE_FLAGS "-mllvm -amdgpu-mfma-vgpr-form")
   endif()
+
+  get_target_property(_ple_legacy_sources _C SOURCES)
+  foreach(_ple_source IN LISTS _ple_legacy_sources)
+    if(_ple_source MATCHES "(^|/)ple_quant_table\\.cpp$")
+      set_source_files_properties("${_ple_source}" PROPERTIES LANGUAGE CXX)
+      if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_property(SOURCE "${_ple_source}" APPEND PROPERTY COMPILE_OPTIONS
+          "-fno-fast-math" "-ffp-contract=off")
+      endif()
+    endif()
+  endforeach()
+  unset(_ple_source)
+  unset(_ple_legacy_sources)
 endif() # _C HIP endif
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")

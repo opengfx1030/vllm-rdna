@@ -515,6 +515,11 @@ Tables come from `primitive-ai/Qwen3.8-Flash-Next-PLE-quant` (only `ples_int4`
 is wired). `PLE_OFFLOAD_DOORBELL` (1) and `PLE_OFFLOAD_PREFAULT` (1) are
 sidecar internals; leave them on.
 
+ROCm sidecars with the group16 INT4 layout now select the native CPU
+small-batch gather automatically; rebuild `vllm._C` when upgrading. See
+[quantized PLE gather requirements](flash-next-ple-ipc.md#quantized-ple-small-batch-gather)
+for format selection and compatibility with FP8 and non-ROCm platforms.
+
 ### EXL3
 
 `VLLM_EXL3_FOLDED_CACHE=<dir>` caches folded fp16 weights across loads.
