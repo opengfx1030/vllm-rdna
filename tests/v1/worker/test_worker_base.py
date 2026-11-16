@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -83,3 +85,42 @@ def test_failing_destroy_hook_is_logged_not_raised(make_wrapper, caplog_vllm):
     wrapper.shutdown()
     assert wrapper.worker.events == ["device", "shutdown"]
     assert "Worker extension destroy hook failed" in caplog_vllm.text
+
+
+def test_triton_cache_artifacts_do_not_clobber_other_ranks(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path))
+    files = []
+    for rank in (5, 6):
+        worker_base._configure_worker_triton_cache(rank)
+        directory = Path(os.environ["TRITON_CACHE_DIR"])
+        directory.mkdir(parents=True, exist_ok=True)
+        artifact = directory / "same_kernel.amdgcn"
+        pending = directory / "pending"
+        pending.write_text(f"assembly for rank {rank}")
+        pending.replace(artifact)
+        files.append(artifact)
+
+    assert files[0].read_text() == "assembly for rank 5"
+    assert files[1].read_text() == "assembly for rank 6"
+
+
+def test_triton_worker_cache_reuses_artifacts_and_respects_new_root(
+    tmp_path, monkeypatch
+):
+    first_root = tmp_path / "first"
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(first_root))
+    worker_base._configure_worker_triton_cache(5)
+    directory = Path(os.environ["TRITON_CACHE_DIR"])
+    directory.mkdir(parents=True)
+    artifact = directory / "kernel.hsaco"
+    artifact.write_bytes(b"compiled target/draft kernel")
+
+    worker_base._configure_worker_triton_cache(5)
+    assert (
+        Path(os.environ["TRITON_CACHE_DIR"]) / artifact.name
+    ).read_bytes() == b"compiled target/draft kernel"
+
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "second"))
+    worker_base._configure_worker_triton_cache(5)
+    assert not (Path(os.environ["TRITON_CACHE_DIR"]) / artifact.name).exists()
+    assert artifact.read_bytes() == b"compiled target/draft kernel"
