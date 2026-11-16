@@ -169,3 +169,57 @@ def test_hc_ops_unaligned_fallback(hyper: int) -> None:
         ),
     ):
         torch.testing.assert_close(h, t, rtol=RTOL, atol=ATOL)
+
+
+@pytest.mark.parametrize("num_tokens", [2, 7])
+def test_compiled_strided_hc_graph_replay(num_tokens: int) -> None:
+    torch.manual_seed(0)
+    sources = [
+        torch.randn(num_tokens, width + HC, dtype=torch.float16, device="cuda")
+        for width in (HYPER, HIDDEN, HC, HYPER)
+    ]
+    residual, block, injection, gate = [
+        source[:, :width]
+        for source, width in zip(sources, (HYPER, HIDDEN, HC, HYPER))
+    ]
+    weight = torch.randn(HIDDEN, dtype=torch.float16, device="cuda")
+
+    def forward(residual, block, injection, gate, weight):
+        return (
+            hc_triton.grouped_gemma_rmsnorm(residual, weight, EPS, HC),
+            hc_triton.hc_silu(residual, HC),
+            hc_triton.hc_gate_mix(residual, gate, HC),
+            hc_triton.hc_combine(residual, block, injection, HC),
+            *hc_triton.hc_combine_norm(residual, block, injection, weight, EPS, HC),
+        )
+
+    # Dynamo must preserve the functional op boundary even for split views.
+    compiled = torch.compile(forward, backend="eager", fullgraph=True)
+    inputs = (residual, block, injection, gate, weight)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        compiled(*inputs)
+        compiled(*inputs)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    try:
+        with torch.cuda.graph(graph):
+            actual = compiled(*inputs)
+        for _ in range(2):
+            for source in sources:
+                source.add_(0.25)
+            graph.replay()
+            packed = [tensor.contiguous() for tensor in inputs]
+            res, blk, inj, gates, norm_weight = packed
+            expected = (
+                hc_triton._grouped_gemma_rmsnorm(res, norm_weight, EPS, HC),
+                hc_triton._hc_silu(res, HC),
+                hc_triton._hc_gate_mix(res, gates, HC),
+                hc_triton._hc_combine(res, blk, inj, HC),
+                *hc_triton._hc_combine_norm(res, blk, inj, norm_weight, EPS, HC),
+            )
+            for output, reference in zip(actual, expected):
+                torch.testing.assert_close(output, reference, rtol=RTOL, atol=ATOL)
+    finally:
+        graph.reset()
