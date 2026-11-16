@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Asymmetric W4A16 MoE checkpoints on the native RDNA2 MoE path."""
 
+import os
+
 import pytest
 import torch
 
@@ -13,6 +15,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     rocm_moe_rdna,
 )
 from vllm.platforms import current_platform  # noqa: E402
+from tests.utils import spawn_new_process_for_each_test  # noqa: E402
 
 
 def test_asymmetric_8bit_moe_is_not_native_rdna2():
@@ -149,6 +152,181 @@ def test_rdna2_moe_matches_dequant_reference(symmetric, num_tokens):
 
     rel = (out.float() - ref).norm() / ref.norm()
     assert rel < 1e-2, f"relative error {rel:.4f}"
+
+
+@needs_rdna2
+@spawn_new_process_for_each_test
+def test_rdna2_ct_rank7_global_routes_match_local_dequant_reference():
+    """Exercise the EP8 tile8 dispatch and real CT loading without collectives."""
+    os.environ["VLLM_RDNA2_MOE_TILE8_MIN_TOKENS"] = "5"
+    os.environ["VLLM_RDNA2_W4A8_SDOT4"] = "0"
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        ExpertMapManager,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_rdna2 import (  # noqa: E501
+        CompressedTensorsWNA16RDNA2MoEMethod,
+    )
+
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_rdna2 import (  # noqa: E501
+        _TILE8_MIN_TOKENS,
+    )
+
+    assert _TILE8_MIN_TOKENS == 5
+    torch.manual_seed(71)
+    device = torch.device("cuda")
+    hidden, inter, group, top_k = 2560, 640, 32, 10
+    parallel = FusedMoEParallelConfig(
+        tp_size=1,
+        pcp_size=1,
+        dp_size=1,
+        ep_size=8,
+        tp_rank=0,
+        pcp_rank=0,
+        dp_rank=0,
+        ep_rank=7,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend="allgather_reducescatter",
+        enable_eplb=False,
+    )
+    moe = FusedMoEConfig(
+        num_experts=512,
+        experts_per_token=top_k,
+        hidden_dim=hidden,
+        intermediate_size=inter,
+        num_local_experts=64,
+        num_logical_experts=512,
+        activation=MoEActivation.SILU,
+        device=device,
+        routing_method=RoutingMethodType.Renormalize,
+        moe_parallel_config=parallel,
+        in_dtype=torch.float16,
+    )
+    weights = QuantizationArgs(
+        num_bits=4, type="int", strategy="group", group_size=group, symmetric=False
+    )
+    quant = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": {
+                "weights": weights,
+                "input_activations": None,
+                "format": "pack-quantized",
+            }
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    with device:
+        manager = ExpertMapManager(
+            max_num_batched_tokens=5,
+            top_k=top_k,
+            global_num_experts=512,
+            num_redundant_experts=0,
+            num_expert_group=None,
+            moe_parallel_config=parallel,
+            placement_strategy="linear",
+            enable_eplb=False,
+        )
+        layer = RoutedExperts(
+            layer_name="rank7_group32.experts",
+            params_dtype=torch.float16,
+            moe_config=moe,
+            quant_config=quant,
+            expert_map_manager=manager,
+        )
+    method = layer.quant_method
+    assert isinstance(method, CompressedTensorsWNA16RDNA2MoEMethod)
+    assert layer.expert_map[448].item() == 0
+    assert layer.expert_map[511].item() == 63
+    assert layer.expert_map[0].item() == layer.expert_map[447].item() == -1
+
+    projections = (
+        ("gate_proj", "w1", "w13", inter, hidden),
+        ("up_proj", "w3", "w13", inter, hidden),
+        ("down_proj", "w2", "w2", hidden, inter),
+    )
+    reference_weights = {}
+    for source_expert, destinations in (
+        (448, (0, 447, *range(448, 511))),
+        (511, (511,)),
+    ):
+        reference_weights[source_expert] = []
+        for projection, shard, stem, n, k in projections:
+            packed, scale, zeros, dequantized = _make_quantized_weights(
+                1, n, k, group, False, device
+            )
+            reference_weights[source_expert].append(dequantized[0])
+            for suffix, tensor in (
+                ("weight_packed", packed),
+                ("weight_scale", scale),
+                ("weight_zero_point", zeros),
+            ):
+                param = getattr(layer, f"{stem}_{suffix}")
+                for global_id in destinations:
+                    loaded = param.weight_loader(
+                        param,
+                        tensor[0],
+                        f"experts.{global_id}.{projection}.{suffix}",
+                        shard,
+                        global_id,
+                        return_success=True,
+                    )
+                    assert loaded is (global_id >= 448)
+
+    method.process_weights_after_loading(layer)
+    assert method._zero_v2
+    assert layer.w13_weight_packed.shape == (64, 320, 1280)
+    assert layer.w2_weight_packed.shape == (64, 80, 2560)
+    assert layer.w13_weight_scale.shape == (64, 80, 1280)
+    assert layer.w2_weight_scale.shape == (64, 20, 2560)
+    assert layer.w13_qzeros.shape == (64, 80, 160)
+    assert layer.w2_qzeros.shape == (64, 20, 320)
+
+    x = (torch.randn(5, hidden, device=device) * 0.25).half()
+    routes = [
+        [448, 511, 0, 447, 1, 2, 3, 4, 5, 6],
+        [511, 0, 447, 1, 2, 3, 4, 5, 6, 7],
+        [448, 0, 447, 1, 2, 3, 4, 5, 6, 7],
+        [0, 447, 1, 2, 3, 4, 5, 6, 7, 8],
+        [447, 511, 0, 448, 1, 2, 3, 4, 5, 6],
+    ]
+    router_weights = torch.softmax(torch.randn(5, top_k, device=device), dim=-1)
+    reference = torch.zeros(5, hidden, device=device, dtype=torch.float32)
+    for token, ids in enumerate(routes):
+        for slot, global_id in enumerate(ids):
+            if global_id not in reference_weights:
+                continue
+            gate, up, down = reference_weights[global_id]
+            activated = torch.nn.functional.silu(gate @ x[token].float()) * (
+                up @ x[token].float()
+            )
+            reference[token] += router_weights[token, slot] * (down @ activated)
+    assert reference[[0, 1, 2, 4]].norm(dim=1).min() > 0
+    for ids_dtype in (torch.int32, torch.int64):
+        # int32 exercises fused route/zero; int64 exercises block alignment.
+        ids = torch.tensor(routes, device=device, dtype=ids_dtype)
+        output = method.apply(layer, x, router_weights, ids, None, None)
+        assert output.shape == reference.shape
+        assert torch.isfinite(output).all()
+        assert torch.count_nonzero(output[3]) == 0
+        for token in (0, 1, 2, 4):
+            relative_l2 = (
+                (output[token].float() - reference[token]).norm()
+                / reference[token].norm()
+            )
+            assert relative_l2 < 1e-2, (
+                f"token {token}, ids {ids_dtype}: relative error {relative_l2:.4f}"
+            )
 
 
 @needs_rdna2
