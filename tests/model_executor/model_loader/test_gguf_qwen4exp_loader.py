@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU registry, TP1/TP2 load_model, and fail-closed tests for qwen4exp_gguf."""
 
 from __future__ import annotations
@@ -14,6 +15,24 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 from gguf import quants
+
+
+def _gguf_plugin_usable() -> bool:
+    from vllm.model_executor.model_loader.gguf_plugin_compat import (
+        get_gguf_moe_method_cls,
+    )
+
+    try:
+        get_gguf_moe_method_cls()
+    except ImportError:
+        return False
+    return True
+
+
+requires_gguf_plugin = pytest.mark.skipif(
+    not _gguf_plugin_usable(),
+    reason="vllm-gguf-plugin is not installed or does not match this vLLM",
+)
 
 HF_TEMPLATE_CONFIG = Path(__file__).parent / "fixtures/qwen4exp_hf_config.json"
 GEOMETRY = {
@@ -570,6 +589,7 @@ def test_registry_resolves_qwen4exp_gguf_loader(tmp_path):
     assert isinstance(loader, Qwen4ExpGGUFModelLoader)
 
 
+@requires_gguf_plugin
 def test_end_to_end_tp1_load_model_populates_every_parameter_accurately(
     tmp_path, monkeypatch
 ):
@@ -766,8 +786,8 @@ def _tp2_worker(rank: int, init_file: str, hf_dir: str, gguf_dir: str, out_dir: 
     amd_model = importlib.import_module("vllm.models.qwen4_exp.amd.model")
     qsa_mod = importlib.import_module("vllm.models.qwen4_exp.amd.qsa")
 
-    q4_pkg.Qwen4ExpForCausalLM = amd_model.Qwen4ExpForCausalLM
-    qsa_mod.Qwen4ExpQSAFlashAttentionImpl = lambda *_a, **_k: None
+    q4_pkg.Qwen4ExpForCausalLM = amd_model.Qwen4ExpForCausalLM  # type: ignore[attr-defined]
+    qsa_mod.Qwen4ExpQSAFlashAttentionImpl = lambda *_a, **_k: None  # type: ignore[attr-defined]
     from vllm.config import (
         CompilationConfig,
         DeviceConfig,
@@ -840,6 +860,7 @@ def _tp2_worker(rank: int, init_file: str, hf_dir: str, gguf_dir: str, out_dir: 
         destroy_distributed_environment()
 
 
+@requires_gguf_plugin
 def test_tp2_sharding_partitions_merged_gdn_qkvz_and_packed_experts_correctly(tmp_path):
     hf_dir, gguf_dir, truth, packed_truth = _make_toy_artifact(tmp_path)
     out_dir = tmp_path / "tp2-out"
@@ -884,8 +905,12 @@ def test_tp2_sharding_partitions_merged_gdn_qkvz_and_packed_experts_correctly(tm
 @pytest.mark.parametrize(
     ("case", "expected_match"),
     [
-        ("mismatch_gate_up", "gate/up quant mismatch"),
-        ("missing_tensor", "missing|unloaded|incomplete"),
+        pytest.param(
+            "mismatch_gate_up", "gate/up quant mismatch", marks=requires_gguf_plugin
+        ),
+        pytest.param(
+            "missing_tensor", "missing|unloaded|incomplete", marks=requires_gguf_plugin
+        ),
         ("mtp_without_sidecar", "no MTP tensors"),
     ],
 )
@@ -968,6 +993,7 @@ def test_loader_fails_closed_on_invalid_contracts(
         destroy_distributed_environment()
 
 
+@requires_gguf_plugin
 def test_explicit_mtp_sidecar_loads_all_31_unquantized_mtp_keys(tmp_path, monkeypatch):
     import safetensors.torch
 

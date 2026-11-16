@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Native vLLM loader for mixed-quant Qwen4Exp GGUF shard sets.
 
 Routes:
@@ -19,11 +20,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import regex as re
 import torch
 from torch import nn
 
@@ -43,6 +44,10 @@ from vllm.model_executor.model_loader.gguf_manifest import (
     validate_shards,
 )
 from vllm.model_executor.model_loader.gguf_packed import dequantize as dequantize_packed
+from vllm.model_executor.model_loader.gguf_plugin_compat import (
+    get_gguf_moe_method_cls,
+    store_gguf_weight_type,
+)
 from vllm.model_executor.model_loader.qwen4exp_gguf_mapping import (
     inverse_zero_centered_norm,
     plan_tensors,
@@ -192,9 +197,7 @@ class Qwen4ExpGGUFQuantConfig(QuantizationConfig):
         )
 
         if isinstance(layer, RoutedExperts):
-            from vllm_gguf_plugin.quantization.fused_moe import GGUFMoEMethod
-
-            return GGUFMoEMethod(self, layer.moe_config)
+            return get_gguf_moe_method_cls()(self, layer.moe_config)
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         if isinstance(layer, VocabParallelEmbedding):
@@ -475,8 +478,6 @@ class Qwen4ExpGGUFModelLoader(BaseModelLoader):
         consumed: set[str],
         text_config: Any,
     ) -> set[str]:
-        from vllm_gguf_plugin.quantization.params import _store_gguf_weight_type
-
         num_layers = int(text_config.num_hidden_layers)
         hidden_size = int(text_config.hidden_size)
         inter_size = int(text_config.moe_intermediate_size)
@@ -500,10 +501,8 @@ class Qwen4ExpGGUFModelLoader(BaseModelLoader):
                 )
 
             routed = lm_module.model.layers[layer_idx].mlp.experts.routed_experts
-            _store_gguf_weight_type(
-                routed.w13_weight_type, torch.tensor(gate_info.type)
-            )
-            _store_gguf_weight_type(routed.w2_weight_type, torch.tensor(down_info.type))
+            store_gguf_weight_type(routed.w13_weight_type, torch.tensor(gate_info.type))
+            store_gguf_weight_type(routed.w2_weight_type, torch.tensor(down_info.type))
 
             gate_3d = _read_packed_expert_3d(
                 gate_info, expected_dims=(hidden_size, inter_size, num_experts)
