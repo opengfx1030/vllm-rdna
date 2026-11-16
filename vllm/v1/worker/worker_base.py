@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -34,6 +35,22 @@ else:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R")
+_worker_triton_cache: tuple[str, str] | None = None
+
+
+def _configure_worker_triton_cache(rank: int) -> None:
+    """Keep concurrent workers from replacing each other's cache artifacts."""
+    global _worker_triton_cache
+    root = os.environ.get("TRITON_CACHE_DIR")
+    if root is None:
+        return
+    if _worker_triton_cache is not None and root == _worker_triton_cache[1]:
+        root = _worker_triton_cache[0]
+    directory = os.path.join(root, f"rank_{rank}")
+    os.environ["TRITON_CACHE_DIR"] = directory
+    _worker_triton_cache = (root, directory)
+
+
 
 
 class CompilationTimes(NamedTuple):
@@ -281,6 +298,7 @@ class WorkerWrapperBase:
             "vllm_config is required to initialize the worker"
         )
         self.vllm_config = vllm_config
+        _configure_worker_triton_cache(self.global_rank)
 
         vllm_config.enable_trace_function_call_for_thread()
 

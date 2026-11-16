@@ -526,6 +526,13 @@ path (correctness A/B only).
 
 ### Other
 
+An explicit `TRITON_CACHE_DIR` is scoped to `rank_<global_rank>` during worker
+initialization, before worker plugins or model code load. Reinitialization reuses
+the same rank directory without nesting it; a new caller-supplied root is honored.
+This keeps concurrent ranks from replacing each other's cache stages, at the cost
+of duplicate artifacts and potentially more cold-start compilation work. Unset
+`TRITON_CACHE_DIR` retains Triton's default behavior.
+
 - `VLLM_USE_BREAKABLE_CUDAGRAPH`: auto-enabled for models whose RDNA path
   needs eager breaks inside FULL graphs (DeepSeek-V4, Qwen3.5/3.8 hybrids).
   Set it explicitly only to override.
