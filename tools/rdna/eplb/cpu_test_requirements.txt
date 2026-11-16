@@ -1,0 +1,58 @@
+# CPU-only environment for the EPLB tool and collector tests (no GPU, no vllm wheel).
+#
+# The tools tests (tests/tools/rdna/test_eplb_*.py) need only numpy, regex and pytest
+# and run with --noconftest:
+#   uv run --no-project --python 3.12 --with numpy --with regex --with pytest \
+#     python -m pytest --noconftest -p no:cacheprovider tests/tools/rdna/test_eplb_model.py \
+#     tests/tools/rdna/test_eplb_io.py
+#
+# The collector tests (tests/model_executor/layers/fused_moe/test_rdna_eplb_stats.py)
+# import the repository's vllm package and the suite conftest; this is the dependency
+# set that makes `import vllm` and tests/conftest.py work on a Mac/CPU box:
+#   uv run --no-project --python 3.12 --with-requirements tools/rdna/eplb/cpu_test_requirements.txt \
+#     python -m pytest -p no:cacheprovider tests/model_executor/layers/fused_moe/test_rdna_eplb_stats.py \
+#     tests/tools/rdna/test_eplb_model.py tests/tools/rdna/test_eplb_io.py
+#
+# Do not add the PyPI package `vllm`: the repository is imported from the working tree.
+torch
+numpy
+pytest
+regex
+psutil
+pydantic
+cloudpickle
+pyzmq
+msgspec
+pillow
+tqdm
+pyyaml
+cachetools
+packaging
+requests
+transformers
+tokenizers
+huggingface_hub
+safetensors
+sentencepiece
+openai
+aiohttp
+fastapi
+prometheus_client
+cbor2
+einops
+gguf
+blake3
+py-cpuinfo
+diskcache
+lark
+partial-json-parser
+setproctitle
+openai-harmony
+mcp
+tiktoken
+jinja2
+pybase64
+uvloop
+xgrammar
+llguidance
+tblib

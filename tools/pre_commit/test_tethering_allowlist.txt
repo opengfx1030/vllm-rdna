@@ -80,6 +80,10 @@ tests/tools/rdna/test_serve_pci_buses.py  # fork-only PCI_BUSES launcher key and
 tests/tools/rdna/test_serve_replayssm_state_dtype.py  # fork-only REPLAYSSM_STATE_DTYPE launcher key and the retired LeapQuant switch (print mode, stub venv), CPU unit test; not in CI
 tests/tools/rdna/test_spec_acceptance.py  # fork-only speculative acceptance length of a bench cell (fake server log), CPU unit test; not in CI
 tests/tools/rdna/test_hetero_moe.py  # fork-only hetero-MoE expert-stats IO, placement solver, validator and simulator tools, CPU unit test; not in CI
+tests/tools/rdna/test_eplb_model.py  # fork-only lean-EPLB study tools (geometry, placement, simulator, rebalance policy), CPU unit test; not in CI
+tests/tools/rdna/test_eplb_io.py  # fork-only lean-EPLB trace readers, counter summary, placement solver and kernel-time objective fit, CPU unit test; not in CI
+tests/tools/rdna/test_eplb_replay_check.py  # fork-only replay analyzer of the cross-rank top-k study (synthetic counter dumps), CPU unit test; not in CI
+tests/tools/rdna/test_tunable_bits.py  # fork-only bitwise comparison of the router GEMM across rank tables (synthetic run files), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_report.py  # fork-only PR receipt logic (cells, ABBA verdicts, summary parsing, gates), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_driver.py  # fork-only pr_receipt.sh driver against stub trees and a stub serve_validate.sh, CPU unit test; not in CI
 tests/tools/rdna/test_archdiff_report.py  # fork-only per-function disassembly diff report (normalization, verdicts), CPU unit test; not in CI
