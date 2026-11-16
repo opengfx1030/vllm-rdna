@@ -20,6 +20,17 @@
   "profile": "rocm7.14-rocblas5.5",
   "storage_policy": "One visible folder per rocBLAS build, registered by name in tunableop/profiles.json: name -> {rocblas, rocm, torch, lib_sha256, dir}. This profile (rocm7.14-rocblas5.5, rocBLAS 5.5.0.cd957402) is the canonical shared serving set and covers Flash-Next, 27B AWQ dense and EXL3 27B. configure_tunableop auto-selects it by the loaded librocblas.so.5 sha256[:12]; TUNABLEOP_PROFILE=rocm7.14-rocblas5.5 forces it (validated against the loaded lib). Never store rows in /tmp or the run CWD. Per-user fallback: $HOME/.cache/tunableop/tunableop_results.csv. Consume via tools/rdna2_028/tunableop_env.sh (configure_tunableop). The foreign build lives in the sibling profile rocm10-rocblas5.6.",
   "shared_across_ranks": false,
+  "rank_agreement": {
+    "date": "2026-11-16",
+    "rule": "every rank file names the same solution for every key (a replicated GEMM must round alike on every rank)",
+    "tool": "tools/rdna2_028/tunableop_agree.py write",
+    "policy": "per key the lowest recorded time wins, ties go to the lowest rank; only the losing lines were replaced; no key added or dropped",
+    "keys_split_before": 531,
+    "lines_rewritten": 2124,
+    "files": 8,
+    "guard": "tests/tools/rdna/test_tunableop_rank_agree.py",
+    "why": "tn_512_1023_2560_ld_2560_2560_512 (the MoE router GEMM at 1023 rows) was ...046 on ranks 0, 1, 3 and ...044 on rank 2: rank 2 routed near-tied tokens differently in every pure 1023-row prefill pass (docs/rdna2/eplb-lean-design-2026-11-16.md, section 11)"
+  },
   "campaign": {
     "date": "2026-10-25",
     "arm": "coverage: Qwen3.5-4B rdna_hint_flex (3.0 bpw) and its dense fp16 export at TP=1/2/4; Qwen2.5-0.5B-Instruct rdna_hint_flex, dense fp16 export and AWQ at TP=1 (RECIPE=full, FULL_AND_PIECEWISE; branch feat/hi2-weights-support)",

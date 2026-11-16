@@ -106,6 +106,30 @@ All serve launchers under `tools/rdna/` (through
 go through this helper; a launcher with a
 `TUNABLEOP=0` opt-out sets `PYTORCH_TUNABLEOP_ENABLED=0` and writes nothing.
 
+## Rank files must agree per key
+
+A worker on device ordinal `r` reads `tunableop_results<r>.csv`, and a
+replicated GEMM (the MoE router, hyper-connection and PLE projections)
+multiplies the same operands on every rank. Two rank files that name different
+solutions for one key give different rounding on different ranks; the router
+GEMM at M=1023 flipped near-tied top-k decisions on rank 2 in every pure
+1023-row prefill pass that way (`docs/rdna2/eplb-lean-design-2026-11-16.md`,
+section 11). Every profile therefore ships one solution per key in all of its
+rank files (TP8 and TP4 x PP2 read ranks 0-7):
+
+```bash
+python tools/rdna2_028/tunableop_agree.py check tunableop/<profile> [...]
+python tools/rdna2_028/tunableop_agree.py write tunableop/<profile>
+```
+
+`write` keeps, per key, the solution with the lowest recorded time (ties go to
+the lowest rank), replaces only the lines that name another solution and adds
+or drops no key. `tests/tools/rdna/test_tunableop_rank_agree.py` fails on any
+profile whose rank files disagree: run `write` after every re-tune or harvest
+that touched one rank file, and accept the new rows with the deterministic
+concurrency probe (`VLLM_RDNA2_MOE_DETERMINISTIC=1`) on the flat and the
+hierarchical all-reduce.
+
 ## Cache-aligned prefill
 
 With automatic block sizing, Flash-Next TP4 conversation caching aligns

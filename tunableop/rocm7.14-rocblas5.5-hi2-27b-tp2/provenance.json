@@ -13,6 +13,15 @@
   "storage_policy": "Opt-in derived profile (auto: false in tunableop/profiles.json): the canonical rocm7.14-rocblas5.5 rank files 0-3 byte-for-byte plus the rows below, so that no other recipe's lookup table changes. Selected by TUNABLEOP_PREFER=rocm7.14-rocblas5.5-hi2-27b-tp2 in tools/rdna/recipes/27b-hi2-tp2.env only; TUNABLEOP_PREFER= (empty) loads the canonical rows. Same rocBLAS build and lib_sha256 as the canonical profile. Never store rows in /tmp or the run CWD.",
   "rank_policy": "Ranks 0-3 hold the canonical rows plus identical new rows (TP=2 workers read ranks 0 and 1; one tuning on one V620 serves both ranks, same arch and build).",
   "shared_across_ranks": false,
+  "rank_agreement": {
+    "date": "2026-11-16",
+    "rule": "rank files 0-3 name the same solution for every key; the canonical rows were agreed first and carried over byte for byte",
+    "tool": "tools/rdna2_028/tunableop_agree.py write",
+    "keys_split_before": 531,
+    "lines_rewritten": 1062,
+    "files": 4,
+    "guard": "tests/tools/rdna/test_tunableop_rank_agree.py"
+  },
   "rows_per_rank_added": 36,
   "campaign": {
     "date": "2026-11-15",

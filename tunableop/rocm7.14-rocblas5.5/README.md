@@ -257,6 +257,15 @@ End-to-end cells with these frozen rows are recorded under
   not bit-identical and greedy acceptance shifts slightly.
 * Cold tuning is impractical online (>20 min of inline tuning per workload);
   ship these rows instead.
+* The eight rank files name one solution per key (2026-11-16). 531 of the 3330
+  keys had named different solutions on different ranks, and the router GEMM
+  at M=1023 (`tn_512_1023_2560_ld_2560_2560_512`: `...046` on ranks 0, 1 and 3,
+  `...044` on rank 2) made rank 2 route near-tied tokens differently in every
+  pure 1023-row prefill pass. `tools/rdna2_028/tunableop_agree.py write` kept
+  the fastest recorded solution per key (2124 lines rewritten in the eight
+  files, no key added or dropped); see `tunableop/README.md`, "Rank files
+  must agree per key", and `docs/rdna2/eplb-lean-design-2026-11-16.md`,
+  section 11.
 
 ## Regeneration
 
