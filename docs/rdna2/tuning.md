@@ -504,6 +504,12 @@ flip. Raw runs: infrastructure `bench_results/2026-10-13_pp3-mtp2/` and
 
 ### PLE table (Flash-Next)
 
+AMD PLE checkpoint loading consumes ordinary parameter tensors as they arrive,
+just like its checkpoint-split embedding shards. It does not retain a list of
+all remaining source tensors until the iterator ends. This bounds source-tensor
+ownership during CPU-staged loading; shard validation and quantized table
+selection are unchanged. This is not a whole-process RSS ceiling.
+
 | Mode | Env | Host RAM peak | Notes |
 | --- | --- | ---: | --- |
 | `PLE=bf16` | (none) | ~160 GB | Upstream pinned BF16 table. |

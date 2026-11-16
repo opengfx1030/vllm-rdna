@@ -684,7 +684,6 @@ class Qwen4ExpNGramEmbedding(_NGramEmbeddingBase):  # type: ignore[valid-type,mi
             "ngram_heads_vocab_sizes": self.ngram_heads_vocab_sizes,
         }
         loaded: set[str] = set()
-        regular_weights: list[tuple[str, torch.Tensor]] = []
         shard_prefix = "ngram_embedding.shard_"
 
         for name, loaded_weight in weights:
@@ -715,7 +714,9 @@ class Qwen4ExpNGramEmbedding(_NGramEmbeddingBase):  # type: ignore[valid-type,mi
                     continue
                 shard_text = name[len(shard_prefix) : -len(".weight")]
                 if not shard_text.isdigit():
-                    regular_weights.append((name, loaded_weight))
+                    loaded.update(
+                        AutoWeightsLoader(self).load_weights(((name, loaded_weight),))
+                    )
                     continue
                 shard_index = int(shard_text)
                 if shard_index >= self.split_ngram_parts:
@@ -746,10 +747,7 @@ class Qwen4ExpNGramEmbedding(_NGramEmbeddingBase):  # type: ignore[valid-type,mi
                 )
                 loaded.add("ngram_embedding.weight")
                 continue
-            regular_weights.append((name, loaded_weight))
-
-        if regular_weights:
-            loaded.update(AutoWeightsLoader(self).load_weights(regular_weights))
+            loaded.update(AutoWeightsLoader(self).load_weights(((name, loaded_weight),)))
         return loaded
 
 

@@ -16,6 +16,7 @@ from transformers import Qwen4ExpTextConfig
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
+from tests.utils import spawn_new_process_for_each_test
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -2837,3 +2838,49 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
     )
     expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+@spawn_new_process_for_each_test
+def test_amd_ple_loads_regular_weights_before_advancing_stream(tmp_path):
+    """A real loader must consume a staging tensor before its producer reuses it."""
+    from vllm.config import EngramConfig, set_current_vllm_config
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    config = VllmConfig(engram_config=EngramConfig(cpu_offload=False))
+    text = Qwen4ExpTextConfig(
+        ngram_size=3, heads_per_ngram=1, ngram_vocab_size_base=5,
+        make_ngram_vocab_size_divisible_by=8, split_ngram_parts=2,
+        ple_embed_dim=6, eos_token_id=0, vocab_size=64,
+    )
+    with set_current_vllm_config(config):
+        init_distributed_environment(
+            world_size=1, rank=0, local_rank=0, backend="gloo",
+            distributed_init_method=f"file://{tmp_path / 'rendezvous'}",
+        )
+        initialize_model_parallel(tensor_model_parallel_size=1)
+        try:
+            with torch.device("cpu"):
+                module = amd_ple_layer.Qwen4ExpNGramEmbedding(
+                    text, embedding_dim=6, ple_dense_layer_id=0,
+                    max_total_tokens=4, prefix="stream.ple_embedding",
+                    layer_name="stream.ple", params_dtype=torch.float32,
+                )
+            destination = module.ngram_embedding.weight
+            staging = torch.empty_like(destination)
+
+            def weights():
+                for value in (2.0, 3.0):
+                    staging.fill_(value)
+                    yield "ngram_embedding.weight", staging
+                    assert torch.equal(destination, staging)
+                staging.fill_(-99)
+
+            loaded = module.load_weights(weights())
+            assert loaded == {"ngram_embedding.weight"}
+            assert torch.all(destination == 3.0)
+        finally:
+            cleanup_dist_env_and_memory()
