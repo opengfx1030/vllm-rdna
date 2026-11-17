@@ -23,8 +23,8 @@ Environment:
     PACKAGES: space- or comma-separated package names (default ``vllm-rdna``)
     PACKAGE_OWNER: package owner (default ``opengfx1030``)
     RETENTION_DAYS: minimum age of a deletable version (default ``7``)
-    GITHUB_EVENT_NAME: ``workflow_dispatch`` enables the dry-run input
-    INPUT_DRY_RUN: ``false`` performs the deletion, anything else only lists
+    GITHUB_EVENT_NAME: a manual run defaults to a dry run, other events delete
+    INPUT_DRY_RUN: ``true``/``false`` forces the mode, unset keeps the default
     GH_TOKEN / GITHUB_TOKEN: token with ``packages: read`` (``write`` to delete)
 
 Manifests are read from the registry with an anonymous pull token.
@@ -332,8 +332,13 @@ def prune(owner: str, package: str, retention_days: int, dry_run: bool) -> bool:
 def main() -> int:
     event = os.environ.get("GITHUB_EVENT_NAME", "workflow_dispatch")
     requested = (os.environ.get("INPUT_DRY_RUN") or "").strip().lower()
-    # Scheduled runs delete; manual runs default to a dry run.
-    dry_run = event == "workflow_dispatch" and requested != "false"
+    if requested in {"true", "false"}:
+        # An explicit input always wins: it is what a manual run asked for and
+        # what the read-only probe sets.
+        dry_run = requested == "true"
+    else:
+        # Scheduled runs delete; manual runs default to a dry run.
+        dry_run = event == "workflow_dispatch"
     try:
         retention_days = int(os.environ.get("RETENTION_DAYS") or 7)
     except ValueError:
