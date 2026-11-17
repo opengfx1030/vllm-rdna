@@ -1,0 +1,48 @@
+name: Package cleanup
+
+on:
+  schedule:
+    # Daily, away from the top of the hour so it does not race an image build.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: List the versions that would be deleted, delete nothing
+        type: boolean
+        default: true
+      retention-days:
+        description: Delete untagged versions older than this many days
+        type: number
+        default: 7
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-cleanup
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    if: github.repository == 'opengfx1030/vllm-rdna'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the cleanup script
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Scheduled runs delete. Manual runs are a dry run unless the dispatch
+      # explicitly asks for deletion, so a typo in the input cannot delete.
+      - name: Prune untagged image versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry-run }}
+          PACKAGE_OWNER: opengfx1030
+          PACKAGES: vllm-rdna
+          RETENTION_DAYS: ${{ inputs.retention-days || '7' }}
+        run: python3 .github/workflows/scripts/prune_package_versions.py
