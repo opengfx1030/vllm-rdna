@@ -4,9 +4,12 @@
 server runs. Default off; with the flag off nothing below exists (one `None`
 check per step).
 
-**Status: not qualified, do not enable on a shared box.** The first server run
-with the flag on ended in a GPU hang (see [Measurements](#measurements)); the
-cause is open.
+**Status (2026-11-17): works and does not stall; no speedup measured; not
+merged.** Two server runs on one slot (24 and 34 minutes) with the flag on
+showed no fault, no eviction and no added stall (see [Measurements](#measurements)).
+Still owed before it can be called qualified: the flag-off receipt, a soak of
+at least 4 hours, stationary-traffic behaviour of the planner, and a measured
+gain. A first run ended in a PCIe fault on the box whose cause is open.
 
 Background and the load study: [`eplb-lean-design-2026-11-16.md`](./eplb-lean-design-2026-11-16.md).
 Upstream `--enable-eplb` stays refused for this MoE method: it routes through a
@@ -98,20 +101,46 @@ collective the others do not breaks the test.
 
 ## Measurements
 
-No ITL, TTFT or throughput number exists for this path yet.
+`flashnext-mtp2` (AWQ), TP=4 on four V620 (HIP 2-5), FULL_AND_PIECEWISE, MTP2,
+2026-11-17, one boot per arm, so differences of 1 % are inside the spread.
 
-**First server run, 2026-11-17, FAILED.** `flashnext-mtp2`, TP=4 on four V620,
-`VLLM_RDNA_EPLB=1 VLLM_RDNA_EPLB_CHAOS=8 VLLM_RDNA_EPLB_DECISION_STEPS=512`:
+| | flag off | chaos swaps | planner (default) |
+|---|---|---|---|
+| ITL median 1k/512 c=1 | 22.4 ms | 22.7 ms | 22.6 ms |
+| ITL median 1k/512 c=8 | 46.3 ms | 46.2 ms | 46.5 ms |
+| ITL median 16k/1k c=1 | 23.0 ms | not run | 23.2 ms |
+| ITL median 16k/1k c=8 | 48.1 ms | not run | 48.3 ms |
+| stall probe max gap, inject 4096 | 425 ms | 424 ms | 425 ms |
+| stall probe max gap, inject 16384 | 438 ms | 445 ms | 437 ms |
+| PPL probe | 4.81 | pass | 4.83 |
+| KFD evictions | 0 | 0 | 0 |
+| plans executed | 0 | 50 (8 swaps each) | 4 (118 swaps) |
 
-- boot and bind normal (`Online EPLB: 48 layers, 4 ranks, 2.44 MiB per expert,
-  39 chunks per swap`), three probe requests answered;
-- about one minute after ready, all four workers died with `HW Exception by
-  GPU node-1 ... reason: GPU Hang`; no plan had been logged;
-- the kernel then reported `device lost from bus` on the four serving cards
-  and, four minutes later, on the two other V620 of the same PCIe switch.
+- 425-445 ms is one prefill step of the injected prompt; the swaps add no gap
+  on top of it.
+- The counters cost about +0.2 ms (+0.9 %) of ITL at c=1 and c=8 in every
+  cell (earlier measurement: +0.6 to +0.9 %).
+- Chaos mode (random swaps every 512 steps, no planner) is the qualification
+  of the transfer: 50 plans, each 329 steps (16-30 s wall) for 8 swaps, no
+  fault.
+- The planner did nothing during the bench cells (uniform random prompts, no
+  imbalance to fix). During the stall probe's repetitive prompts it made 4
+  plans (32, 32, 32, 22 swaps; 44-73 s wall each, 1317 steps for 32 swaps).
+  That is one plan per about 6.5k steps on non-stationary traffic; the gate
+  for stationary traffic (at most one per 10,000 steps) is not tested.
+- **No speedup is measured.** The study predicts at most about 0.4 % of ITL
+  for a permutation at EP4, below this noise [INFERENCE]; a gain needs replicas
+  (not built) or traffic with a persistent skew.
 
-Cause not established. The balancer's collectives are int32 all-reduces issued
-at the step boundary; `rdna_ar` takes float tensors only, so they run on RCCL.
-Whether the first mailbox collective (step 256) had been reached when the
-hang occurred is not known [INFERENCE: it is the first suspect]. Before any
-further server run: reproduce on a single collective outside the server.
+### The first run, a PCIe fault on the box
+
+The first chaos run (same flags) ended with all four workers dead and, in the
+box's kernel log, a fatal PCIe error on the root port of the V620 switch at
+01:28:44 (completion timeout, DPC containment) that froze every card below it,
+including two that were not in the run. The server was idle: no decode step,
+so no balancer collective, was executing. Nothing else was found; a single-
+process reproduction of the balancer's int32 all-reduces (196 and 32768 words,
+9000 each, RCCL, four ranks) passed with exact sums, and the same run later
+completed twice without a fault. Cause open; it may be unrelated to this
+change. An earlier statement that the balancer's collective was the likely
+cause was wrong.
