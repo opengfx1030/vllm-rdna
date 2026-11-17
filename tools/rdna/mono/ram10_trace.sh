@@ -20,10 +20,17 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
-for cell in 16384:1 1024:8; do
-    IFS=: read -r input concurrency <<< "$cell"
+for cell in ${TRACE_CELLS:-16384:512:1:1 1024:512:8:8}; do
+    IFS=: read -r input output concurrency requests <<< "$cell"
     dir="$OUT/trace/${input}-c${concurrency}"
     mkdir -p "$dir"
+    dataset=(--dataset-name random --random-input-len "$input" --random-output-len "$output")
+    if [[ -n ${TRACE_DATASET_DIR:-} ]]; then
+        corpus="$TRACE_DATASET_DIR/${input}.jsonl"
+        [[ -s "$corpus" ]] || { echo "Missing trace corpus: $corpus" >&2; exit 1; }
+        dataset=(--dataset-name custom --dataset-path "$corpus" --skip-chat-template)
+        sha256sum "$corpus" > "$dir/dataset.sha256"
+    fi
     curl -fsS --max-time 60 -X POST "$base/reset_prefix_cache" > "$dir/reset.json"
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
         python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("success") is True' "$dir/reset.json"
@@ -35,10 +42,10 @@ for cell in 16384:1 1024:8; do
         python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"]; assert len(r)==4 and all(x["caches"]==10 for x in r)' "$dir/start.json"
     HIP_VISIBLE_DEVICES="$GPUS" "$VENV/bin/python" -m vllm.entrypoints.cli.main bench serve \
         --backend openai --endpoint /v1/completions --base-url "$base" \
-        --model "$SERVED" --tokenizer "$MODEL" --dataset-name random \
-        --random-input-len "$input" --random-output-len 512 \
-        --num-prompts "$concurrency" --max-concurrency "$concurrency" \
+        --model "$SERVED" --tokenizer "$MODEL" "${dataset[@]}" \
+        --num-prompts "$requests" --max-concurrency "$concurrency" \
         --ignore-eos --request-rate inf --seed 271828 --temperature 0 \
+        --ready-check-timeout-sec 0 --num-warmups 0 \
         --save-result --save-detailed --result-dir "$dir" \
         --result-filename diagnostic-bench.json > "$dir/client.log" 2>&1
     curl -fsS --max-time 120 -H 'Content-Type: application/json' \

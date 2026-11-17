@@ -117,6 +117,60 @@ Native-copy kernel/cache tests pass on HIP 7.14 gfx1030. A long native-copy
 MTP2 qualification hit NaN logits and remains under investigation; this backend
 and the wider K2 gate are not enabled by default.
 
+## TP4 approximately 10% expert-RAM study
+
+`ram10_study.sh` compares four arms without changing the learned router:
+
+| Arm | Real expert slots/rank | Change |
+|---|---:|---|
+| `R` / `resident` | 128, resident model | Normal compiled MonoKernel; W4A8 prefill |
+| `F` / `fullcache` | 128, cache backend | Full-capacity cache control; W4A16 prefill |
+| `D` / `demand` | 115, cache backend | Demand-loaded experts |
+| `Z` / `zeros` | 115, cache backend | As D, initializing constant zero points once |
+
+D/Z leave 13 of 128 experts nonresident, but their dummy slot means **116
+physical rows and 12 rows saved**. The immutable CPU bank still contains every
+expert. This is expert-weight offload, not a CPU KV-cache tier.
+
+The defaults hold TP4, MTP2, FULL_AND_PIECEWISE, MonoKernel, PLE int4, eight
+sequences, 1024-token blocks, 2048 batched tokens, `GMEM=0.92` and `KV=auto`
+fixed. Cached arms need breakable graphs and W4A16 prefill; F separates this
+backend cost from reducing the cache to 115 slots. R-to-D is therefore a
+deployment comparison, **not an isolated PCIe-copy benchmark**.
+
+Run only under a lease with a checked HIP-to-PCI map and the host's thermal
+watchdog. The caller owns those safeguards; the driver owns boot/quiet-window
+coordination, prefix resets, warm-up, KFD checks and benchmark health.
+
+    ARM=D GPUS=2,3,4,5 MODEL=<checkpoint> PLE_QUANT_DIR=<ples_int4> \
+        bash tools/rdna/mono/ram10_study.sh --dryrun
+
+`CELLS` entries are `input:output:concurrency:requests`; the default matrix
+uses 1k/512, 16k/1k and 32k/2k at concurrency 1 and 8. Each cell warms its
+exact shape, resets prefix caches, and saves detailed request timings.
+Preemptions are cumulative-metric deltas and remain visible: a capacity-limited
+32k cell must not be disguised by changing scheduling between arms.
+
+    python tools/rdna/mono/ram10_report.py --run-root <receipts> --baseline R
+
+The report retains per-request CSV, exact TP-minimum/summed KV storage bytes,
+token capacity, expert-copy counters and baseline-relative timing. Prefill and
+decode span rates are wall-span estimates that can overlap other phases, not
+isolated GPU kernel rates; streamed ITL measures delivery chunks under MTP.
+Missing observations remain missing, never zero.
+
+`AFTER_MATRIX_HOOK=$TREE/tools/rdna/mono/ram10_trace.sh` collects separate
+diagnostic traces for D/Z after clean timing windows. Equal-capacity causal
+replay screens bounded prefetch traffic; it cannot prove hidden copy time or
+an ITL speedup. The functional/capacity pilot receipts are in
+`bench_results/2026-11-17_tp4-ram10/`; timing claims require the matched matrix.
+
+For coding-task rather than random-input diagnostics, `TRACE_DATASET_DIR` may
+point to pre-rendered chat JSONL files named `1024.jsonl` and `16384.jsonl`,
+with `prompt` and `output_tokens` fields. Their hashes are saved. Override
+`TRACE_CELLS="16384:512:1:4 1024:512:8:8"` to include sequential task changes;
+nominal file names do not imply exact token lengths.
+
 ## Mono next to the W4A8 MoE prefill
 
 `--monokernel` serves decode (K1 up to 24 rows, K2 up to 8, GDN up to 64); the
