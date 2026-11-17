@@ -40,6 +40,7 @@ class Options:
     expert_cache_policy: str = "lfu_lru"
     expert_cache_decay: int = 128
     expert_cache_copy: str = "tensor"  # opt-in native batched HIP submissions
+    expert_cache_constant_qzeros: bool = False  # fill symmetric zeros once
 
     @classmethod
     def from_dict(cls, extra: dict) -> "Options":
@@ -56,6 +57,10 @@ class Options:
                 isinstance(v, bool) or not isinstance(v, int)
             ):
                 raise ValueError(f"--monokernel: {k} must be an integer")
+            if k == "expert_cache_constant_qzeros" and not isinstance(v, bool):
+                raise ValueError(
+                    "--monokernel: expert_cache_constant_qzeros must be a boolean"
+                )
             cur = getattr(opts, k)
             setattr(opts, k, type(cur)(v) if not isinstance(cur, bool) else bool(v))
         if not 0 <= opts.expert_cache_slots <= 256:
@@ -66,6 +71,11 @@ class Options:
             raise ValueError("--monokernel: expert_cache_decay must be positive")
         if opts.expert_cache_copy not in ("tensor", "native"):
             raise ValueError("--monokernel: expert_cache_copy must be tensor or native")
+        if opts.expert_cache_constant_qzeros and opts.expert_cache_copy != "tensor":
+            raise ValueError(
+                "--monokernel: expert_cache_constant_qzeros requires "
+                "expert_cache_copy=tensor"
+            )
         return opts
 
     def assign(self, other: "Options") -> None:

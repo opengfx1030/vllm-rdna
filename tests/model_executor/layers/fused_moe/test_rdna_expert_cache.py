@@ -202,6 +202,149 @@ def test_kernel_payload_ends_in_an_all_zero_dummy_slot_nothing_else_touches(
             assert full.k2_payload[name].data_ptr() == full.payload[name].data_ptr()
 
 
+def _constant_qzero_bank(module, experts=24):
+    bank = _bank(module, experts)
+    for name in module.QZERO_NAMES:
+        bank[name].fill_(module.QZERO_VALUE)
+    return bank
+
+
+def _learned_bytes(module, bank):
+    return sum(
+        bank[name][0].numel() * bank[name][0].element_size()
+        for name in module.PAYLOAD_NAMES
+        if name not in module.QZERO_NAMES
+    )
+
+
+def test_constant_qzeros_copy_only_the_four_learned_payloads(cache_module):
+    bank = _constant_qzero_bank(cache_module, 16)
+    cache = cache_module.PackedExpertCache(bank, 4, "cpu", constant_qzeros=True)
+    assert cache.constant_qzeros is True
+    learned = _learned_bytes(cache_module, bank)
+    full = sum(t[0].numel() * t[0].element_size() for t in bank.values())
+    zeros = sum(
+        bank[name][0].numel() * bank[name][0].element_size()
+        for name in cache_module.QZERO_NAMES
+    )
+    assert full == learned + zeros and cache.copied_bytes == 0
+    expected = 0
+    for experts in ([0, 1, 2, 3], [2, 9], [3, 12, 13], [0], [5, 6, 7, 8]):
+        before = cache.expert_misses
+        lease = cache.ensure(experts)
+        expected += (cache.expert_misses - before) * learned
+        assert cache.copied_bytes == expected
+        for expert, slot, _ in lease.bindings:
+            for name in bank:
+                assert torch.equal(cache.payload[name][slot], bank[name][expert])
+        cache.release(lease)
+    assert expected == cache.copied_bytes == cache.expert_misses * learned
+    baseline = cache_module.PackedExpertCache(bank, 4, "cpu")
+    baseline_lease = baseline.ensure([0, 1, 2, 3])
+    baseline.release(baseline_lease)
+    assert baseline.copied_bytes == 4 * full
+
+
+@pytest.mark.parametrize("seed", range(2))
+def test_constant_qzeros_every_slot_matches_the_baseline_through_reuse(
+    cache_module, seed
+):
+    rng = random.Random(seed)
+    experts, slots = 12, 3
+    bank = _constant_qzero_bank(cache_module, experts)
+    enabled = cache_module.PackedExpertCache(bank, slots, "cpu", constant_qzeros=True)
+    baseline = cache_module.PackedExpertCache(bank, slots, "cpu")
+    dummy = enabled.dummy_slot
+    assert dummy == slots == baseline.dummy_slot
+    seen: set[int] = set()
+    demands = [[0, 1, 2]] + [
+        rng.sample(range(experts), rng.randint(1, slots)) for _ in range(80)
+    ]
+    for demand in demands:
+        enabled_lease = enabled.ensure(demand)
+        baseline_lease = baseline.ensure(demand)
+        assert enabled_lease.bindings == baseline_lease.bindings
+        assert torch.equal(enabled.slot_map, baseline.slot_map)
+        seen.update(slot for _, slot, _ in enabled_lease.bindings)
+        for name in cache_module.PAYLOAD_NAMES:
+            assert torch.equal(enabled.payload[name], baseline.payload[name])
+            assert torch.equal(enabled.k2_payload[name], baseline.k2_payload[name])
+        for name in cache_module.QZERO_NAMES:
+            assert not enabled.k2_payload[name][dummy].any()
+        enabled.release(enabled_lease)
+        baseline.release(baseline_lease)
+    assert seen == set(range(slots))
+
+
+@pytest.mark.parametrize("invalid", ["dtype", "value"])
+def test_constant_qzeros_refuse_a_host_zero_point_that_is_not_constant(
+    cache_module, invalid
+):
+    bank = _constant_qzero_bank(cache_module, 8)
+    if invalid == "dtype":
+        bank["w2_qzeros"] = bank["w2_qzeros"].to(torch.int64)
+    else:
+        bank["w13_qzeros"][6, 0, 0] = cache_module.QZERO_VALUE - 1
+    with pytest.raises(ValueError, match="qzeros"):
+        cache_module.PackedExpertCache(bank, 2, "cpu", constant_qzeros=True)
+    # The default cache still accepts the bank and copies all six payloads.
+    assert cache_module.PackedExpertCache(bank, 2, "cpu").constant_qzeros is False
+
+
+def test_a_constant_qzeros_miss_leaves_the_slot_zero_point_row_alone(cache_module):
+    bank = _constant_qzero_bank(cache_module, 8)
+    cache = cache_module.PackedExpertCache(bank, 1, "cpu", constant_qzeros=True)
+    marker = cache_module.QZERO_VALUE ^ 0x0F
+    for name in cache_module.QZERO_NAMES:
+        cache.payload[name][0].fill_(marker)
+    lease = cache.ensure([3])
+    assert lease.bindings == ((3, 0, True),)
+    for name in cache_module.PAYLOAD_NAMES:
+        if name in cache_module.QZERO_NAMES:
+            assert cache.payload[name][0].eq(marker).all()
+        else:
+            assert torch.equal(cache.payload[name][0], bank[name][3])
+    cache.release(lease)
+
+
+def test_constant_qzeros_reject_the_fixed_six_copy_native_path(cache_module):
+    bank = _constant_qzero_bank(cache_module, 8)
+    with pytest.raises(ValueError, match="expert_cache_copy=native"):
+        cache_module.PackedExpertCache(
+            bank, 2, "cpu", copy_mode="native", constant_qzeros=True
+        )
+    with pytest.raises(ValueError, match="boolean"):
+        cache_module.PackedExpertCache(bank, 2, "cpu", constant_qzeros=1)
+
+
+def test_constant_qzeros_option_is_opt_in_and_paired_with_tensor_copies(monkeypatch):
+    root = Path(__file__).resolve().parents[4]
+    spec = importlib.util.spec_from_file_location(
+        "mono_rdna2_options_test",
+        root / "vllm/models/qwen4_exp/amd/mono/rdna2/__init__.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "mono_rdna2_options_test", module)
+    spec.loader.exec_module(module)
+    assert module.Options().expert_cache_constant_qzeros is False
+    opts = module.Options.from_dict(
+        {"expert_cache_slots": 115, "expert_cache_constant_qzeros": True}
+    )
+    assert opts.expert_cache_constant_qzeros is True
+    assert opts.expert_cache_copy == "tensor"
+    for extra, message in (
+        ({"expert_cache_constant_qzeros": 1}, "boolean"),
+        ({"expert_cache_constant_qzeros": "true"}, "boolean"),
+        (
+            {"expert_cache_constant_qzeros": True, "expert_cache_copy": "native"},
+            "tensor",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            module.Options.from_dict(extra)
+
+
 @pytest.mark.parametrize("seed", range(4))
 def test_residency_maps_follow_every_kind_of_pass(cache_module, seed):
     """The first pass reads ``resident_map`` before the host plans the loads."""
@@ -419,12 +562,31 @@ def test_loading_context_stages_only_enabled_native_experts(cache_module, monkey
     assert layer._rdna_expert_cache_device == torch.device("cuda:0")
     assert layer._rdna_expert_cache_policy == "lru"
     assert layer._rdna_expert_cache_decay == 64
+    assert layer._rdna_expert_cache_constant_qzeros is False
     assert method.requires_device_loading is False
     config.additional_config["rocm_mono_decode"]["expert_cache_slots"] = 0
     untouched = SimpleNamespace()
     with cache_module.cpu_weight_context(method, untouched):
         pass
     assert vars(untouched) == {}
+
+
+def test_loading_context_propagates_constant_qzeros(cache_module, monkeypatch):
+    config, method = _loading_config(monkeypatch, 2)
+    knobs = config.additional_config["rocm_mono_decode"]
+    knobs["expert_cache_constant_qzeros"] = True
+    layer = SimpleNamespace()
+    with cache_module.cpu_weight_context(method, layer):
+        assert torch.empty(1).device.type == "cpu"
+    assert layer._rdna_expert_cache_constant_qzeros is True
+    knobs["expert_cache_constant_qzeros"] = 1
+    rejected = SimpleNamespace()
+    with (
+        pytest.raises(ValueError, match="true or false"),
+        cache_module.cpu_weight_context(method, rejected),
+    ):
+        pytest.fail("a non-boolean constant qzeros flag must not begin staging")
+    assert vars(rejected) == {}
 
 
 @pytest.mark.parametrize("unsupported", ["symmetric", "dtype", "eplb", "model"])
@@ -576,3 +738,162 @@ def test_native_copy_validates_entire_pass_before_writing(cache_module, invalid)
         torch.ops._rocm_C.rdna2_expert_cache_copy(sources, destinations, experts, slots)
     torch.accelerator.synchronize()
     assert all(payload.eq(-1).all().item() for payload in cache.payload.values())
+
+
+@pytest.mark.parametrize("max_calls", [2, 10])
+def test_worker_trace_replays_exact_misses_from_initial_cache_state(
+    cache_module, max_calls
+):
+    root = Path(__file__).resolve().parents[4]
+    spec = importlib.util.spec_from_file_location(
+        "expert_trace_worker_test", root / "tools/rdna/mono/expert_cache_worker.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cache = cache_module.PackedExpertCache(_bank(cache_module, 4), 2, "cpu")
+
+    def demand(ids):
+        cache.policy.observe(ids)
+        for experts in cache.policy.plan_passes(ids):
+            cache.release(cache.ensure(experts))
+
+    demand([3, 3, 1])
+    original = cache.policy.observe
+    cached_module = SimpleNamespace(_rdna_expert_cache=cache)
+    worker = module.ExpertCacheWorker()
+    worker.get_model = lambda: SimpleNamespace(
+        named_modules=lambda: [("model.layers.0.experts", cached_module)]
+    )
+    worker.rdna_expert_cache_trace("start", max_calls=max_calls, layers=[0])
+    calls = [[2, 2, -1], [0, 1, 2], [3], [], [1, 3]]
+    for ids in calls:
+        demand(ids)
+    record = worker.rdna_expert_cache_trace("stop")["layers"][0]
+    assert cache.policy.observe == original
+    assert record["seen_calls"] == len(calls)
+    assert record["ids"] == calls[:max_calls]
+    assert record["final_misses"] == cache.expert_misses
+
+    replay = cache_module.ExpertCachePolicy(
+        record["local_experts"],
+        record["capacity"],
+        record["policy"],
+        record["decay_interval"],
+    )
+    replay.epoch = record["initial_epoch"]
+    replay._frequency = record["initial_frequencies"][:]
+    replay._last_used = record["initial_last_used"][:]
+    replay._expert_slots = record["initial_mapping"].copy()
+    for expert, slot in replay.mapping.items():
+        replay._slot_experts[slot] = expert
+    misses = record["initial_misses"]
+    for index, ids in enumerate(record["ids"]):
+        assert record["misses_before"][index] == misses
+        replay.observe(ids)
+        for experts in replay.plan_passes(ids):
+            lease = replay.acquire(experts)
+            misses += sum(miss for _, _, miss in lease.bindings)
+            lease.commit()
+            lease.release()
+    assert misses == record["captured_end_misses"]
+    seen = record["seen_calls"]
+    demand([0])
+    assert record["seen_calls"] == seen
+
+
+def test_worker_rejects_native_switch_for_constant_qzeros(cache_module):
+    root = Path(__file__).resolve().parents[4]
+    spec = importlib.util.spec_from_file_location(
+        "expert_constant_worker_test", root / "tools/rdna/mono/expert_cache_worker.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cache = cache_module.PackedExpertCache(
+        _constant_qzero_bank(cache_module), 2, "cpu", constant_qzeros=True
+    )
+    cached_module = SimpleNamespace(_rdna_expert_cache=cache)
+    worker = module.ExpertCacheWorker()
+    worker.get_model = lambda: SimpleNamespace(modules=lambda: [cached_module])
+    with pytest.raises(ValueError, match="constant expert qzeros require tensor"):
+        worker.rdna_expert_cache_control("native")
+    assert cache._copy_op is None
+
+
+def test_worker_trace_byte_cap_keeps_an_exact_complete_forward_prefix(
+    cache_module, monkeypatch
+):
+    import json
+
+    root = Path(__file__).resolve().parents[4]
+    spec = importlib.util.spec_from_file_location(
+        "expert_bounded_worker_test", root / "tools/rdna/mono/expert_cache_worker.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_TRACE_BYTES_LIMIT", 60)
+    caches = [
+        cache_module.PackedExpertCache(_bank(cache_module, 4), 1, "cpu")
+        for _ in range(2)
+    ]
+    worker = module.ExpertCacheWorker()
+    worker.get_model = lambda: SimpleNamespace(
+        named_modules=lambda: [
+            (f"model.layers.{index}.experts", SimpleNamespace(_rdna_expert_cache=cache))
+            for index, cache in enumerate(caches)
+        ]
+    )
+    worker.rdna_expert_cache_trace("start", max_calls=128)
+    for step in range(3):
+        for cache in caches:
+            ids = [step] + [-1] * 9
+            cache.policy.observe(ids)
+            for experts in cache.policy.plan_passes(ids):
+                cache.release(cache.ensure(experts))
+    result = worker.rdna_expert_cache_trace("stop")
+    assert result["raw_bytes"] == 60
+    assert result["byte_limit_reached"]
+    assert [len(record["ids"]) for record in result["layers"]] == [2, 1]
+    assert [record["captured_end_misses"] for record in result["layers"]] == [2, 1]
+    assert [cache.expert_misses for cache in caches] == [3, 3]
+
+    spec = importlib.util.spec_from_file_location(
+        "expert_prefetch_replay_test", root / "tools/rdna/mono/ram10_prefetch.py"
+    )
+    assert spec is not None and spec.loader is not None
+    replay = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(replay)
+    response = json.loads(json.dumps({"results": [result]}))
+    measured = replay.replay(response, warmup_calls=0)
+    assert measured["native_replay_exact"]
+    assert measured["scored_calls_per_layer"] == 1
+    assert measured["unscored_tail_calls"] == 1
+    assert measured["scored"]["demand_misses"] == 2
+
+
+def test_worker_reports_physical_kv_storage_without_double_counting_views():
+    root = Path(__file__).resolve().parents[4]
+    spec = importlib.util.spec_from_file_location(
+        "kv_memory_worker_test", root / "tools/rdna/mono/expert_cache_worker.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    packed_page = torch.zeros(64, dtype=torch.uint8)
+    recurrent_page = torch.zeros(7, dtype=torch.int64)
+    worker = module.ExpertCacheWorker()
+    worker.model_runner = SimpleNamespace(
+        kv_caches=[
+            packed_page[:10],
+            packed_page[12:],
+            recurrent_page[1:],
+            packed_page.view(8, 8),
+        ]
+    )
+    measured = worker.rdna_cache_memory()
+    assert measured["kv_cache_storage_bytes"] == 120
+    assert measured["kv_cache_storages"] == 2
+    assert measured["kv_cache_views"] == 4
+    assert measured["kv_cache_devices"] == ["cpu"]

@@ -44,7 +44,7 @@ Topology is explicit: `TP` (2 or 4; 256 or 128 local experts per rank) and
 `GPUS` must agree in device count, and the `GPUS` set must be listed in
 `ALLOWED_GPU_SETS` (space-separated set list; default `6,7`, the maintainer
 host's allocation restriction). `SLOTS` is capped at the per-rank local expert
-count (default 96 at TP2, 48 at TP4 — the same one-third-of-local budget).
+count (default 96 at TP2, 48 at TP4 — the same three-eighths-of-local budget).
 A four-card host runs the same plan with:
 
     GPUS=0,1,2,3 TP=4 ALLOWED_GPU_SETS="0,1,2,3" PRINT=1 bash tools/rdna/mono/serve_offload.sh
@@ -61,6 +61,17 @@ oracle is the resident 128-expert `mono_k2_rdna2` entry with AR detached.
 
 `KV_OFFLOAD_GB=0` disables the optional CPU KV tier by omitting its connector
 flags. Positive budgets retain the native KV backend; the default is 16 GiB.
+
+For symmetric INT4 tensor copies, opt in to initializing constant zero points
+once rather than copying them on every expert miss:
+
+    MONO_CFG='"expert_cache_constant_qzeros":true' KV_OFFLOAD_GB=0 \
+        bash tools/rdna/mono/serve_offload.sh
+
+The host zero points are validated, the dummy slot remains zero, and all six
+payload views retain their layout. Only weight/scale H2D bytes change; host/VRAM
+usage and expert selection do not. The option defaults off and rejects native
+copies, including a later RPC backend switch.
 
 For isolated, localhost qualification, load
 `--worker-extension-cls tools.rdna.mono.expert_cache_worker.ExpertCacheWorker`
@@ -81,6 +92,26 @@ must not be used as clean performance comparisons.
 The diagnostic `post_step_checks="collective" | "wait" | "off"` control
 separates TP collective pacing from the post-step completion wait. `collective`
 is the normal guard; the other modes are solely for reproducing failures.
+
+`rdna_expert_cache_trace` accepts `{"action":"start","max_calls":1024,"layers":[0,1]}`
+and later `{"action":"stop"}` through the same endpoint. It returns bounded
+CPU-visible demands, including prefill/padding rows, initial LFU/LRU state,
+and miss counters for exact replay. Call only between workloads; traced windows
+add Python work and are never clean performance evidence.
+Retention stops at 16 MiB of raw IDs per worker (the JSON response is larger).
+If this cuts a forward short, replay scores only the complete shared prefix
+and reports discarded tail records.
+
+    python tools/rdna/mono/ram10_prefetch.py TRACE_STOP_RPC.json --out prefetch.json
+
+Ordinary replay must exactly reproduce observed cache misses before causal
+previous-step and physically adjacent-layer predictions are compared at equal
+slot count. This counts speculative traffic and useful loads, not runtime
+overlap or ITL improvement; it never replaces the model's router.
+
+`rdna_cache_memory` reports exact V2 KV storage bytes, deduplicating shared
+tensor views by backing storage. It works on resident and offloaded workers
+without synchronizing the device; TP capacity uses the minimum rank budget.
 
 Native-copy kernel/cache tests pass on HIP 7.14 gfx1030. A long native-copy
 MTP2 qualification hit NaN logits and remains under investigation; this backend

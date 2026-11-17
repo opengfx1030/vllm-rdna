@@ -39,7 +39,13 @@ VALIDATE=1 MTP=0 EAGER=1 CELLS=none \
 ```
 
 The config keys under `rocm_mono_decode` are `expert_cache_slots` (0 disables),
-`expert_cache_policy` (`lfu_lru` or `lru`), and `expert_cache_decay` (invocations).
+`expert_cache_policy` (`lfu_lru` or `lru`), `expert_cache_decay` (invocations),
+`expert_cache_copy` (`tensor` default, `native` experimental), and
+`expert_cache_constant_qzeros` (JSON boolean, default `false`, tensor copies only).
+The last option validates the symmetric INT4 zero points as constant
+`0x77777777`, initializes the real slot rows once, and copies only the four
+weight/scale tensors on a miss. The dummy row stays zero. It changes neither
+routing nor host/device allocation; any speed benefit needs a measured A/B.
 The wrapper exposes SLOTS/POLICY/DECAY and KV_OFFLOAD_GB; KV_OFFLOAD_GB=0 disables
 the native host KV tier for expert-only comparison. The offloading launcher
 also defaults `VLLM_RDNA2_W4A16_DETERMINISTIC_DENSE=1`; standard resident recipes

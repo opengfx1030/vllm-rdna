@@ -188,6 +188,7 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
             policy=layer._rdna_expert_cache_policy,
             decay_interval=layer._rdna_expert_cache_decay,
             copy_mode=layer._rdna_expert_cache_copy,
+            constant_qzeros=getattr(layer, "_rdna_expert_cache_constant_qzeros", False),
         )
         for name, tensor in cache.payload.items():
             if hasattr(layer, name):
@@ -199,12 +200,13 @@ class CompressedTensorsWNA16RDNA2MoEMethod(CompressedTensorsWNA16MoEMethod):
         layer._rdna_expert_cache = cache
         logger.info(
             "RDNA2 expert cache %s: %d logical experts, %d GPU slots; "
-            "device %.3f GiB, host %.3f GiB",
+            "device %.3f GiB, host %.3f GiB; constant qzeros %s",
             getattr(layer, "layer_name", ""),
             cache.logical_num_experts,
             cache.slot_count,
             cache.device_bytes / 2**30,
             cache.host_bytes / 2**30,
+            cache.constant_qzeros,
         )
         self._zero_v2 = False
         self._w4a8 = False

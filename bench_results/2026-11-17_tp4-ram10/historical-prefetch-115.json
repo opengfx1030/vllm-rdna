@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "purpose": "Historical trace screening at 115 real rows, not current GPU timing",
+  "input": "t10b_G_rank0.trace.npz",
+  "input_sha256": "1cd218f08522665338ae4b13aae3e76d0f071ba0f0e5a760ca04836ac27903b0",
+  "sampled_layers": [
+    0,
+    12,
+    24,
+    36,
+    47
+  ],
+  "steps": 5242,
+  "local_experts": 128,
+  "policies": [
+    {
+      "kind": "ordinary",
+      "capacity": 111,
+      "misses": 19944,
+      "demands": 2592575,
+      "copy_bytes": 50928998400
+    },
+    {
+      "kind": "ordinary",
+      "capacity": 113,
+      "misses": 15726,
+      "demands": 2592575,
+      "copy_bytes": 40157913600
+    },
+    {
+      "kind": "ordinary",
+      "capacity": 115,
+      "misses": 12230,
+      "demands": 2592575,
+      "copy_bytes": 31230528000
+    },
+    {
+      "kind": "ordinary",
+      "capacity": 128,
+      "misses": 2552,
+      "demands": 2592575,
+      "copy_bytes": 6516787200
+    },
+    {
+      "kind": "transition",
+      "mode": "reserved",
+      "capacity": 113,
+      "real_rows": 115,
+      "demand_misses": 15726,
+      "expert_demands": 2592575,
+      "total_copy_bytes": 40160467200,
+      "prefetch_issued": 1,
+      "prefetch_bytes": 2553600,
+      "prefetch_useful_hits": 0,
+      "prefetch_already_resident": 167711
+    },
+    {
+      "kind": "transition",
+      "mode": "reserved",
+      "capacity": 111,
+      "real_rows": 115,
+      "demand_misses": 19925,
+      "expert_demands": 2592575,
+      "total_copy_bytes": 50885587200,
+      "prefetch_issued": 2,
+      "prefetch_bytes": 5107200,
+      "prefetch_useful_hits": 11,
+      "prefetch_already_resident": 335419
+    },
+    {
+      "kind": "transition",
+      "mode": "shared",
+      "capacity": 115,
+      "real_rows": 115,
+      "demand_misses": 12230,
+      "expert_demands": 2592575,
+      "total_copy_bytes": 31230528000,
+      "prefetch_issued": 0,
+      "prefetch_bytes": 0,
+      "prefetch_useful_hits": 0,
+      "prefetch_already_resident": 167712
+    },
+    {
+      "kind": "prev_step",
+      "mode": "shared",
+      "capacity": 115,
+      "real_rows": 115,
+      "demand_misses": 12230,
+      "expert_demands": 2592575,
+      "total_copy_bytes": 31230528000,
+      "prefetch_issued": 0,
+      "prefetch_bytes": 0,
+      "prefetch_useful_hits": 0,
+      "prefetch_already_resident": 208596
+    }
+  ],
+  "limits": [
+    "historical decode trace, five sampled layers only",
+    "global rank0 route choices filtered to four local ranks",
+    "cold start included, no held-out workload",
+    "transition targets next sampled layer, not adjacent physical layer",
+    "reserved policy is a two-tier speculative-pass model, not a runtime implementation",
+    "115 real rows plus one dummy assumed, not measured GPU allocation",
+    "copy timing model unqualified; only demands and byte counts are useful screening"
+  ]
+}

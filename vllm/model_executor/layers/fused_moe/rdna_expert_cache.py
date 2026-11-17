@@ -20,6 +20,11 @@ PAYLOAD_NAMES = (
     "w2_qzeros",
 )
 
+# The two zero-point payloads of symmetric uint4b8 experts: every element holds
+# zero=8 (GPTQv1 stores zero-1), so a cache can fill them once and copy none.
+QZERO_NAMES = ("w13_qzeros", "w2_qzeros")
+QZERO_VALUE = 0x77777777
+
 
 def is_capturing_expert_work() -> bool:
     """Distinguish raw capture from a breakable graph's eager/replay segments."""
@@ -67,6 +72,9 @@ def cpu_weight_context(quant_method, layer):
         raise ValueError("expert cache does not support EPLB")
     if isinstance(slots, bool) or not isinstance(slots, int) or slots < 1:
         raise ValueError("expert_cache_slots must be a positive integer")
+    constant_qzeros = options.get("expert_cache_constant_qzeros", False)
+    if not isinstance(constant_qzeros, bool):
+        raise ValueError("expert_cache_constant_qzeros must be true or false")
     device = torch.get_default_device()
     if device.type != "cuda":
         raise ValueError("expert cache requires a CUDA/HIP loading device")
@@ -75,6 +83,7 @@ def cpu_weight_context(quant_method, layer):
     layer._rdna_expert_cache_policy = options.get("expert_cache_policy", "lfu_lru")
     layer._rdna_expert_cache_decay = options.get("expert_cache_decay", 128)
     layer._rdna_expert_cache_copy = options.get("expert_cache_copy", "tensor")
+    layer._rdna_expert_cache_constant_qzeros = constant_qzeros
     quant_method.requires_device_loading = False
     with torch.device("cpu"):
         yield
@@ -112,7 +121,7 @@ def prepare_host_payload(layer, group_size, device, shuffle):
         groups = weights.shape[1] * 8 // group_size
         host[f"{stem}_qzeros"] = torch.full(
             (weights.shape[0], groups, weights.shape[2] // 8),
-            0x77777777,  # symmetric uint4b8 zero=8, GPTQv1 stores zero-1
+            QZERO_VALUE,
             dtype=torch.int32,
             device="cpu",
             pin_memory=pin,
@@ -121,7 +130,12 @@ def prepare_host_payload(layer, group_size, device, shuffle):
 
 
 class PackedExpertCache:
-    """Immutable packed CPU bank with a bounded, stable device allocation."""
+    """Immutable packed CPU bank with a bounded, stable device allocation.
+
+    With ``constant_qzeros`` the two symmetric zero-point payloads are filled
+    once per real slot and never copied again: a demand miss moves only the
+    four learned payloads. The all-zero dummy slot is left untouched.
+    """
 
     def __init__(
         self,
@@ -131,12 +145,21 @@ class PackedExpertCache:
         policy="lfu_lru",
         decay_interval=128,
         copy_mode="tensor",
+        constant_qzeros=False,
     ):
         if set(host_payload) != set(PAYLOAD_NAMES):
             raise ValueError("expert cache requires all six packed payload tensors")
         self.device = torch.device(device)
         if copy_mode not in ("tensor", "native"):
             raise ValueError("expert_cache_copy must be tensor or native")
+        if not isinstance(constant_qzeros, bool):
+            raise ValueError("constant_qzeros must be a boolean")
+        self.constant_qzeros = constant_qzeros
+        if self.constant_qzeros and copy_mode == "native":
+            raise ValueError(
+                "constant qzeros cannot skip payload copies with "
+                "expert_cache_copy=native: its fixed six-copy op has no skip"
+            )
         self._copy_op = None
         if copy_mode == "native":
             if self.device.type != "cuda" or torch.version.hip is None:
@@ -170,6 +193,18 @@ class PackedExpertCache:
                 raise ValueError("expert host payload must be contiguous CPU storage")
             if source.shape[0] != self.logical_num_experts:
                 raise ValueError("expert payload dimensions disagree")
+            if self.constant_qzeros and name in QZERO_NAMES:
+                if source.dtype != torch.int32:
+                    raise ValueError(
+                        f"constant expert qzeros require int32 {name}, "
+                        f"got {source.dtype}"
+                    )
+                low, high = source.min().item(), source.max().item()
+                if low != QZERO_VALUE or high != QZERO_VALUE:
+                    raise ValueError(
+                        f"constant expert qzeros require {name} to be entirely "
+                        f"{QZERO_VALUE:#x}, got [{low:#x}, {high:#x}]"
+                    )
             if self.device.type == "cuda" and not source.is_pinned():
                 source = source.pin_memory()
             self.host_payload[name] = source
@@ -182,6 +217,9 @@ class PackedExpertCache:
             # modular path and the loads only ever see the real slots.
             self.k2_payload[name] = storage
             self.payload[name] = storage[: self.slot_count]
+            if self.constant_qzeros and name in QZERO_NAMES:
+                # Written once here; no demand miss copies this payload again.
+                self.payload[name].fill_(QZERO_VALUE)
         self.slot_map = torch.full(
             (self.logical_num_experts,), -1, dtype=torch.int32, device=self.device
         )
@@ -231,6 +269,11 @@ class PackedExpertCache:
         self.committed_passes = 0
         self._copy_sources = tuple(self.host_payload[name] for name in PAYLOAD_NAMES)
         self._copy_destinations = tuple(self.payload[name] for name in PAYLOAD_NAMES)
+        self._copied_names = tuple(
+            name
+            for name in PAYLOAD_NAMES
+            if not (self.constant_qzeros and name in QZERO_NAMES)
+        )
         self._expert_bytes = sum(
             tensor[0].numel() * tensor.element_size() for tensor in self._copy_sources
         )
@@ -335,7 +378,7 @@ class PackedExpertCache:
             self.copied_bytes += len(bindings) * self._expert_bytes
             return
         for expert, slot, _ in bindings:
-            for name in PAYLOAD_NAMES:
+            for name in self._copied_names:
                 source = self.host_payload[name][expert]
                 self.payload[name][slot].copy_(source, non_blocking=True)
                 self.copied_bytes += source.numel() * source.element_size()

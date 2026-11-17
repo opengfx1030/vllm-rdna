@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "purpose": "Functional and startup-capacity pilot; not a controlled throughput comparison",
+  "baseline_revision": "e315534d3d",
+  "optimized_arm_source": "uncommitted constant-qzero candidate, identified by 192 constant-qzeros=True layer logs",
+  "rocm_extension_sha256": "6945bd8cf54fb787784f8436405c2b0ac3e1f34410ed0fadce2e409da1cc0c32",
+  "settings": {
+    "tp": 4,
+    "hip_devices": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "pci_buses": [
+      "d9",
+      "dc",
+      "df",
+      "e2"
+    ],
+    "model": "wtdcode/Qwen3.8-Flash-Next-AWQ-W4A16@0939125b929543a783ce700c90e36dd1a575c00c",
+    "mtp": 2,
+    "cudagraph_mode": "FULL_AND_PIECEWISE",
+    "monokernel": true,
+    "gpu_memory_utilization": 0.92,
+    "kv": "auto",
+    "max_model_len": 131072,
+    "max_batched_tokens": 2048,
+    "max_num_seqs": 8,
+    "kv_cpu_offload": false,
+    "live_eplb": false,
+    "ple": "int4",
+    "deterministic_dense": true
+  },
+  "arms": [
+    {
+      "arm": "resident",
+      "expert_slots": 0,
+      "model_loading_gib": [
+        20.56
+      ],
+      "available_kv_estimate_gib_rank0": [
+        4.18
+      ],
+      "gpu_kv_capacity_tokens": [
+        269375
+      ],
+      "allocated_kv_gib_per_rank_rounded": {
+        "1": 4.43,
+        "0": 4.18,
+        "2": 4.43,
+        "3": 4.03
+      },
+      "ppl": [
+        "4.84"
+      ],
+      "functional_pass": true,
+      "serve_fault_markers": 0,
+      "constant_qzeros_true_layer_logs": 0,
+      "remote_receipt": "~/w4a8_runs/port-v031/serve-ram10-pilot-resident",
+      "peak_junction_c": 70.0
+    },
+    {
+      "arm": "fullcache",
+      "expert_slots": 128,
+      "model_loading_gib": [
+        20.55
+      ],
+      "available_kv_estimate_gib_rank0": [
+        2.5
+      ],
+      "gpu_kv_capacity_tokens": [
+        167229
+      ],
+      "allocated_kv_gib_per_rank_rounded": {
+        "1": 2.89,
+        "3": 2.57,
+        "2": 2.6,
+        "0": 2.5
+      },
+      "ppl": [
+        "4.80"
+      ],
+      "functional_pass": true,
+      "serve_fault_markers": 0,
+      "constant_qzeros_true_layer_logs": 0,
+      "remote_receipt": "~/w4a8_runs/port-v031/serve-ram10-pilot-fullcache",
+      "peak_junction_c": 70.0
+    },
+    {
+      "arm": "demand",
+      "expert_slots": 115,
+      "model_loading_gib": [
+        19.29
+      ],
+      "available_kv_estimate_gib_rank0": [
+        3.6
+      ],
+      "gpu_kv_capacity_tokens": [
+        241353
+      ],
+      "allocated_kv_gib_per_rank_rounded": {
+        "2": 3.75,
+        "1": 4.0,
+        "3": 3.61,
+        "0": 3.6
+      },
+      "ppl": [
+        "4.80"
+      ],
+      "functional_pass": true,
+      "serve_fault_markers": 0,
+      "constant_qzeros_true_layer_logs": 0,
+      "remote_receipt": "~/w4a8_runs/port-v031/serve-ram10-pilot-demand",
+      "peak_junction_c": 70.0
+    },
+    {
+      "arm": "zeros",
+      "expert_slots": 115,
+      "model_loading_gib": [
+        19.29
+      ],
+      "available_kv_estimate_gib_rank0": [
+        3.67
+      ],
+      "gpu_kv_capacity_tokens": [
+        242257
+      ],
+      "allocated_kv_gib_per_rank_rounded": {
+        "2": 3.93,
+        "0": 3.67,
+        "3": 3.62,
+        "1": 3.67
+      },
+      "ppl": [
+        "4.80"
+      ],
+      "functional_pass": true,
+      "serve_fault_markers": 0,
+      "constant_qzeros_true_layer_logs": 192,
+      "remote_receipt": "~/w4a8_runs/port-v031/serve-ram10-pilot-zeros",
+      "peak_junction_c": 72.0
+    }
+  ],
+  "limits": [
+    "Available KV memory is the rank-0 estimate, not necessarily the TP minimum.",
+    "Per-rank allocated GiB is rounded by the runtime log; exact storage-byte RPC added for the timing matrix.",
+    "Resident uses W4A8 prefill and compiled graphs; cache arms require W4A16 and breakable graphs. Fullcache isolates this backend cost.",
+    "Zero-point-copy elimination changes neither allocation nor routing. Its small capacity difference from demand is not attributed to the optimization.",
+    "PPL is a 261-token startup smoke, not task-accuracy qualification.",
+    "No throughput claim from these pilots."
+  ]
+}
