@@ -58,6 +58,12 @@ step with the default chunk.
 | `VLLM_RDNA_EPLB_OBJECTIVE` | touch | `touch` (decode: distinct experts per rank) or `pairs` (prefill) |
 | `VLLM_RDNA_EPLB_CHAOS` | 0 | N > 0: no policy, N random swaps per decision (qualification) |
 
+Mailbox steps take priority over transfer steps. A cadence with
+`CHUNK_EVERY % MAILBOX_STEPS == 0` is rejected because every transfer would be
+starved by a mailbox (including `MAILBOX_STEPS=1`). The mailbox's deliberate
+host/device handshake is covered by the sync-check allow-region, including
+its host-to-device copy, so strict debug checking does not reject that copy.
+
 `tools/rdna/serve_rdna.sh` passes them through, e.g.
 `bash tools/rdna/serve_rdna.sh RECIPE=flashnext-mtp2 MODEL=... VLLM_RDNA_EPLB=1`.
 

@@ -374,6 +374,9 @@ def test_flag_on_enables_the_counters_without_snapshot_files(monkeypatch, tmp_pa
     "kwargs",
     [
         {"mailbox_steps": 0},
+        {"mailbox_steps": 1},
+        {"chunk_every": 256},
+        {"mailbox_steps": 4, "chunk_every": 8},
         {"chunk_kb": 0},
         {"chunk_kb": 8192},
         {"max_swaps": 0},
@@ -686,3 +689,27 @@ def test_swapped_k_first_experts_serve_the_same_moe(M, w4a8):
                 assert torch.equal(getattr(module, name)[int(slots[e])], tensor[e])
     after = forward()
     torch.testing.assert_close(after, before, atol=0.02, rtol=0.01)
+
+
+@pytest.mark.skipif(not _gfx1030_moe(), reason="needs gfx1030")
+def test_mailbox_error_disables_balancer_under_strict_sync_check(monkeypatch):
+    """The intentional mailbox handshake must not kill a sync-checked worker."""
+    from vllm.utils import gpu_sync_debug as sync
+
+    device = torch.device("cuda")
+    cfg = eo.OnlineConfig()
+    # A one-participant rendezvous exercises the real GPU mailbox transfers;
+    # the error word follows the same coordinated-disable path as a peer error.
+    ctl = eo.OnlineEplb(cfg, collective=Port(Bus(1), 0, device))
+    ctl._mail_host = torch.zeros(
+        eo.HEADER + eo.SWAP_WORDS * cfg.max_swaps, dtype=torch.int32
+    )
+    ctl._mail = torch.zeros_like(ctl._mail_host, device=device)
+    ctl._error = "setup failed"
+    ctl.t = cfg.mailbox_steps
+    monkeypatch.setattr(sync, "_SYNC_CHECK_MODE", "error")
+    with sync._checked_region("error"):
+        ctl._mailbox()
+    assert ctl.off
+    assert ctl.collectives == 1
+    assert ctl._mail.cpu()[eo.M_ERRORS].item() == 1

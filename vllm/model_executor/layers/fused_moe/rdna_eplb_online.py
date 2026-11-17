@@ -135,6 +135,11 @@ class OnlineConfig:
     def __post_init__(self) -> None:
         if self.mailbox_steps < 1 or self.chunk_every < 1 or self.decision_steps < 1:
             raise ValueError("online EPLB step counts must be >= 1")
+        if self.chunk_every % self.mailbox_steps == 0:
+            raise ValueError(
+                f"{CHUNK_EVERY_ENV} must leave transfer steps outside "
+                f"{MAILBOX_ENV}; every transfer step would be a mailbox step"
+            )
         if not 1 <= self.chunk_kb <= 4096:
             raise ValueError(f"{CHUNK_ENV} must be 1..4096, got {self.chunk_kb}")
         if not 1 <= self.max_swaps <= 1024:
@@ -468,9 +473,10 @@ class OnlineEplb:
                 self._outbox = None
         if self._error is not None:
             message[M_ERRORS] = 1
-        self._mail.copy_(self._mail_host)
-        out = self._reduce(self._mail)
+        # The scheduled mailbox handshake deliberately synchronizes the host.
         with gpu_sync_allowed():
+            self._mail.copy_(self._mail_host)
+            out = self._reduce(self._mail)
             result = out.cpu().numpy()
         if result[M_ERRORS] != 0:
             self._disable(f"{int(result[M_ERRORS])} rank(s) reported an error")
