@@ -10,7 +10,7 @@ so a rank's work is fixed by which experts it owns:
 ``T[s, r]``   distinct experts of rank ``r`` with at least one pair (decode objective:
               bandwidth bound, one weight read per touched expert),
 ``P[s, r]``   pairs of rank ``r`` (prefill objective: compute bound),
-``us[s, r]``  the roofline time of ``geometry.CostModel``.
+``us[s, r]``  the roofline time of ``core.CostModel``.
 
 The figure of merit is ``max_over_mean(x) = sum_s max_r x / sum_s mean_r x``: the
 factor by which the slowest rank stretches the sum of step times (DeepInfer's
@@ -19,7 +19,7 @@ factor by which the slowest rank stretches the sum of step times (DeepInfer's
 
 import numpy as np
 
-from tools.rdna.eplb.geometry import DEFAULT_COST, CostModel
+from tools.rdna.eplb._core import core
 
 
 def step_counts(
@@ -36,7 +36,7 @@ def rank_loads(
     counts: np.ndarray,
     owner: np.ndarray,
     ranks: int,
-    cost: CostModel = DEFAULT_COST,
+    cost: core.CostModel = core.DEFAULT_COST,
 ) -> dict[str, np.ndarray]:
     """``T``, ``P`` and ``us`` of a permutation-only placement (``owner[e]`` = rank)."""
     onehot = np.zeros((owner.shape[0], ranks))
