@@ -67,8 +67,12 @@ step with the default chunk.
   linear placement strategy (a static `VLLM_RDNA_MOE_PLACEMENT` file is the
   starting point if set).
 - Not moved: the MTP draft model's BF16 experts, the expert-offload cache.
-- The Flash-Next mono K2 kernel stands down while the balancer is on (it
-  needs the contiguous expert block); see "Mono K2" below.
+- The Flash-Next mono K2 kernel (`--monokernel`) runs in map mode while the
+  balancer is on: it resolves routed ids through the layer's live
+  `expert_map` and reports them for the counters. Kernel tests (HIP 1) 387
+  passed / 48 skipped and archdiff over six arches shows only the four new
+  Stage-4 functions per arch; a served `--monokernel` + `VLLM_RDNA_EPLB=1`
+  run is not qualified yet.
 - A swap changes which rank adds which partial sum, so outputs are equal in
   value, not bit for bit (fp16 all-reduce association), as with any change of
   placement.
