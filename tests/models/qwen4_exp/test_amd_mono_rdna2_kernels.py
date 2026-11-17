@@ -123,8 +123,10 @@ def _golden_gaps(G, res, blk, inj):
     return (srt[:, TOPK - 1] - srt[:, TOPK]).tolist()
 
 
-def _today_ffn(L, res, blk, inj, *, return_routes=False, expert_base=0):
-    """Today's decode FFN block on one contiguous EP rank."""
+def _today_ffn(L, res, blk, inj, *, return_routes=False, expert_base=0, emap=None):
+    """Today's decode FFN block on one EP rank: the contiguous block at
+    ``expert_base``, or the placement ``emap`` (global id -> local row, -1 =
+    not local) when given."""
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers import rdna_ops  # noqa: F401
     from vllm.model_executor.layers.fused_moe.experts.rdna2_w4a16_moe import (
@@ -138,10 +140,11 @@ def _today_ffn(L, res, blk, inj, *, return_routes=False, expert_base=0):
     from vllm.models.qwen4_exp.amd.ops.hc import hc_combine_norm
 
     M = res.shape[0]
-    emap = torch.full((E,), -1, dtype=torch.int32, device=DEV)
-    emap[expert_base : expert_base + EL] = torch.arange(
-        EL, dtype=torch.int32, device=DEV
-    )
+    if emap is None:
+        emap = torch.full((E,), -1, dtype=torch.int32, device=DEV)
+        emap[expert_base : expert_base + EL] = torch.arange(
+            EL, dtype=torch.int32, device=DEV
+        )
     res_out, xn = hc_combine_norm(res, blk, inj, L["norm_w"], EPS, HC)
     b, inj_out = torch.ops.vllm.rdna_hc_mix(
         xn, L["wd"], None, None, L["wu"], None, None, R, HC

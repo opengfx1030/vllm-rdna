@@ -17,6 +17,11 @@ The decision is made at run time inside one opaque custom op
 (``vllm::qwen4_exp_mono_k2_rdna2``), so torch.compile sees a single op and the
 branch follows the actual batch, not the trace-time size.
 
+Placement: with the EPLB load counters on (``layout.map_mode``) K2 resolves the
+routed ids through the layer's live ``expert_map``, so any placement of the
+rank's experts runs (no contiguous block), and hands its top-k ids to the
+counters (``ids_out``) instead of standing down to the modules.
+
 Fail-stop: a timed-out grid barrier leaves a sticky record; later launches
 exit at once and fill the FFN output with NaN instead of returning stale data.
 """
@@ -29,7 +34,7 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.rdna_eplb_stats import (
-    ENABLED as EPLB_STATS_ENABLED,
+    COLLECTOR as EPLB_STATS,
 )
 from vllm.model_executor.layers.fused_moe.rdna_expert_stats import (
     ENABLED as EXPERT_STATS_ENABLED,
@@ -314,7 +319,7 @@ def run(mono: MonoLayer, hidden_states, attn_out, injection):
                 for name, x in tensors.items()
             },
         )
-    torch.ops._rocm_C.mono_k2_rdna2(
+    args = (
         hidden_states,
         attn_out,
         injection.contiguous(),
@@ -344,6 +349,22 @@ def run(mono: MonoLayer, hidden_states, attn_out, injection):
         mono.dense_mtp,
         getattr(mono, "preserve_fault", False),
     )
+    if not getattr(mono, "map_mode", False):
+        torch.ops._rocm_C.mono_k2_rdna2(*args)
+        return res_out, out, inj_out
+    # Map mode (layout.map_mode): the placement is the layer's live expert_map,
+    # the tensor the module path reads (a rebalancer rewrites it in place and a
+    # captured graph holds its address, so it is never copied), and the routed
+    # ids go to the layer's load counters like the module path's top-k does.
+    ids_out = mono.ids_out
+    stats = None
+    if EPLB_STATS is not None:
+        stats = EPLB_STATS.layer_stats(mono.experts, ids_out[:1])
+    torch.ops._rocm_C.mono_k2_rdna2(
+        *args, mono.experts.expert_map, ids_out if stats is not None else None
+    )
+    if stats is not None:
+        stats.count(ids_out[:m])
     return res_out, out, inj_out
 
 
@@ -365,12 +386,12 @@ def _k2(
     md = mode()
     fits = 0 < m <= MAX_ROWS and hidden_states.dtype == torch.float16 and mono.ready
     # With VLLM_EXPERT_STATS_DIR the modules route: K2's top-k is not observable.
+    # The EPLB counters do not stand K2 down: in map mode K2 reports its ids.
     use = (
         fits
         and OPTS.k2
         and not OPTS.modules
         and not EXPERT_STATS_ENABLED
-        and not EPLB_STATS_ENABLED
         and m <= mono.k2_max_rows
         and md in MODES
     )

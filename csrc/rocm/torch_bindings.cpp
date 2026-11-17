@@ -160,7 +160,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor z2, Tensor! res_out, Tensor! inj_out, Tensor! out, "
       "Tensor! workspace, int expert_base, int zero_offset, int num_wg, "
       "float eps, float timeout_ms, bool reset_control=False, "
-      "bool dense_mtp=False, bool preserve_fault=False) -> ()");
+      "bool dense_mtp=False, bool preserve_fault=False, "
+      "Tensor? expert_map=None, Tensor!? ids_out=None) -> ()");
   rocm_ops.impl("mono_k2_rdna2", torch::kCUDA, &mono_k2_rdna2);
   rocm_ops.def(
       "mono_k2_offload_rdna2(Tensor res, Tensor blk, Tensor inj, Tensor "

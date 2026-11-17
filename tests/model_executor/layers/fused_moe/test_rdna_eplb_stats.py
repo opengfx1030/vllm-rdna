@@ -535,12 +535,6 @@ def test_fused_moe_counts_each_call_once():
     assert "eplb_stats" not in cached
 
 
-def test_k2_stands_down_only_through_the_import_time_flag():
-    source = (ROOT / "vllm/models/qwen4_exp/amd/mono/rdna2/k2.py").read_text()
-    assert "and not EPLB_STATS_ENABLED" in source
-    assert source.count("EPLB_STATS_ENABLED") == 2  # import + the one gate
-
-
 def test_the_torch_formulation_is_capture_safe_by_construction():
     """No host synchronization, dynamic shapes or allocation of persistent state."""
     source = inspect.getsource(es.LayerStats.count_torch)

@@ -39,6 +39,18 @@
 //   w13 [El, H/8, 2I] / w2 [El, I/8, H] uint32 (exllama-shuffled int4),
 //   s13 / s2 [El, groups, N] fp16, z13 / z2 [El, groups, N/8] packed zeros
 //   (moe_gptq_gemm_rdna2's layout, symmetric).
+//
+// Placement. By default the rank holds one contiguous block of experts,
+// [expert_base, expert_base + 128) of the global ids, and the local expert of
+// a routed id is id - expert_base. mono_k2_rdna2 also takes an optional
+// expert_map (int32 [E]: global id -> row of w13 / w2 on this rank, -1 = not
+// on this rank) that replaces the subtraction, and an optional ids_out (int32
+// [M, 10]) that receives the routed global ids of every row (slot order, i.e.
+// ascending expert id) for the expert-load counters. Any placement works with
+// the map, and a rebalancer may rewrite the map and the weight rows in place
+// between launches: a captured graph holds their addresses only. Either
+// option selects the Stage 4 instantiations (kStageMapped); without both the
+// original Stage 0 code runs, unchanged.
 
 #include <algorithm>
 #include <cstddef>
@@ -67,6 +79,11 @@ constexpr int kMaxM = 24;
 constexpr int kTopK = 10;
 constexpr int kMaxPairs = kMaxM * kTopK;
 constexpr int kLocalE = 128;
+// mono_ffn_kernel<MT, WPE, Stage>: 0 resident experts, 1..3 the expert-offload
+// split, kStageMapped resident experts with the optional expert_map / ids_out.
+// A further Stage value rather than a fourth template parameter: the mangled
+// name and the code of every existing instantiation stay as they were.
+constexpr int kStageMapped = 4;
 constexpr int kHC = 4;
 constexpr int kRowChunk = 8;
 // E1 GDN decode (Qwen4Exp linear-attention layers, per TP rank).
@@ -154,11 +171,24 @@ struct Params {
   int prefetch;   // 1: waves 1..7 touch the next phase's weights while waiting
   int hc_only;    // K1: stop after P3 (block_input written to out via bin)
   int dense_mtp;  // MTP-only unquantized FP16 experts
-  int* route_ids;
-  float* route_weights;
-  const int* local_to_slot;
-  int slot_count;
-  int local_count;
+  // The expert-offload stages (1..3) and the placement-aware resident stage
+  // (kStageMapped) never share a launch, so they share these 32 bytes:
+  // sizeof(Params) and every field offset stay as they were, and with them
+  // the code of the other instantiations (the hidden kernel arguments follow
+  // the struct).
+  union {
+    struct {
+      int* route_ids;
+      float* route_weights;
+      const int* local_to_slot;
+      int slot_count;
+      int local_count;
+    };
+    struct {
+      const int* expert_map;  // [E] global id -> local row, -1 = not here; or 0
+      int* ids_out;           // [M, kTopK] routed global ids; or 0
+    };
+  };
   // E1 GDN mode: K1, then the linear-attention decode of the layer.
   int gdn;
   const half* g_wq;     // in_proj_qkvz [4096, H]
@@ -865,6 +895,12 @@ __device__ __forceinline__ void q4_prep(const uint32_t* z, const half* s,
   sc = __half2half2(s[(size_t)group * N + col]);
 }
 
+// Stage 4: local row of the routed global expert `id` on this rank (-1 or out
+// of range: not here). The expert_map replaces the contiguous block if given.
+__device__ __forceinline__ int mapped_local_expert(const Params& p, int id) {
+  return p.expert_map != nullptr ? p.expert_map[id] : id - p.expert_base;
+}
+
 // ------------------------------------------------------------------ kernel
 #ifndef MONO_FFN_MIN_BLOCKS
   #define MONO_FFN_MIN_BLOCKS 1
@@ -891,7 +927,12 @@ __global__ void __launch_bounds__(kThreads)
   // Row path: today's per-row GEMV loops on chunks of <= 8 activation rows,
   // <= 128 VGPRs, two WGs (16 waves) per CU. Tiled path (MONO_FFN_TILED_BIG
   // for MT > 8): 4x8 register tiles, one WG per CU.
-  constexpr int LocalCapacity = Stage == 0 ? kLocalE : 256;
+  static_assert(Stage >= 0 && Stage <= kStageMapped, "mono_ffn: Stage 0..4");
+  // Resident experts: all 128 local rows stay in place (Stage 0, and Stage 4
+  // with its optional expert_map / ids_out).
+  constexpr bool kMapped = Stage == kStageMapped;
+  constexpr bool kResident = Stage == 0 || kMapped;
+  constexpr int LocalCapacity = kResident ? kLocalE : 256;
   constexpr bool kRow = MT <= 8 || !MONO_FFN_TILED_BIG;
   constexpr int MC = MT < 8 ? MT : 8;       // activation rows per pass
   constexpr int NR = kRow ? 4 : kRowChunk;  // expert rows per pass
@@ -914,7 +955,8 @@ __global__ void __launch_bounds__(kThreads)
   __shared__ int s_flag;
   __shared__ float s_red[kWaves];
   __shared__ half s_lora[kMaxM * 320];  // P3 lora; reused as the P5 SE act
-  __shared__ int s_tid[kMaxPairs];
+  // routed global ids; Stage 4 keeps the local row of every pair behind them
+  __shared__ int s_tid[kMapped ? 2 * kMaxPairs : kMaxPairs];
   __shared__ float s_tw[kMaxPairs];
   __shared__ int s_used[LocalCapacity];  // used-expert slot -> local expert
   __shared__ int s_ucnt[LocalCapacity];  // rows per used expert
@@ -1686,8 +1728,11 @@ __global__ void __launch_bounds__(kThreads)
       // local expert lists: mark, prefix over the 128 local experts, then
       // append the pairs with LDS atomics.
       for (int pi = tid; pi < M * kTopK; pi += kThreads) {
-        const int le = s_tid[pi] - p.expert_base;
-        if (le >= 0 && le < (Stage == 0 ? LocalCapacity : p.local_count)) {
+        const int le = kMapped ? mapped_local_expert(p, s_tid[pi])
+                               : s_tid[pi] - p.expert_base;
+        // the list loop and P5c read the local row from here
+        if constexpr (kMapped) s_tid[kMaxPairs + pi] = le;
+        if (le >= 0 && le < (kResident ? LocalCapacity : p.local_count)) {
           if constexpr (Stage == 2) {
             const int slot = p.local_to_slot[le];
             if (slot >= 0 && slot < p.slot_count) s_slot[le] = 0;
@@ -1715,9 +1760,10 @@ __global__ void __launch_bounds__(kThreads)
       }
       __syncthreads();
       for (int pi = tid; pi < M * kTopK; pi += kThreads) {
-        const int le = s_tid[pi] - p.expert_base;
-        if (le >= 0 && le < (Stage == 0 ? LocalCapacity : p.local_count)) {
-          if constexpr (Stage != 0) {
+        const int le =
+            kMapped ? s_tid[kMaxPairs + pi] : s_tid[pi] - p.expert_base;
+        if (le >= 0 && le < (kResident ? LocalCapacity : p.local_count)) {
+          if constexpr (!kResident) {
             if (s_slot[le] < 0) continue;
           }
           const int u = s_slot[le];
@@ -1733,6 +1779,12 @@ __global__ void __launch_bounds__(kThreads)
         for (int i = tid; i < M * kTopK; i += kThreads)
           p.ctrl->topk_id[i] = s_tid[i];
         if (tid == 0) p.ctrl->pad[2] = nused;  // local experts touched (debug)
+      }
+      if constexpr (kMapped) {  // the routed global ids, for the load counters
+        if (wg == 0 && p.ids_out != nullptr) {
+          for (int i = tid; i < M * kTopK; i += kThreads)
+            p.ids_out[i] = s_tid[i];
+        }
       }
 
       // ---------------- P5b: routed gate_up as WG tiles (today's moe_gemm_q4
@@ -1866,8 +1918,9 @@ __global__ void __launch_bounds__(kThreads)
         for (int i = wg * kThreads + tid; i < M * kTopK * I;
              i += G * kThreads) {
           const int pi = i / I, j = i % I;
-          const int le = s_tid[pi] - p.expert_base;
-          if (le < 0 || le >= (Stage == 0 ? LocalCapacity : p.local_count))
+          const int le =
+              kMapped ? s_tid[kMaxPairs + pi] : s_tid[pi] - p.expert_base;
+          if (le < 0 || le >= (kResident ? LocalCapacity : p.local_count))
             continue;
           if constexpr (Stage == 2) {
             const int slot = p.local_to_slot[le];
@@ -2074,7 +2127,7 @@ __global__ void __launch_bounds__(kThreads)
   }
   if (wg == 0 && tid == 0) {
     p.ctrl->ts[7] = wall_clock64();
-    if (timing && Stage == 0) {  // every WG entered before barrier 1
+    if (timing && kResident) {  // every WG entered before barrier 1
       const unsigned long long emin =
           __hip_atomic_load(&sc[0], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
       const unsigned long long emax =
@@ -2226,7 +2279,9 @@ static void mono_launch(
     double timeout_ms, const GdnArgs* gdn = nullptr, bool reset_control = false,
     bool dense_mtp = false, bool preserve_fault = false, int stage = 0,
     torch::Tensor* route_ids = nullptr, torch::Tensor* route_weights = nullptr,
-    const torch::Tensor* local_to_slot = nullptr) {
+    const torch::Tensor* local_to_slot = nullptr,
+    const torch::Tensor* expert_map = nullptr,
+    const torch::Tensor* ids_out = nullptr) {
   using namespace mono_ffn;
   const bool hc_only = wr == nullptr && gdn == nullptr;  // K1 only
   const int M = res.size(0);
@@ -2269,6 +2324,27 @@ static void mono_launch(
         "mono_ffn: shared-expert size");
     TORCH_CHECK(H % 128 == 0 && I % 64 == 0 && group % 8 == 0,
                 "mono_ffn: alignment");
+  }
+  // Placement-aware resident K2 (Stage 4): the quantized resident FFN only
+  const bool mapped = expert_map != nullptr || ids_out != nullptr;
+  if (mapped) {
+    TORCH_CHECK(ffn && gdn == nullptr && stage == 0 && !dense_mtp,
+                "mono_ffn: expert_map / ids_out need the resident quantized "
+                "FFN (no dense MTP experts, no expert cache)");
+    TORCH_CHECK(
+        expert_map == nullptr ||
+            (expert_map->scalar_type() == at::kInt && expert_map->dim() == 1 &&
+             expert_map->numel() == E && expert_map->is_contiguous() &&
+             expert_map->device() == res.device()),
+        "mono_ffn: expert_map must be a contiguous int32 [", E,
+        "] tensor on the input device");
+    TORCH_CHECK(
+        ids_out == nullptr ||
+            (ids_out->scalar_type() == at::kInt && ids_out->dim() == 2 &&
+             ids_out->size(1) == kTopK && ids_out->size(0) >= M &&
+             ids_out->is_contiguous() && ids_out->device() == res.device()),
+        "mono_ffn: ids_out must be a contiguous int32 [>= ", M, ", ", kTopK,
+        "] tensor on the input device");
   }
   TORCH_CHECK(workspace.numel() * workspace.element_size() >=
                   mono_k2_rdna2_workspace_bytes(H, R, ND, E, Ise, I),
@@ -2411,6 +2487,11 @@ static void mono_launch(
     p.local_count = local_to_slot->numel();
     p.stats = nullptr;
   }
+  if (mapped) {
+    p.expert_map =
+        expert_map != nullptr ? expert_map->data_ptr<int>() : nullptr;
+    p.ids_out = ids_out != nullptr ? ids_out->data_ptr<int>() : nullptr;
+  }
   p.eps = (float)eps;
   {
     const char* pf = getenv("MONO_FFN_PREFETCH");
@@ -2441,7 +2522,8 @@ static void mono_launch(
     // gfx10 and under-reports by 2x (P0 probe), so derive the per-CU limit
     // from the code object: waves per SIMD = 1024 / VGPRs (wave32), 2 SIMDs
     // per CU, 64 KiB LDS per CU; CUs = 2 x the reported WGP count.
-    static int cap[16] = {0, 0, 0, 0};
+    // slots 0..3 resident, 4..15 offload, 16..19 resident with map / ids_out
+    static int cap[20] = {0, 0, 0, 0};
     if (cap[slot] == 0) {
       hipFuncAttributes fa{};
       int units = 0;
@@ -2485,6 +2567,17 @@ static void mono_launch(
       OFFLOAD_LAUNCH(3);
     }
 #undef OFFLOAD_LAUNCH
+  } else if (mapped) {
+    if (M <= 4)
+      launch(mono_ffn_kernel<4, 8, kStageMapped>, 16);
+    else if (M <= 8)
+      launch(mono_ffn_kernel<8, 8, kStageMapped>, 17);
+    else if (M <= 12)
+      launch(mono_ffn_kernel < 12, MONO_FFN_TILED_BIG ? MONO_FFN_TILED_WPE : 8,
+             kStageMapped >, 18);
+    else
+      launch(mono_ffn_kernel < 24, MONO_FFN_TILED_BIG ? MONO_FFN_TILED_WPE : 8,
+             kStageMapped >, 19);
   } else if (M <= 4)
     launch(mono_ffn_kernel<4, 8>, 0);
   else if (M <= 8)
@@ -2510,11 +2603,15 @@ void mono_k2_rdna2(const torch::Tensor& res, const torch::Tensor& blk,
                    torch::Tensor& out, torch::Tensor& workspace,
                    int64_t expert_base, int64_t zero_offset, int64_t num_wg,
                    double eps, double timeout_ms, bool reset_control,
-                   bool dense_mtp, bool preserve_fault) {
+                   bool dense_mtp, bool preserve_fault,
+                   const std::optional<torch::Tensor>& expert_map,
+                   const std::optional<torch::Tensor>& ids_out) {
   mono_launch(res, blk, inj, norm_w, wd, wu, &wr, &se_w1, &se_w2, &se_wg, &w13,
               &s13, &z13, &w2, &s2, &z2, res_out, inj_out, out, workspace,
               expert_base, zero_offset, num_wg, eps, timeout_ms, nullptr,
-              reset_control, dense_mtp, preserve_fault);
+              reset_control, dense_mtp, preserve_fault, 0, nullptr, nullptr,
+              nullptr, expert_map ? &*expert_map : nullptr,
+              ids_out ? &*ids_out : nullptr);
 }
 
 // Stable-buffer split K2. Prefix initializes the shared/routed accumulator;
