@@ -9,10 +9,10 @@ The four-hour planner soak completed 71 benchmark cells and 233 expert swaps
 without a reported KFD eviction. Its final cell was deliberately interrupted.
 The flag-off receipts pass token-exact and overlap checks, but their speed
 verdicts still contain regressions; they are not a passing speed gate.
-Mono K2 passes kernel tests and six-architecture disassembly comparison;
-served MonoKernel + EPLB qualification is running. The stationary-traffic
-plan-rate gate is not met over the whole soak. A first run ended in a PCIe
-fault on the box whose cause remains open.
+Mono K2 passes kernel tests, six-architecture disassembly comparison, a
+served run with 192 live swaps, and paired injection hard-stall gates.
+The mixed-size soak does not establish stationary-traffic quiescence.
+A first run ended in a PCIe fault on the box whose cause remains open.
 
 Background and the load study: [`eplb-lean-design-2026-11-16.md`](./eplb-lean-design-2026-11-16.md).
 Upstream `--enable-eplb` stays refused for this MoE method: it routes through a
@@ -80,8 +80,8 @@ its host-to-device copy, so strict debug checking does not reject that copy.
   balancer is on: it resolves routed ids through the layer's live
   `expert_map` and reports them for the counters. Kernel tests (HIP 1) 387
   passed / 48 skipped and archdiff over six arches shows only the four new
-  Stage-4 functions per arch; a served `--monokernel` + `VLLM_RDNA_EPLB=1`
-  run is not qualified yet.
+  Stage-4 functions per arch. A served `--monokernel` + `VLLM_RDNA_EPLB=1`
+  run completed 192 swaps and passed its post-load greedy probe; see below.
   A separate cross-build check on HIP 1 gives bit-identical default-K2
   output digests for every batch size 1–24, with zero sticky fault words.
 - A swap changes which rank adds which partial sum, so outputs are equal in
@@ -166,8 +166,9 @@ The original 110-cell loop was too long for the intended four-hour window.
   warm 0.40 s, 1.9×), not a claim that prefix caching passed.
 - Fourteen plans completed, 233 swaps. Plan starts span step 13,056 to
   103,936; the first five each moved 32 experts, later plans moved 3–18.
-  The whole-run gate of at most one plan per 10,000 steps is not met.
-  Convergence is not the same as proving stationary-traffic quiescence.
+  This exceeds one plan per 10,000 steps over the observed start interval,
+  but alternating prompt sizes is not a fixed stationary workload at the
+  decision-window scale. A true stationary-traffic gate remains unproven.
 - CPU compilation/archdiff and a 149-second HIP 1 kernel suite overlapped
   this run. This is stability evidence, not a quiet speed measurement.
   Only cell medians are retained for every repetition; no whole-soak
@@ -175,6 +176,55 @@ The original 110-cell loop was too long for the intended four-hour window.
 
 Logs: `~/w4a8_runs/eplb-online/soak1.log` and
 `~/w4a8_runs/port-v031/serve-eplb-soak1/serve.log`.
+
+### Served MonoKernel, W4A8 and live swaps
+
+`monochaos`, 19:20:08–19:54:20 CET, combined tree before the two Python
+review fixes, TP4, MTP2, FULL_AND_PIECEWISE and `--monokernel`.
+All four ranks logged mapped K2 execution and the W4A8 sdot4 prefill kernel.
+Six plans completed, 192 swaps, with zero reported KFD eviction deltas,
+zero serve-log fault markers and zero reported new GPU faults.
+
+- Greedy, PPL 4.78, prefix (2.1×), concurrency and post-load greedy probes
+  pass. Concurrency: 0 failing of 48 checks, with 17 near-tie and 1 soft.
+- ITL medians at 1k c=1/c=8: 24.1/47.6 ms; 16k c=1/c=8: 24.9/49.8 ms.
+  These are one-arm observations, not a speed comparison.
+- `CHAOS=512` was capped by `MAX_SWAPS=32`; it did **not** mean a 512-step
+  decision interval. Plans ran at the default 4,096-step decision cadence.
+- The stall probe returned **NO-GATES**, not PASS. Eight decoders filled
+  `max_num_seqs=8`; 4k injections waited about 135 s for admission. The
+  reverse scenario had a 5.57 s maximum gap, and the 16k injection reported
+  four starved decoders. None of this is a clean no-stall qualification.
+  The paired rerun below reserves one request slot for the injected prefill.
+
+### Paired injection hard gates after review fixes
+
+`monogate-off` and `monogate-chaos`, 19:57:52–20:16:05 CET, source
+`dde11baa4f`, TP4, MTP2, FULL_AND_PIECEWISE, MonoKernel on in both arms.
+Seven decoders leave one slot free under `max_num_seqs=8`. Three repetitions
+per prompt length, `--max-starved 0 --min-decode-tokens-during-prefill 1
+--gate-stat worst`, matching the receipt's existing injection gates.
+
+| Observation | EPLB off | Chaos (8 swaps / 512 decision steps) |
+|---|---:|---:|
+| Hard injection gates | PASS | PASS |
+| Baseline ITL p50 | 45.7 ms | 46.4 ms |
+| 4k injection mean maximum gap | 419 ms | 422 ms |
+| 16k injection mean maximum gap | 432 ms | 435 ms |
+| Reverse 16k mean maximum gap (not gated) | 5,212 ms | 5,215 ms |
+| Completed plans / swaps | 0 / 0 | 5 / 40 |
+| Reported KFD eviction delta | 0 ms | 0 ms |
+| PPL probe | 4.80 | 4.83 |
+
+Greedy, prefix, concurrency and post-load greedy probes pass in both arms;
+zero serve-log fault markers. The gates require actual decoder progress and
+zero starved decoders during injection, not zero scheduling delay. Reverse
+arrival is reported but is not hard-gated. The +0.7 ms ITL and +3 ms gaps
+are one paired observation, not an ABBA result or a demonstrated speedup.
+No baseline scheduler/admission change was made to obtain this result.
+
+Receipts: `~/w4a8_runs/port-v031/serve-eplb-monogate-{off,chaos}/stall/`
+and `~/w4a8_runs/eplb-online/gated_mono.log`. The b4 lease was released.
 
 ### Flag-off receipts
 
