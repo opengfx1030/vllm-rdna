@@ -97,10 +97,10 @@ At 3 rows `min_touch` gives +5.7 / +8.8 / +12.9 / +15.5 % at 2 / 4 / 8 / 12 slot
 
 ## 4. (c) Rebalancing policy with hysteresis (built as a model)
 
-`tools/rdna/eplb/policy.py`, a pure function of the EMA, the loads the ranks really had and the placement in force, so replay, boot-time solver and a phase-2 balancer share it.
+`tools/rdna/eplb/policy.py` (schedule, replay) around the pure-numpy core in `vllm/model_executor/layers/fused_moe/rdna_eplb_policy.py` (`PolicyConfig`, `decide_swaps`, `shifted_gain`, `repair_owner`, the geometry and cost model; the tools load it by file path, the online planner `rdna_eplb_planner.py` runs it in a helper process): a pure function of the EMA, the loads the ranks really had and the placement in force, so replay, boot-time solver and the online balancer share it.
 
 1. **Weight** per expert: EMA of the touched flag (decode) or of the pairs (prefill).
-2. **Candidate** = a prefix of the swap sequence of `placement.repair_owner` from the placement in force. On the W1 marginals a full descent from linear moves about 17 experts per layer (8.5 swaps); 50 / 80 / 90 % of the in-sample drop of the heaviest rank takes 2.5 / 3.6 / 4.7 swaps at 24 rows (1.6 / 2.8 / 3.2 at 3 rows); 84 to 86 % of the drop survives on the held-out window. `pack_owner` from scratch reshuffles 380 to 390 of the 512 experts: 23x more bytes.
+2. **Candidate** = a prefix of the swap sequence of `rdna_eplb_policy.repair_owner` from the placement in force. On the W1 marginals a full descent from linear moves about 17 experts per layer (8.5 swaps); 50 / 80 / 90 % of the in-sample drop of the heaviest rank takes 2.5 / 3.6 / 4.7 swaps at 24 rows (1.6 / 2.8 / 3.2 at 3 rows); 84 to 86 % of the drop survives on the held-out window. `pack_owner` from scratch reshuffles 380 to 390 of the 512 experts: 23x more bytes.
 3. **Gain** = `mean over calls of max_r L - mean max_r (L + delta)` (`shifted_gain`): the realised per-call `T` or `P` of each rank (the ring) with the means moved by the candidate's expected change. The EMA-only predictor (`predictor="expected"`) ignores that the slowest rank is mostly the maximum of noise and overstates the gain:
 
    | Rows | predicted by the EMA alone (share of slowest-rank expert time) | realised by the packed placement (share of MoE time, section 3.1) |

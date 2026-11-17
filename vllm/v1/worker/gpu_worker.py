@@ -62,6 +62,9 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.fused_moe.rdna_eplb_online import (
+    ONLINE as _EPLB_ONLINE,
+)
 from vllm.model_executor.layers.fused_moe.rdna_eplb_stats import (
     COLLECTOR as _EPLB_STATS,
 )
@@ -1500,6 +1503,9 @@ class Worker(WorkerBase):
         if _EPLB_STATS is not None:
             # Opt-in EPLB load counters: non-blocking drain between steps.
             _EPLB_STATS.tick()
+        if _EPLB_ONLINE is not None:
+            # Opt-in online EPLB: one bounded slice of a rebalance per step.
+            _EPLB_ONLINE.step()
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
@@ -1833,6 +1839,8 @@ class Worker(WorkerBase):
             _EXPERT_STATS.close()
         if _EPLB_STATS is not None:
             _EPLB_STATS.close()
+        if _EPLB_ONLINE is not None:
+            _EPLB_ONLINE.close()
 
         if self._ple_offload_worker_handle is not None:
             self._ple_offload_worker_handle.close()
