@@ -4,12 +4,15 @@
 server runs. Default off; with the flag off nothing below exists (one `None`
 check per step).
 
-**Status (2026-11-17): works and does not stall; no speedup measured; not
-merged.** Two server runs on one slot (24 and 34 minutes) with the flag on
-showed no fault, no eviction and no added stall (see [Measurements](#measurements)).
-Still owed before it can be called qualified: the flag-off receipt, a soak of
-at least 4 hours, stationary-traffic behaviour of the planner, and a measured
-gain. A first run ended in a PCIe fault on the box whose cause is open.
+**Status (2026-11-17): opt-in, not merged; no speedup demonstrated.**
+The four-hour planner soak completed 71 benchmark cells and 233 expert swaps
+without a reported KFD eviction. Its final cell was deliberately interrupted.
+The flag-off receipts pass token-exact and overlap checks, but their speed
+verdicts still contain regressions; they are not a passing speed gate.
+Mono K2 passes kernel tests and six-architecture disassembly comparison;
+served MonoKernel + EPLB qualification is running. The stationary-traffic
+plan-rate gate is not met over the whole soak. A first run ended in a PCIe
+fault on the box whose cause remains open.
 
 Background and the load study: [`eplb-lean-design-2026-11-16.md`](./eplb-lean-design-2026-11-16.md).
 Upstream `--enable-eplb` stays refused for this MoE method: it routes through a
@@ -73,6 +76,8 @@ step with the default chunk.
   passed / 48 skipped and archdiff over six arches shows only the four new
   Stage-4 functions per arch; a served `--monokernel` + `VLLM_RDNA_EPLB=1`
   run is not qualified yet.
+  A separate cross-build check on HIP 1 gives bit-identical default-K2
+  output digests for every batch size 1–24, with zero sticky fault words.
 - A swap changes which rank adds which partial sum, so outputs are equal in
   value, not bit for bit (fp16 all-reduce association), as with any change of
   placement.
@@ -82,7 +87,8 @@ step with the default chunk.
 `rdna_eplb_policy.decide_swaps` per layer (moved from `tools/rdna/eplb/`): the
 swap sequence that lowers the heaviest rank, judged on the loads the ranks
 really had in the window, with a holdout on the previous window and a minimum
-relative gain. A stationary workload produces no plan.
+relative gain. Balanced stationary samples should produce no plan; real
+repeated traffic can still trigger placement changes (see the soak below).
 
 ## Tests
 
@@ -127,14 +133,56 @@ collective the others do not breaks the test.
 - Chaos mode (random swaps every 512 steps, no planner) is the qualification
   of the transfer: 50 plans, each 329 steps (16-30 s wall) for 8 swaps, no
   fault.
-- The planner did nothing during the bench cells (uniform random prompts, no
-  imbalance to fix). During the stall probe's repetitive prompts it made 4
-  plans (32, 32, 32, 22 swaps; 44-73 s wall each, 1317 steps for 32 swaps).
-  That is one plan per about 6.5k steps on non-stationary traffic; the gate
-  for stationary traffic (at most one per 10,000 steps) is not tested.
+- In the initial short runs, the planner did nothing during the bench cells.
+  During the stall probe's repetitive prompts it made 4 plans
+  (32, 32, 32, 22 swaps; 44–73 s wall each, 1317 steps for 32 swaps).
+  The longer soak below supersedes that initial observation about
+  stationary traffic.
 - **No speedup is measured.** The study predicts at most about 0.4 % of ITL
   for a permutation at EP4, below this noise [INFERENCE]; a gain needs replicas
   (not built) or traffic with a persistent skew.
+
+### Four-hour planner soak
+
+`soak1`, 15:18:59–19:19:52 CET, TP4 HIP 2–5, planner enabled, MonoKernel off.
+The run was stopped deliberately after four hours: 71 cells completed,
+2,272 requests; the 72nd cell was interrupted, not counted as a pass.
+The original 110-cell loop was too long for the intended four-hour window.
+
+| Cell | Completed cells (32 requests each) | Median of cell ITL medians | Range of cell ITL medians |
+|---|---:|---:|---:|
+| 1k/512 c=8 | 36 | 46.0 ms | 45.3–47.0 ms |
+| 16k/1k c=8 | 35 | 47.8 ms | 46.9–48.6 ms |
+
+- All 71 completed cells report zero KFD eviction deltas. No PCIe
+  completion-timeout/DPC/device-lost signature was found in the kernel log.
+- PPL 4.82; the prefix probe failed its ratio threshold (cold 0.74 s,
+  warm 0.40 s, 1.9×), not a claim that prefix caching passed.
+- Fourteen plans completed, 233 swaps. Plan starts span step 13,056 to
+  103,936; the first five each moved 32 experts, later plans moved 3–18.
+  The whole-run gate of at most one plan per 10,000 steps is not met.
+  Convergence is not the same as proving stationary-traffic quiescence.
+- CPU compilation/archdiff and a 149-second HIP 1 kernel suite overlapped
+  this run. This is stability evidence, not a quiet speed measurement.
+  Only cell medians are retained for every repetition; no whole-soak
+  per-request maximum-gap or p99 guarantee is inferred from those medians.
+
+Logs: `~/w4a8_runs/eplb-online/soak1.log` and
+`~/w4a8_runs/port-v031/serve-eplb-soak1/serve.log`.
+
+### Flag-off receipts
+
+Base `b56907c433`, head `7421070327`: the AB receipt passes token-exact
+(26/26), overlap, and the stall hard gate. Subsequent ABBA runs pass
+token-exact and overlap; stall was disabled for those repeats.
+
+The first ABBA reports regressions in 3/4 cells. The two-cell repeat
+(`20261117-123921-7421070327-vs-b56907c433`) still reports regressions in
+both cells: aggregate output −2.4% at c=4 and −3.7% at c=8.
+Its ITL medians improve 1.0%/0.6%; c=4 p99 changes direction, with
+154.2/384.9 ms on base versus 61.9/60.6 ms on head. This demonstrates tail
+variability, not that every regression label is noise or that the speed
+gate passed. These receipts predate the Mono K2 integration.
 
 ### The first run, a PCIe fault on the box
 
