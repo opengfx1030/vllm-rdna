@@ -88,6 +88,7 @@ tests/tools/rdna/test_pr_receipt_report.py  # fork-only PR receipt logic (cells,
 tests/tools/rdna/test_pr_receipt_driver.py  # fork-only pr_receipt.sh driver against stub trees and a stub serve_validate.sh, CPU unit test; not in CI
 tests/tools/rdna/test_archdiff_report.py  # fork-only per-function disassembly diff report (normalization, verdicts), CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_quiet_windows.py  # fork-only serve_validate.sh quiet-window renewal between cells (stub server and venv), CPU unit test; not in CI
+tests/tools/rdna/test_prefix_probe.py  # fork-only prefix-cache probe validity gates (fake tokenizer/metrics, injected TTFT), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_scan.py  # fork-only added-line scan for host syncs and unchecked launches in a diff (stub trees), CPU unit test; not in CI
 tests/tools/rdna/test_tunable_hi2.py  # fork-only 27B HI2 TunableOp shape formulas and census groups, CPU unit test; not in CI
 tests/tools/rdna/test_hi2_tunableop_profile.py  # fork-only 27B HI2 TP=2 TunableOp profile registry / rows / recipe wiring (print mode, stub venv), CPU unit test; not in CI

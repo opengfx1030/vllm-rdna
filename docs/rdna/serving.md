@@ -352,6 +352,19 @@ settings make the locks effective:
 To restore the defaults, remove both files, run
 `sudo sysctl -w vm.compact_unevictable_allowed=1`, and log in again.
 
+## Prefix-cache validation
+
+`tools/rdna/port_v031/prefix_probe.py` sends an identical, nonce-prefixed prompt
+twice and requires measured cache hits covering more than half of the warm
+prompt. It uses `/tokenize` for context-length checks; cache block geometry is
+not guessed. Missing metrics or output fail the probe.
+
+Cold/warm TTFT and speedup are reported separately. A fixed latency target is
+opt-in (`--ratio 0.5` requires warm TTFT at most half of cold TTFT). The old
+default 2× requirement was not a cache-correctness or EPLB-throughput contract:
+partial block reuse and fixed request overhead can miss it while cache hits
+are correct. Independent ITL performance gates remain unchanged.
+
 ## Further reading
 
 - [`docs/rdna2/tuning.md`](../rdna2/tuning.md) — code defaults, subsystem flags, TunableOp, and the measurements already recorded there.
