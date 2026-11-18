@@ -98,7 +98,7 @@ def _load_test_ple_weights(
     )
     runner.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.float32),
-        load_config=SimpleNamespace(),
+        load_config=SimpleNamespace(download_dir=None),
     )
     runner._layers = {}
     runner._load_weights()
@@ -147,9 +147,12 @@ def test_ple_offload_rejects_missing_materialized_parameters(
         )
 
 
+@pytest.mark.parametrize("is_hip", [False, True])
 def test_ple_offload_wait_only_waits_for_done(
     monkeypatch: pytest.MonkeyPatch,
+    is_hip: bool,
 ) -> None:
+    monkeypatch.setattr(torch.version, "hip", "7.14.0" if is_hip else None)
     wait_calls = []
     error = SimpleNamespace(value=0)
     stream = SimpleNamespace(cuda_stream=17)
@@ -191,14 +194,19 @@ def test_ple_offload_wait_only_waits_for_done(
         torch.empty(4, 2),
     )
 
-    assert wait_calls == [
-        (
-            stream.cuda_stream,
-            flag_tensor.data_ptr(),
-            ple_offload_layer.CpuGpuSemaphore.DONE_VALUE,
-            ple_offload_layer.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
-        )
-    ]
+    expected_wait_calls = (
+        []
+        if is_hip
+        else [
+            (
+                stream.cuda_stream,
+                flag_tensor.data_ptr(),
+                ple_offload_layer.CpuGpuSemaphore.DONE_VALUE,
+                ple_offload_layer.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
+            )
+        ]
+    )
+    assert wait_calls == expected_wait_calls
 
 
 def test_offloaded_forward_waits_then_releases_output(

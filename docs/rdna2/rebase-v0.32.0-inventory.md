@@ -1041,8 +1041,14 @@ sit outside the guard, like the existing v3 geometry.
 
 The native build at `6333bc722e` passed: all seven extensions import from
 the isolated tree, 186 `_rocm_C` schemas are registered, and `pip check`
-passes. CPU collection then exposed an SM100-only reload-test marker
-querying device capability with GPUs hidden; its skip predicate now
-checks the CUDA platform and accelerator availability first. The CPU
-rerun and model-runtime gates remain pending. No performance result is
-claimed.
+passes. CPU collection exposed an SM100-only reload-test marker querying
+device capability with GPUs hidden; its skip predicate now checks the
+CUDA platform and accelerator availability first.
+
+The first executed CPU batch had 55 passes and seven failures. It exposed
+the same missing CUDA-platform gate in the SM100 capture-default heuristic;
+that heuristic is now CUDA-only. CLI tests use local model configs rather
+than a remote `dummy` repository, and PLE fixtures include EXL3 lookup
+metadata and cover the distinct CUDA-wait/ROCm-host-sync contracts.
+The CPU rerun and model-runtime gates remain pending. No performance result
+is claimed.

@@ -2637,7 +2637,9 @@ class VllmConfig:
         # On SM100, unset kinds default to wider grids; elsewhere, and with the
         # deprecated fields, they default to the shared sizes resolved above.
         wide_defaults = (
-            not legacy_sizes and current_platform.is_device_capability_family(100)
+            not legacy_sizes
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
         )
         if (
             wide_defaults

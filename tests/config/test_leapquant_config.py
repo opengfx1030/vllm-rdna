@@ -139,16 +139,15 @@ def test_flag_defaults_to_auto_and_rejects_other_values():
         CacheConfig(replayssm_state_dtype="fp8")
 
 
-def test_cli_flag_parses_and_restricts_its_values():
+def test_cli_flag_parses_and_restricts_its_values(make_model):
+    model = make_model()
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(["--model", "dummy"])
+    args = parser.parse_args(["--model", model])
     assert EngineArgs.from_cli_args(args).replayssm_state_dtype == "auto"
-    args = parser.parse_args(
-        ["--model", "dummy", "--replayssm-state-dtype", "leapquant"]
-    )
+    args = parser.parse_args(["--model", model, "--replayssm-state-dtype", "leapquant"])
     assert EngineArgs.from_cli_args(args).replayssm_state_dtype == "leapquant"
     with pytest.raises(SystemExit):
-        parser.parse_args(["--model", "dummy", "--replayssm-state-dtype", "fp8"])
+        parser.parse_args(["--model", model, "--replayssm-state-dtype", "fp8"])
 
 
 def test_flag_is_not_a_compile_cache_factor():
