@@ -1037,6 +1037,12 @@ in the GDN prefill and monolithic QSA translation units while compiling
 older targets. Those helpers now compile with shuffle fallbacks. The next
 build reached the EXL3 dense translation unit, where v2 launch geometry
 was hidden inside the RDNA device guard; those unchanged constants now
-sit outside the guard, like the existing v3 geometry. The full native
-build and model-runtime gates remain pending. No performance result is
+sit outside the guard, like the existing v3 geometry.
+
+The native build at `6333bc722e` passed: all seven extensions import from
+the isolated tree, 186 `_rocm_C` schemas are registered, and `pip check`
+passes. CPU collection then exposed an SM100-only reload-test marker
+querying device capability with GPUs hidden; its skip predicate now
+checks the CUDA platform and accelerator availability first. The CPU
+rerun and model-runtime gates remain pending. No performance result is
 claimed.

@@ -50,7 +50,9 @@ def _model_tensor_ptrs(worker) -> dict[str, int]:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
+    not current_platform.is_cuda()
+    or not torch.accelerator.is_available()
+    or not current_platform.is_device_capability_family(100),
     reason="TRT-LLM and CuteDSL MoE kernels need SM100",
 )
 @pytest.mark.parametrize(
