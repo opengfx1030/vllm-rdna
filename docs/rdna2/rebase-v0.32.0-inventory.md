@@ -1034,6 +1034,9 @@ upstream's new `KV=auto` extensible-cache path.
 
 The first six-architecture build stopped on GFX10-only `row_xmask` controls
 in the GDN prefill and monolithic QSA translation units while compiling
-older targets. Those helpers now have shuffle fallbacks; the native-build
-rerun and model-runtime gates remain pending. No performance result is
+older targets. Those helpers now compile with shuffle fallbacks. The next
+build reached the EXL3 dense translation unit, where v2 launch geometry
+was hidden inside the RDNA device guard; those unchanged constants now
+sit outside the guard, like the existing v3 geometry. The full native
+build and model-runtime gates remain pending. No performance result is
 claimed.
