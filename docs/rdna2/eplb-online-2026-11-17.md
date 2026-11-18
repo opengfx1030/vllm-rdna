@@ -309,3 +309,43 @@ separately; no failed performance label is being relabelled.
 Raw original receipts (463 files, caches excluded) and all seven base/head
 extension hashes: [`bench_results/2026-11-18_eplb-final/original-summary.json`](../../bench_results/2026-11-18_eplb-final/original-summary.json)
 and its linked `original-receipts.tar.gz`.
+
+### Corrected prefix-contract ABBA: performance fails (2026-11-18)
+
+Source `06e01fee103a`, same native/runtime code and seven reused head extensions.
+All four boots complete with valid functional probes and hardware guards.
+Prefix reuse is 1024/1927 tokens (53.1%) in every arm; short PPL is 4.82–4.84
+over 261 tokens, **not a full quality qualification**. Both chaos boots have
+committed-plan overlap in every measured cell. No new faults or KFD evictions;
+b4 was released. The original aborted campaign remains unchanged.
+
+| Cell | Off p50 ITL (ms) | On p50 ITL (ms) | Change | Off p99 ITL (ms) | On p99 ITL (ms) | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| 1k/512 c1 | 23.37 | 24.15 | +3.33% | 23.95 | 27.64 | +15.39% |
+| 1k/512 c8 | 46.92 | 47.51 | +1.26% | 380.88 | 383.74 | +0.75% |
+| 16k/1k c1 | 24.10 | 24.72 | +2.59% | 24.60 | 28.04 | +14.01% |
+| 16k/1k c8 | 49.38 | 49.63 | +0.51% | 429.39 | 430.65 | +0.29% |
+
+Seven of eight ITL rows fail the unchanged `max(0.5%, off-boot spread)` parity
+screen. **NOT QUALIFIED**; no threshold relaxation or performance reroll.
+Chaos is a transfer stress test, not a demonstration of useful placement.
+TTFT/aggregate output remain context metrics, not proof of placement benefit.
+Raw four-arm evidence, native gate, aggregate failure report and extension
+manifest: [`corrected-summary.json`](../../bench_results/2026-11-18_eplb-final/corrected-summary.json)
+and its linked `corrected-receipts.tar.gz`.
+
+### No-plan diagnostic controls
+
+`tools/rdna/eplb/counter_control.sh` runs two additional fresh boots, **C1/C2,
+not replacement ABBA arms**. It keeps counters, mapped K2, module routing and
+the scheduled mailbox enabled, but uses `CHAOS=1 DECISION_STEPS=1000000000`:
+no planner, and no plan may occur. The same four cells, MTP2, F&P, Mono,
+functional probes and thermal/AER/KFD guards apply. Take b4's lease before
+running with `VENV=... MODEL=... OUT=<fresh path>`; `DRY_RUN=1` prints plans.
+
+`qualify_boot.py boot --arm C1|C2` verifies this diagnostic contract, including
+zero plans and witnesses on all four ranks. Counter-only receipts cannot
+qualify R2, even if renamed as an on arm. Compare these controls with the saved
+off arms only as a later diagnostic, not a fresh ABBA or proof of causality.
+Their purpose is to separate always-on counter/map/mailbox cost from
+movement/checksum/placement cost before choosing a runtime optimization.

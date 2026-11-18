@@ -731,7 +731,9 @@ def _worker_rank(line: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def log_evidence_problems(text: str, on: bool) -> tuple[list[str], dict[str, Any]]:
+def log_evidence_problems(
+    text: str, on: bool, *, counter_only: bool = False
+) -> tuple[list[str], dict[str, Any]]:
     """Mono/K2/EPLB markers of one boot, with the rank attribution kept."""
     problems = []
     mono_ranks: set[int] = set()
@@ -786,16 +788,19 @@ def log_evidence_problems(text: str, on: bool) -> tuple[list[str], dict[str, Any
             problems.append(f"'{EPLB_COUNTERS}' appears {counters} time(s), expected 4")
         if off_warnings:
             problems.append(f"EPLB turned itself off: {off_warnings[0]}")
+        chaos, decision = (1, 1_000_000_000) if counter_only else (8, 512)
         for config in configs:
-            if "chaos=8" not in config:
-                problems.append(f"EPLB config does not show CHAOS=8: {config}")
+            if not re.search(rf"\bchaos={chaos}(?:,|\))", config):
+                problems.append(f"EPLB config does not show CHAOS={chaos}: {config}")
                 break
         for config in configs:
-            if "decision_steps=512" not in config:
+            if not re.search(rf"\bdecision_steps={decision}(?:,|\))", config):
                 problems.append(
-                    f"EPLB config does not show DECISION_STEPS=512: {config}"
+                    f"EPLB config does not show DECISION_STEPS={decision}: {config}"
                 )
                 break
+        if counter_only and plan_starts:
+            problems.append("counter-only diagnostic logged an EPLB plan")
     else:
         if eplb_on or counters:
             problems.append("off arm logged EPLB is ON or its load counters")
@@ -870,7 +875,8 @@ def validate_boot(
     problems = []
     summary = _required(boot_dir / "summary.txt")
     serve = _required(boot_dir / "serve.log")
-    on = arm.startswith("B")
+    counter_only = arm in ("C1", "C2")
+    on = counter_only or arm.startswith("B")
     problems += summary_problems(summary, cells)
     try:
         invalid = gate_module().invalid_cells(str(boot_dir))
@@ -880,11 +886,11 @@ def validate_boot(
     if invalid:
         problems.append("INVALID cell(s): " + ", ".join(sorted(invalid)))
     problems += cell_problems(boot_dir, cells)
-    log_problems, evidence = log_evidence_problems(serve, on)
+    log_problems, evidence = log_evidence_problems(serve, on, counter_only=counter_only)
     problems += log_problems
     hits: dict[str, list[int]] = {}
     unfinished: tuple[int, ...] = ()
-    if on:
+    if on and not counter_only:
         try:
             coverage = check_plan_overlap(boot_dir, cells)
         except QualificationError as exc:
@@ -893,12 +899,13 @@ def validate_boot(
             hits = coverage.hits
             unfinished = coverage.unfinished
     else:
+        label = "counter-only arm" if counter_only else "off arm"
         try:
             spans, tail = plan_spans(serve)
             if spans or tail:
-                problems.append("off arm logged an EPLB plan")
+                problems.append(f"{label} logged an EPLB plan")
         except QualificationError as exc:
-            problems.append(f"off arm plan evidence: {exc}")
+            problems.append(f"{label} plan evidence: {exc}")
     problems += guard_problems(boot_dir)
     try:
         faults = fault_lines(boot_dir / "serve.log")
@@ -910,6 +917,7 @@ def validate_boot(
     evidence["plan_overlap"] = hits
     evidence["unfinished_plans"] = list(unfinished)
     evidence["on"] = on
+    evidence["counter_only"] = counter_only
     evidence["cells"] = cells
     evidence["faults"] = len(faults)
     evidence["ok"] = not problems
@@ -924,7 +932,8 @@ def cmd_boot(args: argparse.Namespace) -> int:
     except QualificationError as exc:
         problems = [str(exc)]
         evidence = {
-            "on": args.arm.startswith("B"),
+            "on": args.arm.startswith("B") or args.arm in ("C1", "C2"),
+            "counter_only": args.arm in ("C1", "C2"),
             "cells": args.cells,
             "plan_overlap": {},
             "unfinished_plans": [],
@@ -939,8 +948,13 @@ def cmd_boot(args: argparse.Namespace) -> int:
         for problem in problems:
             print(f"  - {problem}")
         return 1
+    mode = (
+        "counter-only diagnostic"
+        if evidence["counter_only"]
+        else ("on" if evidence["on"] else "off")
+    )
     print(
-        f"boot {args.arm}: VALID ({'on' if evidence['on'] else 'off'}, "
+        f"boot {args.arm}: VALID ({mode}, "
         f"{len(evidence['plan_overlap'])} cell(s) with a live plan, "
         f"{evidence['faults']} fault line(s))"
     )
@@ -1213,6 +1227,10 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 
 def cmd_r2(args: argparse.Namespace) -> int:
+    if tuple(args.arms) != tuple(R2_ARMS):
+        raise QualificationError(
+            "r2 requires A1 B1 B2 A2; counter-only controls cannot qualify"
+        )
     run = Path(args.run)
     problems = []
     arms: dict[str, Any] = {}
@@ -1245,6 +1263,10 @@ def cmd_r2(args: argparse.Namespace) -> int:
             problems.append(
                 f"arm {arm}: head {evidence.get('head_sha')!r}, "
                 f"expected {args.head_sha!r}"
+            )
+        if evidence.get("counter_only"):
+            problems.append(
+                f"arm {arm}: counter-only diagnostic cannot qualify rebalance"
             )
         if evidence.get("ok") is not True:
             problems.append(f"arm {arm}: evidence is not ok")
@@ -1430,9 +1452,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--abort", default="")
     p.set_defaults(func=cmd_guard)
 
-    p = sub.add_parser("boot", help="validate one r2 arm directory")
+    p = sub.add_parser("boot", help="validate an r2 arm or no-plan C1/C2 diagnostic")
     p.add_argument("--dir", required=True)
-    p.add_argument("--arm", required=True, choices=R2_ARMS)
+    p.add_argument("--arm", required=True, choices=(*R2_ARMS, "C1", "C2"))
     p.add_argument("--cells", required=True)
     p.add_argument("--head-sha", default="")
     p.add_argument("--out", default="")

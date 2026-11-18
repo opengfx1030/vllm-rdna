@@ -427,3 +427,107 @@ def test_speed_regressions_use_cell_verdicts_not_metric_labels():
 def test_missing_speed_verdicts_cannot_be_reported_as_zero_regressions(speed):
     with pytest.raises(qb.QualificationError):
         qb._speed_regressions({"speed": speed})
+
+
+def _counter_log(chaos: int = 1, decision: int = 1_000_000_000) -> str:
+    lines = []
+    for rank in range(4):
+        worker = f"(Worker_TP{rank}_EP{rank} pid=123)"
+        lines += [
+            f"{worker} mono rdna2: --monokernel on TP rank {rank}",
+            f"{worker} mono k2_rdna2: 3 rows (full) -> mono kernel",
+            f"{worker} mono k2_rdna2: 24 rows (eager) -> modules",
+            f"{worker} Online EPLB is ON: OnlineConfig(chaos={chaos}, "
+            f"decision_steps={decision})",
+            f"{worker} EPLB load counters are ON",
+        ]
+    return _log(*lines)
+
+
+def test_counter_control_preserves_all_rank_witnesses_without_movement():
+    problems, evidence = qb.log_evidence_problems(
+        _counter_log(), True, counter_only=True
+    )
+    assert problems == []
+    assert evidence["plan_starts"] == 0
+    incomplete = _counter_log().replace(
+        "(Worker_TP3_EP3 pid=123) mono k2_rdna2: 3 rows (full) -> mono kernel", ""
+    )
+    problems, _ = qb.log_evidence_problems(incomplete, True, counter_only=True)
+    assert any("expected TP ranks 0-3" in item for item in problems)
+
+
+@pytest.mark.parametrize(
+    ("chaos", "decision"), [(8, 512), (10, 1_000_000_000), (1, 10_000_000_000)]
+)
+def test_counter_control_rejects_wrong_or_prefix_matching_settings(chaos, decision):
+    problems, _ = qb.log_evidence_problems(
+        _counter_log(chaos, decision), True, counter_only=True
+    )
+    assert any("config does not show" in item for item in problems)
+
+
+def test_counter_control_cannot_hide_a_started_plan_or_qualify_as_rebalance():
+    problems, _ = qb.log_evidence_problems(
+        _counter_log() + _start(1, 99), True, counter_only=True
+    )
+    assert "counter-only diagnostic logged an EPLB plan" in problems
+    problems, _ = qb.log_evidence_problems(_counter_log(), True)
+    assert any("CHAOS=8" in item for item in problems)
+    assert any("DECISION_STEPS=512" in item for item in problems)
+
+
+@pytest.mark.parametrize("counter_only", [False, True])
+def test_r2_rejects_a_counter_control_renamed_as_an_on_arm(tmp_path, counter_only):
+    rows = [
+        {"cell": cell, "metric": metric, "verdict": "pass"}
+        for cell in ("1024x512-c1", "1024x512-c8", "16384x1024-c1", "16384x1024-c8")
+        for metric in ("median_itl_ms", "p99_itl_ms")
+    ]
+    gate = tmp_path / "gate.json"
+    gate.write_text(json.dumps(rows))
+    for arm in qb.R2_ARMS:
+        directory = tmp_path / "boots" / arm
+        directory.mkdir(parents=True)
+        (directory / "evidence.json").write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "on": arm.startswith("B"),
+                    "counter_only": counter_only and arm == "B1",
+                }
+            )
+        )
+    args = [
+        "r2",
+        "--run",
+        str(tmp_path),
+        "--gate-json",
+        str(gate),
+        "--cells",
+        qb.R2_CELLS,
+    ]
+    assert qb.main(args) == int(counter_only)
+    report = json.loads((tmp_path / "qualification.json").read_text())
+    assert any("counter-only" in p for p in report["problems"]) == counter_only
+
+
+def test_r2_rejects_counter_arm_manifest_before_reading_receipts(tmp_path, capsys):
+    assert (
+        qb.main(
+            [
+                "r2",
+                "--run",
+                str(tmp_path),
+                "--arms",
+                "C1",
+                "C2",
+                "--gate-json",
+                str(tmp_path / "missing.json"),
+                "--cells",
+                qb.R2_CELLS,
+            ]
+        )
+        == 1
+    )
+    assert "counter-only controls cannot qualify" in capsys.readouterr().err
