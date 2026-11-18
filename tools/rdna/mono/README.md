@@ -162,14 +162,44 @@ Missing observations remain missing, never zero.
 `AFTER_MATRIX_HOOK=$TREE/tools/rdna/mono/ram10_trace.sh` collects separate
 diagnostic traces for D/Z after clean timing windows. Equal-capacity causal
 replay screens bounded prefetch traffic; it cannot prove hidden copy time or
-an ITL speedup. The functional/capacity pilot receipts are in
-`bench_results/2026-11-17_tp4-ram10/`; timing claims require the matched matrix.
+an ITL speedup.
 
 For coding-task rather than random-input diagnostics, `TRACE_DATASET_DIR` may
 point to pre-rendered chat JSONL files named `1024.jsonl` and `16384.jsonl`,
 with `prompt` and `output_tokens` fields. Their hashes are saved. Override
 `TRACE_CELLS="16384:512:1:4 1024:512:8:8"` to include sequential task changes;
 nominal file names do not imply exact token lengths.
+
+The driver passes the requested output length explicitly and rejects incomplete
+requests or unexpected output lengths before replay.
+
+### Measured results, 2026-11-17–18
+
+[Full timing/capacity tables](../../../bench_results/2026-11-17_tp4-ram10/ram10-report.md),
+[per-request CSV](../../../bench_results/2026-11-17_tp4-ram10/ram10-per-request.csv),
+[raw receipts](../../../bench_results/2026-11-17_tp4-ram10/matrix-r1/) and
+[source/kernel/receipt manifest](../../../bench_results/2026-11-17_tp4-ram10/matrix-manifest.json).
+
+All four arms passed the short quality, prefix-cache and concurrency probes;
+all 24 timing cells were valid. D/Z reduced cache payload, but neither beat R
+on output throughput or KV capacity. The cached backend used a larger graph
+pool even in F, where almost no demand loads remained.
+
+Initializing constant zero points reduced copied bytes per miss, not cache
+allocation. D/Z's differing KV budgets and MTP acceptance are not evidence of
+an allocation or latency win: this was one boot per arm, not ABBA. The option
+remains off by default.
+
+In the random-input traces, previous-step and adjacent-layer top-two
+predictions were already resident and avoided no demand loads. Forcing
+nonresident predictions increased both misses and copy traffic, even with
+optimistically instantaneous copies. No runtime predictor was enabled.
+
+[Coding-task and bounded-prefetch results](../../../bench_results/2026-11-17_tp4-ram10/prefetch-report.md)
+include the honestly labelled initial 256-token run and corrected 512-token
+receipts. Adjacent-layer lookahead avoided six of 6,907 demand loads on the
+corrected long-task trace, with unchanged total transfer bytes; no runtime ITL
+benefit was measured. The b4 lease was released after the diagnostic.
 
 ## Mono next to the W4A8 MoE prefill
 

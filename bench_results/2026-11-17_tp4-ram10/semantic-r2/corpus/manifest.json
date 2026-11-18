@@ -1,0 +1,34 @@
+{
+  "model": "/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c",
+  "template_kwargs": {
+    "enable_thinking": false
+  },
+  "datasets": {
+    "1024": {
+      "requests": 8,
+      "prompt_tokens": [
+        990,
+        1014,
+        1026,
+        1083,
+        978,
+        1047,
+        971,
+        1015
+      ],
+      "sha256": "7273187f6143674b35508b96304c4385b35940579f59862e3efe184b44eccf6b",
+      "source_sha256": "dacfbbc18478c3c35c582cb0d85b6dd7a16f04453385aa6b494f03aa39c62938"
+    },
+    "16384": {
+      "requests": 4,
+      "prompt_tokens": [
+        18638,
+        19580,
+        15946,
+        15917
+      ],
+      "sha256": "b4adf0a9162064946ad9e766f844cb87ae9a00beb630cb734776075dac7a5878",
+      "source_sha256": "21ef18eb764ec9e0f6542445dfef663de3d43bb7cd19da19ae1fb6cd2740418d"
+    }
+  }
+}

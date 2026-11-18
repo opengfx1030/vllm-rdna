@@ -1,0 +1,2 @@
+arm,replicate,tag,cell,request_index,success,prompt_tokens,output_tokens,ttft_s,latency_s,decode_s,decode_tokens,prefill_tok_s,decode_tok_s,itl_n,itl_expected,itl_missing_tokens,itl_mean_ms,itl_p50_ms,itl_p99_ms,error
+D,2,demand-r2,bench-1024x512-c1,0,1,1024,512,0.635079174,16.2642669,15.6291877,511,1612.39739,32.6952372,438,511,73,35.683077,35.294969,42.9377619,

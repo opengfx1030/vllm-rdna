@@ -1,0 +1,4 @@
+cold TTFT 0.87 s, warm TTFT 0.41 s, speedup 2.1x -> PASS
+prefix cache: queries +3854, hits +1024, warm hit rate 53.1% (hit granularity 2048 tokens)
+cold text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be GPU/computing-related terms (barrier, ca'
+warm text: '\n\n<think>\nThe user has provided a very long sequence of words that appear to be GPU/computing-related terms (barrier, ca'

@@ -1,0 +1,2 @@
+TRACE PASS arm=Z input=16384 concurrency=1; diagnostic timings excluded
+TRACE PASS arm=Z input=1024 concurrency=8; diagnostic timings excluded

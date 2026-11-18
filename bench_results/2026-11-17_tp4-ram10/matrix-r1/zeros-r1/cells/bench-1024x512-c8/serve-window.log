@@ -1,0 +1,81 @@
+INFO:     127.0.0.1:53880 - "GET /metrics HTTP/1.1" 200 OK
+(APIServer pid=620286) INFO 11-18 00:38:17 [loggers.py:335] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+INFO:     127.0.0.1:34342 - "POST /tokenize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34346 - "GET /metrics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34346 - "GET /metrics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34346 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34348 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34352 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34356 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34370 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34376 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34384 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34398 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:25 [k1.py:89] mono k1_rdna2: 1026 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:25 [k1.py:89] mono k1_rdna2: 1026 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:25 [k1.py:89] mono k1_rdna2: 1026 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:25 [k1.py:89] mono k1_rdna2: 1026 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:25 [k2.py:401] mono k2_rdna2: 1026 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:25 [k2.py:401] mono k2_rdna2: 1026 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:25 [k2.py:401] mono k2_rdna2: 1026 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:25 [k2.py:401] mono k2_rdna2: 1026 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:26 [k1.py:89] mono k1_rdna2: 1027 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:26 [k1.py:89] mono k1_rdna2: 1027 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:26 [k1.py:89] mono k1_rdna2: 1027 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:26 [k1.py:89] mono k1_rdna2: 1027 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:26 [k2.py:401] mono k2_rdna2: 1027 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:26 [k2.py:401] mono k2_rdna2: 1027 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:26 [k2.py:401] mono k2_rdna2: 1027 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:26 [k2.py:401] mono k2_rdna2: 1027 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:26 [pinned_host.py:370] Pinned host mappings that appeared after warm-up: 13 now mlocked (0.1 MiB), 1154 in all; VmLck 26.69 -> 26.69 GiB.
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:26 [pinned_host.py:370] Pinned host mappings that appeared after warm-up: 14 now mlocked (0.1 MiB), 1152 in all; VmLck 26.69 -> 26.69 GiB.
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:26 [pinned_host.py:370] Pinned host mappings that appeared after warm-up: 13 now mlocked (0.1 MiB), 1154 in all; VmLck 26.69 -> 26.69 GiB.
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:27 [pinned_host.py:370] Pinned host mappings that appeared after warm-up: 13 now mlocked (0.1 MiB), 1152 in all; VmLck 26.69 -> 26.69 GiB.
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:27 [k1.py:89] mono k1_rdna2: 1030 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:27 [k1.py:89] mono k1_rdna2: 1030 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:27 [k1.py:89] mono k1_rdna2: 1030 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:27 [k1.py:89] mono k1_rdna2: 1030 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:27 [k2.py:401] mono k2_rdna2: 1030 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:27 [k2.py:401] mono k2_rdna2: 1030 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:27 [k2.py:401] mono k2_rdna2: 1030 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:27 [k2.py:401] mono k2_rdna2: 1030 rows (eager) -> modules
+(APIServer pid=620286) INFO 11-18 00:38:27 [loggers.py:335] Engine 000: Avg prompt throughput: 204.8 tokens/s, Avg generation throughput: 0.4 tokens/s, Running: 4 reqs, Waiting: 4 reqs, GPU KV cache usage: 23.4%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+(APIServer pid=620286) INFO 11-18 00:38:27 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 1.00, Accepted throughput: 0.00 tokens/s, Drafted throughput: 0.20 tokens/s, Accepted: 0 tokens, Drafted: 4 tokens, Per-position acceptance rate: 0.000, 0.000, Avg Draft acceptance rate: 0.0%
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:27 [k1.py:89] mono k1_rdna2: 1033 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:27 [k1.py:89] mono k1_rdna2: 1033 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:27 [k1.py:89] mono k1_rdna2: 1033 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:27 [k1.py:89] mono k1_rdna2: 1033 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:27 [k2.py:401] mono k2_rdna2: 1033 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:27 [k2.py:401] mono k2_rdna2: 1033 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:27 [k2.py:401] mono k2_rdna2: 1033 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:27 [k2.py:401] mono k2_rdna2: 1033 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:28 [k1.py:89] mono k1_rdna2: 1036 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:28 [k1.py:89] mono k1_rdna2: 1036 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:28 [k1.py:89] mono k1_rdna2: 1036 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:28 [k1.py:89] mono k1_rdna2: 1036 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:28 [k2.py:401] mono k2_rdna2: 1036 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:28 [k2.py:401] mono k2_rdna2: 1036 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:28 [k2.py:401] mono k2_rdna2: 1036 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:28 [k2.py:401] mono k2_rdna2: 1036 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:29 [k1.py:89] mono k1_rdna2: 1039 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:29 [k1.py:89] mono k1_rdna2: 1039 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:29 [k1.py:89] mono k1_rdna2: 1039 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:29 [k1.py:89] mono k1_rdna2: 1039 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:29 [k2.py:401] mono k2_rdna2: 1039 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:29 [k2.py:401] mono k2_rdna2: 1039 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:29 [k2.py:401] mono k2_rdna2: 1039 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:29 [k2.py:401] mono k2_rdna2: 1039 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:29 [k1.py:89] mono k1_rdna2: 1042 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:29 [k1.py:89] mono k1_rdna2: 1042 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:29 [k1.py:89] mono k1_rdna2: 1042 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:29 [k1.py:89] mono k1_rdna2: 1042 rows (eager) -> modules
+(Worker_TP1_EP1 pid=621615) INFO 11-18 00:38:29 [k2.py:401] mono k2_rdna2: 1042 rows (eager) -> modules
+(Worker_TP3_EP3 pid=621616) INFO 11-18 00:38:29 [k2.py:401] mono k2_rdna2: 1042 rows (eager) -> modules
+(Worker_TP2_EP2 pid=621617) INFO 11-18 00:38:29 [k2.py:401] mono k2_rdna2: 1042 rows (eager) -> modules
+(Worker_TP0_EP0 pid=621614) INFO 11-18 00:38:29 [k2.py:401] mono k2_rdna2: 1042 rows (eager) -> modules
+(APIServer pid=620286) INFO 11-18 00:38:37 [loggers.py:335] Engine 000: Avg prompt throughput: 614.3 tokens/s, Avg generation throughput: 182.2 tokens/s, Running: 8 reqs, Waiting: 0 reqs, GPU KV cache usage: 43.8%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+(APIServer pid=620286) INFO 11-18 00:38:37 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.33, Accepted throughput: 103.68 tokens/s, Drafted throughput: 155.78 tokens/s, Accepted: 1037 tokens, Drafted: 1558 tokens, Per-position acceptance rate: 0.773, 0.558, Avg Draft acceptance rate: 66.6%
+(APIServer pid=620286) INFO 11-18 00:38:47 [loggers.py:335] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 195.5 tokens/s, Running: 4 reqs, Waiting: 0 reqs, GPU KV cache usage: 21.9%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+(APIServer pid=620286) INFO 11-18 00:38:47 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 1.91, Accepted throughput: 92.99 tokens/s, Drafted throughput: 205.39 tokens/s, Accepted: 930 tokens, Drafted: 2054 tokens, Per-position acceptance rate: 0.525, 0.381, Avg Draft acceptance rate: 45.3%
+INFO:     127.0.0.1:34376 - "GET /metrics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34346 - "GET /metrics HTTP/1.1" 200 OK

@@ -1,0 +1,21 @@
+INFO:     127.0.0.1:55290 - "GET /metrics HTTP/1.1" 200 OK
+(APIServer pid=588118) INFO 11-18 00:01:27 [loggers.py:335] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+INFO:     127.0.0.1:48040 - "POST /tokenize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48052 - "GET /metrics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48052 - "GET /metrics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48052 - "POST /v1/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=589359) INFO 11-18 00:01:42 [pinned_host.py:370] Pinned host mappings that appeared after warm-up: 2 now mlocked (0.3 MiB), 1160 in all; VmLck 26.69 -> 26.69 GiB.
+(Worker_TP2_EP2 pid=589361) INFO 11-18 00:01:42 [pinned_host.py:370] Pinned host mappings that appeared after warm-up: 2 now mlocked (0.3 MiB), 1161 in all; VmLck 26.69 -> 26.69 GiB.
+(Worker_TP3_EP3 pid=589360) INFO 11-18 00:01:43 [pinned_host.py:370] Pinned host mappings that appeared after warm-up: 2 now mlocked (0.3 MiB), 1160 in all; VmLck 26.69 -> 26.69 GiB.
+(Worker_TP0_EP0 pid=589358) INFO 11-18 00:01:43 [pinned_host.py:370] Pinned host mappings that appeared after warm-up: 2 now mlocked (0.3 MiB), 1159 in all; VmLck 26.69 -> 26.69 GiB.
+(APIServer pid=588118) INFO 11-18 00:01:57 [loggers.py:335] Engine 000: Avg prompt throughput: 1638.3 tokens/s, Avg generation throughput: 43.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 11.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+(APIServer pid=588118) INFO 11-18 00:01:57 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.39, Accepted throughput: 6.37 tokens/s, Drafted throughput: 9.15 tokens/s, Accepted: 255 tokens, Drafted: 366 tokens, Per-position acceptance rate: 0.765, 0.628, Avg Draft acceptance rate: 69.7%
+INFO:     127.0.0.1:48052 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=588118) INFO 11-18 00:02:07 [loggers.py:335] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 58.5 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 8.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+(APIServer pid=588118) INFO 11-18 00:02:07 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.47, Accepted throughput: 34.80 tokens/s, Drafted throughput: 47.40 tokens/s, Accepted: 348 tokens, Drafted: 474 tokens, Per-position acceptance rate: 0.806, 0.662, Avg Draft acceptance rate: 73.4%
+(APIServer pid=588118) INFO 11-18 00:02:17 [loggers.py:335] Engine 000: Avg prompt throughput: 1638.2 tokens/s, Avg generation throughput: 12.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 11.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+(APIServer pid=588118) INFO 11-18 00:02:17 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 1.62, Accepted throughput: 4.60 tokens/s, Drafted throughput: 14.80 tokens/s, Accepted: 46 tokens, Drafted: 148 tokens, Per-position acceptance rate: 0.392, 0.230, Avg Draft acceptance rate: 31.1%
+(APIServer pid=588118) INFO 11-18 00:02:27 [loggers.py:335] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 56.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 11.3%, Prefix cache hit rate: 0.0%, Corrupted: 0 reqs
+(APIServer pid=588118) INFO 11-18 00:02:27 [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 1.99, Accepted throughput: 28.00 tokens/s, Drafted throughput: 56.80 tokens/s, Accepted: 280 tokens, Drafted: 568 tokens, Per-position acceptance rate: 0.528, 0.458, Avg Draft acceptance rate: 49.3%
+INFO:     127.0.0.1:48052 - "GET /metrics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48052 - "GET /metrics HTTP/1.1" 200 OK

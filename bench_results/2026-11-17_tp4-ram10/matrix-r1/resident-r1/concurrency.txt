@@ -1,0 +1,49 @@
+ok   solo     0        prompt 0: matching / 64
+ok   solo     1        prompt 1: matching / 64
+ok   solo     2        prompt 2: matching / 64
+ok   solo     3        prompt 3: matching / 64
+ok   solo     4        prompt 4: matching / 64
+ok   solo     5        prompt 5: matching / 64
+ok   solo     6        prompt 6: matching / 64
+ok   solo     7        prompt 7: matching / 64
+ok   solo2    0        prompt 0: matching / 64
+WARN solo2    1        prompt 1: soft token 28/64: margin solo 1.187 got 0.219, continuation mean lp -0.07 vs solo -0.36
+ok   solo2    2        prompt 2: matching / 64
+ok   solo2    3        prompt 3: matching / 64
+WARN solo2    4        prompt 4: near-tie token 62/64: margin solo 0.016 got 0.016, continuation mean lp -0.44 vs solo -0.50
+ok   solo2    5        prompt 5: matching / 64
+WARN solo2    6        prompt 6: near-tie token 26/64: margin solo 0.031 got 0.016, continuation mean lp -0.15 vs solo -0.20
+ok   solo2    7        prompt 7: matching / 64
+ok   together 0        prompt 0: matching / 64
+ok   together 1        prompt 1: matching / 64
+ok   together 2        prompt 2: matching / 64
+WARN together 3        prompt 3: near-tie token 42/64: margin solo 0.031 got 0.078, continuation mean lp -0.42 vs solo -0.37
+ok   together 4        prompt 4: matching / 64
+WARN together 5        prompt 5: near-tie token 43/64: margin solo 0.125 got 0.016, continuation mean lp -0.45 vs solo -0.36
+ok   together 6        prompt 6: matching / 64
+ok   together 7        prompt 7: matching / 64
+ok   churn    (0, 0)   prompt 0: matching / 16
+WARN churn    (1, 3)   prompt 3: near-tie token 42/64: margin solo 0.031 got 0.016, continuation mean lp -0.41 vs solo -0.37
+ok   churn    (2, 6)   prompt 6: matching / 24
+WARN churn    (3, 1)   prompt 1: near-tie token 27/64: margin solo 0.344 got 0.078, continuation mean lp -0.25 vs solo -0.37
+ok   churn    (4, 4)   prompt 4: matching / 32
+ok   churn    (5, 7)   prompt 7: matching / 40
+ok   churn    (6, 2)   prompt 2: matching / 48
+ok   churn    (7, 5)   prompt 5: matching / 64
+ok   churn    (8, 0)   prompt 0: matching / 16
+WARN churn    (9, 3)   prompt 3: near-tie token 42/64: margin solo 0.031 got 0.016, continuation mean lp -0.41 vs solo -0.37
+ok   churn    (10, 6)  prompt 6: matching / 24
+ok   churn    (11, 1)  prompt 1: matching / 64
+ok   churn    (12, 4)  prompt 4: matching / 32
+WARN churn    (13, 7)  prompt 7: near-tie token 3/40: margin solo 0.016 got 0.062, continuation mean lp -0.42 vs solo -0.27
+ok   churn    (14, 2)  prompt 2: matching / 48
+WARN churn    (15, 5)  prompt 5: near-tie token 0/64: margin solo 0.016 got 0.016, continuation mean lp -0.18 vs solo -0.28
+ok   longsolo 0        prompt 0: matching / 64
+ok   longsolo 1        prompt 1: matching / 64
+ok   longsolo 2        prompt 2: matching / 64
+ok   longsolo 3        prompt 3: matching / 64
+WARN long     0        prompt 0: near-tie token 41/64: margin solo 0.359 got 0.078, continuation mean lp -0.18 vs solo -0.29
+ok   long     1        prompt 1: matching / 64
+ok   long     2        prompt 2: matching / 64
+ok   long     3        prompt 3: matching / 64
+RESULT PASS: 0 failing, 10 near-tie, 1 soft, 0 solo-noise, 37 identical of 48 checks (27.1s; tie <= 0.2, fail > 1.0 nats, lp drop > 1.5; run-to-run noise 1.98 nats, a flip fails if both runs are sure)

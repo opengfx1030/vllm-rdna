@@ -1,0 +1,32 @@
+RAM10 quiet: window open /home/chenco_adm/w4a8_runs/lanes/quiet-b4/Ram10Study
+RAM10 CELL bench-1024x512-c1 in=1024 out=512 conc=1 requests=4
+bench                        prefill   1624.3 tok/s/req (agg  1593.2) | decode  49.39 tok/s/req (agg out   46.64) | TTFT    0.63 s | ITL med    37.1 ms mean    37.2 ms | ok 4
+RAM10 CELL bench-1024x512-c1 PASS
+RAM10 CELL bench-1024x512-c8 in=1024 out=512 conc=8 requests=8
+bench                        prefill    315.9 tok/s/req (agg  1635.2) | decode  28.77 tok/s/req (agg out  157.52) | TTFT    3.24 s | ITL med    71.2 ms mean    74.2 ms | ok 8
+RAM10 CELL bench-1024x512-c8 PASS
+RAM10 quiet: window closed
+RAM10 quiet: gap 120s
+RAM10 quiet: window open /home/chenco_adm/w4a8_runs/lanes/quiet-b4/Ram10Study
+RAM10 CELL bench-16384x1024-c1 in=16384 out=1024 conc=1 requests=2
+bench                        prefill   1776.0 tok/s/req (agg  1767.9) | decode  62.94 tok/s/req (agg out   40.19) | TTFT    9.23 s | ITL med    36.6 ms mean    36.7 ms | ok 2
+RAM10 CELL bench-16384x1024-c1 PASS
+RAM10 CELL bench-16384x1024-c8 in=16384 out=1024 conc=8 requests=8
+bench                        prefill    278.2 tok/s/req (agg  1089.2) | decode  16.39 tok/s/req (agg out   57.27) | TTFT   58.90 s | ITL med    65.0 ms mean   149.0 ms | ok 8
+RAM10 CELL bench-16384x1024-c8 PASS
+RAM10 quiet: window closed
+RAM10 quiet: gap 120s
+RAM10 quiet: window open /home/chenco_adm/w4a8_runs/lanes/quiet-b4/Ram10Study
+RAM10 CELL bench-32768x2048-c1 in=32768 out=2048 conc=1 requests=2
+bench                        prefill   1745.2 tok/s/req (agg  1741.9) | decode  64.95 tok/s/req (agg out   40.72) | TTFT   18.78 s | ITL med    36.6 ms mean    36.8 ms | ok 2
+RAM10 CELL bench-32768x2048-c1 PASS
+RAM10 quiet: window closed
+RAM10 quiet: gap 120s
+RAM10 quiet: window open /home/chenco_adm/w4a8_runs/lanes/quiet-b4/Ram10Study
+RAM10 CELL bench-32768x2048-c8 in=32768 out=2048 conc=8 requests=8
+bench                        prefill    232.2 tok/s/req (agg   948.0) | decode  23.21 tok/s/req (agg out   52.63) | TTFT  141.13 s | ITL med    59.7 ms mean   108.7 ms | ok 8
+RAM10 CELL bench-32768x2048-c8 PASS
+RAM10 quiet: window closed
+RAM10 AFTER_MATRIX /home/chenco_adm/w4a8_runs/leapquant/tree-ram10-study/tools/rdna/mono/ram10_trace.sh
+RAM10 AFTER_MATRIX PASS
+RAM10 STUDY PASS

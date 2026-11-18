@@ -1,0 +1,7 @@
+RAM10 quiet: window open /home/chenco_adm/w4a8_runs/lanes/quiet-b4/Ram10Semantic
+RAM10 CELL bench-1024x512-c1 in=1024 out=512 conc=1 requests=1
+RAM10 CELL bench-1024x512-c1 PASS
+RAM10 quiet: window closed
+RAM10 AFTER_MATRIX /home/chenco_adm/w4a8_runs/leapquant/tree-ram10-semantic/tools/rdna/mono/ram10_trace.sh
+RAM10 AFTER_MATRIX PASS
+RAM10 STUDY PASS

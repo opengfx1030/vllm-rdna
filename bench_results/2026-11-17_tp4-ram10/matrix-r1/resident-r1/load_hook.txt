@@ -1,0 +1,29 @@
+RAM10 quiet: window open /home/chenco_adm/w4a8_runs/lanes/quiet-b4/Ram10Study
+RAM10 CELL bench-1024x512-c1 in=1024 out=512 conc=1 requests=4
+bench                        prefill   2484.4 tok/s/req (agg  2441.1) | decode  85.77 tok/s/req (agg out   80.37) | TTFT    0.41 s | ITL med    23.4 ms mean    23.4 ms | ok 4
+RAM10 CELL bench-1024x512-c1 PASS
+RAM10 CELL bench-1024x512-c8 in=1024 out=512 conc=8 requests=8
+bench                        prefill    488.8 tok/s/req (agg  2523.0) | decode  40.65 tok/s/req (agg out  247.02) | TTFT    2.09 s | ITL med    45.9 ms mean    48.3 ms | ok 8
+RAM10 CELL bench-1024x512-c8 PASS
+RAM10 quiet: window closed
+RAM10 quiet: gap 120s
+RAM10 quiet: window open /home/chenco_adm/w4a8_runs/lanes/quiet-b4/Ram10Study
+RAM10 CELL bench-16384x1024-c1 in=16384 out=1024 conc=1 requests=2
+bench                        prefill   2610.8 tok/s/req (agg  2598.7) | decode  77.32 tok/s/req (agg out   52.49) | TTFT    6.28 s | ITL med    23.8 ms mean    23.8 ms | ok 2
+RAM10 CELL bench-16384x1024-c1 PASS
+RAM10 CELL bench-16384x1024-c8 in=16384 out=1024 conc=8 requests=8
+bench                        prefill    529.4 tok/s/req (agg  2394.4) | decode  23.90 tok/s/req (agg out  102.91) | TTFT   30.95 s | ITL med    49.7 ms mean    95.1 ms | ok 8
+RAM10 CELL bench-16384x1024-c8 PASS
+RAM10 quiet: window closed
+RAM10 quiet: gap 120s
+RAM10 quiet: window open /home/chenco_adm/w4a8_runs/lanes/quiet-b4/Ram10Study
+RAM10 CELL bench-32768x2048-c1 in=32768 out=2048 conc=1 requests=2
+bench                        prefill   2537.1 tok/s/req (agg  2526.3) | decode  96.84 tok/s/req (agg out   60.14) | TTFT   12.92 s | ITL med    23.9 ms mean    23.9 ms | ok 2
+RAM10 CELL bench-32768x2048-c1 PASS
+RAM10 CELL bench-32768x2048-c8 in=32768 out=2048 conc=8 requests=8
+bench                        prefill    464.0 tok/s/req (agg  1852.2) | decode  27.99 tok/s/req (agg out   99.11) | TTFT   70.62 s | ITL med    46.2 ms mean    94.8 ms | ok 8
+RAM10 CELL bench-32768x2048-c8 PASS
+RAM10 quiet: window closed
+RAM10 AFTER_MATRIX /home/chenco_adm/w4a8_runs/leapquant/tree-ram10-study/tools/rdna/mono/ram10_trace.sh
+RAM10 AFTER_MATRIX PASS
+RAM10 STUDY PASS

@@ -1,0 +1,1 @@
+{"cell": "bench-32768x2048-c8", "decode_only_tps": 27.98840675207113, "decode_req_tps": 27.98840675207113, "invalid_reasons": [], "valid": true, "warnings": ["itl_partial"]}

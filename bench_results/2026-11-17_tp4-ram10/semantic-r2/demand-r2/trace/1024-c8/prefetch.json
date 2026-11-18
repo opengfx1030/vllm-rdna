@@ -1,0 +1,197 @@
+{
+  "input": "/home/chenco_adm/w4a8_runs/ram10/semantic-r2/demand-r2/trace/1024-c8/stop.json",
+  "results": [
+    {
+      "mode": "ordinary",
+      "budget_per_target_call": 2,
+      "warmup_calls_per_layer": 64,
+      "scored_calls_per_layer": 109,
+      "layer_records": 40,
+      "distinct_captured_call_counts": [
+        173
+      ],
+      "unscored_tail_calls": 0,
+      "trace_byte_limit_reached": false,
+      "capacities": [
+        115
+      ],
+      "native_replay_exact": true,
+      "scored": {
+        "demand_experts": 71008,
+        "demand_misses": 186,
+        "demand_bytes": 474969600,
+        "demand_passes": 4360,
+        "prediction_candidates": 0,
+        "predictions_already_resident": 0,
+        "prefetch_misses": 0,
+        "prefetch_bytes": 0,
+        "useful_prefetch_loads": 0,
+        "unused_prefetch_evictions": 0,
+        "prefetch_not_used_by_trace_end": 0,
+        "total_copy_bytes": 474969600
+      },
+      "whole_trace": {
+        "demand_experts": 157933,
+        "demand_misses": 1219,
+        "demand_bytes": 3112838400,
+        "demand_passes": 6956,
+        "prediction_candidates": 0,
+        "predictions_already_resident": 0,
+        "prefetch_misses": 0,
+        "prefetch_bytes": 0,
+        "useful_prefetch_loads": 0,
+        "unused_prefetch_evictions": 0,
+        "prefetch_not_used_by_trace_end": 0,
+        "total_copy_bytes": 3112838400
+      },
+      "demand_misses_avoided_vs_ordinary": 0,
+      "extra_copy_bytes_vs_ordinary": 0
+    },
+    {
+      "mode": "previous_step",
+      "budget_per_target_call": 2,
+      "warmup_calls_per_layer": 64,
+      "scored_calls_per_layer": 109,
+      "layer_records": 40,
+      "distinct_captured_call_counts": [
+        173
+      ],
+      "unscored_tail_calls": 0,
+      "trace_byte_limit_reached": false,
+      "capacities": [
+        115
+      ],
+      "native_replay_exact": null,
+      "scored": {
+        "demand_experts": 71008,
+        "demand_misses": 186,
+        "demand_bytes": 474969600,
+        "demand_passes": 4360,
+        "prediction_candidates": 8720,
+        "predictions_already_resident": 8720,
+        "prefetch_misses": 0,
+        "prefetch_bytes": 0,
+        "useful_prefetch_loads": 0,
+        "unused_prefetch_evictions": 0,
+        "prefetch_not_used_by_trace_end": 0,
+        "total_copy_bytes": 474969600
+      },
+      "whole_trace": {
+        "demand_experts": 157933,
+        "demand_misses": 1219,
+        "demand_bytes": 3112838400,
+        "demand_passes": 6956,
+        "prediction_candidates": 13760,
+        "predictions_already_resident": 13756,
+        "prefetch_misses": 4,
+        "prefetch_bytes": 10214400,
+        "useful_prefetch_loads": 3,
+        "unused_prefetch_evictions": 1,
+        "prefetch_not_used_by_trace_end": 0,
+        "total_copy_bytes": 3123052800
+      },
+      "demand_misses_avoided_vs_ordinary": 0,
+      "extra_copy_bytes_vs_ordinary": 0
+    },
+    {
+      "mode": "transition",
+      "budget_per_target_call": 2,
+      "warmup_calls_per_layer": 64,
+      "scored_calls_per_layer": 109,
+      "layer_records": 40,
+      "distinct_captured_call_counts": [
+        173
+      ],
+      "unscored_tail_calls": 0,
+      "trace_byte_limit_reached": false,
+      "capacities": [
+        115
+      ],
+      "native_replay_exact": null,
+      "scored": {
+        "demand_experts": 71008,
+        "demand_misses": 186,
+        "demand_bytes": 474969600,
+        "demand_passes": 4360,
+        "prediction_candidates": 4360,
+        "predictions_already_resident": 4360,
+        "prefetch_misses": 0,
+        "prefetch_bytes": 0,
+        "useful_prefetch_loads": 0,
+        "unused_prefetch_evictions": 0,
+        "prefetch_not_used_by_trace_end": 0,
+        "total_copy_bytes": 474969600
+      },
+      "whole_trace": {
+        "demand_experts": 157933,
+        "demand_misses": 1219,
+        "demand_bytes": 3112838400,
+        "demand_passes": 6956,
+        "prediction_candidates": 6880,
+        "predictions_already_resident": 6880,
+        "prefetch_misses": 0,
+        "prefetch_bytes": 0,
+        "useful_prefetch_loads": 0,
+        "unused_prefetch_evictions": 0,
+        "prefetch_not_used_by_trace_end": 0,
+        "total_copy_bytes": 3112838400
+      },
+      "demand_misses_avoided_vs_ordinary": 0,
+      "extra_copy_bytes_vs_ordinary": 0
+    },
+    {
+      "mode": "transition_missing",
+      "budget_per_target_call": 2,
+      "warmup_calls_per_layer": 64,
+      "scored_calls_per_layer": 109,
+      "layer_records": 40,
+      "distinct_captured_call_counts": [
+        173
+      ],
+      "unscored_tail_calls": 0,
+      "trace_byte_limit_reached": false,
+      "capacities": [
+        115
+      ],
+      "native_replay_exact": null,
+      "scored": {
+        "demand_experts": 71008,
+        "demand_misses": 270,
+        "demand_bytes": 689472000,
+        "demand_passes": 4360,
+        "prediction_candidates": 4325,
+        "predictions_already_resident": 0,
+        "prefetch_misses": 4325,
+        "prefetch_bytes": 11044320000,
+        "useful_prefetch_loads": 27,
+        "unused_prefetch_evictions": 4278,
+        "prefetch_not_used_by_trace_end": 20,
+        "total_copy_bytes": 11733792000
+      },
+      "whole_trace": {
+        "demand_experts": 157933,
+        "demand_misses": 1358,
+        "demand_bytes": 3467788800,
+        "demand_passes": 6956,
+        "prediction_candidates": 6697,
+        "predictions_already_resident": 0,
+        "prefetch_misses": 6697,
+        "prefetch_bytes": 17101459200,
+        "useful_prefetch_loads": 118,
+        "unused_prefetch_evictions": 6548,
+        "prefetch_not_used_by_trace_end": 31,
+        "total_copy_bytes": 20569248000
+      },
+      "demand_misses_avoided_vs_ordinary": -84,
+      "extra_copy_bytes_vs_ordinary": 11258822400
+    }
+  ],
+  "limits": [
+    "Diagnostic trace overhead excluded from all performance claims.",
+    "Same real slots and native demand policy; no extra VRAM assumed.",
+    "Instantaneous fills: no copy/compute contention or timing proof.",
+    "Online training prefix, not an independent held-out workload.",
+    "Transition targets are recorded physically adjacent layers only.",
+    "Never substitute these predictors for the model's learned router."
+  ]
+}

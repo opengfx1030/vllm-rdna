@@ -1,0 +1,279 @@
+{
+  "baseline_arm": "R",
+  "cells": [
+    {
+      "arm": "D",
+      "cache_copied_bytes": 699686400,
+      "cache_copy_modes": [
+        "tensor"
+      ],
+      "cache_demands": 467268,
+      "cache_device_bytes": 56873877504,
+      "cache_host_bytes": 62757371904,
+      "cache_miss_rate_pct": 0.05863872552796254,
+      "cache_misses": 274,
+      "cache_ranks": 4,
+      "capacity_limited": false,
+      "cell": "bench-1024x512-c1",
+      "completed": 1,
+      "decode_only_tps": 33.743734769740655,
+      "decode_req_tps": 33.74373476974066,
+      "decode_req_tps_p50": 33.743734769740655,
+      "decode_req_tps_p99": 33.743734769740655,
+      "decode_span_agg_tps": 33.743734769740655,
+      "duration_s": 15.777640050000628,
+      "evictions": "ok",
+      "failed": 0,
+      "faults": 0,
+      "input_tokens": 1024.0,
+      "invalid_reasons": [],
+      "itl_complete": false,
+      "itl_mean_ms": 34.57431948857252,
+      "itl_p50_ms": 34.31056050249026,
+      "itl_p99_ms": 36.77514674192935,
+      "kv_devices": [
+        "cuda:0",
+        "cuda:1",
+        "cuda:2",
+        "cuda:3"
+      ],
+      "kv_size_tokens": 245872,
+      "kv_storages": 4,
+      "kv_tp_min_bytes": 3939500032,
+      "kv_tp_min_gib": 3.6689453125,
+      "kv_tp_sum_bytes": 15758000128,
+      "kv_tp_sum_gib": 14.67578125,
+      "kv_views": 304,
+      "mtp_acceptance_length": 1.1666666666666667,
+      "mtp_acceptance_rate": 8.333333333333332,
+      "mtp_accepted_tokens": 73.0,
+      "mtp_draft_tokens": 876.0,
+      "mtp_num_drafts": 438.0,
+      "output_throughput_e2e": 32.450987497333585,
+      "output_tokens": 512.0,
+      "preemptions": 0,
+      "prefill_agg_bench_tps": 1616.6765796930397,
+      "prefill_req_tps": 1616.6765796930397,
+      "prefill_req_tps_p50": 1616.6765796930397,
+      "prefill_req_tps_p99": 1616.6765796930397,
+      "prefill_span_tps": 1616.6765796930397,
+      "prompt_tokens_mean": 1024.0,
+      "replicate": "3",
+      "requested": 1,
+      "run_path": "/home/chenco_adm/w4a8_runs/ram10/semantic512-r3/demand-r3",
+      "success_count": 1,
+      "tag": "demand-r3",
+      "ttft_mean_ms": 633.3981780044269,
+      "ttft_p50_ms": 633.3981780044269,
+      "ttft_p99_ms": 633.3981780044269,
+      "valid": true,
+      "valid_for_decode": true,
+      "valid_for_ttft": true,
+      "warnings": [
+        "itl_partial"
+      ]
+    }
+  ],
+  "comparisons": [
+    {
+      "arm": "D",
+      "baseline_arm": "R",
+      "baseline_replicate": null,
+      "baseline_tag": null,
+      "cell": "bench-1024x512-c1",
+      "metrics": {
+        "decode_only_tps": {
+          "baseline": null,
+          "candidate": 33.743734769740655,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "decode_req_tps": {
+          "baseline": null,
+          "candidate": 33.74373476974066,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "decode_span_agg_tps": {
+          "baseline": null,
+          "candidate": 33.743734769740655,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "itl_p50_ms": {
+          "baseline": null,
+          "candidate": 34.31056050249026,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "itl_p99_ms": {
+          "baseline": null,
+          "candidate": 36.77514674192935,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "kv_size_tokens": {
+          "baseline": null,
+          "candidate": 245872,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "kv_tp_min_gib": {
+          "baseline": null,
+          "candidate": 3.6689453125,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "output_throughput_e2e": {
+          "baseline": null,
+          "candidate": 32.450987497333585,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "prefill_agg_bench_tps": {
+          "baseline": null,
+          "candidate": 1616.6765796930397,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "prefill_req_tps": {
+          "baseline": null,
+          "candidate": 1616.6765796930397,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "prefill_span_tps": {
+          "baseline": null,
+          "candidate": 1616.6765796930397,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "ttft_p50_ms": {
+          "baseline": null,
+          "candidate": 633.3981780044269,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        },
+        "ttft_p99_ms": {
+          "baseline": null,
+          "candidate": 633.3981780044269,
+          "delta": null,
+          "pct": null,
+          "status": "missing_baseline"
+        }
+      },
+      "replicate": "3",
+      "status": "missing_baseline"
+    }
+  ],
+  "generated_utc": "2026-11-18T00:54:18.360204+00:00",
+  "notes": [
+    "D/Z have 115 real slots plus one dummy: 116 physical rows, saving 12, not 13. F is the full-capacity cache control. The CPU bank mirrors all 128 local experts, not only the 13 nonresident ones.",
+    "R uses W4A8 prefill and compiled F&P; F/D/Z use W4A16 prefill and breakable F&P, compile NONE. R-to-offload measures deployment cost, not PCIe alone. No resident W4A16 control was measured.",
+    "KV bytes are exact deduplicated rdna_cache_memory storage: TP-min limits capacity; sum covers all ranks. Token capacity is the engine's GPU KV cache size. Missing RPC data stays null, never inferred from weight savings. Expert host/device bytes are separate.",
+    "Logged peak activation includes estimated graph reserve: it is not isolated transient memory. Graph-pool actual/estimated values are reported separately; startup memory fields must not be summed blindly.",
+    "Output e2e is total output/duration. Decode wtd is sum(out-1)/sum(latency-TTFT); decode span is sum(out-1)/(last completion-first first token), not pure GPU decode. Prefill req is mean prompt/mean TTFT; agg is bench_metrics' one-wave estimate. Span rates include queueing and overlapping other phases.",
+    "CSV rates use each request's prompt/TTFT and (out-1)/(latency-TTFT), never 1/median ITL. ITL measures delivery chunks under MTP; missing token intervals are not fabricated as zeros.",
+    "Preemptions are cumulative metric deltas, excluding _created. Positive counts flag capacity limits; faults/KFD evictions invalidate. Baseline comparisons match cell, replicate, request and completed counts. Missing observations stay null/n/a/blank."
+  ],
+  "run_root": "/home/chenco_adm/w4a8_runs/ram10/semantic512-r3",
+  "runs": [
+    {
+      "arm": "D",
+      "arm_name": "demand",
+      "block_size": 1024,
+      "breakable_cudagraph": true,
+      "cache_memory": {
+        "bytes_per_rank": [
+          3939500032,
+          3939500032,
+          3939500032,
+          3939500032
+        ],
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "present": true,
+        "ranks": 4,
+        "storage_bytes_min": 3939500032,
+        "storage_bytes_sum": 15758000128,
+        "storage_gib_min": 3.6689453125,
+        "storage_gib_sum": 14.67578125,
+        "storages": 4,
+        "views": 304
+      },
+      "cell_count": 1,
+      "cells": [
+        "1024:512:1:1"
+      ],
+      "compile_mode": 0,
+      "cudagraph_mode": "FULL_AND_PIECEWISE",
+      "deterministic_dense": true,
+      "device_cache_rows": 116,
+      "exit_code": 0,
+      "expert_device_bytes": 56873877504,
+      "expert_host_bytes": 62757371904,
+      "gmem": 0.92,
+      "gpus": "2,3,4,5",
+      "kernelSHA": "6945bd8cf54fb787784f8436405c2b0ac3e1f34410ed0fadce2e409da1cc0c32",
+      "kernel_sha256": "6945bd8cf54fb787784f8436405c2b0ac3e1f34410ed0fadce2e409da1cc0c32",
+      "kv": "auto",
+      "maxbat": 2048,
+      "maxlen": 131072,
+      "missing_declared_cells": [],
+      "model": "/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c",
+      "mono_knobs": {
+        "expert_cache_decay": 128,
+        "expert_cache_policy": "lfu_lru",
+        "expert_cache_slots": 115
+      },
+      "name": "demand",
+      "path": "/home/chenco_adm/w4a8_runs/ram10/semantic512-r3/demand-r3",
+      "recipe": "flashnext-mtp2",
+      "replicate": "3",
+      "rows_saved_vs_128": 12,
+      "seqs": 8,
+      "serve": {
+        "activation_gib_max": 3.66,
+        "activation_gib_min": 3.66,
+        "boot_failed": false,
+        "boot_faults": 0,
+        "consumed_gib_max": 20.25,
+        "consumed_gib_min": 19.92,
+        "graph_gib_max": 1.57,
+        "graph_gib_min": 1.57,
+        "graph_pool_actual_gib_max": 1.57,
+        "graph_pool_actual_gib_min": 1.57,
+        "graph_pool_estimated_gib_max": 2.44,
+        "graph_pool_estimated_gib_min": 2.44,
+        "kv_size_tokens": 245872,
+        "ppl": 4.8,
+        "present": true
+      },
+      "slots": 115,
+      "source_sha": "ca5b72d89070b6d7a9076b943a8a78d853791204",
+      "status": "done",
+      "tag": "demand-r3",
+      "tp": 4,
+      "tree_sha": "ca5b72d89070b6d7a9076b943a8a78d853791204",
+      "w4a8_prefill": false,
+      "w4a8_sdot4": 0
+    }
+  ],
+  "warnings": []
+}

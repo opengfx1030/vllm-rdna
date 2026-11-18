@@ -1,0 +1,1 @@
+bench                        prefill    488.8 tok/s/req (agg  2523.0) | decode  40.65 tok/s/req (agg out  247.02) | TTFT    2.09 s | ITL med    45.9 ms mean    48.3 ms | ok 8
