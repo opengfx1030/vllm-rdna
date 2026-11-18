@@ -1,0 +1,191 @@
+{
+  "runtime_sha": "20aedaa1cde2e5b336c7142a127b6c201fc7bbc5",
+  "runtime_identity": "Same model/native code as corrected ABBA 06e01fee; only diagnostic tools/docs/receipts differ.",
+  "design": "Two later C1/C2 boots: counters, mapped K2, modules and mailbox on; CHAOS=1 DECISION_STEPS=1000000000; no planner or moves.",
+  "evidence": {
+    "C1": {
+      "mono_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "k2_3row_full_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "modules_24row_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "eplb_on_lines": 4,
+      "counter_lines": 4,
+      "plan_starts": 0,
+      "plan_overlap": {},
+      "unfinished_plans": [],
+      "on": true,
+      "counter_only": true,
+      "cells": "1024:512:1 1024:512:8 16384:1024:1 16384:1024:8",
+      "faults": 0,
+      "ok": true,
+      "problems": [],
+      "head_sha": "20aedaa1cde2e5b336c7142a127b6c201fc7bbc5"
+    },
+    "C2": {
+      "mono_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "k2_3row_full_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "modules_24row_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "eplb_on_lines": 4,
+      "counter_lines": 4,
+      "plan_starts": 0,
+      "plan_overlap": {},
+      "unfinished_plans": [],
+      "on": true,
+      "counter_only": true,
+      "cells": "1024:512:1 1024:512:8 16384:1024:1 16384:1024:8",
+      "faults": 0,
+      "ok": true,
+      "problems": [],
+      "head_sha": "20aedaa1cde2e5b336c7142a127b6c201fc7bbc5"
+    }
+  },
+  "comparison": [
+    {
+      "cell": "1024x512-c1",
+      "metric": "median_itl_ms",
+      "off": 23.374362994218245,
+      "no_move": 24.06341675305157,
+      "chaos": 24.152008001692593,
+      "no_move_vs_off_pct": 2.947903902252924,
+      "chaos_vs_no_move_pct": 0.3681573965583551,
+      "no_move_boots": [
+        24.063913500867784,
+        24.062920005235355
+      ]
+    },
+    {
+      "cell": "1024x512-c1",
+      "metric": "p99_itl_ms",
+      "off": 23.95188541508105,
+      "no_move": 24.669019455322996,
+      "chaos": 27.63837181169947,
+      "no_move_vs_off_pct": 2.994060917602792,
+      "chaos_vs_no_move_pct": 12.036766851451652,
+      "no_move_boots": [
+        24.670545208937256,
+        24.667493701708736
+      ]
+    },
+    {
+      "cell": "1024x512-c8",
+      "metric": "median_itl_ms",
+      "off": 46.916183000575984,
+      "no_move": 47.20683774212375,
+      "chaos": 47.5080762480502,
+      "no_move_vs_off_pct": 0.619519157268611,
+      "chaos_vs_no_move_pct": 0.6381247300910609,
+      "no_move_boots": [
+        47.13877949689049,
+        47.27489598735701
+      ]
+    },
+    {
+      "cell": "1024x512-c8",
+      "metric": "p99_itl_ms",
+      "off": 380.8809969779395,
+      "no_move": 383.14447274358827,
+      "chaos": 383.7392760136572,
+      "no_move_vs_off_pct": 0.5942737452401259,
+      "chaos_vs_no_move_pct": 0.15524255532377573,
+      "no_move_boots": [
+        382.328979158774,
+        383.9599663284025
+      ]
+    },
+    {
+      "cell": "16384x1024-c1",
+      "metric": "median_itl_ms",
+      "off": 24.097647747112205,
+      "no_move": 24.713092756428523,
+      "chaos": 24.722110745642567,
+      "no_move_vs_off_pct": 2.5539630082362264,
+      "chaos_vs_no_move_pct": 0.03649073510516576,
+      "no_move_boots": [
+        24.710123507247772,
+        24.716062005609274
+      ]
+    },
+    {
+      "cell": "16384x1024-c1",
+      "metric": "p99_itl_ms",
+      "off": 24.59540494324756,
+      "no_move": 25.34182066716312,
+      "chaos": 28.042339814637675,
+      "no_move_vs_off_pct": 3.03477712864606,
+      "chaos_vs_no_move_pct": 10.656373837313815,
+      "no_move_boots": [
+        25.336737517645815,
+        25.346903816680424
+      ]
+    },
+    {
+      "cell": "16384x1024-c8",
+      "metric": "median_itl_ms",
+      "off": 49.37696449633222,
+      "no_move": 48.802673001773655,
+      "chaos": 49.63010649953503,
+      "no_move_vs_off_pct": -1.1630757386903001,
+      "chaos_vs_no_move_pct": 1.6954675776289951,
+      "no_move_boots": [
+        48.812863999046385,
+        48.792482004500926
+      ]
+    },
+    {
+      "cell": "16384x1024-c8",
+      "metric": "p99_itl_ms",
+      "off": 429.3920563394205,
+      "no_move": 429.10625768156024,
+      "chaos": 430.64783327536134,
+      "no_move_vs_off_pct": -0.06655890663108677,
+      "chaos_vs_no_move_pct": 0.3592526480807212,
+      "no_move_boots": [
+        429.0084498102078,
+        429.20406555291265
+      ]
+    }
+  ],
+  "limits": [
+    "Later unpaired diagnostics, not a second ABBA or original-gate reroll.",
+    "Metrics average per-boot p50/p99 values; not pooled quantiles.",
+    "Always-on group contains counters, map mode and mailbox; this does not profile their individual costs.",
+    "Short functional probes are not full quality qualification."
+  ],
+  "decision": "User chose bounded vote-fix checks then cleanup/v0.34; native K2 counter fusion separate; EPLB remains experimental/off.",
+  "lease": "b4 released at 11:37:27 box time after exit 0",
+  "archive": {
+    "file": "counter-receipts.tar.gz",
+    "files": 97,
+    "bytes": 1147005,
+    "sha256": "824bc1341f4188cdf355d9991cc7cfb4f7ec80b8b3333566cdcdd1c9ad5d85d8"
+  }
+}

@@ -350,6 +350,25 @@ off arms only as a later diagnostic, not a fresh ABBA or proof of causality.
 Their purpose is to separate always-on counter/map/mailbox cost from
 movement/checksum/placement cost before choosing a runtime optimization.
 
+### No-plan control results (2026-11-18)
+
+Both C1/C2 boots are valid: counters/map mode/mailbox on, zero plans,
+all four rank witnesses, functional probes and hardware guards pass. b4 was
+released. Values below average the two boots' quantiles, not pooled tokens.
+
+| Cell | C p50 ITL (ms) | vs saved off | C p99 ITL (ms) | vs saved off |
+|---|---:|---:|---:|---:|
+| 1k/512 c1 | 24.06 | +2.95% | 24.67 | +2.99% |
+| 1k/512 c8 | 47.21 | +0.62% | 383.14 | +0.59% |
+| 16k/1k c1 | 24.71 | +2.55% | 25.34 | +3.03% |
+| 16k/1k c8 | 48.80 | -1.16% | 429.11 | -0.07% |
+
+Most c1 median overhead remains without moves. These later, unpaired controls
+do not isolate individual counter/map/mailbox costs and do not replace the
+failed ABBA. Raw evidence and comparison:
+[`counter-summary.json`](../../bench_results/2026-11-18_eplb-final/counter-summary.json)
+and its linked `counter-receipts.tar.gz`.
+
 ### Vote-allocation candidate (not performance-qualified)
 
 The controller now computes the unchanged 30-bit weighted checksum with int32
@@ -364,9 +383,33 @@ Isolated CPU checks pass 30 cases, including adversarial checksum wrap and
 coefficient-period boundaries, four-rank chaos, damaged-transfer rejection
 and the real planner process. The local harness executes the real ownership
 function/no-context getters without unrelated config/AITER initialization.
-Fifteen GPU cases remain unrun; actual ROCm and performance checks
-are still required. GPU replay tests now enforce strict sync checking during
-vote/commit. This candidate does not remove mapped-K2/counter overhead.
+All 15 focused ROCm GPU cases pass on `6195fb0b465a` (torch 2.12.0+rocm7.14.0):
+large checksum/other-vote-field checks, eager/captured MoE replay after swaps,
+W4A16/W4A8 and strict-sync vote/commit. KFD eviction stays zero, 20-device AER
+counters are unchanged, peak junction 31 C. PyTorch warns that its sync checker
+is a prototype; this is not a complete proof of all synchronization behavior.
+No model ITL improvement or removal of mapped-K2/counter overhead is claimed.
+
+The bounded per-site micro is complete on the same V620 build. Actual old/new
+methods use synthetic buffers, old/new/new/old ordering, 20 warm-ups and 100
+synchronized samples per arm. Values average arm medians; this is not a
+four-rank protocol measurement or model latency:
+
+| Words | Site | Old wall p50 (us) | New wall p50 (us) | Torch allocations/call old -> new |
+|---:|---|---:|---:|---|
+| 12,288 | checksum pair | 189.06 | 131.98 | 10 -> 0 |
+| 12,288 | commit | 219.42 | 217.17 | 3 -> 0 |
+| 12,288 | vote D2H | 51.43 | 46.08 | 0 -> 0 |
+| 638,400 | checksum pair | 201.54 | 146.73 | 14 -> 4 |
+| 638,400 | commit | 218.81 | 217.23 | 3 -> 0 |
+| 638,400 | vote D2H | 51.50 | 46.27 | 0 -> 0 |
+
+All assertions and guards pass: zero KFD eviction, unchanged AER, peak 31 C.
+Production-sized checksum reduction still allocates workspace. Commit timing
+is near-flat; allocator counts do not include every CPU/driver allocation.
+No ITL gain is inferred. Source pins, separate driver revisions and immutable
+raw evidence: [`vote-summary.json`](../../bench_results/2026-11-18_eplb-final/vote-summary.json)
+and its linked `vote-receipts.tar.gz`.
 
 User decision after the no-plan controls: finish this bounded vote-allocation
 check, keep native K2 counter fusion separate, and proceed to the v0.34 upgrade.
