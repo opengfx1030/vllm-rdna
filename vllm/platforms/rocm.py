@@ -132,7 +132,8 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
         if (hasattr(torch.cuda, "_device_count_amdsmi"))
         else -1
     )
-    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    # AMDSMI can miss RDNA devices that the HIP runtime can still enumerate.
+    r = torch._C._cuda_getDeviceCount() if raw_count <= 0 else raw_count
     return r
 
 

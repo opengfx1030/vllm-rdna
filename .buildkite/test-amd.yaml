@@ -154,8 +154,10 @@ steps:
   - cmake/
   - setup.py
   - vllm/platforms/rocm.py
+  - tests/platforms/test_rocm_device_count.py
   commands:
   - python3 /vllm-workspace/.buildkite/check-torch-abi.py
+  - pytest -v -s tests/platforms/test_rocm_device_count.py
 
 #########################################################################################################################################
 #                                                                                                                                       #
