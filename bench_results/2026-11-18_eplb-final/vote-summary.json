@@ -1,0 +1,168 @@
+{
+  "candidate_sha": "6195fb0b465a0c844366062ed1821f8a69b837aa",
+  "baseline_sha": "20aedaa1cde2e5b336c7142a127b6c201fc7bbc5",
+  "status": "bounded correctness and synthetic per-site checks pass; experimental/off, NOT model-performance-qualified",
+  "gpu_cases_passed": 15,
+  "cpu_cases_passed": 30,
+  "micro_design": "One gfx1030 GPU in leased b4; actual old/new methods, synthetic buffers, old/new/new/old order, 20 warm-ups and 100 synchronized samples per arm/site/size. Values average arm medians, not pooled samples. No four-rank protocol/model timing.",
+  "limits": [
+    "No new ITL/TTFT/model quality qualification; unchanged failed corrected ABBA remains authoritative.",
+    "Stream elapsed time includes host enqueue gaps; not pure GPU kernel time.",
+    "Torch allocator-call deltas do not count all driver/CPU allocations; reduction still uses workspace at the production size.",
+    "Original gpu/result.json generic note incorrectly calls that run a microbench; mode=gpu-tests and proof.log record its actual 15 correctness tests. Original raw file retained unchanged.",
+    "GPU correctness and micro drivers are archived separately; later driver fixes mode-note metadata and records process-group ID for thermal termination.",
+    "Seven existing native binaries reused unchanged; no native counter fusion."
+  ],
+  "hardware_guards": {
+    "kfd_before": 0,
+    "kfd_after": 0,
+    "aer_devices_unchanged": 20,
+    "peak_junction_c": 31
+  },
+  "rows": [
+    {
+      "words": 12288,
+      "site": "checksum_pair",
+      "old_mean_of_p50_us": 189.0595,
+      "new_mean_of_p50_us": 131.97875,
+      "relative_change_pct": -30.191950153258638,
+      "old_allocator_calls_per_sample": [
+        10.0,
+        10.0
+      ],
+      "new_allocator_calls_per_sample": [
+        0.0,
+        0.0
+      ],
+      "old_p50_us": [
+        188.709,
+        189.41
+      ],
+      "new_p50_us": [
+        131.8785,
+        132.079
+      ]
+    },
+    {
+      "words": 12288,
+      "site": "commit",
+      "old_mean_of_p50_us": 219.4205,
+      "new_mean_of_p50_us": 217.16899999999998,
+      "relative_change_pct": -1.026111963102816,
+      "old_allocator_calls_per_sample": [
+        3.0,
+        3.0
+      ],
+      "new_allocator_calls_per_sample": [
+        0.0,
+        0.0
+      ],
+      "old_p50_us": [
+        220.0365,
+        218.80450000000002
+      ],
+      "new_p50_us": [
+        217.3515,
+        216.9865
+      ]
+    },
+    {
+      "words": 12288,
+      "site": "vote_d2h",
+      "old_mean_of_p50_us": 51.43000000000001,
+      "new_mean_of_p50_us": 46.082499999999996,
+      "relative_change_pct": -10.397627843671032,
+      "old_allocator_calls_per_sample": [
+        0.0,
+        0.0
+      ],
+      "new_allocator_calls_per_sample": [
+        0.0,
+        0.0
+      ],
+      "old_p50_us": [
+        51.46,
+        51.400000000000006
+      ],
+      "new_p50_us": [
+        46.019999999999996,
+        46.145
+      ]
+    },
+    {
+      "words": 638400,
+      "site": "checksum_pair",
+      "old_mean_of_p50_us": 201.538,
+      "new_mean_of_p50_us": 146.7315,
+      "relative_change_pct": -27.194127162123273,
+      "old_allocator_calls_per_sample": [
+        14.0,
+        14.0
+      ],
+      "new_allocator_calls_per_sample": [
+        4.0,
+        4.0
+      ],
+      "old_p50_us": [
+        200.952,
+        202.124
+      ],
+      "new_p50_us": [
+        146.601,
+        146.86200000000002
+      ]
+    },
+    {
+      "words": 638400,
+      "site": "commit",
+      "old_mean_of_p50_us": 218.812,
+      "new_mean_of_p50_us": 217.23149999999998,
+      "relative_change_pct": -0.7223095625468523,
+      "old_allocator_calls_per_sample": [
+        3.0,
+        3.0
+      ],
+      "new_allocator_calls_per_sample": [
+        0.0,
+        0.0
+      ],
+      "old_p50_us": [
+        219.235,
+        218.389
+      ],
+      "new_p50_us": [
+        217.101,
+        217.362
+      ]
+    },
+    {
+      "words": 638400,
+      "site": "vote_d2h",
+      "old_mean_of_p50_us": 51.5,
+      "new_mean_of_p50_us": 46.270250000000004,
+      "relative_change_pct": -10.154854368932032,
+      "old_allocator_calls_per_sample": [
+        0.0,
+        0.0
+      ],
+      "new_allocator_calls_per_sample": [
+        0.0,
+        0.0
+      ],
+      "old_p50_us": [
+        52.006,
+        50.994
+      ],
+      "new_p50_us": [
+        46.3455,
+        46.195
+      ]
+    }
+  ],
+  "archive": {
+    "file": "vote-receipts.tar.gz",
+    "sha256": "105f9958b847c368dbfb61aa5ba21319b1a2d02f49b0683a84839ed8eab6afd8",
+    "files": 28,
+    "bytes": 12013
+  }
+}
