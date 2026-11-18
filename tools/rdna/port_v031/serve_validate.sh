@@ -179,8 +179,8 @@ quiet_lock_wait() {
     t_lock=$(date +%s)
     while ! flock -n "$BOOT_LOCK" true 2>/dev/null; do
         if (( $(date +%s) - t_lock > ${QUIET_LOCK_WAIT:-600} )); then
-            log "$BOOT_LOCK is still held: measuring anyway"
-            return 0
+            log "$BOOT_LOCK is still held: refusing a measured window"
+            exit 1
         fi
         log "$BOOT_LOCK is held (a boot is in flight): waiting"
         sleep "${QUIET_POLL:-30}"
