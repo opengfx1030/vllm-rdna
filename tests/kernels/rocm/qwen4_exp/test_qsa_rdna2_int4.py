@@ -293,7 +293,7 @@ def test_qsa_backend_publishes_the_packed_cache_shape():
     forgets the K/V head slot would allocate half the bytes the packed
     records need.
     """
-    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAFlashAttentionBackend
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSABackend
     from vllm.v1.attention.backends.rdna_attn import RdnaAttentionBackend
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
 
@@ -307,7 +307,7 @@ def test_qsa_backend_publishes_the_packed_cache_shape():
         dtype=torch.uint8,
         kv_quant_mode=KVQuantMode.INT4_FP16_BLOCK,
     )
-    for backend in (RdnaAttentionBackend, Qwen4ExpQSAFlashAttentionBackend):
+    for backend in (RdnaAttentionBackend, Qwen4ExpQSABackend):
         customized = backend.customize_spec(spec)
         assert customized.num_head_slots == 2, backend.get_name()
         assert customized.state_content_bytes == kv_heads * record_bytes

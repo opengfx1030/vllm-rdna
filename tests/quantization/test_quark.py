@@ -45,6 +45,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
@@ -1221,6 +1222,144 @@ def test_quark_w8a8_mxfp8_moe_weight_shapes(monkeypatch):
         )
 
 
+def test_quark_mxfp4_non_gpt_oss_uses_standard_weight_layout():
+    method = QuarkOCP_MX_MoEMethod.__new__(QuarkOCP_MX_MoEMethod)
+    method.model_type = "pixtral"
+    method.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+    method.moe = SimpleNamespace(activation=MoEActivation.SILU)
+    method.experts_cls = None
+
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "w13_weight",
+        torch.nn.Parameter(torch.zeros(1, 4, 2, dtype=torch.uint8), False),
+    )
+    layer.register_parameter(
+        "w2_weight",
+        torch.nn.Parameter(torch.zeros(1, 2, 2, dtype=torch.uint8), False),
+    )
+    layer.register_parameter(
+        "w13_weight_scale",
+        torch.nn.Parameter(torch.ones(1, 4, 1, dtype=torch.uint8), False),
+    )
+    layer.register_parameter(
+        "w2_weight_scale",
+        torch.nn.Parameter(torch.ones(1, 2, 1, dtype=torch.uint8), False),
+    )
+    layer.w13_bias = None
+    layer.w2_bias = None
+    layer.w13_input_scale = None
+    layer.w2_input_scale = None
+
+    converted = (
+        layer.w13_weight,
+        layer.w2_weight,
+        layer.w13_weight_scale,
+        layer.w2_weight_scale,
+        None,
+        None,
+    )
+    standard_path = (
+        "vllm.model_executor.layers.quantization.quark.quark_moe."
+        "convert_weight_to_mxfp4_moe_kernel_format"
+    )
+    gpt_oss_path = (
+        "vllm.model_executor.layers.quantization.quark.quark_moe."
+        "convert_gpt_oss_weight_to_mxfp4_moe_kernel_format"
+    )
+
+    with (
+        patch(standard_path, return_value=converted) as standard_converter,
+        patch(gpt_oss_path) as gpt_oss_converter,
+        patch("torch.accelerator.empty_cache"),
+        patch.object(method, "get_fused_moe_quant_config", return_value=None),
+    ):
+        method._setup_kernel(layer)
+
+    standard_converter.assert_called_once()
+    assert standard_converter.call_args.kwargs["activation"] == MoEActivation.SILU
+    gpt_oss_converter.assert_not_called()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Mistral Large 4 AMD")
+def test_quark_native_mistral_large4_quant_config_mapping():
+    from vllm.model_executor.models.pixtral import PixtralForConditionalGeneration
+    from vllm.models.mistral.mistral_large4.amd.model import _map_quant_config_layers
+
+    fp8_config = {"weight": {"dtype": "fp8_e4m3"}}
+    quant_config = QuarkConfig(
+        {
+            "global_quant_config": {},
+            "layer_type_quant_config": {},
+            "exclude": [
+                "layers.0.attention.indexer.wk",
+                "layers.0.attention.indexer.weights_proj",
+                "layers.0.attention.wkv_a_with_mqa",
+                "layers.0.gate",
+                "output",
+                "vision_encoder.transformer.layers.0.attention.wq",
+                "vision_encoder.transformer.layers.0.attention.wk",
+                "vision_encoder.transformer.layers.0.attention.wv",
+                "vision_encoder.transformer.layers.0.attention.wo",
+                "vision_encoder.transformer.layers.0.feed_forward.w1",
+                "vision_encoder.transformer.layers.0.feed_forward.w2",
+                "vision_encoder.transformer.layers.0.feed_forward.w3",
+            ],
+            "layer_quant_config": {
+                "layers.0.attention.wq": fp8_config,
+                "layers.0.attention.indexer.wq_b": fp8_config,
+                "layers.0.feed_forward.w1": fp8_config,
+                "layers.0.feed_forward.w2": fp8_config,
+                "layers.0.feed_forward.w3": fp8_config,
+            },
+        }
+    )
+
+    quant_config.apply_vllm_mapper(
+        PixtralForConditionalGeneration.hf_to_vllm_mapper.get_rename_mapper()
+    )
+    quant_config.packed_modules_mapping = dict(
+        PixtralForConditionalGeneration.packed_modules_mapping
+    )
+    _map_quant_config_layers(quant_config, "language_model")
+
+    layer_configs = quant_config.quant_config["layer_quant_config"]
+    assert "language_model.model.layers.0.self_attn.q_proj" in layer_configs
+    assert "language_model.model.layers.0.self_attn.indexer.wq_b" in layer_configs
+    assert "language_model.model.layers.0.mlp.gate_proj" in layer_configs
+    assert "language_model.model.layers.0.mlp.down_proj" in layer_configs
+    assert "language_model.model.layers.0.mlp.up_proj" in layer_configs
+    assert (
+        quant_config.get_layer_quant_config_from_name(
+            "language_model.model.layers.0.mlp.gate_up_proj"
+        )
+        == fp8_config
+    )
+    assert (
+        quant_config.get_layer_quant_config_from_name(
+            "language_model.model.layers.0.mlp.down_proj"
+        )
+        == fp8_config
+    )
+
+    exclude = quant_config.quant_config["exclude"]
+    assert "language_model.model.layers.0.self_attn.kv_a_proj_with_mqa" in exclude
+    assert "language_model.model.layers.0.mlp.gate" in exclude
+    assert "language_model.lm_head" in exclude
+    for layer_name in (
+        "language_model.model.layers.0.self_attn.indexer.wk_weights_proj",
+        "vision_encoder.transformer.layers.0.attention.qkv_proj",
+        "vision_encoder.transformer.layers.0.attention.o_proj",
+        "vision_encoder.transformer.layers.0.feed_forward.gate_up_proj",
+        "vision_encoder.transformer.layers.0.feed_forward.down_proj",
+    ):
+        assert should_ignore_layer(
+            layer_name,
+            exclude,
+            quant_config.packed_modules_mapping,
+        )
+
+
 @pytest.mark.parametrize(
     ("weight", "input_tensors"),
     [
@@ -1621,7 +1760,7 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w8a8_per_block_moe(vllm_runner, tp):
     """Test per-block (128x128) FP8 MoE quantization with a tiny Qwen3 MoE model."""
-    model_path = "Adamji/tiny-qwen3-moe-fp8-per-block"
+    model_path = "vllm-project/tiny-qwen3-moe-fp8-per-block"
     with vllm_runner(
         model_path,
         enforce_eager=True,
@@ -1733,11 +1872,11 @@ class AccuracyTestConfig:
 
 WIKITEXT_ACCURACY_CONFIGS = [
     AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
+        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
         excepted_value=11.3,
     ),
     AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
+        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
         excepted_value=10.6,
     ),
 ]
@@ -1809,6 +1948,30 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
         measured_value - rtol < EXPECTED_VALUE
         and measured_value + rtol > EXPECTED_VALUE
     ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+# Quark MXFP4 with an online 64-wide Hadamard rotation on q/k/v/gate/up
+# (`input_rotation` tensors). The weights are stored rotated, so a loader that
+# skips the activation rotation produces garbage.
+ONLINE_ROTATION_CONFIG = AccuracyTestConfig(
+    model_name="amd-quark/internal-testing-qwen3_0.6b-mxfp4-hadamard",
+    excepted_value=45.9,
+)
+
+
+@pytest.mark.skipif(not current_platform.supports_mx(), reason="requires MX support")
+def test_quark_online_rotation_wikitext():
+    config = ONLINE_ROTATION_CONFIG
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(
+            tp_size=1, kwargs={"cudagraph_capture_sizes": [16]}
+        ),
+        tasks="wikitext",
+        batch_size=64,
+    )
+    measured_value = results["results"]["wikitext"]["word_perplexity,none"]
+    assert measured_value == pytest.approx(config.excepted_value, abs=0.1)
 
 
 @pytest.mark.skipif(
@@ -2503,13 +2666,17 @@ class TestQuarkInt4Format:
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_scale",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_scale"
+                        ),
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_zero_point",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_zero_point"
+                        ),
                         torch.zeros(1),
                     ),
                 ]

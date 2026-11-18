@@ -983,3 +983,49 @@ no other call-signature breaks (remaining findings are vendored Triton typing no
 
 Not servable on the box: DSV4 / MXFP4 (no checkpoint present), so those stay
 statically verified only.
+
+## v0.34.0 integration branch (qualification in progress)
+
+The isolated `rebase/v0.34.0` branch starts from production
+`1e1cac5340a9c9af8c9df3db331978548d709b42` and integrates upstream
+`62d4bc3c7e33b1b6c906e233e6af2d3506c482ca`. It does not import the unmerged
+EPLB-online or RAM-prefetch study runtime changes. Production remains on
+`rdna_extras` until the new branch passes its gates.
+
+### Source migration
+
+- Use only the current GPU runner. Remove the obsolete MRV1 proposers and
+  operative `VLLM_USE_V2_MODEL_RUNNER=1` settings, rather than restoring deleted
+  upstream interfaces.
+- Migrate weight finalization to children-first, no-argument module hooks;
+  quantization-method hooks still receive the layer. Preserve RDNA HI2/EXL3,
+  W4A16/MoE, PLE and GGUF loading paths.
+- Adopt the new QSA module names and attention interface while preserving
+  model-dtype caches, RDNA cache layouts, metadata bounds and optional HIP
+  dispatch.
+- Retain the gfx1030 FP16 wvSplitK refusal in the new launcher translation
+  unit. Move fork-only skinny GEMV/MoE implementations into their own
+  translation unit, not a shared header compiled repeatedly upstream.
+- `VLLM_RDNA_DENSE_GEMV` is removed: gfx1030 FP16 decode already selects the
+  native GEMV unconditionally. Setting the obsolete variable now gives a
+  migration error.
+- Prefix-cache qualification uses measured cache hits. TTFT is reported;
+  `--ratio` remains an explicit latency requirement, not an implicit 2x
+  speedup requirement. Prompt length comes from `/tokenize`, and missing
+  tokenization or metrics evidence fails the probe.
+
+### Pending verification
+
+Use a fresh `venv-7.14.0_0.34.0-rebase-1e1cac5340`, not the serving venv.
+Upstream's build requirements are `requirements/build/rock.txt`; Torch
+remains `2.12.0+rocm7.14.0`. Rebuild all seven native targets:
+`cumem_allocator`, `spinloop`, `fs_io_C`, `_rocm_C`, `_C`,
+`_C_stable_libtorch`, and `_moe_C_stable_libtorch`. Compile for gfx90a,
+gfx942, gfx950, gfx1030, gfx1100 and gfx1200; compilation does not establish
+runtime correctness on architectures without hardware.
+
+Flash-Next MTP2 and HI2 merged-head gates must run on b4 with
+`FULL_AND_PIECEWISE`, real requests after the first replay, quality,
+prefix-cache and concurrency checks. The explicit-KV recipes do not qualify
+upstream's new `KV=auto` extensible-cache path. No v0.34 native-build,
+runtime or performance result is claimed in this section yet.

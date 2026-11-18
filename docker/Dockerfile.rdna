@@ -72,9 +72,9 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL \
     && rustup default "${toolchain}"
 
 # Preserve every base torch-stack distribution, including Triton's local build
-# suffix. Do not install requirements/build/rocm.txt: its Triton pin differs
-# from the published base. The base already supplies CMake, Ninja, wheel,
-# packaging and Jinja2; only the missing/incompatible build helpers are added.
+# suffix, rather than replacing it through requirements/build/rock.txt.
+# The base already supplies CMake, Ninja, wheel, packaging and Jinja2;
+# only the missing/incompatible build helpers are added.
 RUN python - <<'PY'
 from importlib.metadata import version
 from pathlib import Path

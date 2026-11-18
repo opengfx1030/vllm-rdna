@@ -241,6 +241,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_TILES: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    IS_FP8: tl.constexpr,
     NOT_SKIP: tl.constexpr = 1,  # 0 = skip all-padding tiles (E3)
 ) -> None:
     row = tl.program_id(0)
@@ -321,6 +322,14 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
                 mask=valid[:, None],
                 other=0.0,
             )
+            if IS_FP8:
+                # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (an
+                # fp8 QK dot measured slower and less accurate on NVIDIA).
+                keys = keys.to(query.dtype)
+                # Dequant V to fp16 for the PV dot: P <= 1 (online softmax) so
+                # fp16 has the range, its wider mantissa is more accurate, and
+                # the fp8->fp16 upcast with an fp16 PV dot is faster.
+                values = values.to(tl.float16)
             scores = tl.dot(query, keys)
             # Scaling scores avoids re-quantizing a scaled query to BF16.
             scores *= softmax_scale_log2
@@ -1017,7 +1026,8 @@ def qsa_sparse_paged_attention(
     out: torch.Tensor | None = None,
     int4_scales: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged K/V caches.
+    """Run sparse GQA directly over paged bf16, fp16, fp8-e4m3, or packed
+    int4_fp16_block K/V caches.
 
     ``int4_scales`` selects the packed ``int4_fp16_block`` layout: the
     payload views in ``k_cache``/``v_cache`` are uint8 and the matching
@@ -1051,10 +1061,14 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
-    assert q.dtype == k_cache.dtype == v_cache.dtype
+    is_fp8 = k_cache.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    assert k_cache.dtype == v_cache.dtype
     # gfx1030 lacks native BF16; FP16 measured faster and ~7x more accurate
     # against an FP32 reference on this kernel, so both are permitted.
     assert q.dtype in (torch.bfloat16, torch.float16)
+    assert is_fp8 or k_cache.dtype == q.dtype, (
+        "QSA sparse attention requires matching BF16/FP16 K/V, or FP8-e4m3"
+    )
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
@@ -1079,7 +1093,9 @@ def qsa_sparse_paged_attention(
         q, k_cache, v_cache, group_size, logical_indices, block_table, token_to_req, out
     ):
         return out
-    if qsa_rdna2.qsa_use_rdna2(q.dtype):
+    # The fp16 HIP kernel reads a half cache. An fp8 cache has no HIP reader,
+    # so it takes the Triton kernel that upcasts fp8 before the dots.
+    if not is_fp8 and qsa_rdna2.qsa_use_rdna2(q.dtype):
         return qsa_rdna2.qsa_sparse_paged_attention(
             q, k_cache, v_cache, logical_indices, block_table, token_to_req, out
         )
@@ -1166,6 +1182,7 @@ def qsa_sparse_paged_attention(
         NUM_TILES=num_tiles,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
+        IS_FP8=is_fp8,
         NOT_SKIP=0 if MONO_QSA else 1,
         num_warps=partial_warps,
         num_stages=partial_stages,

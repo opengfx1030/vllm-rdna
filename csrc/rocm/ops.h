@@ -1459,3 +1459,10 @@ void rdna_hint_flex_moe_gemm_rdna2(
     torch::Tensor blk_params, torch::Tensor param_off, torch::Tensor row_consts,
     torch::Tensor row_nbits, torch::Tensor row_block, int64_t n_out,
     torch::Tensor out);
+// RDNA3.5 only: Fused Gated Delta Net prefill kernel.
+// Mutates `out` and `final_state` in place.
+void rdna35_gdn_chunked(torch::Tensor& q, torch::Tensor& k, torch::Tensor& v,
+                        torch::Tensor& g, torch::Tensor& beta,
+                        std::optional<torch::Tensor> initial_state,
+                        torch::Tensor& cu_seqlens, torch::Tensor& out,
+                        torch::Tensor& final_state, double scale);

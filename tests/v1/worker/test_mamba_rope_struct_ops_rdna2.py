@@ -7,7 +7,6 @@
   _fill_num_accepted_kernel            (model_states/mamba_hybrid.py)
   precopy_mamba_align_fused_kernel     (mamba_utils.py)
   postprocess_mamba_fused_kernel       (mamba_utils.py)
-  batch_memcpy_kernel                  (mamba_utils.py)
   _prepare_rope_positions_kernel       (gpu/mm/rope.py)
   _apply_grammar_bitmask_kernel        (gpu/structured_outputs.py)
 
@@ -48,7 +47,7 @@ TABLE_COLS = 16
 
 
 def sync():
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
 
 def cdiv(a, b):
@@ -134,21 +133,16 @@ class Rig:
             if spec.storage is not None:
                 storage = spec.storage.clone()
                 view = storage.as_strided(spec.tensor.shape, spec.tensor.stride())
-                specs.append(
-                    dataclasses.replace(spec, tensor=view, storage=storage)
-                )
+                specs.append(dataclasses.replace(spec, tensor=view, storage=storage))
             else:
                 specs.append(dataclasses.replace(spec, tensor=spec.tensor.clone()))
         return Rig(specs, self.block_tables, self.block_table_stride_req)
 
     def payload(self):
-        return [
-            s.storage if s.storage is not None else s.tensor for s in self.specs
-        ]
+        return [s.storage if s.storage is not None else s.tensor for s in self.specs]
 
     def meta(self):
-        return _build_meta(self.specs, self.block_tables,
-                           self.block_table_stride_req)
+        return _build_meta(self.specs, self.block_tables, self.block_table_stride_req)
 
 
 def _raw_ptr(tensor):
@@ -231,23 +225,34 @@ def make_rig(
 
     specs = []
     for g in range(num_groups):
-        conv = _conv_state(layout, num_blocks, conv_width, conv_dim, dtype,
-                           seed + 10 * g)
+        conv = _conv_state(
+            layout, num_blocks, conv_width, conv_dim, dtype, seed + 10 * g
+        )
         conv.group_idx = g
-        temporal = _temporal_state(num_blocks, temporal_inner, dtype,
-                                   seed + 10 * g + 1, page_pad)
+        temporal = _temporal_state(
+            num_blocks, temporal_inner, dtype, seed + 10 * g + 1, page_pad
+        )
         temporal.group_idx = g
         specs.extend([conv, temporal])
 
     stride = block_tables[0].stride(0)
     return Rig(specs, block_tables, stride), src_cols.to(DEVICE).to(torch.int32)
 
+
 # ---------------------------------------------------------------------------
 # _prepare_rope_positions_kernel
 # ---------------------------------------------------------------------------
-def triton_rope(positions, prefill_positions, prefill_delta, idx_mapping,
-                query_start_loc, prefill_lens, num_computed, num_dims,
-                max_model_len):
+def triton_rope(
+    positions,
+    prefill_positions,
+    prefill_delta,
+    idx_mapping,
+    query_start_loc,
+    prefill_lens,
+    num_computed,
+    num_dims,
+    max_model_len,
+):
     num_reqs = idx_mapping.shape[0]
     if num_reqs == 0:
         return
@@ -267,9 +272,17 @@ def triton_rope(positions, prefill_positions, prefill_delta, idx_mapping,
     )
 
 
-def hip_rope(positions, prefill_positions, prefill_delta, idx_mapping,
-             query_start_loc, prefill_lens, num_computed, num_dims,
-             max_model_len):
+def hip_rope(
+    positions,
+    prefill_positions,
+    prefill_delta,
+    idx_mapping,
+    query_start_loc,
+    prefill_lens,
+    num_computed,
+    num_dims,
+    max_model_len,
+):
     OP.prepare_rope_positions_rdna2(
         positions,
         positions.stride(0),
@@ -324,8 +337,17 @@ def hip_bitmask(logits, logits_indices, cu_num_logits, bitmask, mask_stride):
 # ===========================================================================
 # preprocess_mamba_align_fused_kernel
 # ===========================================================================
-def triton_preprocess(idx_mapping, state_idx, num_computed, query_start_loc,
-                      num_accepted, src_col, src_off, num_reqs, mamba_block):
+def triton_preprocess(
+    idx_mapping,
+    state_idx,
+    num_computed,
+    query_start_loc,
+    num_accepted,
+    src_col,
+    src_off,
+    num_reqs,
+    mamba_block,
+):
     if num_reqs == 0:
         return
     block = 256
@@ -349,9 +371,13 @@ def triton_preprocess(idx_mapping, state_idx, num_computed, query_start_loc,
 def test_preprocess_mamba_align_parity(num_reqs, mamba_block):
     max_reqs = max(num_reqs, 1) + 4
     seed = num_reqs + mamba_block
-    idx_mapping = torch.randperm(
-        max_reqs, generator=torch.Generator().manual_seed(seed)
-    )[:num_reqs].to(torch.int32).to(DEVICE)
+    idx_mapping = (
+        torch.randperm(max_reqs, generator=torch.Generator().manual_seed(seed))[
+            :num_reqs
+        ]
+        .to(torch.int32)
+        .to(DEVICE)
+    )
     qsl = torch.zeros(num_reqs + 1, dtype=torch.int32)
     gen = torch.Generator().manual_seed(seed + 1)
     qsl[1:] = torch.randint(0, 5, (num_reqs,), generator=gen).cumsum(0)
@@ -359,8 +385,7 @@ def test_preprocess_mamba_align_parity(num_reqs, mamba_block):
 
     inputs = {
         "state_idx": randint(-1, 6, (max_reqs,), torch.int32, seed + 2),
-        "num_computed": randint(0, 4 * mamba_block, (max_reqs,), torch.int32,
-                                seed + 3),
+        "num_computed": randint(0, 4 * mamba_block, (max_reqs,), torch.int32, seed + 3),
         "num_accepted": randint(-1, 5, (max_reqs,), torch.int32, seed + 4),
     }
 
@@ -394,9 +419,13 @@ def test_preprocess_mamba_align_parity(num_reqs, mamba_block):
 @pytest.mark.parametrize("num_reqs", [0, 1, 8, 256, 257])
 def test_scatter_and_fill_num_accepted_parity(num_reqs):
     max_reqs = max(num_reqs, 1) + 4
-    idx_mapping = torch.randperm(
-        max_reqs, generator=torch.Generator().manual_seed(num_reqs)
-    )[:num_reqs].to(torch.int32).to(DEVICE)
+    idx_mapping = (
+        torch.randperm(max_reqs, generator=torch.Generator().manual_seed(num_reqs))[
+            :num_reqs
+        ]
+        .to(torch.int32)
+        .to(DEVICE)
+    )
     # Include a -1 sentinel row (filtered request under PP).
     if num_reqs >= 3:
         idx_mapping[1] = -1
@@ -414,9 +443,7 @@ def test_scatter_and_fill_num_accepted_parity(num_reqs):
     for value in (1, 2, 0):
         ref = base.clone()
         if num_reqs:
-            mh._fill_num_accepted_kernel[(num_reqs,)](
-                idx_mapping, ref, max(value, 1)
-            )
+            mh._fill_num_accepted_kernel[(num_reqs,)](idx_mapping, ref, max(value, 1))
         got = base.clone()
         mh._update_num_accepted_tokens(idx_mapping, value, got, num_reqs)
         sync()
@@ -426,10 +453,10 @@ def test_scatter_and_fill_num_accepted_parity(num_reqs):
 # ===========================================================================
 # precopy_mamba_align_fused_kernel / postprocess_mamba_fused_kernel
 # ===========================================================================
-def _triton_precopy(rig, num_reqs, idx_mapping, src_col, dst_col, token_bias,
-                    conv_state_dim_first):
-    mu.precopy_mamba_align_fused_kernel[(num_reqs, len(rig.specs),
-                                         TEMPORAL_TILES)](
+def _triton_precopy(
+    rig, num_reqs, idx_mapping, src_col, dst_col, token_bias, conv_state_dim_first
+):
+    mu.precopy_mamba_align_fused_kernel[(num_reqs, len(rig.specs), TEMPORAL_TILES)](
         dst_col,
         src_col,
         token_bias,
@@ -452,8 +479,9 @@ def _triton_precopy(rig, num_reqs, idx_mapping, src_col, dst_col, token_bias,
     )
 
 
-def _hip_precopy(rig, num_reqs, idx_mapping, src_col, dst_col, token_bias,
-                 conv_state_dim_first):
+def _hip_precopy(
+    rig, num_reqs, idx_mapping, src_col, dst_col, token_bias, conv_state_dim_first
+):
     OP.precopy_mamba_align_fused_rdna2(
         dst_col,
         src_col,
@@ -466,14 +494,23 @@ def _hip_precopy(rig, num_reqs, idx_mapping, src_col, dst_col, token_bias,
     )
 
 
-def _triton_postprocess(rig, num_reqs, idx_mapping, num_accepted, src_col,
-                        num_scheduled, num_computed, num_draft, block_size,
-                        conv_state_dim_first, precomputed):
+def _triton_postprocess(
+    rig,
+    num_reqs,
+    idx_mapping,
+    num_accepted,
+    src_col,
+    num_scheduled,
+    num_computed,
+    num_draft,
+    block_size,
+    conv_state_dim_first,
+    precomputed,
+):
     accepted_out = torch.full(
         (num_accepted.shape[0],), -321, dtype=torch.int32, device=DEVICE
     )
-    mu.postprocess_mamba_fused_kernel[(num_reqs, len(rig.specs),
-                                       TEMPORAL_TILES)](
+    mu.postprocess_mamba_fused_kernel[(num_reqs, len(rig.specs), TEMPORAL_TILES)](
         num_accepted,
         src_col,
         num_scheduled if not precomputed else None,
@@ -502,9 +539,19 @@ def _triton_postprocess(rig, num_reqs, idx_mapping, num_accepted, src_col,
     return accepted_out
 
 
-def _hip_postprocess(rig, num_reqs, idx_mapping, num_accepted, src_col,
-                     num_scheduled, num_computed, num_draft, block_size,
-                     conv_state_dim_first, precomputed):
+def _hip_postprocess(
+    rig,
+    num_reqs,
+    idx_mapping,
+    num_accepted,
+    src_col,
+    num_scheduled,
+    num_computed,
+    num_draft,
+    block_size,
+    conv_state_dim_first,
+    precomputed,
+):
     accepted_out = torch.full(
         (num_accepted.shape[0],), -321, dtype=torch.int32, device=DEVICE
     )
@@ -562,9 +609,13 @@ def run_copy_case(mode, case: CopyCase):
     sync()
 
     if case.has_idx_mapping:
-        idx_mapping = torch.randperm(
-            max_reqs, generator=torch.Generator().manual_seed(seed)
-        )[:num_reqs].to(torch.int32).to(DEVICE)
+        idx_mapping = (
+            torch.randperm(max_reqs, generator=torch.Generator().manual_seed(seed))[
+                :num_reqs
+            ]
+            .to(torch.int32)
+            .to(DEVICE)
+        )
     else:
         idx_mapping = None
 
@@ -574,11 +625,25 @@ def run_copy_case(mode, case: CopyCase):
         token_bias = randint(0, 4, (max_reqs,), torch.int32, seed + 3)
     dst_col = torch.arange(max_reqs, dtype=torch.int32, device=DEVICE)
     if mode == "precopy":
-        _triton_precopy(rig, num_reqs, idx_mapping, src_col, dst_col, token_bias,
-                        case.conv_state_dim_first)
+        _triton_precopy(
+            rig,
+            num_reqs,
+            idx_mapping,
+            src_col,
+            dst_col,
+            token_bias,
+            case.conv_state_dim_first,
+        )
         sync()
-        _hip_precopy(hip_rig, num_reqs, idx_mapping, src_col, dst_col, token_bias,
-                     case.conv_state_dim_first)
+        _hip_precopy(
+            hip_rig,
+            num_reqs,
+            idx_mapping,
+            src_col,
+            dst_col,
+            token_bias,
+            case.conv_state_dim_first,
+        )
         sync()
         return rig.payload(), hip_rig.payload(), None
 
@@ -588,18 +653,37 @@ def run_copy_case(mode, case: CopyCase):
     # The destination column is derived by the kernel; every block-table
     # row defaults to its own block, so the per-row destination is unique.
     num_computed = randint(
-        case.block_size + 8, 4 * case.block_size, (max_reqs,), torch.int32,
+        case.block_size + 8,
+        4 * case.block_size,
+        (max_reqs,),
+        torch.int32,
         seed + 6,
     )
     ref_out = _triton_postprocess(
-        rig, num_reqs, idx_mapping, num_accepted, src_col, num_scheduled,
-        num_computed, num_draft, case.block_size, case.conv_state_dim_first,
+        rig,
+        num_reqs,
+        idx_mapping,
+        num_accepted,
+        src_col,
+        num_scheduled,
+        num_computed,
+        num_draft,
+        case.block_size,
+        case.conv_state_dim_first,
         case.precomputed,
     )
     sync()
     got_out = _hip_postprocess(
-        hip_rig, num_reqs, idx_mapping, num_accepted, src_col, num_scheduled,
-        num_computed, num_draft, case.block_size, case.conv_state_dim_first,
+        hip_rig,
+        num_reqs,
+        idx_mapping,
+        num_accepted,
+        src_col,
+        num_scheduled,
+        num_computed,
+        num_draft,
+        case.block_size,
+        case.conv_state_dim_first,
         case.precomputed,
     )
     sync()
@@ -619,15 +703,11 @@ def test_precopy_sd_serving_shapes():
 
 
 def test_precopy_ds_serving_shapes():
-    assert_copy_parity(
-        "precopy", CopyCase(layout="DS", conv_state_dim_first=True)
-    )
+    assert_copy_parity("precopy", CopyCase(layout="DS", conv_state_dim_first=True))
 
 
 def test_precopy_padded_pages_and_idx_mapping():
-    assert_copy_parity(
-        "precopy", CopyCase(has_idx_mapping=True, page_pad=64, seed=11)
-    )
+    assert_copy_parity("precopy", CopyCase(has_idx_mapping=True, page_pad=64, seed=11))
 
 
 def test_precopy_small_block_size():
@@ -678,8 +758,7 @@ def test_postprocess_same_block_shift():
 def test_postprocess_single_request():
     assert_copy_parity(
         "postprocess",
-        CopyCase(num_reqs=1, block_size=1024, conv_dim=16, temporal_inner=256,
-                 seed=29),
+        CopyCase(num_reqs=1, block_size=1024, conv_dim=16, temporal_inner=256, seed=29),
     )
 
 
@@ -687,87 +766,6 @@ def test_postprocess_padded_pages():
     assert_copy_parity(
         "postprocess",
         CopyCase(page_pad=64, conv_dim=128, temporal_inner=2048, seed=33),
-    )
-
-
-# ===========================================================================
-# batch_memcpy_kernel
-# ===========================================================================
-def _ptr_tensor(ptrs):
-    return torch.tensor(ptrs, dtype=torch.uint64, device=DEVICE)
-
-
-def _batch_memcpy_run(fn, total, src_off, dst_off, sizes, seed):
-    buf = randint(0, 256, (total,), torch.uint8, seed)
-    sp = _ptr_tensor([buf.data_ptr() + o for o in src_off])
-    dp = _ptr_tensor([buf.data_ptr() + o for o in dst_off])
-    sz = torch.tensor(sizes, dtype=torch.int32, device=DEVICE)
-    fn(sp, dp, sz)
-    return buf
-
-
-def _triton_batch_memcpy(sp, dp, sz):
-    mu.batch_memcpy_kernel[(sz.shape[0],)](sp, dp, sz, BLOCK_SIZE=1024)
-
-
-def _hip_batch_memcpy(sp, dp, sz):
-    OP.batch_memcpy_rdna2(sp, dp, sz)
-
-
-def test_batch_memcpy_parity_disjoint():
-    sizes = [0, 1, 7, 8, 9, 1023, 1024, 1025, 8192, 3 * 1024 * 1024 + 5]
-    src_off, dst_off = [], []
-    off = 32
-    for s in sizes:
-        src_off.append(off)
-        dst_off.append(off)
-        off += max(s, 1)
-    total = off + 64
-    ref = _batch_memcpy_run(_triton_batch_memcpy, total, src_off, dst_off, sizes, 41)
-    got = _batch_memcpy_run(_hip_batch_memcpy, total, src_off, dst_off, sizes, 41)
-    sync()
-    assert torch.equal(ref, got)
-    # Sizes above 1024 must actually have been copied.
-    assert not torch.equal(ref[:total], torch.zeros(total, dtype=torch.uint8,
-                                                    device=DEVICE))
-
-
-def test_batch_memcpy_parity_left_overlap():
-    """dst < src with overlapping ranges: the in-kernel barrier matters.
-
-    The entries must not overlap each other: the kernel makes no ordering
-    guarantee across entries, so two entries sharing bytes are undefined and
-    Triton and HIP legitimately disagree there.
-    """
-    sizes = [4096, 1024]
-    src_off = [64, 8192 + 64]
-    dst_off = [0, 8192]
-    total = max(s + o for s, o in zip(sizes, src_off)) + 64
-    ref = _batch_memcpy_run(_triton_batch_memcpy, total, src_off, dst_off, sizes, 43)
-    got = _batch_memcpy_run(_hip_batch_memcpy, total, src_off, dst_off, sizes, 43)
-    sync()
-    assert torch.equal(ref, got)
-
-
-def test_batch_memcpy_parity_misaligned():
-    """Mismatched sub-8B alignment takes the byte-wide slow path."""
-    sizes = [1023, 512, 8]
-    # Non-overlapping ranges with mismatched sub-8B alignment: a right overlap
-    # (dst > src) is unsafe on both paths (no barrier), as upstream documents.
-    src_off = [3, 11, 1]
-    dst_off = [2048 + 5, 1024 + 2, 3072 + 7]
-    total = max(s + o for s, o in zip(sizes, src_off)) + 4096
-    ref = _batch_memcpy_run(_triton_batch_memcpy, total, src_off, dst_off, sizes, 47)
-    got = _batch_memcpy_run(_hip_batch_memcpy, total, src_off, dst_off, sizes, 47)
-    sync()
-    assert torch.equal(ref, got)
-
-
-def test_batch_memcpy_empty_batch():
-    OP.batch_memcpy_rdna2(
-        torch.zeros(0, dtype=torch.uint64, device=DEVICE),
-        torch.zeros(0, dtype=torch.uint64, device=DEVICE),
-        torch.zeros(0, dtype=torch.int32, device=DEVICE),
     )
 
 
@@ -781,9 +779,13 @@ def test_prepare_rope_positions_parity(num_dims, num_reqs):
     max_num_tokens = 2048
     max_model_len = 4096
     seed = num_reqs * 10 + num_dims
-    idx_mapping = torch.randperm(
-        max_reqs, generator=torch.Generator().manual_seed(seed)
-    )[:num_reqs].to(torch.int32).to(DEVICE)
+    idx_mapping = (
+        torch.randperm(max_reqs, generator=torch.Generator().manual_seed(seed))[
+            :num_reqs
+        ]
+        .to(torch.int32)
+        .to(DEVICE)
+    )
     qsl = torch.zeros(num_reqs + 1, dtype=torch.int32)
     gen = torch.Generator().manual_seed(seed + 1)
     qsl[1:] = torch.randint(1, 40, (num_reqs,), generator=gen).cumsum(0)
@@ -791,8 +793,7 @@ def test_prepare_rope_positions_parity(num_dims, num_reqs):
     # Keep num_computed + query_len inside one prefill_positions row so both
     # paths read the same in-bounds data.
     prefill_lens = randint(0, max_model_len, (max_reqs,), torch.int32, seed + 2)
-    num_computed = randint(0, max_model_len - 2048, (max_reqs,), torch.int32,
-                           seed + 3)
+    num_computed = randint(0, max_model_len - 2048, (max_reqs,), torch.int32, seed + 3)
     prefill_delta = randint(-5, 5, (max_reqs,), torch.int32, seed + 4)
     prefill_positions = randint(
         -1000, 100000, (max_reqs * num_dims, max_model_len), torch.int32, seed + 5
@@ -802,11 +803,28 @@ def test_prepare_rope_positions_parity(num_dims, num_reqs):
         (num_dims, max_num_tokens + 1), -12345, dtype=torch.int64, device=DEVICE
     )
     got = ref.clone()
-    triton_rope(ref, prefill_positions, prefill_delta, idx_mapping,
-                query_start_loc, prefill_lens, num_computed, num_dims,
-                max_model_len)
-    hip_rope(got, prefill_positions, prefill_delta, idx_mapping,
-             query_start_loc, prefill_lens, num_computed, num_dims, max_model_len)
+    triton_rope(
+        ref,
+        prefill_positions,
+        prefill_delta,
+        idx_mapping,
+        query_start_loc,
+        prefill_lens,
+        num_computed,
+        num_dims,
+        max_model_len,
+    )
+    hip_rope(
+        got,
+        prefill_positions,
+        prefill_delta,
+        idx_mapping,
+        query_start_loc,
+        prefill_lens,
+        num_computed,
+        num_dims,
+        max_model_len,
+    )
     sync()
     assert torch.equal(ref, got)
 
@@ -823,8 +841,9 @@ def test_prepare_rope_positions_serving_boundaries():
         [1, 1, 1, 1, 1023, 1024, 1025, 2048], dtype=torch.int32, device=DEVICE
     ).cumsum(0)
     # Rows 0..3 are decode (num_computed >= prefill_len), rows 4..7 prefill.
-    prefill_lens = torch.full((max_reqs,), max_model_len, dtype=torch.int32,
-                              device=DEVICE)
+    prefill_lens = torch.full(
+        (max_reqs,), max_model_len, dtype=torch.int32, device=DEVICE
+    )
     prefill_lens[:4] = 1
     num_computed = torch.tensor(
         [0, 5, 500, 1023, 0, 0, 0, 1000, 0, 0, 0, 0],
@@ -835,13 +854,32 @@ def test_prepare_rope_positions_serving_boundaries():
     prefill_positions = randint(
         -1000, 100000, (max_reqs * num_dims, max_model_len), torch.int32, 53
     )
-    ref = torch.full((num_dims, max_num_tokens + 1), -12345, dtype=torch.int64,
-                     device=DEVICE)
+    ref = torch.full(
+        (num_dims, max_num_tokens + 1), -12345, dtype=torch.int64, device=DEVICE
+    )
     got = ref.clone()
-    triton_rope(ref, prefill_positions, prefill_delta, idx_mapping, qsl,
-                prefill_lens, num_computed, num_dims, max_model_len)
-    hip_rope(got, prefill_positions, prefill_delta, idx_mapping, qsl,
-             prefill_lens, num_computed, num_dims, max_model_len)
+    triton_rope(
+        ref,
+        prefill_positions,
+        prefill_delta,
+        idx_mapping,
+        qsl,
+        prefill_lens,
+        num_computed,
+        num_dims,
+        max_model_len,
+    )
+    hip_rope(
+        got,
+        prefill_positions,
+        prefill_delta,
+        idx_mapping,
+        qsl,
+        prefill_lens,
+        num_computed,
+        num_dims,
+        max_model_len,
+    )
     sync()
     assert torch.equal(ref, got)
 
@@ -854,8 +892,17 @@ def test_prepare_rope_positions_serving_boundaries():
 def test_apply_grammar_bitmask_parity(dtype, vocab_size):
     mask_stride = 4
     cu = [0, 3, 5, 9]
-    mapping = [0, 1, 2, 4, 5, 3, 2 * mask_stride, 2 * mask_stride + 1,
-               2 * mask_stride + 5]
+    mapping = [
+        0,
+        1,
+        2,
+        4,
+        5,
+        3,
+        2 * mask_stride,
+        2 * mask_stride + 1,
+        2 * mask_stride + 5,
+    ]
     logits = rand((len(mapping), vocab_size), dtype, 5)
     bitmask = randint(
         0, 2**31 - 1, (len(mapping), cdiv(vocab_size, 32)), torch.int32, 6
@@ -899,13 +946,17 @@ class _NoLaunch:
 @pytest.mark.skipif(not is_uva_available(), reason="UVA required")
 def test_dispatch_does_not_fall_back_to_triton(monkeypatch):
     for mod, names in (
-        (mu, ("postprocess_mamba_fused_kernel",
-              "precopy_mamba_align_fused_kernel",
-              "batch_memcpy_kernel")),
+        (mu, ("postprocess_mamba_fused_kernel", "precopy_mamba_align_fused_kernel")),
         (so, ("_apply_grammar_bitmask_kernel",)),
         (rope_mod, ("_prepare_rope_positions_kernel",)),
-        (mh, ("_scatter_num_accepted_kernel", "_fill_num_accepted_kernel",
-              "preprocess_mamba_align_fused_kernel")),
+        (
+            mh,
+            (
+                "_scatter_num_accepted_kernel",
+                "_fill_num_accepted_kernel",
+                "preprocess_mamba_align_fused_kernel",
+            ),
+        ),
     ):
         for name in names:
             monkeypatch.setattr(mod, name, _NoLaunch())
@@ -941,7 +992,7 @@ def test_dispatch_does_not_fall_back_to_triton(monkeypatch):
         num_reqs,
     )
 
-    # --- precopy / postprocess / batch_memcpy (v1/worker/mamba_utils.py)
+    # --- precopy / postprocess (v1/worker/mamba_utils.py)
     rig, _src_cols = make_rig(
         max_reqs=max_reqs, conv_dim=128, temporal_inner=2048, seed=3
     )
@@ -949,8 +1000,12 @@ def test_dispatch_does_not_fall_back_to_triton(monkeypatch):
         is_initialized=True,
         num_states=len(rig.specs),
         block_size=4,
-        num_accepted_tokens_out=torch.zeros(max_reqs, dtype=torch.int32,
-                                            device=DEVICE),
+        replayssm=None,
+        has_leapquant_states=False,
+        num_accepted_tokens_out=torch.zeros(max_reqs, dtype=torch.int32, device=DEVICE),
+        num_accepted_tokens_snapshot=torch.zeros(
+            max_reqs, dtype=torch.int32, device=DEVICE
+        ),
         **rig.meta(),
     )
     dst_col = torch.zeros(max_reqs, dtype=torch.int32, device=DEVICE)
@@ -961,28 +1016,21 @@ def test_dispatch_does_not_fall_back_to_triton(monkeypatch):
     )
     accepted = torch.ones(max_reqs, dtype=torch.int32, device=DEVICE)
     zeros = torch.zeros(max_reqs, dtype=torch.int32, device=DEVICE)
-    decode_computed = torch.full((max_reqs,), 1025, dtype=torch.int32,
-                                 device=DEVICE)
+    decode_computed = torch.full((max_reqs,), 1025, dtype=torch.int32, device=DEVICE)
     mu.MambaSpecDecodeGPUContext.run_fused_postprocess_align(
         shim, num_reqs, accepted, dst_col, decode_computed, idx_mapping
-    )
-    mu.MambaSpecDecodeGPUContext.run_fused_postprocess(
-        shim, num_reqs, accepted, dst_col, zeros, decode_computed, zeros
-    )
-    buf = torch.zeros(4096, dtype=torch.uint8, device=DEVICE)
-    mu.batch_memcpy(
-        _ptr_tensor([buf.data_ptr()]),
-        _ptr_tensor([buf.data_ptr() + 64]),
-        torch.tensor([1024], dtype=torch.int32, device=DEVICE),
     )
 
     # --- rope (gpu/mm/rope.py)
     state = rope_mod.RopeState(4, max_reqs, 2048, 4096, DEVICE)
-    state.prepare_positions(idx_mapping, qsl, torch.ones(
-        max_reqs, dtype=torch.int32, device=DEVICE), zeros)
+    state.prepare_positions(
+        idx_mapping, qsl, torch.ones(max_reqs, dtype=torch.int32, device=DEVICE), zeros
+    )
 
     # --- grammar bitmask (gpu/structured_outputs.py)
-    worker = so.StructuredOutputsWorker(16, 256, DEVICE, 4, 1)
+    worker = so.StructuredOutputsWorker(
+        max_num_logits=16, vocab_size=256, device=DEVICE, mask_stride=2
+    )
     batch = SimpleNamespace(
         req_ids=["r0", "r1"],
         cu_num_logits_np=[0, 2, 4],
@@ -997,19 +1045,24 @@ def test_dispatch_does_not_fall_back_to_triton(monkeypatch):
     )
     sync()
 
+
 # ===========================================================================
 # Every op runs inside a FULL cudagraph capture: nothing may sync or allocate.
 # ===========================================================================
 @pytest.mark.skipif(not is_uva_available(), reason="UVA required")
 def test_ops_are_cudagraph_capturable():
     n, mr = SERVE_NUM_REQS, SERVE_NUM_REQS + 4
-    rig, src_col_full = make_rig(max_reqs=mr, conv_dim=128, temporal_inner=2048,
-                                 seed=61)
+    rig, src_col_full = make_rig(
+        max_reqs=mr, conv_dim=128, temporal_inner=2048, seed=61
+    )
     shim = SimpleNamespace(
         is_initialized=True,
         num_states=len(rig.specs),
         block_size=1024,
+        replayssm=None,
+        has_leapquant_states=False,
         num_accepted_tokens_out=torch.zeros(mr, dtype=torch.int32, device=DEVICE),
+        num_accepted_tokens_snapshot=torch.zeros(mr, dtype=torch.int32, device=DEVICE),
         **rig.meta(),
     )
     idx = torch.arange(n, dtype=torch.int32, device=DEVICE)
@@ -1024,11 +1077,6 @@ def test_ops_are_cudagraph_capturable():
     src_col_full = src_col_full.to(DEVICE)
     copied = torch.zeros(mr, dtype=torch.int32, device=DEVICE)
     decode_computed = torch.full((mr,), 1025, dtype=torch.int32, device=DEVICE)
-
-    buf = randint(0, 256, (4096,), torch.uint8, 63)
-    sp = _ptr_tensor([buf.data_ptr()])
-    dp = _ptr_tensor([buf.data_ptr() + 64])
-    sz = torch.tensor([1024], dtype=torch.int32, device=DEVICE)
 
     positions = torch.zeros((4, 2049), dtype=torch.int64, device=DEVICE)
     pp = randint(-100, 100, (mr * 4, 4096), torch.int32, 65)
@@ -1052,10 +1100,6 @@ def test_ops_are_cudagraph_capturable():
         mu.MambaSpecDecodeGPUContext.run_fused_postprocess_align(
             shim, n, accepted, copied, decode_computed, idx
         )
-        mu.MambaSpecDecodeGPUContext.run_fused_postprocess(
-            shim, n, accepted, copied, zeros, decode_computed, zeros
-        )
-        mu.batch_memcpy(sp, dp, sz)
         hip_rope(positions, pp, pd, idx, qsl, pl, computed, 4, 4096)
         hip_bitmask(logits, li, cu, bm, 4)
 

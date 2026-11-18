@@ -531,11 +531,13 @@ class HfRunner:
                 ),
             )
 
-            # in case some unquantized custom models are not in same dtype
+            # In case some unquantized custom models are not in the same dtype.
             if getattr(model, "quantization_method", None) is None and any(
                 p.dtype != self.dtype for p in model.parameters()
             ):
-                model = model.to(dtype=self.dtype)
+                for parameter in model.parameters():
+                    if parameter.is_floating_point() or parameter.is_complex():
+                        parameter.data = parameter.data.to(dtype=self.dtype)
 
             if len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)
@@ -1019,9 +1021,12 @@ class VllmRunner:
         from vllm.platforms import current_platform
 
         if current_platform.is_rocm():
-            gpu_memory_utilization = kwargs.get(
-                "gpu_memory_utilization",
-                CacheConfig.gpu_memory_utilization,
+            # An unset utilization resolves to 1.0 with the extensible KV cache,
+            # which no longer needs the memory free up front; wait for the
+            # standard fraction in that case.
+            gpu_memory_utilization = (
+                kwargs.get("gpu_memory_utilization")
+                or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
             )
             # V1 startup requires free_memory >= total * gpu_memory_utilization.
             # ROCm CI can hand a test a device that is still lazily releasing
@@ -1036,7 +1041,7 @@ class VllmRunner:
             # CCL context in the engine subprocess. The default utilization of
             # 0.92 leaves too little headroom for both, so lower it on XPU when
             # the caller did not request an explicit value.
-            if "gpu_memory_utilization" not in kwargs:
+            if kwargs.get("gpu_memory_utilization") is None:
                 kwargs["gpu_memory_utilization"] = 0.9
             gpu_memory_utilization = kwargs["gpu_memory_utilization"]
             # XPU (Level Zero) can also release device memory lazily after a
@@ -1385,6 +1390,7 @@ class VllmRunner:
         # because when the next test starts some GPU memory is still in use.
         gpu_memory_utilization = (
             self.llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
         )
         from vllm.platforms import current_platform
 

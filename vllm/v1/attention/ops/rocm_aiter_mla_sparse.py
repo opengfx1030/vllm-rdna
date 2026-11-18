@@ -23,11 +23,24 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX10X, _ON_GFX942, _ON_GFX950
+    from vllm.platforms.rocm import (
+        _ON_GFX10X,
+        _ON_GFX942,
+        _ON_GFX950,
+        _ON_GFX1151,
+        _ON_RDNA,
+        get_cdna_version,
+    )
 else:
     _ON_GFX10X = False
     _ON_GFX942 = False
     _ON_GFX950 = False
+    _ON_GFX1151 = False
+    _ON_RDNA = False
+
+    def get_cdna_version() -> int:
+        return 0
+
 
 logger = init_logger(__name__)
 
@@ -51,11 +64,40 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
+# gfx942 gate against the in-tree ragged prefill, not the gfx950 OPUS
+# crossover. MI325, H=16, D=512, bf16: from 512 rows AITER is ahead at
+# top-k 128, 512, and 2048. At 256 rows and top-k 128 the ratio is 1.04,
+# on a flat ~0.025 ms.
+_GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES = 512
+
+
+def _can_use_aiter_pa_prefill_sparse(q: torch.Tensor, kv: torch.Tensor) -> bool:
+    """Cheap gate. The AITER import runs only after this passes."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return (
+        get_cdna_version() == 3
+        and rocm_aiter_ops.is_mla_enabled()
+        and q.shape[0] >= _GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES
+        and q.dtype in (torch.bfloat16, torch.float16)
+        and kv.dtype == q.dtype
+    )
 
 
 def _indexer_k_is_c4a_block_flat(compress_ratio: int) -> bool:
     """V4.0 C4A is block-flat (NORMAL). Ratio 1 and 2 are 16×16 SHUFFLE."""
     return compress_ratio == 4
+
+
+def indexer_k_cache_is_shuffled(block_size: int) -> bool:
+    """Value layout of the ROCm FP8 indexer-K cache (ratio 1 / 2): 16x16 SHUFFLE
+    tiles when a block holds more than one token, flat rows otherwise.
+
+    The one rule shared by the insert, the prefill gather and the paged-logits
+    readers (and by fused writers, through their cache object), so a writer and
+    its readers cannot disagree on the layout.
+    """
+    return block_size > 1
 
 
 @triton.jit
@@ -194,7 +236,7 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_value = kv_cache[:, : block_size * head_dim].view(FP8_DTYPE)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
-    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+    layout = "SHUFFLE" if indexer_k_cache_is_shuffled(block_size) else "NORMAL"
     grid = (num_tokens,)
     _indexer_k_quant_and_cache_kernel[grid](
         k,
@@ -401,7 +443,7 @@ def cp_gather_indexer_k_quant_cache_triton(
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
     if cache_layout is None:
-        layout = "NORMAL" if block_size == 1 else "SHUFFLE"
+        layout = "SHUFFLE" if indexer_k_cache_is_shuffled(block_size) else "NORMAL"
     else:
         layout = cache_layout
     kernel_args = (
@@ -438,7 +480,18 @@ def cp_gather_indexer_k_quant_cache_triton(
         )
 
 
+def _unshuffle_indexer_k_values(
+    values: torch.Tensor, block_size: int, dim: int
+) -> torch.Tensor:
+    """`[..., block_size * dim]` FP8 bytes in 16x16 SHUFFLE tile order
+    ([blk/16, dim/16, 16, 16]) -> flat rows ([blk, dim])."""
+    lead = values.shape[:-1]
+    values = values.reshape(*lead, block_size // 16, dim // 16, 16, 16)
+    return values.transpose(-3, -2).reshape(*lead, block_size * dim)
+
+
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156
+# ``shuffled``: the cache's value layout (indexer_k_cache_is_shuffled).
 def fp8_paged_mqa_logits_torch(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -446,6 +499,7 @@ def fp8_paged_mqa_logits_torch(
     context_lens: torch.Tensor,
     block_tables: torch.Tensor,
     max_model_len: int,
+    shuffled: bool = False,
 ):
     from vllm.utils.math_utils import cdiv
 
@@ -471,9 +525,10 @@ def fp8_paged_mqa_logits_torch(
             pages = block_tables[i, :num_pages]
             cache = kv_cache_flat[pages]
             scale_offset = block_size * dim
-            cache_value = (
-                cache[..., :scale_offset].view(dtype=FP8_DTYPE).to(torch.float32)
-            )
+            cache_value = cache[..., :scale_offset]
+            if shuffled:
+                cache_value = _unshuffle_indexer_k_values(cache_value, block_size, dim)
+            cache_value = cache_value.view(dtype=FP8_DTYPE).to(torch.float32)
             cache_scale = (
                 cache[..., scale_offset:].view(dtype=torch.float32).contiguous()
             )
@@ -487,11 +542,17 @@ def fp8_paged_mqa_logits_torch(
             logits[i, :seq_len] = score[:seq_len]
         return logits
 
-    kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
-    scale = scale.contiguous().view(torch.float)
+    # A block holds its block_size * dim values, then its block_size scales
+    # (not per-token [values | scale] rows).
+    num_block, block_size = kv_cache.shape[:2]
+    kv_cache_flat = kv_cache.reshape(num_block, -1)
+    values = kv_cache_flat[:, : block_size * dim]
+    if shuffled:
+        values = _unshuffle_indexer_k_values(values, block_size, dim)
+    scale = kv_cache_flat[:, block_size * dim :].contiguous().view(torch.float)
     q = q.float()
-    kv_cache = kv_cache.view(FP8_DTYPE).float() * scale
-    num_block, block_size, _, dim = kv_cache.size()
+    kv_cache = values.reshape(num_block, block_size, 1, dim).view(FP8_DTYPE).float()
+    kv_cache = kv_cache * scale.view(num_block, block_size, 1, 1)
     logits = torch.full(
         [batch_size * next_n, max_model_len],
         float("-inf"),
@@ -746,7 +807,7 @@ def paged_mqa_logits_module():
                 str(error),
             )
             return None
-        if _ON_GFX942 or _ON_GFX950:
+        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
             function_name = "deepgemm_fp8_paged_mqa_logits"
             required_parameters = {
                 "Preshuffle",
@@ -864,7 +925,7 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        if _ON_GFX942 or _ON_GFX950:
+        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
             logger.info_once(
                 "Using AITER paged-MQA logits from %s.",
                 aiter_paged_mqa_logits_module.__name__,
@@ -885,7 +946,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=block_size > 1,
+                Preshuffle=indexer_k_cache_is_shuffled(block_size) and not _ON_RDNA,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
@@ -916,7 +977,13 @@ def rocm_fp8_paged_mqa_logits(
             "aiter.ops.triton.attention.pa_mqa_logits is importable."
         )
         return fp8_paged_mqa_logits_torch(
-            q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
+            q_fp8,
+            kv_cache_fp8,
+            weights,
+            context_lens,
+            block_tables,
+            max_model_len,
+            shuffled=indexer_k_cache_is_shuffled(block_size),
         )
 
 
@@ -1154,6 +1221,113 @@ def _mask_candidates_strided_kernel(
         tile_start += step
 
 
+@triton.jit
+def _wait_global_stores(x):
+    # tl.debug_barrier only waits on LDS traffic on AMD; the flags live in
+    # global memory, so their stores must land before the barrier.
+    tl.inline_asm_elementwise(
+        "s_waitcnt vmcnt(0)", "=v,v", [x], dtype=tl.int32, is_pure=False, pack=1
+    )
+
+
+@triton.jit(do_not_specialize=["width", "nblocks"])
+def _mask_candidates_fused_kernel(
+    logits,
+    starts,
+    ends,
+    candidates,
+    flags,
+    stride_row,
+    stride_col,
+    stride_start,
+    stride_end,
+    stride_cand_row,
+    stride_cand_col,
+    width,
+    nblocks,
+    BLOCK_SIZE: tl.constexpr,
+    K: tl.constexpr,
+    HAS_STARTS: tl.constexpr,
+    ROW_REPEAT: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
+    end = tl.minimum(tl.load(ends + row // ROW_REPEAT * stride_end), width)
+    pid = tl.program_id(1)
+    num_progs = tl.num_programs(1)
+    # As in _mask_candidates_strided_kernel, nothing at or past `end` is
+    # written; here the stores stop at `end` itself, not its tile boundary.
+    if HAS_STARTS:
+        head_end = tl.minimum(start, end)
+        head = pid * TILE
+        while head < head_end:
+            cols = head + tl.arange(0, TILE)
+            tl.store(
+                logits + row * stride_row + cols * stride_col,
+                -float("inf"),
+                cols < head_end,
+            )
+            head += num_progs * TILE
+
+    # Tiles are laid out in block space from `start` and dealt round-robin to
+    # the programs of a row. Each program owns the flags of its own tiles, so
+    # it clears them, scatters the candidates that land in them and reads them
+    # back across workgroup barriers: one launch, and no flags are touched
+    # past the live context.
+    BLOCK_P2: tl.constexpr = triton.next_power_of_2(BLOCK_SIZE)
+    TILE_BLOCKS: tl.constexpr = TILE // BLOCK_P2
+    live_blocks = tl.cdiv(end - start, BLOCK_SIZE)
+    first = pid * TILE_BLOCKS
+    step = num_progs * TILE_BLOCKS
+    if first < live_blocks:
+        row_flags = flags + row * nblocks
+        blocks = tl.arange(0, TILE_BLOCKS)
+        tile = first
+        while tile < live_blocks:
+            tl.store(row_flags + tile + blocks, 0, tile + blocks < live_blocks)
+            tile += step
+
+        k = tl.arange(0, triton.next_power_of_2(K))
+        cand = tl.load(
+            candidates + row * stride_cand_row + k * stride_cand_col,
+            k < K,
+            other=-1,
+        )
+        # Preserve the packed-column clamp for candidates beyond the logits
+        # width: any such candidate keeps the row's last column.
+        past = start + cand * BLOCK_SIZE >= width
+        edge = tl.max(past.to(tl.int32), axis=0)
+        owned = (
+            (cand >= 0)
+            & (cand < live_blocks)
+            & ((cand // TILE_BLOCKS) % num_progs == pid)
+        )
+        _wait_global_stores(pid)
+        tl.debug_barrier()
+        tl.store(row_flags + cand, 1, owned)
+        _wait_global_stores(pid)
+        tl.debug_barrier()
+
+        offsets = tl.arange(0, BLOCK_P2)
+        tile = first
+        while tile < live_blocks:
+            b = tile + blocks
+            # .cv skips L1: a neighbouring row's program may have pulled a
+            # line holding these flags into it before they were written.
+            keep = tl.load(
+                row_flags + b, b < live_blocks, other=0, cache_modifier=".cv"
+            )
+            cols = start + b[:, None] * BLOCK_SIZE + offsets[None, :]
+            keep = (keep[:, None] != 0) | ((cols == width - 1) & (edge != 0))
+            tl.store(
+                logits + row * stride_row + cols * stride_col,
+                -float("inf"),
+                (offsets[None, :] < BLOCK_SIZE) & (cols < end) & ~keep,
+            )
+            tile += step
+
+
 def _apply_candidate_mask_strided(
     logits: torch.Tensor,
     row_ks: torch.Tensor | None,
@@ -1169,6 +1343,10 @@ def _apply_candidate_mask_strided(
     width is the ``max_model_len`` workspace and the live context is far
     shorter, i.e. the paged decode path below; the prefill chunks pass
     chunk-sized logits and stay on the shared kernel.
+
+    On gfx942 and gfx950 the candidate flags are built by the masking
+    programs themselves, each over only its own live tiles, so the whole mask
+    is a single launch and the flags past each row's end are never cleared.
     """
     from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
         _candidate_flags_kernel,
@@ -1178,8 +1356,41 @@ def _apply_candidate_mask_strided(
     if not rows or not width:
         return
     nblocks = triton.cdiv(width, block_size)
-    flags = torch.empty((rows, nblocks + 1), device=logits.device, dtype=torch.uint8)
     start_stride = row_ks.stride(0) if row_ks is not None else 0
+    tile = _MASK_TILE
+    if (_ON_GFX950 or _ON_GFX942) and rows >= 16:
+        # Every live tile of the fused kernel scans the row's candidate list,
+        # so wider tiles win once there are enough rows to fill the GPU
+        # without them. Measured on gfx950.
+        tile = 2048 if rows < 64 else 4096
+    # Derived from tensor shapes, so the grid stays static and a FULL cudagraph
+    # capture remains valid across replays; only the loop trip count inside
+    # the kernel is data-dependent. The min keeps narrow widths from launching
+    # programs that would only fall through.
+    grid_cols = min(_MASK_GRID_COLS, triton.cdiv(width, tile))
+    if _ON_GFX950 or _ON_GFX942:
+        flags = torch.empty((rows, nblocks), device=logits.device, dtype=torch.uint8)
+        _mask_candidates_fused_kernel[(rows, grid_cols)](
+            logits,
+            row_ks,
+            row_ke,
+            candidate_blocks,
+            flags,
+            *logits.stride(),
+            start_stride,
+            row_ke.stride(0),
+            *candidate_blocks.stride(),
+            width,
+            nblocks,
+            block_size,
+            candidate_blocks.shape[1],
+            row_ks is not None,
+            row_repeat,
+            tile,
+        )
+        return
+
+    flags = torch.empty((rows, nblocks + 1), device=logits.device, dtype=torch.uint8)
     _candidate_flags_kernel[(rows,)](
         candidate_blocks,
         row_ks,
@@ -1193,11 +1404,6 @@ def _apply_candidate_mask_strided(
         row_ks is not None,
         row_repeat,
     )
-    # Derived from width, which is a tensor shape, so the grid stays static and
-    # a FULL cudagraph capture remains valid across replays; only the loop trip
-    # count inside the kernel is data-dependent. The min keeps narrow widths
-    # from launching programs that would only fall through.
-    grid_cols = min(_MASK_GRID_COLS, triton.cdiv(width, _MASK_TILE))
     _mask_candidates_strided_kernel[(rows, grid_cols)](
         logits,
         row_ks,
@@ -1211,7 +1417,7 @@ def _apply_candidate_mask_strided(
         block_size,
         row_ks is not None,
         row_repeat,
-        _MASK_TILE,
+        tile,
     )
 
 
@@ -1311,10 +1517,8 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
-        # gfx10x: the HIP paged-MQA kernel returns a [rows, max_model_len]
-        # tensor; the per-head stage-1 buffer below would be 64x larger
-        # (4 GiB at max_num_batched_tokens=2048, 32k context).
-        if _ON_GFX942 or _ON_GFX950 or _ON_GFX10X:
+        # gfx10 HIP and RDNA standalone kernels use a row-wise logits buffer.
+        if _ON_GFX942 or _ON_GFX950 or _ON_GFX10X or _ON_RDNA:
             workspace_manager.get_simultaneous(
                 ((decode_rows, max_model_len), torch.float32),
             )
@@ -1510,28 +1714,31 @@ def rocm_aiter_sparse_attn_indexer(
             )
 
             num_rows = logits.shape[0]
+            # Decode rows start at column 0 and the kernels take int32 ends, so
+            # no starts tensor or dtype cast is needed. Rows sharing one
+            # seq_len (next_n > 1 with per-request lens) are expanded in-kernel.
             visible = decode_metadata.seq_lens.reshape(-1)
-            if visible.numel() != num_rows:
-                visible = visible.repeat_interleave(next_n)
-            visible = visible[:num_rows].to(torch.int64)
-            row_starts = torch.zeros_like(visible)
+            row_repeat = next_n if visible.numel() != num_rows else 1
+            visible = visible[:num_rows]
             decode_candidates = candidate_blocks[:num_rows]
             if candidate_write:
                 _select_candidate_blocks(
                     logits,
-                    row_starts,
+                    None,
                     visible,
                     decode_candidates.shape[1],
                     candidate_block_size,
                     decode_candidates,
+                    row_repeat,
                 )
             else:
                 _apply_candidate_mask_strided(
                     logits,
-                    row_starts,
+                    None,
                     visible,
                     decode_candidates,
                     candidate_block_size,
+                    row_repeat,
                 )
 
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
@@ -3817,6 +4024,39 @@ def _rocm_sparse_attn_prefill_ragged_aiter_opus(
     return True
 
 
+def _rocm_sparse_attn_prefill_aiter(
+    pa_prefill_sparse: Callable[..., torch.Tensor],
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor | None,
+    output: torch.Tensor,
+) -> None:
+    """gfx942 path. One KV pool; the extend sources stay unset."""
+    logger.info_once("Using AITER pa_prefill_sparse for sparse MLA prefill on gfx942")
+    indices = _as_int32_contiguous_1d(indices)
+    indptr = _as_int32_contiguous_1d(indptr)
+    inplace = (
+        output.shape == q.shape and output.dtype == q.dtype and output.is_contiguous()
+    )
+    written = pa_prefill_sparse(
+        q,
+        kv,
+        indices,
+        indptr,
+        None,
+        None,
+        None,
+        attn_sink,
+        float(scale),
+        out=output if inplace else None,
+    )
+    if written.data_ptr() != output.data_ptr():
+        output.copy_(written[..., : output.shape[-1]])
+
+
 @functools.lru_cache
 def _decode_cu_count() -> int:
     try:
@@ -4581,6 +4821,31 @@ def rocm_sparse_attn_prefill(
             output=output,
         ):
             return
+
+    if _can_use_aiter_pa_prefill_sparse(q, kv):
+        from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+
+        if ragged_indices is None or ragged_indptr is None:
+            assert indices is not None
+            indices_2d = indices.reshape(indices.shape[0], -1)
+            ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+                indices_2d,
+                topk_length
+                if topk_length is not None
+                else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
+                num_rows=kv.shape[0],
+            )
+        _rocm_sparse_attn_prefill_aiter(
+            pa_prefill_sparse,
+            q=q,
+            kv=kv.squeeze(1),
+            indices=ragged_indices,
+            indptr=ragged_indptr,
+            scale=scale,
+            attn_sink=opus_attn_sink,
+            output=output,
+        )
+        return
 
     if ragged_indices is not None and ragged_indptr is not None:
         _rocm_sparse_attn_prefill_ragged_triton(

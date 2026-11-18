@@ -38,16 +38,9 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionCGSupport,
+    AttentionImplBase,
     AttentionType,
     MultipleOf,
-)
-from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
-from vllm.v1.attention.backends.flash_attn import (
-    FlashAttentionBackend,
-    FlashAttentionImpl,
-    FlashAttentionMetadata,
-    FlashAttentionMetadataBuilder,
 )
 from vllm.v1.attention.ops import rocm_octave
 from vllm.v1.attention.ops.int4_fp16_kv_layout import (
@@ -68,9 +61,10 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
-from ..common.qsa_cache import QSAForwardMetadata
+from ..common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
+from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
-from .indexer_qsa import QSAIndexer
+from .qsa_indexer import QSAIndexer
 
 
 class QsaMainKvLayout(NamedTuple):
@@ -137,10 +131,8 @@ _OCTAVE_WINDOW_ENTRIES = 16384
 _OCTAVE_SINK_ENTRIES = 2048
 
 
-class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
-    """Flash metadata supporting uniform decode and target-verify graphs."""
-
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+class Qwen4ExpROCmQSAMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
+    """Reserve the Octave workspace for ROCm QSA."""
 
     def __init__(
         self,
@@ -169,10 +161,16 @@ _OCTAVE_CACHE_DTYPES: tuple[CacheDType, ...] = (
     "octave_k3v3",
     "octave_k3v3_compact",
 )
-_QSA_CACHE_DTYPES: tuple[CacheDType, ...] = ("auto", "bfloat16", *_OCTAVE_CACHE_DTYPES)
+_QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
+    "auto",
+    "bfloat16",
+    "fp8",
+    "fp8_e4m3",
+    *_OCTAVE_CACHE_DTYPES,
+)
 
 
-class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
+class Qwen4ExpQSABackend(AttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner.
 
     With an Octave ``kv_cache_dtype`` the main K/V cache holds one packed
@@ -181,11 +179,16 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
+    # fp8/fp8_e4m3: uint8 storage read by the QSA Triton kernel.
+    # octave_*: packed slots handled by the Octave kernels.
+    # int4_fp16_block: packed records written by the RDNA native kernel.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         *_QSA_CACHE_DTYPES,
         "float16",
         INT4_FP16_BLOCK,
     ]
+    # The owner writes K/V before calling the sparse attention implementation.
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
@@ -224,12 +227,12 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
         return [MultipleOf(16)]
 
     @staticmethod
-    def get_impl_cls() -> type[Qwen4ExpQSAFlashAttentionImpl]:
-        return Qwen4ExpQSAFlashAttentionImpl
+    def get_impl_cls() -> type[Qwen4ExpQSAImpl]:
+        return Qwen4ExpQSAImpl
 
     @staticmethod
-    def get_builder_cls() -> type[Qwen4ExpQSAMetadataBuilder]:
-        return Qwen4ExpQSAMetadataBuilder
+    def get_builder_cls() -> type[Qwen4ExpROCmQSAMetadataBuilder]:
+        return Qwen4ExpROCmQSAMetadataBuilder
 
     @classmethod
     def is_sparse(cls) -> bool:
@@ -240,35 +243,35 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
         return False
 
 
-class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
+class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
     """Run paged sparse GQA with the QSA Triton kernel."""
 
-    supports_dcp: bool = False
-    supports_pcp: bool = False
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # QSA computes entirely in its own Triton kernels (forward_qsa ->
-        # qsa_sparse_paged_attention); flash_attn_varlen_func is never called
-        # from this impl. The FlashAttention* base classes are reused only for
-        # metadata/plumbing. Requiring a working FA build therefore excludes
-        # platforms that can run QSA perfectly well -- gfx1030 (RDNA2) has no
-        # flash_attn or AITER build but runs the Triton path correctly.
-        if not is_flash_attn_varlen_func_available() and not current_platform.is_rocm():
-            raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        kv_cache_dtype: str,
+    ) -> None:
+        """Initialize QSA state and preserve the optional Octave cache path."""
         if self.dcp_world_size != 1:
             raise NotImplementedError(
                 "Qwen4Exp QSA does not support decode context parallelism"
             )
         if (
-            self.kv_cache_dtype not in _QSA_CACHE_DTYPES
-            and self.kv_cache_dtype != INT4_FP16_BLOCK
+            kv_cache_dtype not in (*_QSA_CACHE_DTYPES, "float16")
+            and kv_cache_dtype != INT4_FP16_BLOCK
         ):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16/FP16, Octave, or packed "
-                "int4_fp16_block main KV cache"
+                "Qwen4Exp QSA requires a BF16/FP16, FP8-e4m3, Octave, or "
+                "packed int4_fp16_block main KV cache"
             )
-        self.supports_quant_query_input = False
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
         self.octave_fmt: rocm_octave.OctaveFormat | None = None
         if self.kv_cache_dtype in _OCTAVE_CACHE_DTYPES:
             self.octave_fmt = rocm_octave.OctaveFormat.from_cache_dtype(
@@ -335,8 +338,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            return
+        """Store FP16/BF16 K/V directly or use the existing Octave/int4 writer."""
         if self.kv_cache_dtype == INT4_FP16_BLOCK:
             # The packed writer takes [2, pages, slots, heads, record_bytes];
             # it quantizes and packs each record.
@@ -383,27 +385,17 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             layer._v_scale,
         )
 
-    def forward_qsa(
+    def forward(
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: Qwen4ExpQSAMetadata,
         output: torch.Tensor,
+        *,
         token_to_req: torch.Tensor,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del key, value
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError("QSA does not support fused output quantization")
-        if self.alibi_slopes is not None or self.sinks is not None:
-            raise NotImplementedError("QSA does not support ALiBi or attention sinks")
-        if self.sliding_window != (-1, -1):
-            raise NotImplementedError("QSA does not support sliding-window attention")
-
+        """Run sparse attention over the owner's indexer-selected K/V rows."""
         num_tokens = attn_metadata.num_actual_tokens
         from .ops import qsa as _qsa_ops
 
@@ -456,11 +448,28 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 raise NotImplementedError(
                     "Qwen4Exp QSA requires an FP16 query for a packed INT4 KV cache"
                 )
-        elif key_cache.dtype != query.dtype or query.dtype not in (
-            torch.bfloat16,
-            torch.float16,
-        ):
-            raise NotImplementedError("Qwen4Exp QSA requires matching BF16/FP16 Q/K/V")
+        else:
+            if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+                assert key_cache.dtype == torch.uint8, (
+                    "fp8 KV cache must be uint8 storage; a config mismatch would "
+                    "silently double the view's shape"
+                )
+                fp8_dtype = current_platform.fp8_dtype()
+                key_cache = key_cache.view(fp8_dtype)
+                value_cache = value_cache.view(fp8_dtype)
+            if query.dtype not in (torch.bfloat16, torch.float16):
+                raise NotImplementedError("Qwen4Exp QSA requires BF16/FP16 queries")
+            if key_cache.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+                if layer._k_scale_float != 1.0 or layer._v_scale_float != 1.0:
+                    raise NotImplementedError(
+                        "Qwen4Exp QSA with an FP8 KV cache requires unit scales on "
+                        "the AMD path (the NVIDIA port's host-side dequant fold is "
+                        "not yet ported here). Use bf16 KV caches or unit scales."
+                    )
+            elif key_cache.dtype != query.dtype:
+                raise NotImplementedError(
+                    "Qwen4Exp QSA requires matching BF16/FP16 Q/K/V"
+                )
         from .ops.qsa import qsa_sparse_paged_attention
 
         qsa_sparse_paged_attention(
@@ -477,7 +486,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
 
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
-    """Merged Qwen full-attention owner with a QSA index side branch."""
+    """Merged Qwen full-attention owner with a QSA indexer branch."""
 
     supports_dcp = False
 
@@ -498,17 +507,14 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             raise ValueError("Qwen4Exp QSA requires a paged KV cache")
         if model_config.dtype not in (torch.bfloat16, torch.float16):
             raise NotImplementedError("Qwen4Exp QSA requires BF16 or FP16")
-        if cache_config.cache_dtype not in (
-            *_QSA_CACHE_DTYPES,
-            "float16",
-            INT4_FP16_BLOCK,
-        ):
+        cache_dtype = qsa_kv_cache_dtype(cache_config, prefix)
+        if cache_dtype not in (*_QSA_CACHE_DTYPES, "float16", INT4_FP16_BLOCK):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16/FP16, Octave, or packed "
-                "int4_fp16_block main KV cache"
+                "Qwen4Exp QSA requires a BF16/FP16, FP8-e4m3, Octave, or "
+                "packed int4_fp16_block main KV cache"
             )
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None and cache_config.cache_dtype != INT4_FP16_BLOCK:
+        if kv_cache_scheme is not None and cache_dtype != INT4_FP16_BLOCK:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         # The fused HIP QSA decode reads the main KV cache, so which kernel can
         # serve this deployment follows from the cache layout. A packed cache
@@ -516,12 +522,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # the mode and the cache dtype have to agree.
         from .ops.qsa_rdna2 import qsa_decode_mode, qsa_use_rdna2_int4
 
-        if qsa_decode_mode() == "int4" and cache_config.cache_dtype != INT4_FP16_BLOCK:
+        if qsa_decode_mode() == "int4" and cache_dtype != INT4_FP16_BLOCK:
             raise NotImplementedError(
                 "Qwen4Exp QSA: VLLM_RDNA_QSA_DECODE_MODE=int4 needs an "
                 "int4_fp16_block KV cache"
             )
-        if cache_config.cache_dtype == INT4_FP16_BLOCK and not qsa_use_rdna2_int4():
+        if cache_dtype == INT4_FP16_BLOCK and not qsa_use_rdna2_int4():
             raise NotImplementedError(
                 "Qwen4Exp QSA: an int4_fp16_block KV cache needs the native "
                 "packed-int4 HIP QSA decode; the Triton path cannot read the "
@@ -604,34 +610,29 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
         self.layer_name = f"{prefix}.attn"
         self.attn_type = AttentionType.DECODER
-        self.kv_cache_dtype = cache_config.cache_dtype
+        self.kv_cache_dtype = cache_dtype
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
         if (
-            self.kv_cache_dtype not in _OCTAVE_CACHE_DTYPES
+            self.kv_cache_dtype not in (*_QSA_CACHE_DTYPES, "float16")
             and self.kv_cache_dtype != INT4_FP16_BLOCK
-            and self.kv_cache_torch_dtype not in (torch.bfloat16, torch.float16)
         ):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires BF16 or FP16 cache storage"
+                "Qwen4Exp QSA requires BF16/FP16, FP8-e4m3, Octave, or "
+                "packed int4_fp16_block cache storage"
             )
         self.kv_sharing_target_layer_name = None
         self.kv_cache = torch.tensor([])
         set_default_quant_scales(self, register_buffer=True)
 
-        self.attn_backend = Qwen4ExpQSAFlashAttentionBackend
-        self.impl = Qwen4ExpQSAFlashAttentionImpl(
+        self.attn_backend = Qwen4ExpQSABackend
+        self.impl: Qwen4ExpQSAImpl = Qwen4ExpQSAImpl(  # type: ignore[assignment]
             self.num_heads,
             self.head_dim,
             self.scaling,
             self.num_kv_heads,
-            None,
-            None,
             self.kv_cache_dtype,
-            None,
-            AttentionType.DECODER,
-            None,
         )
         self.indexer = QSAIndexer(
             vllm_config=vllm_config,
@@ -641,8 +642,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.indexer",
         )
-        # The fused prepare writes raw BF16 K/V; an Octave cache is packed by
-        # do_kv_cache_update instead.
+        # The fused prepare writes model-dtype or platform-fp8 K/V; an Octave
+        # cache is packed by do_kv_cache_update instead.
         self.use_fused_qsa_prepare = (
             self.attn_output_gate
             and self.indexer.use_fused_pre_indexer
@@ -664,6 +665,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if self.layer_name in static_context:
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         static_context[self.layer_name] = self
+
+    def process_weights_after_loading(self) -> None:
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
@@ -699,16 +704,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             if gate is not None:
                 gate.zero_()
             return
-        main_metadata = cast(FlashAttentionMetadata, metadata[self.layer_name])
+        main_metadata = cast(Qwen4ExpQSAMetadata, metadata[self.layer_name])
         if self.kv_cache.numel() == 0:
             raise RuntimeError("QSA main K/V cache is not bound")
 
         num_tokens = main_metadata.num_actual_tokens
-        side_metadata = cast(
-            QSAForwardMetadata,
+        indexer_metadata = cast(
+            QSAIndexerMetadata,
             metadata[self.indexer.raw_key_cache.prefix],
         )
-        if side_metadata.num_actual_tokens != num_tokens:
+        if indexer_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
         selected, main_outputs = self.indexer(
             hidden_states,
@@ -724,7 +729,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.indexer.output_width,
         ):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
-        impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
+        impl = self.impl
         if main_outputs is None:
             assert key is not None and value is not None
             if impl.octave_fmt is not None:
@@ -740,19 +745,17 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         else:
             query, _ = main_outputs
             # The gate is applied to every row outside this op; padded rows
-            # must stay finite so they keep the zero output forward_qsa gives.
+            # must stay finite so they keep the zero output forward gives.
             assert gate is not None
             gate[num_tokens:].zero_()
         assert query is not None
-        impl.forward_qsa(
+        impl.forward(
             self,
             query,
-            key,
-            value,
             self.kv_cache,
             main_metadata,
             output,
-            token_to_req=side_metadata.token_to_req,
+            token_to_req=indexer_metadata.token_to_req,
         )
 
     def forward(
@@ -904,8 +907,8 @@ direct_register_custom_op(
 __all__ = [
     "QSAIndexer",
     "Qwen4ExpQSAAttention",
-    "Qwen4ExpQSAFlashAttentionBackend",
-    "Qwen4ExpQSAFlashAttentionImpl",
+    "Qwen4ExpQSABackend",
+    "Qwen4ExpQSAImpl",
     "qwen4_exp_qsa_prepare_with_output",
     "qwen4_exp_qsa_with_output",
 ]

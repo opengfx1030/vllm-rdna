@@ -53,10 +53,9 @@ export TRITON_CACHE_DIR=$VLLM_CACHE_ROOT/triton
 export TORCHINDUCTOR_CACHE_DIR=$VLLM_CACHE_ROOT/inductor
 export TORCH_EXTENSIONS_DIR=$VLLM_CACHE_ROOT/extensions
 export VLLM_USE_RDNA2_FA=1 VLLM_FA_RDNA2_GQA_DECODE=1
-export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ROCM_MOE_PREFILL=0 VLLM_GDN_HIP_PREFILL=0
 export VLLM_RDNA_FUSED_SE=1
-export VLLM_RDNA_DENSE_INT8=0 VLLM_RDNA_DENSE_INT8_ONLY=0 VLLM_RDNA_DENSE_GEMV=0
+export VLLM_RDNA_DENSE_INT8=0 VLLM_RDNA_DENSE_INT8_ONLY=0
 export VLLM_RDNA_AR=1 VLLM_RDNA_AR_MAX_KB=64 VLLM_RDNA_AR_ONESHOT_KB=64
 export VLLM_RDNA_AR_BLOCKS=0 VLLM_RDNA_AR_PACE=0
 export VLLM_CAUSAL_CONV1D_RDNA2_FWD=${CONV1D:-0}
@@ -116,7 +115,11 @@ for IN in $CELLS; do
   t1=$(date +%s)
   log "cell in=$IN rc=$rc elapsed=$((t1-t0))s"
   grep -m1 -iE "Throughput|Output token throughput|Mean TTFT|Mean TPOT" "$CD/bench.log" | tr -s ' ' | tee -a "$DRIVER_LOG"
-  ls -la "$CD"/prof*.csv 2>/dev/null | tee -a "$DRIVER_LOG" || log "NO CSV for in=$IN"
+  if csv_report=$(find "$CD" -maxdepth 1 -type f -name 'prof*.csv' -ls 2>/dev/null) && [[ -n $csv_report ]]; then
+    printf '%s\n' "$csv_report" | tee -a "$DRIVER_LOG"
+  else
+    log "NO CSV for in=$IN"
+  fi
   ss=$(sel_count)
   if [[ "$ss" -gt "$ss0" ]]; then
     log "STOP NEW PCI SERR ($ss0 -> $ss)"; echo "STOP NEW PCI SERR" >"$OUT/IM_STOP"; break

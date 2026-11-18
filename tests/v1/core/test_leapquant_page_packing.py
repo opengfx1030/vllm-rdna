@@ -405,7 +405,7 @@ def flash_next_specs(
         dtype=torch.float16,
         tokens_per_state=4,
     )
-    # QSAKeyStateCache: capacity = round_up(compress_ratio + num_spec, ratio) = 8.
+    # QSARawKeyCache: capacity = round_up(compress_ratio + num_spec, ratio) = 8.
     ring = CircularBufferSpec(
         block_size=8, num_kv_heads=1, head_size=128, head_size_v=0, dtype=torch.float16
     )
@@ -488,8 +488,10 @@ def layout_fingerprint(config: KVCacheConfig) -> dict:
 def capacity_table(model_dir) -> str:
     """The markdown table of the design note, from the real planner."""
     rows = [
-        "| Block | Mode | GDN groups | Blocks per request (GDN+PLE+ring / attn) "
-        "| Blocks | Tokens at 262,144 | Concurrency | 1k | 4k | 32k | 8 requests |",
+        (
+            "| Block | Mode | GDN groups | Blocks per request (GDN+PLE+ring / attn) "
+            "| Blocks | Tokens at 262,144 | Concurrency | 1k | 4k | 32k | 8 requests |"
+        ),
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
 
