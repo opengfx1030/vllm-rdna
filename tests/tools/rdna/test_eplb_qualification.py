@@ -400,3 +400,30 @@ def test_gate_requires_eight_passing_rows() -> None:
     rows[0]["verdict"] = "FAIL"
     problems = qb.gate_row_problems(rows, qb.R2_CELLS)
     assert any("not pass" in item for item in problems)
+
+
+def test_speed_regressions_use_cell_verdicts_not_metric_labels():
+    receipt = {
+        "speed": {
+            "cells": [
+                {
+                    "name": "bench-1024x512-c1",
+                    "verdict": "win",
+                    "metrics": {"out_tps": {"verdict": "regression"}},
+                },
+                {"name": "bench-1024x512-c8", "verdict": "regression"},
+                {"name": "bench-16384x1024-c1", "verdict": "none"},
+                {"name": "bench-16384x1024-c8", "verdict": "regression"},
+            ]
+        }
+    }
+    assert qb._speed_regressions(receipt) == [
+        "bench-1024x512-c8",
+        "bench-16384x1024-c8",
+    ]
+
+
+@pytest.mark.parametrize("speed", [None, {}, {"cells": []}, {"cells": [{}]}])
+def test_missing_speed_verdicts_cannot_be_reported_as_zero_regressions(speed):
+    with pytest.raises(qb.QualificationError):
+        qb._speed_regressions({"speed": speed})

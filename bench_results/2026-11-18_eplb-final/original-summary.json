@@ -1,0 +1,186 @@
+{
+  "source_sha": "2ea7a364848c05f28ecd73a593717a0728157a2d",
+  "base_sha": "b56907c4339779d2076f0886532833689aec93ec",
+  "r1": {
+    "gates": {
+      "exact": "PASS",
+      "quality": "NOT RUN",
+      "overlap": "PASS",
+      "stall": "PASS"
+    },
+    "native_speed_counts": {
+      "win": 3,
+      "regression": 3,
+      "none": 2,
+      "invalid": 0
+    },
+    "limit": "Short PPL probes are not the full quality gate, which was NOT RUN. The original qualification renderer counted Markdown headings/footnotes as regression labels; native JSON has 3 regression cells, not 5."
+  },
+  "r2": {
+    "result": "aborted after B1; original prefix latency gate failed; ABBA incomplete",
+    "completed_arms": [
+      "A1",
+      "B1"
+    ],
+    "not_run": [
+      "B2",
+      "A2"
+    ],
+    "original_abort_retained": true,
+    "pair_is_not_causal": true,
+    "paired_benchmarks": [
+      {
+        "cell": "bench-1024x512-c1",
+        "output_throughput": {
+          "off": 71.276444955161,
+          "chaos": 82.24257703668144,
+          "change_pct": 15.385352185310431
+        },
+        "median_ttft_ms": {
+          "off": 409.45203750015935,
+          "chaos": 402.0079205001821,
+          "change_pct": -1.8180681296461665
+        },
+        "median_itl_ms": {
+          "off": 23.32606300478801,
+          "chaos": 24.27468700625468,
+          "change_pct": 4.066798590366272
+        },
+        "p99_itl_ms": {
+          "off": 23.980086200754158,
+          "chaos": 27.597469721222296,
+          "change_pct": 15.084947944659067
+        }
+      },
+      {
+        "cell": "bench-1024x512-c8",
+        "output_throughput": {
+          "off": 265.7821041255227,
+          "chaos": 254.07704314780838,
+          "change_pct": -4.404006438366636
+        },
+        "median_ttft_ms": {
+          "off": 546.1007245030487,
+          "chaos": 545.6735035040765,
+          "change_pct": -0.07823117234663224
+        },
+        "median_itl_ms": {
+          "off": 47.37108050176175,
+          "chaos": 47.26694199780468,
+          "change_pct": -0.21983561036400534
+        },
+        "p99_itl_ms": {
+          "off": 383.5193726894795,
+          "chaos": 385.3925903671188,
+          "change_pct": 0.4884284370051839
+        }
+      },
+      {
+        "cell": "bench-16384x1024-c1",
+        "output_throughput": {
+          "off": 67.79095481769613,
+          "chaos": 61.928805844059134,
+          "change_pct": -8.647391070684174
+        },
+        "median_ttft_ms": {
+          "off": 5958.6639829940395,
+          "chaos": 5980.042055496597,
+          "change_pct": 0.3587729155993591
+        },
+        "median_itl_ms": {
+          "off": 24.079356007860042,
+          "chaos": 24.7588419879321,
+          "change_pct": 2.821861098985612
+        },
+        "p99_itl_ms": {
+          "off": 24.562423616007436,
+          "chaos": 28.27863556041848,
+          "change_pct": 15.129663108607794
+        }
+      },
+      {
+        "cell": "bench-16384x1024-c8",
+        "output_throughput": {
+          "off": 121.9010866627294,
+          "chaos": 115.40131066309786,
+          "change_pct": -5.332008251587483
+        },
+        "median_ttft_ms": {
+          "off": 7145.81027749955,
+          "chaos": 6986.189064002247,
+          "change_pct": -2.233773460231825
+        },
+        "median_itl_ms": {
+          "off": 49.6183160066721,
+          "chaos": 48.52183199545834,
+          "change_pct": -2.209837212263144
+        },
+        "p99_itl_ms": {
+          "off": 430.65722081359127,
+          "chaos": 431.61553662328515,
+          "change_pct": 0.22252403149851663
+        }
+      }
+    ],
+    "prefix": {
+      "off_cold_s_rounded": 0.84,
+      "off_warm_s_rounded": 0.39,
+      "chaos_cold_s_rounded": 0.74,
+      "chaos_warm_s_rounded": 0.4,
+      "hits_each": 1024,
+      "prompt_tokens_each": 1927,
+      "required_latency_ratio": 0.5,
+      "failure_local_time": "08:24:35",
+      "first_plan_local_time": "08:24:55",
+      "failure_precedes_first_plan": true,
+      "actual_state_and_hash_block": 1024
+    }
+  },
+  "extensions": {
+    "comparison_scope": "Independent previously built base/head extension sets, not a same-binary source-only comparison",
+    "base": {
+      "tree": "/home/chenco_adm/w4a8_runs/leapquant/tree-eplb-base",
+      "declared_sha": "b56907c4339779d2076f0886532833689aec93ec",
+      "build_log": null,
+      "build_log_status": "Not located; do not claim a new clean build",
+      "sha256": {
+        "_C.abi3.so": "ca9157c34518bd338e59ccbca20fcc8f1d5345b238ae858ab234896e58eb7bcb",
+        "_C_stable_libtorch.abi3.so": "41cc91120d8eb74e039365195147a10ccb99c2d45098dcc850f110855db0914f",
+        "cumem_allocator.abi3.so": "c2fbf0031c8ffdc6e45682001895557c6900a86d78ae42e27d397cde5ed8e0d5",
+        "fs_io_C.abi3.so": "e1e9b393d6a1b10efa440631b7836f3bf939d48caa6461b41f6cda234262c35a",
+        "_moe_C_stable_libtorch.abi3.so": "65b361d9ede30b404e152f72e2e879f09ed0ad8cb875e990ec9764f1e70bb225",
+        "_rocm_C.abi3.so": "7638432da0d26233e431de026c2bbb0761e993528a5cd85fae3ed936115556c8",
+        "spinloop.abi3.so": "358398a6b3f861e0d559d368f1e7d2b4a2e63b051fad10f95db973f673e27aa8"
+      }
+    },
+    "reused_head_extensions": {
+      "tree": "/home/chenco_adm/w4a8_runs/leapquant/tree-eplb-fixes",
+      "declared_sha": null,
+      "cpp_source_content_matches": "e315534d3d1a467ffeb86bf0e8b3037e6401d3f4",
+      "build_log": "/home/chenco_adm/w4a8_runs/eplb-online/build_mono.log",
+      "deployment_requirement": "Copy these extensions only into a fresh, fully synced committed-source snapshot; record that snapshot's actual SHA, not a stale or invented tree SHA",
+      "sha256": {
+        "_C.abi3.so": "aa199e51165906dc57ba182a134ca803d5ec5716428c4d2d18f5a3954f891ce4",
+        "_C_stable_libtorch.abi3.so": "5f1c6f974295859ac5d0d336fda99c408df091139b8b625871afe02899d7eff6",
+        "cumem_allocator.abi3.so": "5b15b7f0f1be41ca11938a053fd9888b88c3cd300e92916722c421e402896197",
+        "fs_io_C.abi3.so": "e9072cb339b4a7e0a80b9a3be6c4e2d505b1fd3f5146b55f38d9949ff887c10c",
+        "_moe_C_stable_libtorch.abi3.so": "b862aa37c7d8bd5f95ca172342dbfbfb2a39ecc846d97f8c2430cf5283aef5cc",
+        "_rocm_C.abi3.so": "6945bd8cf54fb787784f8436405c2b0ac3e1f34410ed0fadce2e409da1cc0c32",
+        "spinloop.abi3.so": "3cae522882de0165acec9731409d9cf146abb49bf23754738497bd94e0091aee"
+      }
+    },
+    "kernel_log_access": "sudo -n dmesg --level=err,warn succeeds; historical unavailable logs remain unknown",
+    "limits": [
+      "All seven extension file hashes differ between the control sets",
+      "The existing six-architecture instruction comparison covered K2 only, not the six other extension libraries",
+      "Source inventory and historical build evidence are documented in local://eplb-final-gate-diagnosis.md"
+    ]
+  },
+  "raw_archive": {
+    "path": "original-receipts.tar.gz",
+    "file_count": 463,
+    "bytes": 7697527,
+    "sha256": "3723b03b33c4e3a9b4d99cf4d91663f1d3d41bcbf5055af53bca47a145641516"
+  },
+  "b4_released": true
+}

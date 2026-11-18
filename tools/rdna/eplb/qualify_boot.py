@@ -954,6 +954,28 @@ def _cells_spec(spec: str) -> str:
     return " ".join(cell.spec for cell in report_module().parse_cells(spec))
 
 
+def _speed_regressions(receipt: dict[str, Any]) -> list[str]:
+    """Count native cell verdicts, never Markdown headings or explanatory text."""
+    speed = receipt.get("speed")
+    if (
+        not isinstance(speed, dict)
+        or not isinstance(speed.get("cells"), list)
+        or not speed["cells"]
+    ):
+        raise QualificationError("receipt.json: speed cell verdicts are missing")
+    names = []
+    for cell in speed["cells"]:
+        if (
+            not isinstance(cell, dict)
+            or not isinstance(cell.get("name"), str)
+            or cell.get("verdict") not in {"win", "regression", "none", "invalid"}
+        ):
+            raise QualificationError("receipt.json: malformed speed cell verdict")
+        if cell["verdict"] == "regression":
+            names.append(cell["name"])
+    return names
+
+
 def cmd_r1(args: argparse.Namespace) -> int:
     run = Path(args.run)
     problems = []
@@ -1071,15 +1093,11 @@ def cmd_r1(args: argparse.Namespace) -> int:
             problems.append(f"receipt gate {gate} is {verdict or 'missing'}")
     if receipt and receipt.get("ok") is not True:
         problems.append("receipt.json says ok is not true")
-    labels = []
     try:
-        receipt_md = (run / "receipt.md").read_text(errors="replace")
-    except OSError as exc:
-        problems.append(f"receipt.md: unreadable ({exc})")
-        receipt_md = ""
-    for line in receipt_md.splitlines():
-        if "REGRESSION" in line:
-            labels.append(line.strip())
+        labels = _speed_regressions(receipt)
+    except QualificationError as exc:
+        problems.append(str(exc))
+        labels = []
     (run / "speed-labels.txt").write_text(
         "\n".join(labels) + "\n" if labels else "0 REGRESSION labels\n"
     )

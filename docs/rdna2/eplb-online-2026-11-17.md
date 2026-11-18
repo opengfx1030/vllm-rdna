@@ -259,7 +259,7 @@ each, RCCL, four ranks) passed with exact sums, and later runs completed
 without reproducing the fault. Cause remains open; neither the balancer
 collective nor an unrelated hardware cause has been established.
 
-### Final qualification protocol (not yet a qualification result)
+### Final qualification protocol
 
 `tools/rdna/eplb/qualify_final.sh` runs two bounded campaigns:
 
@@ -281,3 +281,31 @@ These campaigns do not establish stationarity or resolve the historical
 PCIe incident. The base build log was not located; the reused head extensions
 come from the recorded Mono build. Record all seven extension hashes rather
 than describing this as a newly rebuilt production baseline.
+
+### Original final run (2026-11-18): R1 passes, R2 incomplete
+
+Runtime source `2ea7a364848c`, base `b56907c433`, independently built extension
+sets as recorded above. R1's six boots pass token-exact, overlap and stall
+gates; the full quality gate was **NOT RUN** (short PPL probes are separate).
+The native speed result is **3 wins, 3 regression cells, 2 no measurable
+difference**, not an all-green performance receipt. The initial wrapper's
+printed count of five matched Markdown headings/footnotes too; its counter
+has been corrected to use native JSON cell verdicts.
+
+R2 completed only A1/off and B1/chaos. Both reused 1024 of 1927 prompt tokens
+(53.1%). The legacy prefix probe failed B1 because warm TTFT 0.40 s exceeded
+half of cold TTFT 0.74 s; A1 was 0.39/0.84 s (rounded logs). B1's prefix
+failure at 08:24:35 precedes its first rebalance plan at 08:24:55. All four
+B1 measured cells overlap committed plans; mapped 3-row FULL K2 and 24-row
+module witnesses are present on all four ranks. Guards report no hardware
+faults or KFD eviction; b4 was released.
+
+The original abort and failed prefix result are retained unchanged. This is
+**not completed ABBA or EPLB qualification**. The repaired probe separates
+verified reuse from an explicitly requested latency target; the original
+ITL envelope is unchanged. A revised four-arm campaign must be identified
+separately; no failed performance label is being relabelled.
+
+Raw original receipts (463 files, caches excluded) and all seven base/head
+extension hashes: [`bench_results/2026-11-18_eplb-final/original-summary.json`](../../bench_results/2026-11-18_eplb-final/original-summary.json)
+and its linked `original-receipts.tar.gz`.
