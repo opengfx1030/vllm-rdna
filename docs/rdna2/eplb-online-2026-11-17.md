@@ -349,3 +349,26 @@ qualify R2, even if renamed as an on arm. Compare these controls with the saved
 off arms only as a later diagnostic, not a fresh ABBA or proof of causality.
 Their purpose is to separate always-on counter/map/mailbox cost from
 movement/checksum/placement cost before choosing a runtime optimization.
+
+### Vote-allocation candidate (not performance-qualified)
+
+The controller now computes the unchanged 30-bit weighted checksum with int32
+products/reduction into reusable buffers. Wrap modulo 2^32 preserves the low
+30 bits; coefficient generation still uses wide indices. Vote D2H storage
+and commit index/value tensors are also reused. All checksums, votes,
+scheduled host synchronization, fail-closed publication and routing semantics
+remain in place. Torch's reduction may still allocate internal workspace;
+this is not a claim of a completely allocation-free path or an ITL win.
+
+Isolated CPU checks pass 30 cases, including adversarial checksum wrap and
+coefficient-period boundaries, four-rank chaos, damaged-transfer rejection
+and the real planner process. The local harness executes the real ownership
+function/no-context getters without unrelated config/AITER initialization.
+Fifteen GPU cases remain unrun; actual ROCm and performance checks
+are still required. GPU replay tests now enforce strict sync checking during
+vote/commit. This candidate does not remove mapped-K2/counter overhead.
+
+User decision after the no-plan controls: finish this bounded vote-allocation
+check, keep native K2 counter fusion separate, and proceed to the v0.34 upgrade.
+EPLB stays experimental/off; neither this candidate nor the failed chaos
+campaign is a production performance qualification.
