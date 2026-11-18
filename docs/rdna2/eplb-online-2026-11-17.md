@@ -9,8 +9,9 @@ The four-hour planner soak completed 71 benchmark cells and 233 expert swaps
 without a reported KFD eviction. Its final cell was deliberately interrupted.
 The flag-off receipts pass token-exact and overlap checks, but their speed
 verdicts still contain regressions; they are not a passing speed gate.
-Mono K2 passes kernel tests, six-architecture disassembly comparison, a
-served run with 192 live swaps, and paired injection hard-stall gates.
+Mapped K2 passes kernel tests and six-architecture disassembly comparison; a
+Mono-enabled server completed 192 live swaps. The paired hard-injection gates
+exercise the modules path at 21–24 rows, not K2 (limited to eight rows).
 The mixed-size soak does not establish stationary-traffic quiescence.
 A first run ended in a PCIe fault on the box whose cause remains open.
 
@@ -120,6 +121,12 @@ collective the others do not breaks the test.
 `flashnext-mtp2` (AWQ), TP=4 on four V620 (HIP 2-5), FULL_AND_PIECEWISE, MTP2,
 2026-11-17, one boot per arm, so differences of 1 % are inside the spread.
 
+Historical zero fault-marker counts used a scanner that missed `GPU Hang` and
+`HW Exception`. Kernel-log access was unavailable: the old `0` followed by
+`n/a` is unknown, not a measured zero. Those summaries alone do not establish
+absence of faults; final qualification uses corrected recognition and
+before/after PCIe AER evidence.
+
 | | flag off | chaos swaps | planner (default) |
 |---|---|---|---|
 | ITL median 1k/512 c=1 | 22.4 ms | 22.7 ms | 22.6 ms |
@@ -134,11 +141,11 @@ collective the others do not breaks the test.
 
 - 425-445 ms is one prefill step of the injected prompt; the swaps add no gap
   on top of it.
-- The counters cost about +0.2 ms (+0.9 %) of ITL at c=1 and c=8 in every
-  cell (earlier measurement: +0.6 to +0.9 %).
+- Earlier counter measurements cost +0.8–1.0 % of ITL at c=1 and +0.3–0.6 %
+  at c=8, not +0.9 % in every cell.
 - Chaos mode (random swaps every 512 steps, no planner) is the qualification
   of the transfer: 50 plans, each 329 steps (16-30 s wall) for 8 swaps, no
-  fault.
+  reported fault.
 - In the initial short runs, the planner did nothing during the bench cells.
   During the stall probe's repetitive prompts it made 4 plans
   (32, 32, 32, 22 swaps; 44–73 s wall each, 1317 steps for 32 swaps).
@@ -160,8 +167,8 @@ The original 110-cell loop was too long for the intended four-hour window.
 | 1k/512 c=8 | 36 | 46.0 ms | 45.3–47.0 ms |
 | 16k/1k c=8 | 35 | 47.8 ms | 46.9–48.6 ms |
 
-- All 71 completed cells report zero KFD eviction deltas. No PCIe
-  completion-timeout/DPC/device-lost signature was found in the kernel log.
+- All 71 completed cells report zero KFD eviction deltas. The kernel-log
+  check was unavailable, so this run has no kernel-log no-fault receipt.
 - PPL 4.82; the prefix probe failed its ratio threshold (cold 0.74 s,
   warm 0.40 s, 1.9×), not a claim that prefix caching passed.
 - Fourteen plans completed, 233 swaps. Plan starts span step 13,056 to
@@ -242,13 +249,12 @@ gate passed. These receipts predate the Mono K2 integration.
 
 ### The first run, a PCIe fault on the box
 
-The first chaos run (same flags) ended with all four workers dead and, in the
-box's kernel log, a fatal PCIe error on the root port of the V620 switch at
-01:28:44 (completion timeout, DPC containment) that froze every card below it,
-including two that were not in the run. The server was idle: no decode step,
-so no balancer collective, was executing. Nothing else was found; a single-
-process reproduction of the balancer's int32 all-reduces (196 and 32768 words,
-9000 each, RCCL, four ranks) passed with exact sums, and the same run later
-completed twice without a fault. Cause open; it may be unrelated to this
-change. An earlier statement that the balancer's collective was the likely
-cause was wrong.
+The first chaos run ended with all four workers dead. The recorded kernel
+event was a fatal PCIe error on the V620 switch's root port at 01:28:44
+(completion timeout, DPC containment), affecting cards outside the run too.
+Application logs contain probe completions from 01:28:38 through 01:28:48,
+so the previous claim that the server was idle is unsupported. A standalone
+reproduction of the balancer's int32 all-reduces (196 and 32768 words, 9000
+each, RCCL, four ranks) passed with exact sums, and later runs completed
+without reproducing the fault. Cause remains open; neither the balancer
+collective nor an unrelated hardware cause has been established.
