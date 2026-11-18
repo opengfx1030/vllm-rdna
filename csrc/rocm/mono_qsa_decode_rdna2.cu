@@ -434,11 +434,12 @@ struct Store {
   bool dense;  // both last dims contiguous and width*esz a multiple of 16
 };
 
-__device__ __forceinline__ void store_row(const Store& s, int64_t row,
-                                          int lane, int lanes) {
+__device__ __forceinline__ void store_row(const Store& s, int64_t row, int lane,
+                                          int lanes) {
   const int64_t slot = s.slots[row];
   if (slot < 0 || slot >= s.limit) return;
-  char* dst = s.cache + (slot / s.page) * s.s_block + (slot % s.page) * s.s_token;
+  char* dst =
+      s.cache + (slot / s.page) * s.s_block + (slot % s.page) * s.s_token;
   const char* src = s.rows + row * s.r_row;
   if (s.dense) {
     const int vecs = s.width * s.esz / 16;
@@ -478,7 +479,8 @@ __global__ void __launch_bounds__(kThreads)
 Store make(const torch::Tensor& cache, const torch::Tensor& slots,
            const torch::Tensor& rows, const char* what) {
   TORCH_CHECK(cache.dim() == 4 && cache.size(2) == 1,
-              "mono_qsa_store3_rdna2: ", what, " cache must be [blocks, page, 1, W]");
+              "mono_qsa_store3_rdna2: ", what,
+              " cache must be [blocks, page, 1, W]");
   TORCH_CHECK(rows.dim() == 2 && rows.size(1) == cache.size(3),
               "mono_qsa_store3_rdna2: ", what, " rows must be [n, W]");
   TORCH_CHECK(slots.scalar_type() == torch::kInt64 && slots.dim() == 1 &&
@@ -518,8 +520,9 @@ void mono_qsa_store3_rdna2(torch::Tensor& c_cache, const torch::Tensor& c_slots,
                            const torch::Tensor& r_rows, torch::Tensor& p_cache,
                            const torch::Tensor& p_rows) {
   const int64_t n = c_rows.size(0);
-  TORCH_CHECK(r_rows.size(0) == n && p_rows.size(0) == n,
-              "mono_qsa_store3_rdna2: the three stores need the same row count");
+  TORCH_CHECK(
+      r_rows.size(0) == n && p_rows.size(0) == n,
+      "mono_qsa_store3_rdna2: the three stores need the same row count");
   if (n == 0) return;
   const at::cuda::OptionalCUDAGuard device_guard(device_of(c_cache));
   const auto c = qsa_store3::make(c_cache, c_slots, c_rows, "compressed");
@@ -561,10 +564,10 @@ struct Args {
   // compressed-key epilogue
   const half* pooled;  // [n, 128]
   int64_t pooled_row;
-  const half* weight;  // [128]
-  const half* cos_sin; // [max_pos, rotary_dim]
+  const half* weight;   // [128]
+  const half* cos_sin;  // [max_pos, rotary_dim]
   int64_t cache_row;
-  const char* pos;     // [n] or [3, n]
+  const char* pos;  // [n] or [3, n]
   int64_t pos_m, pos_t;
   int pos_esz;
   int has_mrope, sec_h, sec_w;
@@ -616,8 +619,9 @@ __global__ void __launch_bounds__(kThreads) kstore_k(Args a) {
   }
   __builtin_amdgcn_wave_barrier();
   __builtin_amdgcn_s_waitcnt(0);
-  half* dst = reinterpret_cast<half*>(a.c.cache + (slot / a.c.page) * a.c.s_block +
-                                      (slot % a.c.page) * a.c.s_token);
+  half* dst =
+      reinterpret_cast<half*>(a.c.cache + (slot / a.c.page) * a.c.s_block +
+                              (slot % a.c.page) * a.c.s_token);
   const int half_rot = a.rotary_dim / 2;
   const int64_t pt = load_pos(a, 0, row);
   const int64_t ph = a.has_mrope ? load_pos(a, 1, row) : pt;
@@ -659,22 +663,27 @@ void mono_qsa_k_store_rdna2(
     const torch::Tensor& r_rows, torch::Tensor& p_cache,
     const torch::Tensor& p_rows) {
   const int64_t n = pooled.size(0);
-  TORCH_CHECK(pooled.dim() == 2 && pooled.size(1) == qsa_kstore::kHD &&
-                  pooled.scalar_type() == torch::kHalf && pooled.stride(1) == 1,
-              "mono_qsa_k_store_rdna2: pooled must be fp16 [n, 128], dense rows");
+  TORCH_CHECK(
+      pooled.dim() == 2 && pooled.size(1) == qsa_kstore::kHD &&
+          pooled.scalar_type() == torch::kHalf && pooled.stride(1) == 1,
+      "mono_qsa_k_store_rdna2: pooled must be fp16 [n, 128], dense rows");
   TORCH_CHECK(weight.numel() == qsa_kstore::kHD &&
-                  weight.scalar_type() == torch::kHalf && weight.is_contiguous(),
+                  weight.scalar_type() == torch::kHalf &&
+                  weight.is_contiguous(),
               "mono_qsa_k_store_rdna2: weight must be fp16 [128]");
   TORCH_CHECK(cos_sin_cache.scalar_type() == torch::kHalf &&
                   cos_sin_cache.dim() == 2 && cos_sin_cache.stride(1) == 1 &&
                   cos_sin_cache.size(1) == rotary_dim,
-              "mono_qsa_k_store_rdna2: cos_sin_cache must be fp16 [max_pos, rotary_dim]");
-  TORCH_CHECK(rotary_dim > 0 && rotary_dim <= qsa_kstore::kHD && rotary_dim % 2 == 0,
-              "mono_qsa_k_store_rdna2: rotary_dim must be even and <= 128");
+              "mono_qsa_k_store_rdna2: cos_sin_cache must be fp16 [max_pos, "
+              "rotary_dim]");
+  TORCH_CHECK(
+      rotary_dim > 0 && rotary_dim <= qsa_kstore::kHD && rotary_dim % 2 == 0,
+      "mono_qsa_k_store_rdna2: rotary_dim must be even and <= 128");
   TORCH_CHECK(c_cache.scalar_type() == torch::kHalf,
               "mono_qsa_k_store_rdna2: compressed cache must be fp16");
-  TORCH_CHECK(r_rows.size(0) == n && p_rows.size(0) == n && c_slots.numel() == n,
-              "mono_qsa_k_store_rdna2: row counts must match");
+  TORCH_CHECK(
+      r_rows.size(0) == n && p_rows.size(0) == n && c_slots.numel() == n,
+      "mono_qsa_k_store_rdna2: row counts must match");
   const bool mrope = positions.dim() == 2;
   TORCH_CHECK((mrope && positions.size(0) == 3 && positions.size(1) == n) ||
                   (!mrope && positions.dim() == 1 && positions.size(0) == n),
@@ -766,7 +775,8 @@ __device__ __forceinline__ int64_t load_int(const char* p, int64_t i, int esz) {
 }
 
 template <int NL>
-__device__ __forceinline__ float dotn(const uint4 (&q)[NL], const uint4 (&k)[NL]) {
+__device__ __forceinline__ float dotn(const uint4 (&q)[NL],
+                                      const uint4 (&k)[NL]) {
   float acc[NL];
 #pragma unroll
   for (int j = 0; j < NL; ++j) {
@@ -774,7 +784,8 @@ __device__ __forceinline__ float dotn(const uint4 (&q)[NL], const uint4 (&k)[NL]
     const qsa_h2v* y = reinterpret_cast<const qsa_h2v*>(&k[j]);
     float t = 0.f;
 #pragma unroll
-    for (int i = 0; i < 4; ++i) t = __builtin_amdgcn_fdot2(x[i], y[i], t, false);
+    for (int i = 0; i < 4; ++i)
+      t = __builtin_amdgcn_fdot2(x[i], y[i], t, false);
     acc[j] = t;
   }
   float s = 0.f;
@@ -787,8 +798,12 @@ __device__ __forceinline__ float dotn(const uint4 (&q)[NL], const uint4 (&k)[NL]
 // VALU modifier; __shfl_xor lowers to an LDS ds_bpermute).
 template <int M>
 __device__ __forceinline__ float xor_dpp(float v) {
+#if defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
   return __int_as_float(__builtin_amdgcn_update_dpp(
       0, __float_as_int(v), 0x160 | M, 0xF, 0xF, false));
+#else
+  return __shfl_xor(v, M, 32);
+#endif
 }
 
 // sum over the LPK lanes of a key (rows of 16 lanes, LPK <= 16)
@@ -861,11 +876,10 @@ __global__ void __launch_bounds__(256) mqa_k(const Args a) {
       const int g = i / (kHeads * (kHD / 8));
       const int h = (i / (kHD / 8)) % kHeads;
       const int c = i % (kHD / 8);
-      s_q[g][h][c] =
-          g < gn ? *reinterpret_cast<const uint4*>(
-                       a.q + (int64_t)(row0 + g) * a.q_row +
-                       (int64_t)h * a.q_head + c * 8)
-                 : make_uint4(0, 0, 0, 0);
+      s_q[g][h][c] = g < gn ? *reinterpret_cast<const uint4*>(
+                                  a.q + (int64_t)(row0 + g) * a.q_row +
+                                  (int64_t)h * a.q_head + c * 8)
+                            : make_uint4(0, 0, 0, 0);
     }
     __syncthreads();
   } else {
@@ -877,8 +891,9 @@ __global__ void __launch_bounds__(256) mqa_k(const Args a) {
                          (int64_t)h * a.q_head + sub * 8;
 #pragma unroll
         for (int j = 0; j < NL; ++j)
-          qv[g][h][j] = g < gn ? *reinterpret_cast<const uint4*>(qp + 8 * LPK * j)
-                               : make_uint4(0, 0, 0, 0);
+          qv[g][h][j] = g < gn
+                            ? *reinterpret_cast<const uint4*>(qp + 8 * LPK * j)
+                            : make_uint4(0, 0, 0, 0);
       }
   }
   const int32_t* trow = a.table + (int64_t)sreq * a.t_req;
@@ -977,10 +992,11 @@ void mono_qsa_mqa_rdna2(const torch::Tensor& q, const torch::Tensor& k_cache,
                   q.scalar_type() == torch::kHalf && q.stride(2) == 1 &&
                   q.stride(0) % 8 == 0 && q.stride(1) % 8 == 0,
               "mono_qsa_mqa_rdna2: q must be fp16 [rows, 4, 128], dense rows");
-  TORCH_CHECK(k_cache.dim() == 4 && k_cache.size(2) == 1 && k_cache.size(3) == kHD &&
-                  k_cache.scalar_type() == torch::kHalf && k_cache.stride(3) == 1 &&
-                  k_cache.stride(0) % 8 == 0 && k_cache.stride(1) % 8 == 0,
-              "mono_qsa_mqa_rdna2: k_cache must be fp16 [pages, page, 1, 128]");
+  TORCH_CHECK(
+      k_cache.dim() == 4 && k_cache.size(2) == 1 && k_cache.size(3) == kHD &&
+          k_cache.scalar_type() == torch::kHalf && k_cache.stride(3) == 1 &&
+          k_cache.stride(0) % 8 == 0 && k_cache.stride(1) % 8 == 0,
+      "mono_qsa_mqa_rdna2: k_cache must be fp16 [pages, page, 1, 128]");
   TORCH_CHECK(page_table.scalar_type() == torch::kInt32 &&
                   token_to_req.scalar_type() == torch::kInt32 &&
                   token_to_req.is_contiguous(),
@@ -991,7 +1007,8 @@ void mono_qsa_mqa_rdna2(const torch::Tensor& q, const torch::Tensor& k_cache,
               "mono_qsa_mqa_rdna2: logits fp32 [rows, columns], visible int32");
   for (const auto* t : {&query_positions, &sequence_lengths})
     TORCH_CHECK((t->scalar_type() == torch::kInt64 ||
-                 t->scalar_type() == torch::kInt32) && t->is_contiguous(),
+                 t->scalar_type() == torch::kInt32) &&
+                    t->is_contiguous(),
                 "mono_qsa_mqa_rdna2: positions / lengths must be int32/int64");
   TORCH_CHECK(group >= 1 && group <= 4, "mono_qsa_mqa_rdna2: group in 1..4");
   // waves < 0: the same with non-temporal key loads
@@ -1000,7 +1017,9 @@ void mono_qsa_mqa_rdna2(const torch::Tensor& q, const torch::Tensor& k_cache,
   TORCH_CHECK(waves == 2 || waves == 4 || waves == 8,
               "mono_qsa_mqa_rdna2: waves in {2, 4, 8}");
   TORCH_CHECK((reinterpret_cast<uintptr_t>(q.data_ptr()) |
-               reinterpret_cast<uintptr_t>(k_cache.data_ptr())) % 16 == 0,
+               reinterpret_cast<uintptr_t>(k_cache.data_ptr())) %
+                      16 ==
+                  0,
               "mono_qsa_mqa_rdna2: q / k_cache must be 16-byte aligned");
   const int rows = (int)q.size(0);
   const int columns = (int)logits.size(1);
@@ -1053,22 +1072,38 @@ void mono_qsa_mqa_rdna2(const torch::Tensor& q, const torch::Tensor& k_cache,
     hipLaunchKernelGGL(kernel, grid, block, 0, stream, a);
     done = true;
   };
-#define MQA_L(G_, L_, U_)                                                  \
+#define MQA_L(G_, L_, U_)                                                    \
   if (!done && group == G_ && lanes_per_key == L_ && unroll == U_ && !q_lds) \
     go(mqa_k<G_, L_, U_>);
-#define MQA_Q(G_, L_, U_)                                                 \
+#define MQA_Q(G_, L_, U_)                                                   \
   if (!done && group == G_ && lanes_per_key == L_ && unroll == U_ && q_lds) \
     go(mqa_k<G_, L_, U_, true>);
 #define MQA_U(G_, L_) \
   MQA_L(G_, L_, 1) MQA_L(G_, L_, 2) MQA_L(G_, L_, 4) MQA_L(G_, L_, 8)
 #define MQA_QU(G_, L_) MQA_Q(G_, L_, 1) MQA_Q(G_, L_, 2) MQA_Q(G_, L_, 4)
-  MQA_U(1, 2) MQA_U(2, 2)
-  MQA_U(1, 4) MQA_U(2, 4) MQA_U(3, 4) MQA_U(4, 4)
-  MQA_U(1, 8) MQA_U(2, 8) MQA_U(3, 8) MQA_U(4, 8)
-  MQA_U(1, 16) MQA_U(2, 16) MQA_U(3, 16) MQA_U(4, 16)
-  MQA_QU(2, 4) MQA_QU(3, 4) MQA_QU(4, 4)
-  MQA_QU(2, 8) MQA_QU(3, 8) MQA_QU(4, 8)
-  MQA_QU(2, 16) MQA_QU(3, 16) MQA_QU(4, 16)
+  MQA_U(1, 2);
+  MQA_U(2, 2);
+  MQA_U(1, 4);
+  MQA_U(2, 4);
+  MQA_U(3, 4);
+  MQA_U(4, 4);
+  MQA_U(1, 8);
+  MQA_U(2, 8);
+  MQA_U(3, 8);
+  MQA_U(4, 8);
+  MQA_U(1, 16);
+  MQA_U(2, 16);
+  MQA_U(3, 16);
+  MQA_U(4, 16);
+  MQA_QU(2, 4);
+  MQA_QU(3, 4);
+  MQA_QU(4, 4);
+  MQA_QU(2, 8);
+  MQA_QU(3, 8);
+  MQA_QU(4, 8);
+  MQA_QU(2, 16);
+  MQA_QU(3, 16);
+  MQA_QU(4, 16);
 #undef MQA_QU
 #undef MQA_U
 #undef MQA_Q
@@ -1107,7 +1142,7 @@ constexpr int kThreads = 6 * 32;
 struct Args {
   const half* qk;  // [n, 5*128]: q heads, then k
   int64_t qk_row;
-  half* q_out;     // [n, 4, 128] contiguous
+  half* q_out;  // [n, 4, 128] contiguous
   const half* q_w;
   const half* k_w;
   float q_eps, k_eps, beta;
@@ -1120,8 +1155,8 @@ struct Args {
   const int32_t* state_table;  // [reqs, >= 1]
   int64_t st_req;
   const int32_t* t2r;
-  const int32_t* qsl;          // [reqs + 1]
-  const int64_t* end_pos;      // logical positions [n]
+  const int32_t* qsl;      // [reqs + 1]
+  const int64_t* end_pos;  // logical positions [n]
   int requests, ratio;
   qsa_store3::Store c;  // compressed key cache, c.slots
   qsa_store3::Store r;  // raw key ring (r.slots = raw slots)
@@ -1136,12 +1171,9 @@ __device__ __forceinline__ int64_t ld_pos(const Args& a, int m, int64_t t) {
 }
 
 // norm + RoPE of one 128-wide head held as v[j] = x[lane + 32 j] (one wave).
-__device__ __forceinline__ void norm_rope_store(const Args& a, float (&v)[4],
-                                                const half* w, float eps,
-                                                int64_t pt, int64_t ph,
-                                                int64_t pw, float* s_x,
-                                                half* dst, int64_t dst_dim,
-                                                int lane) {
+__device__ __forceinline__ void norm_rope_store(
+    const Args& a, float (&v)[4], const half* w, float eps, int64_t pt,
+    int64_t ph, int64_t pw, float* s_x, half* dst, int64_t dst_dim, int lane) {
   float ss = 0.0f;
 #pragma unroll
   for (int j = 0; j < 4; ++j) ss += v[j] * v[j];
@@ -1287,7 +1319,8 @@ __global__ void __launch_bounds__(kThreads) epi_k(Args a) {
 qsa_store3::Store geom(const torch::Tensor& cache, const torch::Tensor& slots,
                        int64_t n, const char* what) {
   TORCH_CHECK(cache.dim() == 4 && cache.size(2) == 1,
-              "mono_qsa_epilogue_rdna2: ", what, " cache must be [blocks, page, 1, W]");
+              "mono_qsa_epilogue_rdna2: ", what,
+              " cache must be [blocks, page, 1, W]");
   TORCH_CHECK(slots.scalar_type() == torch::kInt64 && slots.dim() == 1 &&
                   slots.size(0) >= n && slots.is_contiguous(),
               "mono_qsa_epilogue_rdna2: ", what, " slots must be int64 [>= n]");
@@ -1313,9 +1346,9 @@ void mono_qsa_epilogue_rdna2(
     int64_t rotary_dim, int64_t mrope_h, int64_t mrope_w,
     const torch::Tensor& state_table, const torch::Tensor& token_to_req,
     const torch::Tensor& query_start_loc, const torch::Tensor& end_positions,
-    int64_t compress_ratio, torch::Tensor& c_cache, const torch::Tensor& c_slots,
-    torch::Tensor& r_cache, const torch::Tensor& r_slots,
-    torch::Tensor& p_cache) {
+    int64_t compress_ratio, torch::Tensor& c_cache,
+    const torch::Tensor& c_slots, torch::Tensor& r_cache,
+    const torch::Tensor& r_slots, torch::Tensor& p_cache) {
   using namespace qsa_epi;
   const int64_t n = qk.size(0);
   TORCH_CHECK(qk.dim() == 2 && qk.size(1) == (kHeads + 1) * kHD &&
@@ -1328,11 +1361,11 @@ void mono_qsa_epilogue_rdna2(
     TORCH_CHECK(w->numel() == kHD && w->scalar_type() == torch::kHalf &&
                     w->is_contiguous(),
                 "mono_qsa_epilogue_rdna2: norm weights must be fp16 [128]");
-  TORCH_CHECK(cos_sin_cache.scalar_type() == torch::kHalf &&
-                  cos_sin_cache.dim() == 2 && cos_sin_cache.stride(1) == 1 &&
-                  cos_sin_cache.size(1) == rotary_dim && rotary_dim % 2 == 0 &&
-                  rotary_dim > 0 && rotary_dim <= kHD,
-              "mono_qsa_epilogue_rdna2: cos_sin_cache fp16 [max_pos, rotary_dim]");
+  TORCH_CHECK(
+      cos_sin_cache.scalar_type() == torch::kHalf && cos_sin_cache.dim() == 2 &&
+          cos_sin_cache.stride(1) == 1 && cos_sin_cache.size(1) == rotary_dim &&
+          rotary_dim % 2 == 0 && rotary_dim > 0 && rotary_dim <= kHD,
+      "mono_qsa_epilogue_rdna2: cos_sin_cache fp16 [max_pos, rotary_dim]");
   const bool mrope = positions.dim() == 2;
   TORCH_CHECK((mrope && positions.size(0) == 3 && positions.size(1) == n) ||
                   (!mrope && positions.dim() == 1 && positions.size(0) == n),
@@ -1344,14 +1377,16 @@ void mono_qsa_epilogue_rdna2(
                   token_to_req.scalar_type() == torch::kInt32 &&
                   query_start_loc.scalar_type() == torch::kInt32 &&
                   end_positions.scalar_type() == torch::kInt64 &&
-                  token_to_req.is_contiguous() && query_start_loc.is_contiguous() &&
+                  token_to_req.is_contiguous() &&
+                  query_start_loc.is_contiguous() &&
                   end_positions.is_contiguous() && token_to_req.numel() >= n &&
                   end_positions.numel() >= n,
               "mono_qsa_epilogue_rdna2: metadata dtypes/shapes");
   TORCH_CHECK(c_cache.scalar_type() == torch::kHalf &&
                   r_cache.scalar_type() == torch::kHalf &&
-                  p_cache.scalar_type() == torch::kInt64 && p_cache.size(3) == 3 &&
-                  c_cache.size(3) == kHD && r_cache.size(3) == kHD &&
+                  p_cache.scalar_type() == torch::kInt64 &&
+                  p_cache.size(3) == 3 && c_cache.size(3) == kHD &&
+                  r_cache.size(3) == kHD &&
                   r_cache.size(1) == p_cache.size(1) &&
                   r_cache.size(1) >= compress_ratio && compress_ratio > 0,
               "mono_qsa_epilogue_rdna2: cache layouts");

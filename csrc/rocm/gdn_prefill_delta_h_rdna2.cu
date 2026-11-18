@@ -339,6 +339,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
 // 16-lane row, so inside each group of 8). Every lane ends with the same sum
 // because a + b == b + a bitwise, exactly as with the shuffle version.
 __device__ __forceinline__ float gdn_ksum_dpp(float x) {
+#if defined(__GFX10__) || defined(__GFX11__) || defined(__GFX12__)
   x += __int_as_float(
       __builtin_amdgcn_update_dpp(0, __float_as_int(x), 0xB1, 0xF, 0xF, false));
   x += __int_as_float(
@@ -346,6 +347,9 @@ __device__ __forceinline__ float gdn_ksum_dpp(float x) {
   x += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(x), 0x164,
                                                   0xF, 0xF, false));
   return x;
+#else
+  return gdn_ksum(x);
+#endif
 }
 
 // Latency-hiding variant of gdn_prefill_delta_h_packed_kernel. Same recurrence,

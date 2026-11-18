@@ -1006,6 +1006,9 @@ EPLB-online or RAM-prefetch study runtime changes. Production remains on
 - Retain the gfx1030 FP16 wvSplitK refusal in the new launcher translation
   unit. Move fork-only skinny GEMV/MoE implementations into their own
   translation unit, not a shared header compiled repeatedly upstream.
+- Gate GFX10+ DPP row-XOR instructions in GDN prefill and monolithic QSA
+  decode per device architecture. Older targets use the equivalent shuffle
+  tree; the RDNA instruction path is unchanged.
 - `VLLM_RDNA_DENSE_GEMV` is removed: gfx1030 FP16 decode already selects the
   native GEMV unconditionally. Setting the obsolete variable now gives a
   migration error.
@@ -1027,5 +1030,10 @@ runtime correctness on architectures without hardware.
 Flash-Next MTP2 and HI2 merged-head gates must run on b4 with
 `FULL_AND_PIECEWISE`, real requests after the first replay, quality,
 prefix-cache and concurrency checks. The explicit-KV recipes do not qualify
-upstream's new `KV=auto` extensible-cache path. No v0.34 native-build,
-runtime or performance result is claimed in this section yet.
+upstream's new `KV=auto` extensible-cache path.
+
+The first six-architecture build stopped on GFX10-only `row_xmask` controls
+in the GDN prefill and monolithic QSA translation units while compiling
+older targets. Those helpers now have shuffle fallbacks; the native-build
+rerun and model-runtime gates remain pending. No performance result is
+claimed.
