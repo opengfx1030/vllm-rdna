@@ -2,6 +2,14 @@
   "source_commit": "0577aafba2bc09c074a2d2cc1721a9f232412bbe",
   "analysis_commit": "20d601c98679e7972c7168fe6b56ed44435af348",
   "kernel_sha256": "6945bd8cf54fb787784f8436405c2b0ac3e1f34410ed0fadce2e409da1cc0c32",
+  "monokernel_all_arms": true,
+  "extension_provenance": {
+    "kind": "Prebuilt Mono/EPLB extension set reused by every arm",
+    "rocm_C_md5": "7767169d3645837dd3b31cba0b6a0754",
+    "cpp_source_content_matches": "e315534d3d1a467ffeb86bf0e8b3037e6401d3f4",
+    "build_log": "/home/chenco_adm/w4a8_runs/eplb-online/build_mono.log",
+    "comparison_scope": "Matched resident-mode versus cached-mode control under shared extensions, not a clean production-binary b56907c433 control"
+  },
   "remote_root": "/home/chenco_adm/w4a8_runs/ram10/matrix-r1",
   "raw_files": {
     "resident-r1/metadata.json": {

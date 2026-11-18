@@ -180,6 +180,11 @@ requests or unexpected output lengths before replay.
 [raw receipts](../../../bench_results/2026-11-17_tp4-ram10/matrix-r1/) and
 [source/kernel/receipt manifest](../../../bench_results/2026-11-17_tp4-ram10/matrix-manifest.json).
 
+Every arm enabled Mono and reused the same prebuilt Mono/EPLB extension set
+(C++ source content matches `e315534d3d`; the actual kernel hash is recorded).
+R is a matched resident-mode control under those libraries, not a clean
+`b56907c433` production-binary control.
+
 All four arms passed the short quality, prefix-cache and concurrency probes;
 all 24 timing cells were valid. D/Z reduced cache payload, but neither beat R
 on output throughput or KV capacity. The cached backend used a larger graph

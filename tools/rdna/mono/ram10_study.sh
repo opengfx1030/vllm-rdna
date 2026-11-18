@@ -510,7 +510,7 @@ run_cell() {
     span=$((le - ls))
     if ((span > 0)); then
         faults=$(tail -n +$((ls + 1)) "$OUT/serve.log" | head -n "$span" |
-            grep -acE 'Memory Fault|HSA_STATUS_ERROR|page fault|Segmentation fault|core dumped' || true)
+            grep -acE 'Memory Fault|HSA_STATUS_ERROR|page fault|Segmentation fault|core dumped|GPU Hang|HW Exception' || true)
         [[ -n $faults ]] || faults=0
     else
         faults=0

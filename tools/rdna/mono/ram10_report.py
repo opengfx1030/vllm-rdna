@@ -43,6 +43,7 @@ POOL_RE = re.compile(
 PPL_RE = re.compile(r"\bPPL\s+([0-9]+(?:\.[0-9]+)?)")
 FAULT_RE = re.compile(
     r"Memory Fault|HSA_STATUS_ERROR|page fault|Segmentation fault|core dumped"
+    r"|GPU Hang|HW Exception"
 )
 PREEMPT_RE = re.compile(
     r"^vllm:num_preemptions(?:_total)?(?:\{[^}]*\})?\s+([0-9.eE+]+)\s*$", re.M
@@ -1525,6 +1526,12 @@ def _selftest() -> int:
         "p99_itl_ms": 0.0,
     }
     with tempfile.TemporaryDirectory(prefix="ram10-report-") as tmp:
+        fault_probe = Path(tmp) / "fault-probe.log"
+        for signal in ("GPU Hang", "HW Exception"):
+            fault_probe.write_text(signal + "\n", encoding="utf-8")
+            assert (
+                parse_serve(fault_probe, Path(tmp) / "summary.txt")["boot_faults"] == 1
+            )
 
         def write_cell(
             path: Path,
