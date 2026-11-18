@@ -108,7 +108,18 @@ if [[ ${STALL_PROBE:-0} == 1 && ${STALL_ITER_LOG:-1} == 1 ]]; then
 fi
 
 log "boot TREE=$SERVE_TREE RECIPE=$RECIPE MODEL=$MODEL GPUS=$GPUS PORT=$PORT overrides=$* bench_extra=${BENCH_EXTRA:-}"
-dmesg_before=$(sudo -n dmesg 2>/dev/null | wc -l || echo 0)
+# Kernel-log line count for the before/after fault count. `sudo -n` never
+# prompts and only reads; a denied read leaves the count unknown ("n/a" in the
+# summary), never zero.
+dmesg_readable=0
+dmesg_before=0
+if dmesg_first=$(sudo -n dmesg 2>/dev/null); then
+    dmesg_readable=1
+    if [[ -n $dmesg_first ]]; then
+        dmesg_before=$(printf '%s\n' "$dmesg_first" | wc -l | tr -d ' ')
+    fi
+fi
+unset dmesg_first
 # BOOT_LOCK=/path serializes boots across concurrent drivers (two boots at
 # once have stalled on this box): held from launch until the server answers
 # or the boot fails, never inherited by the server (9>&-).
@@ -179,8 +190,8 @@ quiet_lock_wait() {
     t_lock=$(date +%s)
     while ! flock -n "$BOOT_LOCK" true 2>/dev/null; do
         if (( $(date +%s) - t_lock > ${QUIET_LOCK_WAIT:-600} )); then
-            log "$BOOT_LOCK is still held: measuring anyway"
-            return 0
+            log "$BOOT_LOCK is still held: refusing a measured window"
+            exit 3
         fi
         log "$BOOT_LOCK is held (a boot is in flight): waiting"
         sleep "${QUIET_POLL:-30}"
@@ -414,8 +425,16 @@ log "$(evict --since "$OUT/evicted-ready.json" | sed 's/^evicted_ms/evicted_ms s
 log "markers:"
 grep -aoE "Using [A-Za-z0-9_]+(MoEMethod|LinearKernel|Kernel)[^\"]*|Selected [A-Za-z0-9_]+ |rdna_ar: [a-z]+[^\"]{0,60}|Using [A-Z_]+ backend[^\"]{0,40}|VLLM_USE_RDNA2_FA=1[^\"]{0,40}|qwen_gdn_full_forward[^\"]{0,30}|Initialized AMD PLE embedding[^\"]{0,120}|Model loading took[^\"]{0,60}|Available KV cache memory[^\"]{0,40}|GPU KV cache size[^\"]{0,40}|Maximum concurrency[^\"]{0,60}|Captur[a-z]+ [^\"]{0,60}took[^\"]{0,30}|WNA16 MoE backend[^\"]{0,60}|Mxfp4 MoE backend[^\"]{0,60}" \
     "$OUT/serve.log" | sort | uniq -c | sort -rn | head -40 | sed 's/^/    /' | tee -a "$SUM"
-faults=$(grep -acE "Memory Fault|HSA_STATUS_ERROR|page fault|Segmentation fault|core dumped" "$OUT/serve.log")
+faults=$(grep -acE "Memory Fault|HSA_STATUS_ERROR|page fault|Segmentation fault|core dumped|GPU Hang|HW Exception" "$OUT/serve.log")
 log "fault markers in serve.log: $faults"
-dmesg_new=$(sudo -n dmesg 2>/dev/null | tail -n +$((dmesg_before + 1)) | grep -iE "amdgpu.*(fault|timeout|reset)|UTCL2|AER|Hardware Error" | grep -vc "uses VM inv eng" || echo "n/a")
+dmesg_new="n/a"
+if (( dmesg_readable )) && dmesg_last=$(sudo -n dmesg 2>/dev/null); then
+    dmesg_new=$(printf '%s\n' "$dmesg_last" | awk -v before="$dmesg_before" '
+        NR > before && tolower($0) ~ /amdgpu.*(fault|timeout|reset)|utcl2|aer|hardware error/ &&
+        $0 !~ /uses VM inv eng/ { count++ }
+        END { print count + 0 }
+    ')
+fi
+unset dmesg_last
 log "new amdgpu dmesg faults: $dmesg_new"
 log "done"

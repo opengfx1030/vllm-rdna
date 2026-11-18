@@ -1,0 +1,54 @@
+{
+  "date": "2026-11-17",
+  "kind": "CPU routing-trace replay; not GPU or ITL measurement",
+  "decision": "Do not implement the evaluated predictor: ordinary caching wins at equal slot capacity",
+  "trace": {
+    "source": "expert-stats-t10b/optimized-rank-0.trace.npz",
+    "sha256": "1cd218f08522665338ae4b13aae3e76d0f071ba0f0e5a760ca04836ac27903b0",
+    "layers": [0, 12, 24, 36, 47],
+    "decode_calls_per_layer": 5242,
+    "ranks": 4,
+    "routing": "One recorded global router trace filtered to four local expert ranges; not independent rank records",
+    "local_experts": 128,
+    "expert_payload_bytes": 2553600
+  },
+  "ordinary_cache": [
+    {"slots": 48, "hits": 1971550, "misses": 621025, "demand_bytes": 1585849440000},
+    {"slots": 56, "hits": 2119934, "misses": 472641, "demand_bytes": 1206936057600},
+    {"slots": 64, "hits": 2240263, "misses": 352312, "demand_bytes": 899663923200}
+  ],
+  "verified_predictive_model": {
+    "predictor": "Past-only transition between consecutive sampled layers",
+    "mode": "Separate reserved cache rows with persistent hits and extra compute passes; not the production cache",
+    "demand_slots": 48,
+    "reserved_slots": 8,
+    "demand_misses": 538028,
+    "prediction_candidates": 670644,
+    "prediction_true_positives": 409122,
+    "candidates_already_resident": 669667,
+    "prefetch_issued": 977,
+    "prefetch_bytes": 2494867200,
+    "prefetch_evicted_unused": 247,
+    "prefetch_wasted_bytes": 630739200,
+    "total_copy_bytes": 1376403168000,
+    "hypothetical_extra_VRAM_bytes_per_rank_across_48_layers": 980582400
+  },
+  "verification": {
+    "deterministic_replay_selfchecks_passed": 9,
+    "ordinary_control": "Actual ExpertCachePolicy, lfu_lru, decay_interval=128",
+    "baseline_matches_prior_replay": true,
+    "parent_reran_selected_prediction": true,
+    "retained_local_commands": [
+      ".tmp/prefetch-study/venv/bin/python .tmp/prefetch-study/scripts/equal_vram_control.py",
+      "replay_prefetch.simulate(trace, 'transition', 'reserved', 8, 48)"
+    ]
+  },
+  "limits": [
+    "Five sampled layers, not a full 48-layer or steady-workload qualification",
+    "All calls retained; no held-out workload or warmup-excluded result",
+    "Copy landing uses historical optimistic timing proxies, not current-device H2D measurements",
+    "No concurrent-transfer, p99 ITL, GPU scheduling or quality measurement",
+    "No live EPLB plus offload integration",
+    "Experimental replay scripts and input data retained locally, not shipped in this commit"
+  ]
+}

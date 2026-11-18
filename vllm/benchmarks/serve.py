@@ -1318,6 +1318,7 @@ async def benchmark(
     if isinstance(metrics, BenchmarkMetrics):
         result = {
             "duration": benchmark_duration,
+            "benchmark_start_time_monotonic": benchmark_start_time,
             "completed": metrics.completed,
             "failed": metrics.failed,
             "total_input_tokens": metrics.total_input,
@@ -1342,6 +1343,7 @@ async def benchmark(
     else:
         result = {
             "duration": benchmark_duration,
+            "benchmark_start_time_monotonic": benchmark_start_time,
             "completed": metrics.completed,
             "total_input_tokens": metrics.total_input,
             "total_input_sequences": metrics.total_input_sequences,

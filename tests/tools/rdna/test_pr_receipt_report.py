@@ -254,7 +254,7 @@ def test_parse_summary():
     assert log.died_in == "bench-16384x1024-c1"
     assert log.hook == "rc=0 PASS pr_receipt hook"
     assert log.evicted_since_ready == "INVALID"
-    assert (log.fault_markers, log.dmesg_faults, log.finished) == (2, "0", True)
+    assert (log.fault_markers, log.dmesg_faults, log.finished) == (2, "unknown", True)
     assert log.markers == [
         "5 Using WNA16 MoE backend for flash-next",
         "12 Captured 51 graphs took 12.5 s",
@@ -265,6 +265,14 @@ def test_parse_summary():
 def test_parse_summary_boot_failure():
     log = rep.parse_summary("[10:00:00] boot X\n[10:30:00] BOOT FAILED after 1800s\n")
     assert log.boot_failed and log.ready_s is None and not log.finished
+
+
+def test_parse_summary_keeps_a_denied_kernel_log_unknown():
+    # The old summary printed a count and then "n/a" when dmesg was denied.
+    log = rep.parse_summary(
+        "[10:09:03] new amdgpu dmesg faults: 0\nn/a\n[10:09:04] done\n"
+    )
+    assert log.dmesg_faults == "unknown" and log.finished
 
 
 # ---------------------------------------------------------------- run fixtures
@@ -852,6 +860,59 @@ def test_a_failed_boot_fails_the_run(tmp_path):
     assert rep.main(["boot", str(run), "B1", "head", "speed", "boots/B1", "rc=1"]) == 0
     result = rep.build_receipt(run)
     assert result["boot_failures"] == ["B1"] and result["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "amd-smi: HW Exception by GPU node-1 (Agent Handle: 0x1234)",
+        "amdgpu: GPU Hang detected, ring gfx_0.0.0 timeout",
+        "HIP error: Memory Fault on device 2",
+    ],
+)
+def test_a_fault_line_in_the_server_log_fails_the_run(tmp_path, line):
+    # A summary that still says "0" must not hide the fault in serve.log.
+    run = quality_run(tmp_path)
+    (run / "boots" / "B1" / "serve.log").write_text(f"INFO serving\n{line}\n")
+    receipt = rep.build_receipt(run)
+    assert rep.reported_faults(receipt["_boots"][1]) == 1
+    assert receipt["boot_failures"] == ["B1"] and receipt["ok"] is False
+    assert rep.main(["report", str(run)]) == 1
+    assert "FAILED: B1" in (run / "receipt.md").read_text()
+
+
+def test_a_healthy_server_log_is_not_a_fault(tmp_path):
+    run = quality_run(tmp_path)
+    (run / "boots" / "B1" / "serve.log").write_text(
+        "INFO [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.00\n"
+        "INFO [api_server.py:1] POST /v1/completions 200 OK\n"
+    )
+    receipt = rep.build_receipt(run)
+    assert rep.reported_faults(receipt["_boots"][1]) == 0
+    assert receipt["boot_failures"] == [] and receipt["ok"] is True
+
+
+def test_an_unreadable_kernel_log_is_unknown_not_zero(tmp_path):
+    log = rep.parse_summary(
+        "[10:09:02] fault markers in serve.log: 0\n"
+        "[10:09:03] new amdgpu dmesg faults: n/a\n"
+    )
+    assert log.dmesg_faults == "unknown"
+    run = quality_run(tmp_path)
+    summary = run / "boots" / "B1" / "summary.txt"
+    summary.write_text(
+        summary.read_text().replace(
+            "[10:09:03] new amdgpu dmesg faults: 0",
+            "[10:09:03] new amdgpu dmesg faults: n/a",
+        )
+    )
+    boot = rep.load_boots(run, json.loads((run / "manifest.json").read_text()))[1]
+    row = next(
+        line
+        for line in rep.health_markdown([boot]).splitlines()
+        if line.startswith("| B1 ")
+    )
+    assert [c.strip() for c in row.strip("|").split("|")][-2] == "unknown"
 
 
 def test_cells_command_prints_the_default_list(capsys):

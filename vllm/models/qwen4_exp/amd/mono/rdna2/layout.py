@@ -4,16 +4,22 @@
 per-device workspace, the rdna_ar attach for the in-kernel all-reduce and the
 graph-mode helper shared by the parts."""
 
+from typing import Any
+
 import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.rdna_eplb_stats import (
+    ENABLED as EPLB_STATS_ENABLED,
+)
 
 from . import OPTS
 
 logger = init_logger(__name__)
 
 MAX_ROWS = 24  # widest batch K1 / K2 are built for
+TOP_K = 10  # routed experts per row (the kernel's kTopK)
 _WORKSPACES: dict[tuple[int, str], torch.Tensor] = {}
 _AR_MAX: dict[int, int] = {}  # per device: rdna_ar slot bytes once attached
 ZEROS: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -47,6 +53,24 @@ MODES: set[str] = set()
 def set_modes() -> None:
     MODES.clear()
     MODES.update(x.strip() for x in str(OPTS.k2_modes).split(",") if x.strip())
+
+
+def map_mode() -> bool:
+    """Whether K2 takes the expert placement as data (decided once per layer).
+
+    In map mode K2 resolves a routed global id through the layer's live
+    ``expert_map`` (any placement of the rank's experts: a rebalancer rewrites
+    map and weight rows in place, and a captured graph holds the addresses
+    only) and writes the routed ids for the load counters, instead of standing
+    down to the modules. Today: the EPLB load counters are on."""
+    return EPLB_STATS_ENABLED
+
+
+def op_takes_map() -> bool:
+    """Whether the built ``_rocm_C::mono_k2_rdna2`` has the ``expert_map`` and
+    ``ids_out`` arguments (an older extension build does not)."""
+    schema = torch.ops._rocm_C.mono_k2_rdna2.default._schema
+    return {"expert_map", "ids_out"} <= {a.name for a in schema.arguments}
 
 
 def workspace(device: torch.device, scope: str = "model") -> torch.Tensor:
@@ -157,6 +181,12 @@ class MonoLayer:
         self.k1_reason = ""
         self.hc_ok = False
         self.dense_mtp = False
+        # map mode (see map_mode): set by _setup_map
+        self.map_mode = False
+        # the layer's routed experts: live expert_map, counters
+        self.experts: Any = None
+        # int32 [MAX_ROWS, TOP_K]: routed global ids K2 writes
+        self.ids_out: Any = None
         self._dense_layout_logged = False
         self._dense_call_logged = False
         self.reason = ""
@@ -325,7 +355,9 @@ class MonoLayer:
             raise ValueError("expert parallelism (expert_map) required")
         loc = (emap >= 0).nonzero().flatten()
         base = int(loc[0]) if loc.numel() else -1
-        if loc.numel() != local_experts or not torch.equal(
+        if map_mode():
+            self._setup_map(experts, emap, loc, local_experts, router)
+        elif loc.numel() != local_experts or not torch.equal(
             emap[base : base + local_experts].cpu(),
             torch.arange(local_experts, dtype=emap.dtype),
         ):
@@ -382,6 +414,40 @@ class MonoLayer:
                     ),
                     torch.zeros(MAX_ROWS, 4, dtype=torch.float16, device=router.device),
                 )
+
+    def _setup_map(self, experts, emap, loc, local_experts, router) -> None:
+        """Map mode: K2 reads the layer's live ``expert_map`` at every launch, so
+        any placement of the rank's experts runs. What stays fixed is checked
+        here once: the local count and the slot ids, each used once."""
+        if self.expert_cache is not None:
+            raise ValueError("expert cache layers stay on the modules in map mode")
+        if not op_takes_map():
+            raise ValueError(
+                "_rocm_C was built without mono_k2_rdna2 expert_map / ids_out"
+            )
+        if (
+            emap.dtype != torch.int32
+            or emap.numel() != router.shape[0]
+            or not emap.is_contiguous()
+            or emap.device != router.device
+        ):
+            raise ValueError(
+                "expert_map must be a contiguous int32 tensor, one entry per "
+                "global expert, on the router's device"
+            )
+        if loc.numel() != local_experts or not torch.equal(
+            emap[loc].sort().values.cpu(),
+            torch.arange(local_experts, dtype=emap.dtype),
+        ):
+            raise ValueError(
+                f"expert_map must hold {local_experts} local slots, "
+                f"0..{local_experts - 1} once each"
+            )
+        self.map_mode = True
+        self.experts = experts
+        self.ids_out = torch.zeros(
+            (MAX_ROWS, TOP_K), dtype=torch.int32, device=router.device
+        )
 
     def _setup_dense_mtp(self, layer, hc, experts, mlp) -> None:
         """Resolve the MTP-only unquantized FP16 expert layout for K2."""

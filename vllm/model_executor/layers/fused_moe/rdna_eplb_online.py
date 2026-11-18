@@ -135,6 +135,11 @@ class OnlineConfig:
     def __post_init__(self) -> None:
         if self.mailbox_steps < 1 or self.chunk_every < 1 or self.decision_steps < 1:
             raise ValueError("online EPLB step counts must be >= 1")
+        if self.chunk_every % self.mailbox_steps == 0:
+            raise ValueError(
+                f"{CHUNK_EVERY_ENV} must leave transfer steps outside "
+                f"{MAILBOX_ENV}; every transfer step would be a mailbox step"
+            )
         if not 1 <= self.chunk_kb <= 4096:
             raise ValueError(f"{CHUNK_ENV} must be 1..4096, got {self.chunk_kb}")
         if not 1 <= self.max_swaps <= 1024:
@@ -350,12 +355,27 @@ class OnlineEplb:
         )
         self._mail = torch.zeros_like(self._mail_host, device=device)
         self._vote = torch.zeros(VOTE_WORDS, dtype=torch.int32, device=device)
+        self._vote_host = torch.empty(
+            VOTE_WORDS,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=device.type == "cuda",
+        )
+        self._pair = torch.empty(2, dtype=torch.int64, device=device)
+        self._pair_host = torch.empty(2, dtype=torch.int64, device="cpu")
+        self._slots = torch.empty(2, dtype=torch.int32, device=device)
+        self._slots_host = torch.empty(2, dtype=torch.int32, device="cpu")
+        self._owners = torch.empty(2, dtype=torch.uint8, device=device)
+        self._owners_host = torch.empty(2, dtype=torch.uint8, device="cpu")
         self._chunk = torch.zeros(2 * cfg.chunk_words, dtype=torch.int32, device=device)
         self._send = torch.zeros(max_words, dtype=torch.int32, device=device)
         self._recv = torch.zeros(max_words, dtype=torch.int32, device=device)
-        self._check = (
-            torch.arange(max_words, dtype=torch.int64, device=device) % CHECK_MOD + 1
-        )
+        # Generate wide indices before narrowing the bounded coefficients.
+        self._check = torch.arange(max_words, dtype=torch.int64, device=device)
+        self._check.remainder_(CHECK_MOD).add_(1)
+        self._check = self._check.to(torch.int32)
+        self._products = torch.empty(max_words, dtype=torch.int32, device=device)
+        self._checksum_sum = torch.empty((), dtype=torch.int32, device=device)
         self._rng = np.random.default_rng(cfg.chaos_seed)
         if self.rank == 0 and self._error is None and not cfg.chaos:
             self._start_planner()
@@ -468,9 +488,10 @@ class OnlineEplb:
                 self._outbox = None
         if self._error is not None:
             message[M_ERRORS] = 1
-        self._mail.copy_(self._mail_host)
-        out = self._reduce(self._mail)
+        # The scheduled mailbox handshake deliberately synchronizes the host.
         with gpu_sync_allowed():
+            self._mail.copy_(self._mail_host)
+            out = self._reduce(self._mail)
             result = out.cpu().numpy()
         if result[M_ERRORS] != 0:
             self._disable(f"{int(result[M_ERRORS])} rank(s) reported an error")
@@ -498,10 +519,11 @@ class OnlineEplb:
         self.plans += 1
         if self.rank == 0:
             logger.info(
-                "Online EPLB: plan %d at step %d, %d swap(s)",
+                "Online EPLB: plan %d at step %d, %d swap(s) monotonic=%.9f",
                 self._plan_seq,
                 self.t,
                 count,
+                self._plan_wall,
             )
 
     def _encode(self, swaps: list[tuple[int, int, int]]) -> np.ndarray | None:
@@ -600,9 +622,17 @@ class OnlineEplb:
             self._recv[lo:hi].copy_(out[n:] if first else out[:n])
         swap.done = hi
 
-    def _checksum(self, buffer: torch.Tensor, words: int) -> torch.Tensor:
-        total = (buffer[:words].to(torch.int64) * self._check[:words]).sum()
-        return (total & CHECK_MASK).to(torch.int32).view(1)
+    def _checksum_into(
+        self, buffer: torch.Tensor, words: int, out: torch.Tensor
+    ) -> None:
+        # int32 wrap preserves the low 30 bits of the original weighted int64 sum.
+        # Reuse caller storage; torch's reduction may still use internal workspace.
+        torch.mul(buffer[:words], self._check[:words], out=self._products[:words])
+        torch.sum(
+            self._products[:words], dim=0, dtype=torch.int32, out=self._checksum_sum
+        )
+        self._checksum_sum.bitwise_and_(CHECK_MASK)
+        out.copy_(self._checksum_sum)
 
     def _vote_and_commit(self, swap: Swap) -> None:
         vote = self._vote
@@ -612,13 +642,14 @@ class OnlineEplb:
             vote[V_READY : V_READY + 1].fill_(1)
             sent = V_SENT_A if first else V_SENT_B
             got = V_GOT_B if first else V_GOT_A
-            vote[sent : sent + 1].copy_(self._checksum(self._send, swap.words))
-            vote[got : got + 1].copy_(self._checksum(self._recv, swap.words))
+            self._checksum_into(self._send, swap.words, vote[sent : sent + 1])
+            self._checksum_into(self._recv, swap.words, vote[got : got + 1])
         if self._error is not None:
             vote[V_ERRORS : V_ERRORS + 1].fill_(1)
         out = self._reduce(vote)
         with gpu_sync_allowed():
-            result = out.cpu().numpy()
+            self._vote_host.copy_(out)
+            result = self._vote_host.numpy()
             passed = (
                 result[V_READY] == 2
                 and result[V_SENT_A] == result[V_GOT_A]
@@ -632,19 +663,23 @@ class OnlineEplb:
         self._xfer = None
         self.committed += 1
         if not self._queue and self.rank == 0:
+            end = time.monotonic()
             logger.info(
-                "Online EPLB: plan %d done, %d swap(s) in %d steps (%.1f s)",
+                "Online EPLB: plan %d done, %d swap(s) in %d steps (%.1f s) "
+                "monotonic=%.9f",
                 self._plan_seq,
                 self._plan_swaps,
                 self.t - self._plan_t0,
-                time.monotonic() - self._plan_wall,
+                end - self._plan_wall,
+                end,
             )
 
     def _commit(self, swap: Swap) -> None:
         """The vote passed on every rank: rewrite the slots and the maps in place."""
         layer = self.layers[swap.layer]
-        device = self._vote.device
-        pair = torch.tensor([swap.a, swap.b], dtype=torch.int64, device=device)
+        pair = self._pair
+        self._pair_host[0], self._pair_host[1] = swap.a, swap.b
+        pair.copy_(self._pair_host)
         if self.rank in (swap.rank_a, swap.rank_b):
             first = self.rank == swap.rank_a
             leaving, arriving = (swap.a, swap.b) if first else (swap.b, swap.a)
@@ -653,20 +688,19 @@ class OnlineEplb:
             for view, width in zip(layer.views, layer.widths):
                 view[slot].copy_(self._recv[at : at + width])
                 at += width
-            slots = (-1, slot) if first else (slot, -1)
-            layer.expert_map.index_copy_(
-                0, pair, torch.tensor(slots, dtype=torch.int32, device=device)
+            self._slots_host[0], self._slots_host[1] = (
+                (-1, slot) if first else (slot, -1)
             )
+            self._slots.copy_(self._slots_host)
+            layer.expert_map.index_copy_(0, pair, self._slots)
             layer.slot[leaving] = -1
             layer.slot[arriving] = slot
         # Every rank: expert ``a`` now lives on the rank of ``b`` and vice versa.
         layer.owner[swap.a] = swap.rank_b
         layer.owner[swap.b] = swap.rank_a
-        layer.stats.owner.index_copy_(
-            0,
-            pair,
-            torch.tensor([swap.rank_b, swap.rank_a], dtype=torch.uint8, device=device),
-        )
+        self._owners_host[0], self._owners_host[1] = swap.rank_b, swap.rank_a
+        self._owners.copy_(self._owners_host)
+        layer.stats.owner.index_copy_(0, pair, self._owners)
         if self._planner is not None:
             self._planner.owner[swap.layer, swap.a] = swap.rank_b
             self._planner.owner[swap.layer, swap.b] = swap.rank_a
