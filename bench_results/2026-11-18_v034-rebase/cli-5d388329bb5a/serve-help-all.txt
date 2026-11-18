@@ -1,0 +1,2647 @@
+usage: vllm serve [model_tag] [options]
+
+Launch a local OpenAI-compatible API server to serve LLM
+completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
+
+Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
+--help=ModelConfig, --help=Frontend)
+  Use `--help=all` to show all available flags at once.
+
+positional arguments:
+  model_tag             The model tag to serve (optional if specified in
+                        config) (default: None)
+
+options:
+  --aggregate-engine-logging
+                        Log aggregate rather than per-engine statistics when
+                        using data parallelism. (default: False)
+  --api-server-count API_SERVER_COUNT, -asc API_SERVER_COUNT
+                        How many API server processes to run. Defaults to
+                        data_parallel_size if not specified. (default: None)
+  --config CONFIG       Read CLI options from a config file. Must be a YAML
+                        with the following options: https://docs.vllm.ai/en/la
+                        test/configuration/serve_args.html (default: None)
+  --disable-log-stats   Disable logging statistics. (default: False)
+  --enable-log-requests, --disable-log-requests
+                        Enable logging request information, dependent on log
+                        level:
+                        - INFO: Request ID, parameters and LoRA request.
+                        - DEBUG: Prompt inputs (e.g: text, token IDs). You can
+                        set the minimum log level via `VLLM_LOGGING_LEVEL`.
+                        You can also set a separate log level for request JSON
+                        body via `VLLM_REQUEST_BODY_LOG_LEVEL` (default:
+                        DEBUG). (default: False)
+  --fail-on-environ-validation, --no-fail-on-environ-validation
+                        If set, the engine will raise an error if environment
+                        validation fails. (default: False)
+  --gdn-prefill-backend {flashinfer,triton,cutedsl,aiter_flydsl,sycl,hip}
+                        Select GDN prefill backend. (default: None)
+  --grpc                Launch the Python gRPC (SMG VllmEngine) server on
+                        --port instead of the HTTP OpenAI-compatible server.
+                        Requires: pip install vllm[grpc]. Cannot be combined
+                        with --grpc-port, which enables the Rust frontend's
+                        gRPC services. (default: False)
+  --headless            Run in headless mode. See multi-node data parallel
+                        documentation for more details. (default: False)
+  --kda-decode-backend {auto,native,flashinfer,triton}
+                        Select KDA decode backend. (default: None)
+  --kda-prefill-backend {auto,triton,flashkda,flashinfer,fused}
+                        Select KDA prefill backend. 'flashkda' is CUDA-only
+                        and 'fused' is ROCm-only; 'auto' picks a supported
+                        backend. (default: None)
+  --shutdown-timeout SHUTDOWN_TIMEOUT
+                        Shutdown timeout in seconds. 0 = abort, >0 = wait.
+                        (default: 0)
+  -h, --help            show this help message and exit
+
+Frontend:
+  Arguments for the OpenAI-compatible frontend server.
+
+  --allow-credentials, --no-allow-credentials
+                        Allow credentials. (default: False)
+  --allowed-headers ALLOWED_HEADERS
+                        Allowed headers. (default: ['*'])
+  --allowed-methods ALLOWED_METHODS
+                        Allowed methods. (default: ['*'])
+  --allowed-origins ALLOWED_ORIGINS
+                        Allowed origins. Cross-origin browser access is
+                        disabled by default. (default: [])
+  --anthropic-disabled-thinking-effort {auto,high,low,max,medium,none,xhigh}
+                        The ``reasoning_effort`` used for Anthropic Messages,
+                        token counting, and render requests with ``thinking:
+                        {"type": "disabled"}`` or ``thinking: {"type":
+                        "between_tools"}``. ``none`` turns thinking off for
+                        models that support it; ``low`` suits models that
+                        always think (e.g. GLM-5.3) or reject ``none`` (e.g.
+                        gpt-oss). ``auto`` (default) uses ``low`` when the
+                        renderer rejects ``none`` or renders it the same as a
+                        thinking effort, and ``none`` otherwise. (default:
+                        auto)
+  --api-key API_KEY [API_KEY ...]
+                        If provided, the server will require one of these keys
+                        to be presented in the header.
+                        Warning: this only authenticates endpoints under the
+                        `/v1`, `/v2`, `/inference`, and `/cohere` path
+                        prefixes. Other endpoints on the same server,
+                        including `/invocations` (which exposes the same
+                        inference capabilities as `/v1`), remain
+                        unauthenticated. Do not rely on `--api-key` alone to
+                        secure vLLM; see https://docs.vllm.ai/en/latest/usage/
+                        security.html#api-key-authentication-limitations for
+                        what it does and does not protect. (default: None)
+  --chat-template CHAT_TEMPLATE
+                        The file path to the chat template, or the template in
+                        single-line form for the specified model. (default:
+                        None)
+  --chat-template-content-format {auto,openai,string}
+                        The format to render message content within a chat
+                        template.
+                        * "string" will render the content as a string.
+                        Example: `"Hello World"`
+                        * "openai" will render the content as a list of
+                        dictionaries, similar to OpenAI schema. Example:
+                        `[{"type": "text", "text": "Hello world!"}]` (default:
+                        auto)
+  --cohere-format COHERE_FORMAT
+                        Cohere ``--tokenizer-mode cohere`` only. Which Cohere
+                        prompt format to render: ``cmd4`` (current Command A+
+                        models; default) or ``cmd3`` (earlier Cmd-A and Cmd-A
+                        reasoning models). Selecting the wrong format silently
+                        produces a prompt the model wasn't trained on, which
+                        most commonly manifests as the model emitting text but
+                        no citations / tool calls / thinking blocks.
+                        Equivalent to passing ``--default-chat-template-kwargs
+                        '{"cohere_format": "..."}'`` -- any explicit request-
+                        level ``chat_template_kwargs.cohere_format`` takes
+                        priority. (default: cmd4)
+  --cohere-is-reasoning-model, --no-cohere-is-reasoning-model
+                        Cohere ``/cohere/v2/chat`` only. Whether the served
+                        model is a reasoning Command-family model. When True
+                        (default), the assistant's chain-of-thought is
+                        surfaced as a ``thinking`` content block (or
+                        ``content-*`` events on the stream). When False,
+                        reasoning is surfaced as Cohere's ``tool_plan`` field
+                        (or ``tool-plan-delta`` events) whenever the model
+                        emits tool calls, matching older non- reasoning
+                        Command models. Has no effect on the non-Cohere
+                        endpoints. (default: True)
+  --data-parallel-supervisor-port DATA_PARALLEL_SUPERVISOR_PORT
+                        HTTP port for aggregated health endpoints in multi-
+                        port external LB mode. (default: 9256)
+  --default-chat-template-kwargs DEFAULT_CHAT_TEMPLATE_KWARGS
+                        Default keyword arguments to pass to the chat template
+                        renderer. These will be merged with request-level
+                        chat_template_kwargs, with request values taking
+                        precedence. Useful for setting default behavior for
+                        reasoning models. Example: '{"enable_thinking":
+                        false}' to disable thinking mode by default for
+                        Qwen3/DeepSeek models.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --disable-access-log-for-endpoints DISABLE_ACCESS_LOG_FOR_ENDPOINTS
+                        Comma-separated list of endpoint paths to exclude from
+                        uvicorn access logs. This is useful to reduce log
+                        noise from high-frequency endpoints like health
+                        checks. Example: "/health,/metrics,/ping". When set,
+                        access logs for requests to these paths will be
+                        suppressed while keeping logs for other endpoints.
+                        (default: None)
+  --disable-fastapi-docs, --enable-fastapi-docs
+                        Disable FastAPI's OpenAPI schema, Swagger UI, and
+                        ReDoc endpoint. (default: False)
+  --disable-uvicorn-access-log, --enable-uvicorn-access-log
+                        Disable uvicorn access log. (default: False)
+  --dp-supervisor-probe-failure-threshold DP_SUPERVISOR_PROBE_FAILURE_THRESHOLD
+                        Number of consecutive connection-error retries before
+                        a child health probe is declared failed in multi-port
+                        external LB mode. (default: 3)
+  --dp-supervisor-probe-interval-s DP_SUPERVISOR_PROBE_INTERVAL_S
+                        Seconds between aggregated health probes in multi-port
+                        external LB mode. (default: 5.0)
+  --dp-supervisor-probe-timeout-s DP_SUPERVISOR_PROBE_TIMEOUT_S
+                        Seconds to wait between retries when a child health
+                        probe fails with a connection error in multi-port
+                        external LB mode. (default: 5.0)
+  --enable-auto-tool-choice, --disable-auto-tool-choice
+                        Enable auto tool choice for supported models. Use
+                        `--tool-call-parser` to specify which parser to use.
+                        (default: False)
+  --enable-flash-late-interaction, --disable-flash-late-interaction
+                        If set, run pooling score MaxSim on GPU in the API
+                        server process. Can significantly improve late-
+                        interaction scoring performance. When disabled, the
+                        setting is also propagated to the engine's
+                        `PoolerConfig`, so the engine-side scorer uses the
+                        reference MaxSim path instead of the fused Triton
+                        kernel. (default: True)
+  --enable-force-include-usage, --disable-force-include-usage
+                        If set to True, including usage on every request.
+                        (default: False)
+  --enable-log-deltas, --disable-log-deltas
+                        If set to False, output deltas will not be logged.
+                        Relevant only if
+                        --enable-log-outputs is set. (default: True)
+  --enable-log-outputs, --disable-log-outputs
+                        If set to True, log model outputs (generations).
+                        Requires `--enable-log-requests`. Output text and
+                        finish reasons are logged at INFO, while output token
+                        IDs are logged at DEBUG. (default: False)
+  --enable-offline-docs, --disable-offline-docs
+                        Enable offline FastAPI documentation for air-gapped
+                        environments. Uses vendored static assets bundled with
+                        vLLM. (default: False)
+  --enable-per-request-metrics, --disable-per-request-metrics
+                        If set to True, include per-request timing metrics in
+                        API responses. (default: False)
+  --enable-prompt-tokens-details, --disable-prompt-tokens-details
+                        If set to True, enable prompt_tokens_details in usage.
+                        (default: False)
+  --enable-request-id-headers, --disable-request-id-headers
+                        If specified, API server will add X-Request-Id header
+                        to responses. (default: False)
+  --enable-scale-out, --disable-scale-out
+                        If set to True, register the scale-out endpoints
+                        (`/render`, `/derender`, `/inference/v1/generate` and
+                        `/inference/v1/abort_requests`) on `vllm serve`. Has
+                        no effect on `vllm launch render` or `vllm serve
+                        --tokens-only` which always register their required
+                        endpoints regardless of this flag. (default: False)
+  --enable-server-load-tracking, --disable-server-load-tracking
+                        If set to True, enable tracking server_load_metrics in
+                        the app state. (default: False)
+  --enable-ssl-refresh, --disable-ssl-refresh
+                        Refresh SSL Context when SSL certificate files change
+                        (default: False)
+  --enable-tokenizer-info-endpoint, --disable-tokenizer-info-endpoint
+                        Enable the `/tokenizer_info` endpoint. May expose chat
+                        templates and other tokenizer configuration. (default:
+                        False)
+  --exclude-tools-when-tool-choice-none, --no-exclude-tools-when-tool-choice-none
+                        If specified, exclude tool definitions in prompts when
+                        tool_choice='none'. (default: False)
+  --fingerprint-mode {custom,full,hash,none}
+                        Controls the ``system_fingerprint`` field on
+                        responses.
+                        - ``full`` (default):
+                        ``vllm-<version>[-<parallelism>]-<hash8>``. Encodes
+                        server version, non-trivial parallelism degrees
+                        (tp/pp/dp/ep), and an 8-char config hash.
+                        - ``hash``: ``vllm-<version>-<hash8>``. Parallelism
+                        stripped.
+                        - ``custom``: emits the literal string from
+                        ``--fingerprint-value``.
+                        - ``none``: the field is omitted (serialized as
+                        ``null``). (default: full)
+  --fingerprint-value FINGERPRINT_VALUE
+                        Literal fingerprint string used when ``--fingerprint-
+                        mode=custom``. (default: None)
+  --grpc-port GRPC_PORT
+                        Enable the Rust frontend's additional gRPC Inference
+                        and Control services on this port. Requires
+                        `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
+                        `--port`. Binds on `--host`, or 127.0.0.1 with
+                        `--uds`. Cannot be combined with the Python gRPC
+                        server's `--grpc` flag. (default: None)
+  --h11-max-header-count H11_MAX_HEADER_COUNT
+                        Maximum number of HTTP headers allowed in a request
+                        for h11 parser. Helps mitigate header abuse. Default:
+                        256. (default: 256)
+  --h11-max-incomplete-event-size H11_MAX_INCOMPLETE_EVENT_SIZE
+                        Maximum size (bytes) of an incomplete HTTP event
+                        (header or body) for h11 parser. Helps mitigate header
+                        abuse. Default: 4194304 (4 MB). (default: 4194304)
+  --host HOST           Host name. (default: None)
+  --log-error-stack, --no-log-error-stack
+                        If set to True, log the stack trace of error responses
+                        (default: False)
+  --lora-modules LORA_MODULES [LORA_MODULES ...]
+                        LoRA modules configurations in either 'name=path'
+                        format or JSON format or JSON list format. Example
+                        (old format): `'name=path'` Example (new format):
+                        `{"name": "name", "path": "lora_path",
+                        "base_model_name": "id"}` (default: None)
+  --max-log-len MAX_LOG_LEN
+                        Max number of prompt characters or prompt ID numbers
+                        being printed in log. The default of None means
+                        unlimited. (default: None)
+  --middleware MIDDLEWARE
+                        Additional ASGI middleware to apply to the app. We
+                        accept multiple
+                        --middleware arguments. The value should be an import
+                        path. If a function is provided, vLLM will add it to
+                        the server using `@app.middleware('http')`. If a class
+                        is provided, vLLM will add it to the server using
+                        `app.add_middleware()`. (default: [])
+  --port PORT           Port number. (default: 8000)
+  --reasoning-effort-map REASONING_EFFORT_MAP
+                        JSON mapping that rewrites a request's reasoning
+                        effort to a value the chat template supports, for
+                        templates that silently fall back on efforts they do
+                        not recognize. Applies to the effort set through the
+                        Chat Completions, Responses and Anthropic Messages
+                        APIs; efforts not listed pass through unchanged.
+                        Example: '{"medium": "low", "xhigh": "max"}' for a
+                        template that only knows low, high and max.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --response-role RESPONSE_ROLE
+                        The role name to return if
+                        `request.add_generation_prompt=true`. (default:
+                        assistant)
+  --return-tokens-as-token-ids, --no-return-tokens-as-token-ids
+                        When `--max-logprobs` is specified, represents single
+                        tokens as strings of the form 'token_id:{token_id}' so
+                        that tokens that are not JSON-encodable can be
+                        identified. (default: False)
+  --root-path ROOT_PATH
+                        FastAPI root_path when app is behind a path based
+                        routing proxy. (default: None)
+  --sse-keep-alive-interval SSE_KEEP_ALIVE_INTERVAL
+                        Send an SSE keep-alive comment line every this many
+                        seconds when a `/v1/chat/completions` or
+                        `/v1/completions` streaming response is idle (queued,
+                        prefill, or between tokens), to prevent reverse
+                        proxies/tunnels with read timeouts from closing the
+                        connection. Defaults to 0, which disables keep-alive
+                        comments entirely. (default: 0)
+  --ssl-ca-certs SSL_CA_CERTS
+                        The CA certificates file. (default: None)
+  --ssl-cert-reqs SSL_CERT_REQS
+                        Whether client certificate is required (see stdlib ssl
+                        module's). (default: 0)
+  --ssl-certfile SSL_CERTFILE
+                        The file path to the SSL cert file. (default: None)
+  --ssl-ciphers SSL_CIPHERS
+                        SSL cipher suites for HTTPS (TLS 1.2 and below only).
+                        Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-
+                        CHACHA20-POLY1305' (default: None)
+  --ssl-keyfile SSL_KEYFILE
+                        The file path to the SSL key file. (default: None)
+  --tokens-only, --no-tokens-only
+                        If set to True, only enable the Tokens In<>Out
+                        endpoint. This is intended for use in a Disaggregated
+                        Everything setup. (default: False)
+  --tool-call-parser {apertus,beam,cohere_command3,cohere_command4,deepseek_v3,deepseek_v31,deepseek_v32,deepseek_v4,deepseek_v41,dots,ernie45,functiongemma,gemma4,gigachat3,glm45,glm47,granite,granite-20b-fc,granite4,granite_toolcall_parser,hermes,hf,hunyuan_a13b,hy_v3,hy_v4,inkling,internlm,jamba,k2_horizon,kimi_k2,kimi_k3,lfm2,ling3,llama3_json,llama4_json,llama4_pythonic,longcat,mimo,minicpm5,minimax_m2,minimax_m3,mistral,muse,muse_glimmer,musespark,olmo3,openai,phi4_mini_json,plamo3,poolside_v1,pythonic,qwen3_coder,qwen3_json,qwen3_xml,ripple,seed_oss,step3,step3p5,step5,xlam,zaya,zaya_xml} or name registered in --tool-parser-plugin
+                        Select the tool call parser depending on the model
+                        that you're using. This is used to parse the model-
+                        generated tool call into OpenAI API format. Required
+                        for `--enable-auto-tool-choice`. You can choose any
+                        option from the built-in parsers or register a plugin
+                        via `--tool-parser-plugin`. (default: None)
+  --tool-parser-plugin TOOL_PARSER_PLUGIN
+                        Special the tool parser plugin write to parse the
+                        model-generated tool into OpenAI API format, the name
+                        register in this plugin can be used in `--tool-call-
+                        parser`. (default: )
+  --tool-server TOOL_SERVER
+                        Comma-separated list of host:port pairs (IPv4, IPv6,
+                        or hostname). Examples: 127.0.0.1:8000, [::1]:8000,
+                        localhost:1234. Or `demo` for built-in demo tools
+                        (browser and Python code interpreter). WARNING: The
+                        `demo` Python tool executes model-generated code in
+                        Docker without network isolation by default. See the
+                        security guide for more information. (default: None)
+  --tool-strict-level {auto,function,parameter,None}
+                        Server-side floor for structural-tag based tool
+                        calling, applied on top of the per-tool `strict`
+                        field. `auto` follows the request's tool choice and
+                        per-tool strictness; `function` constrains the tool-
+                        call envelope (markup and function name) for every
+                        request with tools; `parameter` additionally pins
+                        argument schemas, as if every tool were `strict:
+                        true`. When unset, the tool parser's default level
+                        applies, which is `auto` for most parsers. (default:
+                        None)
+  --trust-request-chat-template, --no-trust-request-chat-template
+                        Whether to trust the chat template provided in the
+                        request. If False, the server will always use the chat
+                        template specified by `--chat-template` or the ones
+                        from tokenizer. (default: False)
+  --trust-request-mm-kwargs, --no-trust-request-mm-kwargs
+                        Whether to trust per-request multimodal kwargs
+                        (`mm_processor_kwargs` and `media_io_kwargs`). If
+                        False, the server rejects non-empty values because
+                        they can change multimodal preprocessing resource
+                        usage. Only enable this when API clients are trusted.
+                        (default: False)
+  --uds UDS             Unix domain socket path. If set, host and port
+                        arguments are ignored. (default: None)
+  --uvicorn-log-level {critical,debug,error,info,trace,warning}
+                        Log level for uvicorn. (default: info)
+
+ModelConfig:
+  Configuration for the model.
+
+  --allow-deprecated-quantization, --no-allow-deprecated-quantization
+                        Whether to allow deprecated quantization methods.
+                        (default: False)
+  --allowed-local-media-path ALLOWED_LOCAL_MEDIA_PATH
+                        Allowing API requests to read local images or videos
+                        from directories specified by the server file system.
+                        This is a security risk. Should only be enabled in
+                        trusted environments. (default: )
+  --allowed-media-domains ALLOWED_MEDIA_DOMAINS [ALLOWED_MEDIA_DOMAINS ...]
+                        If set, only media URLs that belong to this domain can
+                        be used for multi-modal inputs. (default: None)
+  --checkpoint-prepare-on-startup, --no-checkpoint-prepare-on-startup
+                        Prepare each engine for a process checkpoint once it
+                        starts, as `/checkpoint/prepare` does. It serves only
+                        after `/checkpoint/restore`. Requires sleep mode.
+                        (default: False)
+  --code-revision CODE_REVISION
+                        The specific revision to use for the model code on the
+                        Hugging Face Hub. It can be a branch name, a tag name,
+                        or a commit id. If unspecified, will use the default
+                        version. (default: None)
+  --config-format ['auto', 'hf', 'mistral']
+                        The format of the model config to load:
+                        - "auto" will try to load the config in hf format if
+                        available after trying to load in mistral format.
+                        - "hf" will load the config in hf format.
+                        - "mistral" will load the config in mistral format.
+                        (default: auto)
+  --convert {auto,classify,embed,none}
+                        Convert the model using adapters defined in
+                        [vllm.model_executor.models.adapters][]. The most
+                        common use case is to adapt a text generation model to
+                        be used for pooling tasks. (default: auto)
+  --disable-cascade-attn, --enable-cascade-attn
+                        --disable-cascade-attn is deprecated and has no effect
+                        since cascade attention has been removed. It will be
+                        removed in v0.33.0. (default: None)
+  --disable-sliding-window, --enable-sliding-window
+                        Whether to disable sliding window. If True, we will
+                        disable the sliding window functionality of the model,
+                        capping to sliding window size. If the model does not
+                        support sliding window, this argument is ignored.
+                        (default: False)
+  --dtype {auto,bfloat16,float,float16,float32,half}
+                        Data type for model weights and activations:
+                        - "auto" will use FP16 precision for FP32 and FP16
+                        models, and BF16 precision for BF16 models.
+                        - "half" for FP16. Recommended for AWQ quantization.
+                        - "float16" is the same as "half".
+                        - "bfloat16" for a balance between precision and
+                        range.
+                        - "float" is shorthand for FP32 precision.
+                        - "float32" for FP32 precision. (default: auto)
+  --enable-cumem-allocator, --disable-cumem-allocator
+                        Enable the custom cumem allocator to leverage advanced
+                        GPU memory allocation features such as multi-node
+                        NVLink support.
+                        Sleep mode automatically enables this allocator. Only
+                        cuda and hip platforms are supported. (default: False)
+  --enable-nccl-comm-suspend, --disable-nccl-comm-suspend
+                        Enable releasing NCCL communicator memory during sleep
+                        mode (``ncclCommSuspend``/``ncclCommResume``).
+                        Experimental; when disabled (the default) sleep still
+                        releases weights/KV-cache memory as before. (default:
+                        False)
+  --enable-prompt-embeds, --disable-prompt-embeds
+                        If `True`, enables passing text embeddings as inputs
+                        via the `prompt_embeds` key.
+                        WARNING: The vLLM engine may crash if incorrect shape
+                        of embeddings is passed. Only enable this flag for
+                        trusted users! (default: False)
+  --enable-return-routed-experts, --disable-return-routed-experts
+                        Capture and return routed-experts auxiliary outputs.
+                        (default: False)
+  --enable-sleep-mode, --disable-sleep-mode
+                        Enable sleep mode for the engine (only cuda and hip
+                        platforms are supported). (default: False)
+  --enable-trace-replay, --disable-trace-replay
+                        Whether to allow requests to set
+                        `SamplingParams.trace_decode_token_ids`, which forces
+                        decoding to follow a predetermined token sequence
+                        while still computing real logprobs. Reserved for
+                        debugging and RL workflows: enabling it reserves a
+                        per-request trace buffer, so it is off by default.
+                        (default: False)
+  --enforce-eager, --no-enforce-eager
+                        Whether to always use eager-mode PyTorch. If True, we
+                        will disable CUDA graph and always execute the model
+                        in eager mode. If False, we will use CUDA graph and
+                        eager execution in hybrid for maximal performance and
+                        flexibility.
+                        NOTE: This disables both `torch.compile` and CUDA
+                        graphs, and is equivalent to setting `-cc.mode=none
+                        -cc.cudagraph_mode=none`. (default: False)
+  --generation-config GENERATION_CONFIG
+                        The folder path to the generation config. Defaults to
+                        `"auto"`, the generation config will be loaded from
+                        model path. If set to `"vllm"`, no generation config
+                        is loaded, vLLM defaults will be used. If set to a
+                        folder path, the generation config will be loaded from
+                        the specified folder path. If `max_new_tokens` is
+                        specified in generation config, then it sets a server-
+                        wide limit on the number of output tokens for all
+                        requests. (default: auto)
+  --hf-config-path HF_CONFIG_PATH
+                        Name or path of the Hugging Face config to use. If
+                        unspecified, model name or path will be used.
+                        (default: None)
+  --hf-overrides HF_OVERRIDES
+                        If a dictionary, contains arguments to be forwarded to
+                        the Hugging Face config. If a callable, it is called
+                        to update the HuggingFace config. (default: {})
+  --hf-token [HF_TOKEN]
+                        The token to use as HTTP bearer authorization for
+                        remote files . If `True`, will use the token generated
+                        when running `hf auth login` (stored in
+                        `~/.cache/huggingface/token`). (default: None)
+  --io-processor-plugin IO_PROCESSOR_PLUGIN
+                        IOProcessor plugin name to load at model startup
+                        (default: None)
+  --logits-processors LOGITS_PROCESSORS [LOGITS_PROCESSORS ...]
+                        One or more logits processors' fully-qualified class
+                        names or class definitions (default: None)
+  --logprobs-mode {processed_logits,processed_logprobs,raw_logits,raw_logprobs}
+                        Indicates the content returned in the logprobs and
+                        prompt_logprobs. Supported mode: 1) raw_logprobs, 2)
+                        processed_logprobs, 3) raw_logits, 4)
+                        processed_logits. Raw means the values before applying
+                        any logit processors, like bad words. Processed means
+                        the values after applying all processors, including
+                        temperature and top_k/top_p. Note: for
+                        prompt_logprobs, processed_* and raw_* yield identical
+                        results because prompt tokens do not go through
+                        sampling processors. (default: raw_logprobs)
+  --max-logprobs MAX_LOGPROBS
+                        Maximum number of log probabilities to return when
+                        `logprobs` is specified in `SamplingParams`. The
+                        default value comes the default for the OpenAI Chat
+                        Completions API. -1 means no cap, i.e. all
+                        (output_length * vocab_size) logprobs are allowed to
+                        be returned and it may cause OOM. (default: 20)
+  --max-model-len MAX_MODEL_LEN
+                        Model context length (prompt and output). If
+                        unspecified, will be automatically derived from the
+                        model config.
+                        When passing via `--max-model-len`, supports
+                        k/m/g/K/M/G in human-readable format. Examples:
+                        - 1k -> 1000
+                        - 1K -> 1024
+                        - 25.6k -> 25,600
+                        - -1 or 'auto' -> Automatically choose the maximum
+                        model length that fits in GPU memory. This will use
+                        the model's maximum context length if it fits,
+                        otherwise it will find the largest length that can be
+                        accommodated.
+                        Parse human-readable integers like '1k', '2M', etc.
+                        Including decimal values with decimal multipliers.
+                        Also accepts -1 or 'auto' as a special value for auto-
+                        detection.
+                            Examples:
+                            - '1k' -> 1,000
+                            - '1K' -> 1,024
+                            - '25.6k' -> 25,600
+                            - '-1' or 'auto' -> -1 (special value for auto-
+                        detection)
+                             (default: None)
+  --model MODEL         Name or path of the Hugging Face model to use. It is
+                        also used as the content for `model_name` tag in
+                        metrics output when `served_model_name` is not
+                        specified. (default: Qwen/Qwen3-0.6B)
+  --model-class-overrides MODEL_CLASS_OVERRIDES
+                        Override the model class used for one or more
+                        architectures, mapping the architecture name to a
+                        `"module:class"` target (the same format accepted by
+                        `ModelRegistry.register_model`). This registers the
+                        target class at runtime, e.g.
+                        `{"GlmMoeDsaForCausalLM": "vllm.models.deepseek_v32.nv
+                        idia.model:DeepseekV32ForCausalLM"}`. This argument is
+                        for development and debugging purposes only.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: {})
+  --model-impl ['auto', 'terratorch', 'transformers', 'vllm']
+                        Which implementation of the model to use:
+                        - "auto" will try to use the vLLM implementation, if
+                        it exists, and fall back to the Transformers
+                        implementation if no vLLM implementation is available.
+                        - "vllm" will use the vLLM model implementation.
+                        - "transformers" will use the Transformers model
+                        implementation.
+                        - "terratorch" will use the TerraTorch model
+                        implementation. (default: auto)
+  --override-generation-config OVERRIDE_GENERATION_CONFIG
+                        Overrides or sets generation config. e.g.
+                        `{"temperature": 0.5}`. If used with `--generation-
+                        config auto`, the override parameters will be merged
+                        with the default config from the model. If used with
+                        `--generation-config vllm`, only the override
+                        parameters are used.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: {})
+  --pooler-config POOLER_CONFIG
+                        Pooler config which controls the behaviour of output
+                        pooling in pooling models.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.PoolerConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --quantization QUANTIZATION, -q QUANTIZATION
+                        Method used to quantize the weights. If `None`, we
+                        first check the `quantization_config` attribute in the
+                        model config file. If that is `None`, we assume the
+                        model weights are not quantized and use `dtype` to
+                        determine the data type of the weights. (default:
+                        None)
+  --quantization-config QUANTIZATION_CONFIG
+                        User-facing quantization configuration. Carries per-
+                        layer-kind specs (linear, moe) and ignore patterns;
+                        see :class:`QuantizationConfigArgs`. Auto-populated
+                        from the matching online shorthand when `quantization`
+                        is one of the values in
+                        `ONLINE_QUANT_SHORTHAND_NAMES`.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --renderer-num-workers RENDERER_NUM_WORKERS
+                        Number of worker threads in the renderer thread pool.
+                        The pool is consumed by the async renderer path (e.g.
+                        the OpenAI-compatible API server started by `vllm
+                        serve`) to parallelize tokenization, chat template
+                        rendering, and multimodal preprocessing across
+                        concurrent requests.
+                        The offline `LLM` entrypoint uses the synchronous
+                        renderer path and processes prompts (including
+                        multimodal preprocessing) serially, so this setting
+                        has no effect there. (default: 1)
+  --return-sampling-mask, --no-return-sampling-mask
+                        Whether to return the post-processing token support
+                        for each sample. (default: False)
+  --revision REVISION   The specific model version to use. It can be a branch
+                        name, a tag name, or a commit id. If unspecified, will
+                        use the default version. (default: None)
+  --runner {auto,draft,generate,pooling}
+                        The type of model runner to use. Each vLLM instance
+                        only supports one model runner, even if the same model
+                        can be used for multiple types. (default: auto)
+  --seed SEED           Random seed for reproducibility.
+                        The seed must be in the range [0, 2**32 - 1].
+                        We must set the global seed because otherwise,
+                        different tensor parallel workers would sample
+                        different tokens, leading to inconsistent results.
+                        (default: 0)
+  --served-model-name SERVED_MODEL_NAME [SERVED_MODEL_NAME ...]
+                        The model name(s) used in the API. If multiple names
+                        are provided, the server will respond to any of the
+                        provided names. The model name in the model field of a
+                        response will be the first name in this list. If not
+                        specified, the model name will be the same as the
+                        `--model` argument. Noted that this name(s) will also
+                        be used in `model_name` tag content of prometheus
+                        metrics, if multiple names provided, metrics tag will
+                        take the first one. (default: None)
+  --skip-tokenizer-init, --no-skip-tokenizer-init
+                        Skip initialization of tokenizer and detokenizer.
+                        Expects valid `prompt_token_ids` and `None` for prompt
+                        from the input. The generated output will contain
+                        token ids. (default: False)
+  --sleep-mode-backend SLEEP_MODE_BACKEND
+                        Mechanism used to free and restore GPU state for sleep
+                        mode. ``"cumem"`` (default) uses the built-in
+                        ``CuMemAllocator`` and is behavior-compatible with
+                        prior releases. Additional backends (CUDA checkpoint,
+                        CRIU, durable snapshot) may be registered in-tree or
+                        by plugins (RFC #34303). (default: cumem)
+  --sleep-mode-offload-cudagraph, --no-sleep-mode-offload-cudagraph
+                        Back up CUDA graph memory to CPU during sleep,
+                        restored in place on wake. Takes effect with
+                        enable_sleep_mode, the cumem backend and CUDA graphs.
+                        (default: False)
+  --sleep-preserve-parameter-names SLEEP_PRESERVE_PARAMETER_NAMES [SLEEP_PRESERVE_PARAMETER_NAMES ...]
+                        Parameter-name globs to preserve across level-2 sleep.
+                        Use target globs for frozen Engram table weights and
+                        scales omitted by the trainer (e.g.
+                        ``*.engram.embed_tokens.weight*``). Use
+                        ``draft.<name>`` for draft-private parameters, or
+                        ``draft.*`` for all. The sender must omit these
+                        parameters; loaders must preserve their storage.
+                        (default: [])
+  --tokenizer TOKENIZER
+                        Name or path of the Hugging Face tokenizer to use. If
+                        unspecified, model name or path will be used.
+                        (default: None)
+  --tokenizer-mode ['alpamayo2_super', 'auto', 'cohere', 'deepseek_v32', 'deepseek_v4', 'glm5_next', 'hf', 'inkling', 'kimi_k3', 'mistral']
+                        Tokenizer mode:
+                        - "auto" will use the tokenizer from `mistral_common`
+                        for Mistral models if available, otherwise it will use
+                        the "hf" tokenizer.
+                        - "hf" will use the fast tokenizer if available.
+                        - "alpamayo2_super" uses the "hf" tokenizer with
+                        Alpamayo 2 Super's trajectory and special tokens
+                        added; selected automatically for
+                        `nvidia/Alpamayo2-Super`.
+                        - "mistral" will always use the tokenizer from
+                        `mistral_common`.
+                        - "deepseek_v32" will always use the tokenizer from
+                        `deepseek_v32`.
+                        - "deepseek_v4" will always use the tokenizer from
+                        `deepseek_v4`.
+                        - "deepseek_v41" will use the DeepSeek V4.1 prompt
+                        encoder.
+                        - "kimi_k3" will always use the "hf" tokenizer but
+                        render chat prompts with Kimi K3's Python XTML
+                        encoding instead of a Jinja template.
+                        - "glm5_next" uses the "hf" tokenizer and renderer on
+                        the Python frontend; the Rust frontend renders GLM-5.3
+                        and GLM-5.3-Flash prompts natively, and selects this
+                        under "auto" for the `glm5_next` model type
+                        (GLM-5.3-Flash).
+                        - "cohere" uses the standard HF tokenizer but renders
+                        the chat template via the `cohere_melody` library
+                        (cmd3 / cmd4 templates) instead of Jinja, and surfaces
+                        grounded-citation metadata on responses.
+                        - Other custom values can be supported via plugins.
+                        To swap the Rust BPE backend that powers HF fast
+                        tokenizers for the
+                        [fastokens](https://github.com/crusoecloud/fastokens)
+                        implementation, set `VLLM_USE_FASTOKENS=1` instead —
+                        that override applies to any mode that loads an HF
+                        fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`,
+                        …). (default: auto)
+  --tokenizer-revision TOKENIZER_REVISION
+                        The specific revision to use for the tokenizer on the
+                        Hugging Face Hub. It can be a branch name, a tag name,
+                        or a commit id. If unspecified, will use the default
+                        version. (default: None)
+  --trust-remote-code, --no-trust-remote-code
+                        Trust remote code (e.g., from HuggingFace) when
+                        downloading the model and tokenizer. (default: False)
+  --use-fp64-gumbel, --no-use-fp64-gumbel
+                        Whether to use FP64 (instead of FP32) random noise for
+                        Gumbel-max and equivalent exponential-race sampling.
+                        FP64 preserves lower-tail sampling events that fp32
+                        uniform/exponential draws can truncate, at the cost of
+                        significantly lower throughput on most GPUs. (default:
+                        False)
+
+LoadConfig:
+  Configuration for loading the model weights.
+
+  --download-dir DOWNLOAD_DIR
+                        Directory to download and load the weights, default to
+                        the default cache directory of Hugging Face. (default:
+                        None)
+  --ignore-patterns IGNORE_PATTERNS [IGNORE_PATTERNS ...]
+                        The list of patterns to ignore when loading the model.
+                        Default to "original/**/*" to avoid repeated loading
+                        of llama's checkpoints. (default: ['original/**/*'])
+  --load-format LOAD_FORMAT
+                        The format of the model weights to load.
+                        - "auto" will try to load the weights in the
+                        safetensors format and fall back to the pytorch bin
+                        format if safetensors format is not available.
+                        - "pt" will load the weights in the pytorch bin
+                        format.
+                        - "safetensors" will load the weights in the
+                        safetensors format.
+                        - "instanttensor" will load the Safetensors weights on
+                        CUDA devices using InstantTensor, which enables
+                        distributed loading with pipelined prefetching and
+                        fast direct I/O.
+                        - "ipc_cache" will map post-quantized weights from a
+                        local weight cache daemon via CUDA IPC for fast engine
+                        restarts. Launch the daemon with `vllm preload` first.
+                        - "npcache" will load the weights in pytorch format
+                        and store a numpy cache to speed up the loading.
+                        - "dummy" will initialize the weights with random
+                        values, which is mainly for profiling.
+                        - "tensorizer" will use CoreWeave's tensorizer library
+                        for fast weight loading. See the Tensorize vLLM Model
+                        script in the Examples section for more information.
+                        - "runai_streamer" will load the Safetensors weights
+                        using Run:ai Model Streamer.
+                        - "runai_streamer_sharded" will load weights from pre-
+                        sharded checkpoint files using Run:ai Model Streamer.
+                        - "sharded_state" will load weights from pre-sharded
+                        checkpoint files, supporting efficient loading of
+                        tensor-parallel models.
+                        - "mistral" will load weights from consolidated
+                        safetensors files used by Mistral models.
+                        - "modelexpress" will load weights using ModelExpress.
+                        - Other custom values can be supported via plugins.
+                        (default: auto)
+  --model-loader-extra-config MODEL_LOADER_EXTRA_CONFIG
+                        Extra config for model loader. This will be passed to
+                        the model loader corresponding to the chosen
+                        load_format. (default: {})
+  --pt-load-map-location PT_LOAD_MAP_LOCATION
+                        The map location for loading pytorch checkpoint, to
+                        support loading checkpoints can only be loaded on
+                        certain devices like "cuda", this is equivalent to
+                        `{"": "cuda"}`. Another supported format is mapping
+                        from different devices like from GPU 1 to GPU 0:
+                        `{"cuda:1": "cuda:0"}`. Note that when passed from
+                        command line, the strings in dictionary need to be
+                        double quoted for json parsing. For more details, see
+                        the original doc for `map_location` parameter in
+                        [`torch.load`][] parameter. (default: cpu)
+  --safetensors-load-strategy {eager,lazy,prefetch,torchao,None}
+                        Specifies the loading strategy for safetensors
+                        weights.
+                        - None (default): Uses memory-mapped (lazy) loading.
+                        When an NFS filesystem is detected and the total
+                        checkpoint size fits within 90% of available RAM,
+                        prefetching is enabled automatically.
+                        - "lazy": Weights are memory-mapped from the file.
+                        This enables on-demand loading and is highly efficient
+                        for models on local storage. Unlike the default
+                        (None), auto-prefetch on NFS is not performed.
+                        - "eager": The entire file is read into CPU memory
+                        upfront before loading. This is recommended for models
+                        on network filesystems (e.g., Lustre, NFS) as it
+                        avoids inefficient random reads, significantly
+                        speeding up model initialization. However, it uses
+                        more CPU RAM.
+                        - "prefetch": Checkpoint files are read into the OS
+                        page cache before workers load them, speeding up the
+                        model loading phase. Useful on network or high-latency
+                        storage.
+                        - "torchao": Weights are loaded in upfront and then
+                        reconstructed into torchao tensor subclasses. This is
+                        used when the checkpoint was quantized using torchao
+                        and saved using safetensors. Needs `torchao >=
+                        0.14.0`. (default: None)
+  --safetensors-prefetch-block-size SAFETENSORS_PREFETCH_BLOCK_SIZE
+                        Read size in bytes for each safetensors checkpoint
+                        file prefetch.
+                        Parse human-readable integers like '1k', '2M', etc.
+                        Including decimal values with decimal multipliers.
+                            Examples:
+                            - '1k' -> 1,000
+                            - '1K' -> 1,024
+                            - '25.6k' -> 25,600
+                             (default: 16777216)
+  --safetensors-prefetch-num-threads SAFETENSORS_PREFETCH_NUM_THREADS
+                        Number of worker threads used to prefetch safetensors
+                        checkpoint files into the OS page cache when
+                        safetensors prefetching is enabled. (default: 8)
+  --shuffle-safetensors-files, --no-shuffle-safetensors-files
+                        Whether to shuffle the safetensors checkpoint files
+                        during loading. When enabled, files are randomly
+                        shuffled based on the distributed rank, which can help
+                        with load balancing and improve weight loading speed
+                        in startup scenarios. This reduces I/O contention by
+                        ensuring different ranks load different files in a
+                        randomized order. Set to True to enable shuffling.
+                        Default is False. (default: False)
+  --use-tqdm-on-load, --no-use-tqdm-on-load
+                        Whether to enable tqdm for showing progress bar when
+                        loading model weights. (default: True)
+
+AttentionConfig:
+  Configuration for attention mechanisms in vLLM.
+
+  --attention-backend ATTENTION_BACKEND
+                        Attention backend to use. Use "auto" or None for
+                        automatic selection. (default: None)
+
+MambaConfig:
+  Configuration for Mamba SSM backends.
+
+  --enable-mamba-cache-stochastic-rounding, --disable-mamba-cache-stochastic-rounding
+                        Enable stochastic rounding when writing SSM state to
+                        fp16 cache. Uses random bits to unbias the rounding
+                        error, which can improve numerical stability for long
+                        sequences. (default: False)
+  --mamba-backend MAMBA_BACKEND
+                        Mamba SSU backend to use. (default:
+                        MambaBackendEnum.TRITON)
+  --mamba-cache-philox-rounds MAMBA_CACHE_PHILOX_ROUNDS
+                        Number of Philox PRNG rounds for stochastic rounding
+                        random number generation. 0 uses the Triton default.
+                        Higher values improve randomness quality at the cost
+                        of compute. (default: 0)
+  --mamba-ssu-algorithm {auto,horizontal,simple,vertical,None}
+                        Selective state update algorithm to use with the
+                        FlashInfer backend. None defaults to FlashInfer's
+                        "auto" algorithm. Forced algorithms must be supported
+                        by FlashInfer for the active GPU, state dtype, and
+                        decoding mode. (default: None)
+
+StructuredOutputsConfig:
+  Dataclass which contains structured outputs config for the engine.
+
+  --reasoning-parser REASONING_PARSER
+                        Select the reasoning parser depending on the model
+                        that you're using. This is used to parse the reasoning
+                        content into OpenAI API format.
+                        `none` disables reasoning parsing, the same as leaving
+                        it unset. (default: )
+  --reasoning-parser-plugin REASONING_PARSER_PLUGIN
+                        Path to a dynamically reasoning parser plugin that can
+                        be dynamically loaded and registered. (default: )
+
+ParallelConfig:
+  Configuration for the distributed execution.
+
+  --all2all-backend {allgather_reducescatter,deepep_high_throughput,deepep_low_latency,deepep_v2,flashinfer_all2allv,flashinfer_nvlink_one_sided,flashinfer_nvlink_two_sided,moonep,mori,mori_high_throughput,mori_low_latency,naive,nixl_ep,pplx}
+                        All2All backend for MoE expert parallel communication.
+                        Available options:
+                        - "allgather_reducescatter": All2all based on
+                        allgather and reducescatter
+                        - "deepep_high_throughput": Use deepep high-throughput
+                        kernels
+                        - "deepep_low_latency": Use deepep low-latency kernels
+                        - "mori_high_throughput": MoRI EP with InterNodeV1 for
+                        multi-node (deprecated; use "mori")
+                        - "mori_low_latency": MoRI EP with InterNodeV1LL for
+                        multi-node (deprecated; use "mori")
+                        - "moonep": MoonEP balanced EP with dynamic redundant
+                        experts (NVLink)
+                        - "mori": MoRI EP; uses EPv2 where supported (see
+                        `VLLM_MORI_EP_V2`) and EPv1 otherwise, picking the
+                        EPv1 inter-node kernel from the token budget (see
+                        `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`)
+                        - "nixl_ep": Use nixl-ep kernels
+                        - "flashinfer_nvlink_one_sided": Use flashinfer high-
+                        throughput a2a kernels
+                        - "flashinfer_nvlink_two_sided": Use flashinfer two-
+                        sided kernels for mnnvl
+                        - "passthrough": No all2all at all: the MoE backend
+                        dispatches and combines itself (e.g. the FlashInfer
+                        MoE-EP megakernels). Bound automatically for such MoE
+                        backends; not selectable from the CLI. (default:
+                        allgather_reducescatter)
+  --cp-kv-cache-interleave-size CP_KV_CACHE_INTERLEAVE_SIZE
+                        Interleave size of kv_cache storage while using DCP.
+                        Store interleave_size tokens on dcp_rank i, then store
+                        next interleave_size tokens on dcp_rank i+1.
+                        Interleave_size=1: token-level alignment, where token
+                        `i` is stored on dcp_rank `i % dcp_world_size`.
+                        Interleave_size=block_size: block-level alignment,
+                        where tokens are first populated to the preceding
+                        ranks. Tokens are then stored in (rank i+1, block j)
+                        only after (rank i, block j) is fully occupied.
+                        Block_size should be greater than or equal to
+                        cp_kv_cache_interleave_size. Block_size should be
+                        divisible by cp_kv_cache_interleave_size.
+                        When --cp-kv-cache-interleave-size is omitted (None),
+                        the interleave size is resolved automatically based on
+                        NIXL transfer requirements. Explicit settings take
+                        priority. (default: None)
+  --cpu-distributed-timeout-seconds CPU_DISTRIBUTED_TIMEOUT_SECONDS
+                        Timeout (in seconds) for cpu communication groups. If
+                        None, PyTorch's default timeout is used (1800s for
+                        gloo). (default: None)
+  --data-parallel-address DATA_PARALLEL_ADDRESS, -dpa DATA_PARALLEL_ADDRESS
+                        Address of data parallel cluster head-node. (default:
+                        None)
+  --data-parallel-backend DATA_PARALLEL_BACKEND, -dpb DATA_PARALLEL_BACKEND
+                        Backend for data parallel, either "mp" or "ray".
+                        (default: mp)
+  --data-parallel-external-lb, --no-data-parallel-external-lb, -dpe
+                        Whether to use "external" DP LB mode. Applies only to
+                        online serving and when data_parallel_size > 0. This
+                        is useful for a "one-pod-per-rank" wide-EP setup in
+                        Kubernetes. Supported only for MoE deployments; non-
+                        MoE models should use independent vLLM instances
+                        without --data-parallel-* arguments. Set implicitly
+                        when --data-parallel-rank is provided explicitly to
+                        vllm serve. (default: False)
+  --data-parallel-hybrid-lb, --no-data-parallel-hybrid-lb, -dph
+                        Whether to use "hybrid" DP LB mode. Applies only to
+                        online serving and when data_parallel_size > 0.
+                        Enables running an AsyncLLM and API server on a "per-
+                        node" basis where vLLM load balances between local
+                        data parallel ranks, but an external LB balances
+                        between vLLM nodes/replicas. Set explicitly in
+                        conjunction with
+                        --data-parallel-start-rank. (default: False)
+  --data-parallel-multi-port-external-lb, -dpm
+                        Run a node-local supervisor that launches one
+                        external-LB API server per local data parallel rank
+                        and exposes aggregated health on a supervisor port.
+                        (default: False)
+  --data-parallel-rank DATA_PARALLEL_RANK, -dpn DATA_PARALLEL_RANK
+                        Data parallel rank of this instance. When set, enables
+                        external load balancer mode for MoE data-parallel
+                        deployments. Unsupported for non-MoE models; launch
+                        independent vLLM instances instead. (default: None)
+  --data-parallel-rpc-port DATA_PARALLEL_RPC_PORT, -dpp DATA_PARALLEL_RPC_PORT
+                        Fixed port for data parallel RPC communication. All
+                        nodes must use the same port. (default: None)
+  --data-parallel-size DATA_PARALLEL_SIZE, -dp DATA_PARALLEL_SIZE
+                        Number of data parallel groups. MoE layers will be
+                        sharded according to the product of the tensor,
+                        prefill-context, and data parallel sizes. (default: 1)
+  --data-parallel-size-local DATA_PARALLEL_SIZE_LOCAL, -dpl DATA_PARALLEL_SIZE_LOCAL
+                        Number of data parallel replicas to run on this node.
+                        (default: None)
+  --data-parallel-start-rank DATA_PARALLEL_START_RANK, -dpr DATA_PARALLEL_START_RANK
+                        Starting data parallel rank for secondary nodes.
+                        (default: None)
+  --dbo-decode-token-threshold DBO_DECODE_TOKEN_THRESHOLD
+                        The threshold for dual batch overlap for batches only
+                        containing decodes. If the number of tokens in the
+                        request is greater than this threshold, microbatching
+                        will be used. Otherwise, the request will be processed
+                        in a single batch. (default: 32)
+  --dbo-prefill-token-threshold DBO_PREFILL_TOKEN_THRESHOLD
+                        The threshold for dual batch overlap for batches that
+                        contain one or more prefills. If the number of tokens
+                        in the request is greater than this threshold,
+                        microbatching will be used. Otherwise, the request
+                        will be processed in a single batch. (default: 512)
+  --dcp-comm-backend {a2a,ag_rs,None}
+                        Communication backend for Decode Context Parallel
+                        (DCP).
+                        - "ag_rs": AllGather + ReduceScatter (existing
+                        behavior)
+                        - "a2a": All-to-All exchange of partial outputs + LSE,
+                        then combine with Triton kernel. Reduces NCCL calls
+                        from 3 to 2 per layer for MLA models.
+                        `None` selects the model default, which is "ag_rs"
+                        unless the model overrides it via [`set_dcp_defaults`]
+                        [vllm.config.ParallelConfig.set_dcp_defaults].
+                        (default: None)
+  --dcp-kv-cache-interleave-size DCP_KV_CACHE_INTERLEAVE_SIZE
+                        Interleave size of kv_cache storage while using DCP.
+                        dcp_kv_cache_interleave_size has been replaced by
+                        cp_kv_cache_interleave_size, and will be deprecated
+                        when PCP is fully supported. (default: 1)
+  --dcp-q-replicate, --no-dcp-q-replicate
+                        Replicate the MLA query projection within each DCP
+                        group so decode can skip the query all-gather.
+                        With DCP the KV cache is sharded across the group, so
+                        the standard MLA decode path all-gathers the query
+                        every step. Replicating the (small) query projection
+                        at load time lets each rank materialize the full
+                        group-local head set and skip that  collective, at the
+                        cost of computing the projection redundantly on every
+                        rank  in the group. (default: None)
+  --decode-context-parallel-size DECODE_CONTEXT_PARALLEL_SIZE, -dcp DECODE_CONTEXT_PARALLEL_SIZE
+                        Number of ranks that shard the decode KV cache. DCP
+                        does not expand the process world size. Without PCP,
+                        DCP reuses TP ranks. With PCP, DCP either spans the
+                        PCP axis or the full TP x PCP block. (default: 1)
+  --device-ids DEVICE_IDS
+                        Comma-separated physical GPU device IDs or UUIDs to
+                        use (e.g. --device-ids "2,3,5,7"). Avoids setting
+                        CUDA_VISIBLE_DEVICES, preserving full GPU topology
+                        visibility for GPU-NIC affinity and DeepGEMM. Note:
+                        has no effect with Ray executors; use Ray placement
+                        groups for GPU selection instead. (default: None)
+  --disable-custom-all-reduce, --enable-custom-all-reduce
+                        Disable the custom all-reduce kernel and fall back to
+                        NCCL. (default: False)
+  --disable-nccl-for-dp-synchronization, --enable-nccl-for-dp-synchronization
+                        Forces the dp synchronization logic in
+                        vllm/v1/worker/dp_utils.py  to use Gloo instead of
+                        NCCL for its all reduce.
+                        Defaults to True when async scheduling is enabled,
+                        False otherwise. (default: None)
+  --distributed-executor-backend ['external_launcher', 'mp', 'ray', 'uni']
+                        Backend to use for distributed model workers, either
+                        "ray" or "mp" (multiprocessing). If the product of
+                        pipeline_parallel_size and tensor_parallel_size is
+                        less than or equal to the number of GPUs available,
+                        "mp" will be used to keep processing on a single host.
+                        Otherwise, an error will be raised. To use "mp" you
+                        must also set nnodes, and to use "ray" you must
+                        manually set distributed_executor_backend to "ray".
+                        Note:
+                        [TPU](https://docs.vllm.ai/projects/tpu/en/latest/)
+                        platform only supports Ray for distributed inference.
+                        (default: None)
+  --distributed-timeout-seconds DISTRIBUTED_TIMEOUT_SECONDS
+                        Timeout in seconds for distributed operations (e.g.,
+                        init_process_group). If set, this value is passed to
+                        torch.distributed.init_process_group as the timeout
+                        parameter. If None, PyTorch's default timeout is used
+                        (600s for NCCL). Increase this for multi-node setups
+                        where model downloads may be slow. (default: None)
+  --dp-sync-interval DP_SYNC_INTERVAL
+                        Steps between DP finish-sync all-reduces; must match
+                        across DP ranks. (default: 16)
+  --elastic-ep-max-dp-size ELASTIC_EP_MAX_DP_SIZE
+                        Maximum data parallel size supported by elastic expert
+                        parallelism. (default: None)
+  --enable-batch-sharded-sampling, --disable-batch-sharded-sampling
+                        Use sharded sampling across tensor parallel ranks.
+                        Each rank samples a slice of the batch instead of
+                        every rank sampling all of it. Currently defaults to
+                        False if not set. Enabling it explicitly raises when
+                        the config cannot support it (`tensor_parallel_size`
+                        must be > 1, `max_num_seqs` at least
+                        `tensor_parallel_size`, and `max_logprobs` non-
+                        negative). Models opt in by implementing
+                        `compute_logits_local`. (default: None)
+  --enable-dbo, --disable-dbo
+                        Enable dual batch overlap for the model executor.
+                        (default: False)
+  --enable-elastic-ep, --disable-elastic-ep
+                        Enable elastic expert parallelism with stateless NCCL
+                        groups for DP/EP. (default: False)
+  --enable-ep-weight-filter, --disable-ep-weight-filter
+                        Skip non-local expert weights during model loading
+                        when expert parallelism is active.  Each rank only
+                        reads its own expert shard from disk, which can
+                        drastically reduce storage I/O for MoE models with
+                        per-expert weight tensors (e.g. DeepSeek, Mixtral,
+                        Kimi-K2.5).  With EPLB, each rank also reads the
+                        experts its redundant slots replicate in the initial
+                        placement; elastic EP loads every expert.  Has no
+                        effect on 3D fused-expert checkpoints (e.g. GPT-OSS)
+                        or non-MoE models. (default: False)
+  --enable-eplb, --disable-eplb
+                        Enable expert parallelism load balancing for MoE
+                        layers. (default: False)
+  --enable-expert-parallel, -ep, --disable-expert-parallel
+                        Use expert parallelism instead of tensor parallelism
+                        for MoE layers. (default: False)
+  --enable-fault-tolerance, --disable-fault-tolerance
+                        Enable fault tolerance for detailed error recovery,
+                        such as scaling down faulty DPEngineCores. (default:
+                        False)
+  --enable-hc-sp, --disable-hc-sp
+                        Enable sequence parallelism for HyperConnection (HC)
+                        computation. Currently supported by Qwen4Exp on
+                        CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1). Does
+                        not change MoE parallelism. MoE SP may enable HC SP
+                        independently of this flag. (default: False)
+  --enable-shm-tensor-arena, --disable-shm-tensor-arena
+                        Route large CPU tensors (e.g. multimodal
+                        ``pixel_values``) in the engine→worker broadcast
+                        through a zero-copy shared-memory arena instead of
+                        sending a copy to every reader. **Experimental**: may
+                        be reconciled with vLLM's existing multimodal shm
+                        tensor caching in a future release. Opt-in; most
+                        beneficial for multimodal serving with large images
+                        and tensor parallelism. Active only when all queue
+                        readers are node-local; reserves slots in
+                        ``/dev/shm``. (default: False)
+  --eplb-config EPLB_CONFIG
+                        Expert parallelism configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.EPLBConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default:
+                        EPLBConfig(window_size=1000, step_interval=3000,
+                        num_redundant_experts=None, log_balancedness=False,
+                        log_balancedness_interval=1, use_async=True,
+                        policy='default', communicator=None,
+                        enable_migration_batching=False))
+  --expert-placement-strategy {linear,round_robin}
+                        The expert placement strategy for MoE layers:
+                        - "linear": Experts are placed in a contiguous manner.
+                        For example, with 4 experts and 2 ranks, rank 0 will
+                        have experts [0, 1] and rank 1 will have experts [2,
+                        3].
+                        - "round_robin": Experts are placed in a round-robin
+                        manner. For example, with 4 experts and 2 ranks, rank
+                        0 will have experts [0, 2] and rank 1 will have
+                        experts [1, 3]. This strategy can help improve load
+                        balancing for grouped expert models with no redundant
+                        experts. (default: linear)
+  --fault-tolerance-config FAULT_TOLERANCE_CONFIG
+                        The configurations for fault tolerance.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.FaultToleranceConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default:
+                        FaultToleranceConfig(engine_recovery_timeout_sec=120))
+  --master-addr MASTER_ADDR
+                        distributed master address for multi-node distributed
+                        inference when distributed_executor_backend is mp.
+                        (default: 127.0.0.1)
+  --master-port MASTER_PORT
+                        distributed master port for multi-node distributed
+                        inference when distributed_executor_backend is mp.
+                        (default: 29501)
+  --max-parallel-loading-workers MAX_PARALLEL_LOADING_WORKERS
+                        Maximum number of parallel loading workers when
+                        loading model sequentially in multiple batches. To
+                        avoid RAM OOM when using tensor parallel and large
+                        models. (default: None)
+  --nnodes NNODES, -n NNODES
+                        num of nodes for multi-node distributed inference when
+                        distributed_executor_backend is mp. (default: 1)
+  --node-rank NODE_RANK, -r NODE_RANK
+                        distributed node rank for multi-node distributed
+                        inference when distributed_executor_backend is mp.
+                        (default: 0)
+  --numa-bind, --no-numa-bind
+                        Enable NUMA binding for GPU worker subprocesses.
+                        Workers are pinned to their GPU's NUMA-local CPUs; on
+                        PCT-capable Xeons they also auto-bind to the SKU's PCT
+                        priority cores.
+                        If None (default), vLLM binds only when the
+                        environment supports it (multiple NUMA nodes,
+                        `numactl` installed, unrestricted CPU affinity, a
+                        default NUMA memory policy, and the `spawn` start
+                        method with an mp/uni executor and mp DP, including
+                        PCP). Ray, external launchers and device-ID remapping
+                        are excluded from automatic binding. Automatic mode
+                        prefers GPU-local memory but permits allocations on
+                        other nodes. Unsupported environments start unbound.
+                        With `True`, strict memory binding may override an
+                        existing policy, and a missing `numactl` or
+                        undetectable GPU-to-NUMA topology is a startup error;
+                        `False` disables binding. (default: None)
+  --numa-bind-cpus NUMA_BIND_CPUS [NUMA_BIND_CPUS ...]
+                        Optional CPU lists to bind each GPU worker to.
+                        Setting this list implies explicit `numa_bind=True`
+                        and requests strict `--membind`, not CPU-only binding
+                        or automatic soft memory preference. It cannot be
+                        combined with `numa_bind=False`.
+                        Specify one CPU list per visible GPU, for example
+                        `["0-3", "4-7", "8-11", "12-15"]`. When set, vLLM uses
+                        `numactl --physcpubind` instead of `--cpunodebind`.
+                        This is useful for custom policies such as binding to
+                        PCT or other high-frequency cores. Each entry must use
+                        `numactl --physcpubind` CPU-list syntax, for example
+                        `"0-3"` or `"0,2,4-7"`. (default: None)
+  --numa-bind-nodes NUMA_BIND_NODES [NUMA_BIND_NODES ...]
+                        NUMA node to bind each GPU worker to.
+                        Setting this list implies explicit `numa_bind=True`
+                        and requests strict `--membind`, not automatic soft
+                        memory preference. It cannot be combined with
+                        `numa_bind=False`.
+                        Specify one NUMA node per visible GPU, for example
+                        `[0, 0, 1, 1]` for a 4-GPU system with GPUs 0-1 on
+                        NUMA node 0 and GPUs 2-3 on NUMA node 1. If unset and
+                        `numa_bind=True`, vLLM auto-detects the GPU-to-NUMA
+                        topology. The values are passed to `numactl --membind`
+                        and `--cpunodebind`, so they must be valid `numactl`
+                        NUMA node indices. (default: None)
+  --pipeline-parallel-size PIPELINE_PARALLEL_SIZE, -pp PIPELINE_PARALLEL_SIZE
+                        Number of pipeline parallel groups. (default: 1)
+  --prefill-context-parallel-size PREFILL_CONTEXT_PARALLEL_SIZE, -pcp PREFILL_CONTEXT_PARALLEL_SIZE
+                        Number of ranks that split prefill sequence
+                        computation. PCP expands the process world size but
+                        does not increase the KV-cache shard count. (default:
+                        1)
+  --ray-workers-use-nsight, --no-ray-workers-use-nsight
+                        Whether to profile Ray workers with nsight, see
+                        https://docs.ray.io/en/latest/ray-observability/user-
+                        guides/profiling.html#profiling-nsight-profiler.
+                        (default: False)
+  --tensor-parallel-size TENSOR_PARALLEL_SIZE, -tp TENSOR_PARALLEL_SIZE
+                        Number of tensor parallel groups. (default: 1)
+  --ubatch-size UBATCH_SIZE
+                        Number of ubatch size. (default: 0)
+  --worker-cls WORKER_CLS
+                        The full name of the worker class to use. If "auto",
+                        the worker class will be determined based on the
+                        platform. (default: auto)
+  --worker-extension-cls WORKER_EXTENSION_CLS
+                        The full name of the worker extension class to use.
+                        The worker extension class is dynamically inherited by
+                        the worker class. This is used to inject new
+                        attributes and methods to the worker class for use in
+                        collective_rpc calls. It may also define
+                        `init_worker_extension(self)`, called after device and
+                        distributed initialization but before model loading,
+                        and `destroy_worker_extension(self)`, called (best-
+                        effort) before the worker shuts down. (default: )
+
+CacheConfig:
+  Configuration for the KV cache.
+
+  --block-size BLOCK_SIZE
+                        Size of a contiguous cache block in number of tokens.
+                        Accepts None (meaning "use default"). After
+                        construction, always int. (default: None)
+  --enable-extensible-kv-cache, --disable-extensible-kv-cache
+                        Reserve the KV cache address range with device virtual
+                        memory and commit physical pages after warmup, so the
+                        cache is sized from the memory actually free after
+                        CUDA graph capture rather than from a profiling
+                        estimate. If unspecified, enabled on CUDA and ROCm
+                        unless kv_cache_memory_bytes is set, or NIXL on device
+                        memory has no IMEX channel; falls back to estimate-
+                        based sizing where the driver lacks VMM support.
+                        Explicitly requesting it where unsupported is an
+                        error. When a KV connector registers the KV cache for
+                        RDMA or exports it to another process, each segment is
+                        backed by a single physical allocation; connectors
+                        declare this by overriding
+                        `KVConnectorBase_V1.kv_cache_access`. (default: None)
+  --enable-mamba-shared-prefix-checkpoint, --disable-mamba-shared-prefix-checkpoint
+                        Also register a Mamba "align" checkpoint at the
+                        shared-prefix junction -- where an EAGLE/MTP sibling
+                        was observed to resume -- instead of only at the
+                        prompt tail. Off by default; only takes effect with
+                        prefix caching enabled, EAGLE on the Mamba group, and
+                        a prefix match unit smaller than the Mamba block size.
+                        (default: False)
+  --enable-prefix-caching, --disable-prefix-caching
+                        Whether to enable prefix caching. (default: None)
+  --gpu-memory-utilization GPU_MEMORY_UTILIZATION, --device-memory-utilization GPU_MEMORY_UTILIZATION
+                        The fraction of GPU memory to be used for the model
+                        executor, which can range from 0 to 1. For example, a
+                        value of 0.5 would imply 50% GPU memory utilization.
+                        This is a per-instance limit, and only applies to the
+                        current vLLM instance. It does not matter if you have
+                        another vLLM instance running on the same GPU. For
+                        example, if you have two vLLM instances running on the
+                        same GPU, you can set the GPU memory utilization to
+                        0.5 for each instance. On non-GPU installs, this value
+                        controls the corresponding device memory utilization.
+                        If unspecified, 1.0 with the extensible KV cache
+                        (sized from measured memory) and 0.92 otherwise; see
+                        `resolved_gpu_memory_utilization`.
+                        With the extensible KV cache (the default on CUDA and
+                        ROCm), leave this unset unless something needs memory
+                        that vLLM does not measure: other processes sharing
+                        the GPU (including ones that allocate after vLLM has
+                        started), unified-memory devices whose memory the CPU
+                        also uses, weight transfer buffers for weight updates,
+                        or KV connectors that allocate their own device
+                        buffers. A lower value takes memory away from the KV
+                        cache. (default: None)
+  --kv-cache-dtype ['auto', 'bfloat16', 'float16', 'fp8', 'fp8_ds_mla', 'fp8_e4m3', 'fp8_e5m2', 'fp8_inc', 'fp8_per_token_head', 'int4_fp16_block', 'int4_per_token_head', 'int8_per_token_head', 'nvfp4', 'nvfp4_4over6', 'nvfp4_ds_mla', 'octave_k3v3', 'octave_k3v3_compact', 'octave_k3v4', 'turboquant_3bit_nc', 'turboquant_4bit_nc', 'turboquant_k3v4_nc', 'turboquant_k8v4', 'ultraquant_4bit']
+                        Data type for kv cache storage. If "auto", will use
+                        model data type. An explicit float16 or bfloat16 must
+                        match the model data type. Custom dtypes can
+                        registered by platform backends via
+                        ``register_kv_cache_dtype`` are accepted (see
+                        vllm.config.cache). CUDA 11.8+ supports fp8
+                        (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports fp8
+                        (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using
+                        fp8_inc). Some models (namely DeepSeekV3.2) default to
+                        fp8, set to bfloat16 to use bfloat16 instead, this is
+                        an invalid option for models that do not default to
+                        fp8. "nvfp4_4over6" uses the NVFP4 layout and selects
+                        between max/6 and max/4 scales per 16 values by
+                        minimizing squared reconstruction error. (default:
+                        auto)
+  --kv-cache-dtype-skip-layers KV_CACHE_DTYPE_SKIP_LAYERS [KV_CACHE_DTYPE_SKIP_LAYERS ...]
+                        Layer patterns to skip KV cache quantization. Accepts
+                        layer indices (e.g., '0', '2', '4') or attention type
+                        names (e.g., 'sliding_window'). (default: [])
+  --kv-cache-memory-bytes KV_CACHE_MEMORY_BYTES
+                        Size of KV Cache per GPU in bytes. By default, this is
+                        set to None and vllm can automatically infer the kv
+                        cache size based on gpu_memory_utilization. However,
+                        users may want to manually specify the kv cache memory
+                        size. kv_cache_memory_bytes allows more fine-grain
+                        control of how much memory gets used when compared
+                        with using gpu_memory_utilization. Note that
+                        kv_cache_memory_bytes (when not-None) ignores
+                        gpu_memory_utilization
+                        Parse human-readable integers like '1k', '2M', etc.
+                        Including decimal values with decimal multipliers.
+                            Examples:
+                            - '1k' -> 1,000
+                            - '1K' -> 1,024
+                            - '25.6k' -> 25,600
+                             (default: None)
+  --kv-offloading-backend {lmcache,native}
+                        The backend to use for KV cache offloading. Supported
+                        backends include 'native' (vLLM native CPU
+                        offloading), 'lmcache'. KV offloading is only
+                        activated when kv_offloading_size is set. (default:
+                        native)
+  --kv-offloading-size KV_OFFLOADING_SIZE
+                        Size of the KV cache offloading buffer in GiB. When TP
+                        > 1, this is the total buffer size summed across all
+                        TP ranks. By default, this is set to None, which means
+                        no KV offloading is enabled. When set, vLLM will
+                        enable KV cache offloading to CPU using the
+                        kv_offloading_backend. (default: None)
+  --kv-sharing-fast-prefill, --no-kv-sharing-fast-prefill
+                        In some KV sharing setups, e.g. YOCO
+                        (https://arxiv.org/abs/2405.05254), some layers can
+                        skip tokens corresponding to prefill. This flag
+                        enables attention metadata for eligible layers to be
+                        overridden with metadata necessary for implementing
+                        this optimization in some models (e.g. Gemma3n). In
+                        Model Runner V2, batches containing LoRA requests use
+                        regular prefill; batches without LoRA requests can
+                        still use fast prefill. (default: False)
+  --mamba-block-size MAMBA_BLOCK_SIZE
+                        Size of a contiguous cache block in number of tokens
+                        for mamba cache. Can be set only when prefix caching
+                        is enabled. (default: None)
+  --mamba-cache-dtype {auto,bfloat16,float16,float32}
+                        The data type to use for the Mamba cache (both the
+                        conv as well as the ssm state). If set to 'auto', the
+                        data type will be inferred from the model config.
+                        (default: auto)
+  --mamba-cache-mode {align,none}
+                        --mamba-cache-mode is deprecated and will be removed
+                        in v0.34.0. It has no effect: Mamba prefix caching
+                        follows --enable-prefix-caching. (default: None)
+  --mamba-ssm-cache-dtype {auto,bfloat16,float16,float32}
+                        The data type to use for the Mamba cache (ssm state
+                        only, conv state will still be controlled by
+                        mamba_cache_dtype). If set to 'auto', the data type
+                        for the ssm state will be determined by
+                        mamba_cache_dtype. (default: auto)
+  --num-gpu-blocks-override NUM_GPU_BLOCKS_OVERRIDE
+                        Number of GPU blocks to use. This overrides the
+                        profiled `num_gpu_blocks` if specified. Does nothing
+                        if `None`. Used for testing preemption. (default:
+                        None)
+  --prefix-cache-retention-interval PREFIX_CACHE_RETENTION_INTERVAL
+                        Token interval between retained sliding-window and
+                        Mamba prefix-cache checkpoints. ``0`` retains only
+                        semantic checkpoints, including the latest replay
+                        boundary and shared-prefix junctions. Positive values
+                        additionally retain periodic checkpoints at the
+                        specified interval, which must be a multiple of the
+                        scheduler block size. ``None`` retains checkpoints
+                        densely. Applies only to sliding-window and Mamba
+                        cache groups. (default: 0)
+  --prefix-caching-hash-algo {sha256,sha256_cbor,xxhash,xxhash_cbor}
+                        Set the hash algorithm for prefix caching:
+                        - "sha256" uses Pickle for object serialization before
+                        hashing. This is the current default, as SHA256 is the
+                        most secure choice to avoid potential hash collisions.
+                        - "sha256_cbor" provides a reproducible, cross-
+                        language compatible hash. It serializes objects using
+                        canonical CBOR and hashes them with SHA-256.
+                        - "xxhash" uses Pickle serialization with xxHash
+                        (128-bit) for faster, non-cryptographic hashing.
+                        Requires the optional ``xxhash`` package. IMPORTANT:
+                        Use of a hashing algorithm that is not considered
+                        cryptographically secure theoretically increases the
+                        risk of hash collisions, which can cause undefined
+                        behavior or even leak private information in multi-
+                        tenant environments. Even if collisions are still very
+                        unlikely, it is important to consider your security
+                        risk tolerance against the performance benefits before
+                        turning this on.
+                        - "xxhash_cbor" combines canonical CBOR serialization
+                        with xxHash for reproducible hashing. Requires the
+                        optional ``xxhash`` package. (default: sha256)
+  --prefix-match-unit PREFIX_MATCH_UNIT
+                        The finest token boundary (in tokens) a prefix-cache
+                        hit can land on.
+                        Prefix-cache keys are computed every
+                        `prefix_match_unit` tokens. It can be set finer than
+                        the physical KV cache block sizes (e.g. 32 vs a
+                        1024-token hybrid-model block) as long as every KV
+                        cache group's `block_size` is divisible by it,
+                        enabling cache hits at boundaries inside a physical
+                        block. It controls matching granularity only, not how
+                        often states are stored.
+                        This equals to the `hash_block_size` used throughout
+                        the KV cache code. (default: None)
+  --replayssm-buffer-len REPLAYSSM_BUFFER_LEN
+                        ReplaySSM logical history length B for Mamba2. Triton
+                        uses B physical rows and FlashInfer uses B+T, where T
+                        is the target verification length. Kimi-K3 speculative
+                        decode does not use B. Default 16. (default: 16)
+  --replayssm-state-dtype {auto,leapquant}
+                        Storage format of the Gated DeltaNet (GDN) recurrent
+                        state. The default 'auto' keeps the model's own state
+                        dtype. 'leapquant' stores each state as an INT8
+                        residual with FP16 compensators and a ring of FP16
+                        records (LeapQuant, arXiv 2609.38166). It changes
+                        model outputs and runs only on RDNA2 (gfx10x) ROCm,
+                        for Qwen-style GDN layers with head dimension 128. It
+                        does not use `use_replayssm` or `replayssm_buffer_len`
+                        (the window is fixed at 32 records) and is rejected at
+                        startup with `use_replayssm`, KV connectors, KV
+                        offloading, stochastic rounding, or AITER GDN. See
+                        docs/rdna2/leapquant-config-guards-2026-11-14.md.
+                        (default: auto)
+  --swa-bounded-replay, --no-swa-bounded-replay
+                        Keep the sliding-window KV of models that support it
+                        (DeepSeek-V4.1) out of prefix caching and rebuild it
+                        after a prefix hit by recomputing the hit's last
+                        window. The layers past the last KV-source layer then
+                        also run eager prefill steps on each request's
+                        trailing window only. Requires model runner V2.
+                        (default: True)
+  --use-replayssm, --no-use-replayssm
+                        Use the ReplaySSM Mamba2 decode kernel: cache recent
+                        SSM inputs and skip the per-step full-state store,
+                        writing the checkpoint back only on flush. Triton and
+                        FlashInfer support the 'none' and 'align' Mamba cache
+                        modes. Mamba2 speculative decoding requires
+                        FlashInfer. Pipeline parallelism is not supported.
+                        Flushes are most efficient when mamba_block_size is a
+                        multiple of replayssm_buffer_len, but this is not
+                        required. (default: False)
+
+OffloadConfig:
+  Configuration for model weight offloading to reduce GPU memory usage.
+
+  --cpu-offload-gb CPU_OFFLOAD_GB
+                        The space in GiB to offload to CPU, per GPU. Default
+                        is 0, which means no offloading. Intuitively, this
+                        argument can be seen as a virtual way to increase the
+                        GPU memory size. For example, if you have one 24 GB
+                        GPU and set this to 10, virtually you can think of it
+                        as a 34 GB GPU. Then you can load a 13B model with
+                        BF16 weight, which requires at least 26GB GPU memory.
+                        Note that this requires fast CPU-GPU interconnect, as
+                        part of the model is loaded from CPU memory to GPU
+                        memory on the fly in each model forward pass. This
+                        uses UVA (Unified Virtual Addressing) for zero-copy
+                        access. (default: 0)
+  --cpu-offload-params CPU_OFFLOAD_PARAMS [CPU_OFFLOAD_PARAMS ...]
+                        The set of parameter name segments to target for CPU
+                        offloading. Unmatched parameters are not offloaded. If
+                        this set is empty, parameters are offloaded non-
+                        selectively until the memory limit defined by
+                        `cpu_offload_gb` is reached. Examples:
+                            - For parameter name "mlp.experts.w2_weight":
+                                - "experts" or "experts.w2_weight" will match.
+                                - "expert" or "w2" will NOT match (must be
+                        exact segments). This allows distinguishing parameters
+                        like "w2_weight" and "w2_weight_scale". (default:
+                        set())
+  --offload-backend {auto,prefetch,uva}
+                        The backend for weight offloading. Options:
+                        - "auto": Selects based on which sub-config has non-
+                        default values (prefetch if offload_group_size > 0,
+                        uva if cpu_offload_gb > 0).
+                        - "uva": UVA (Unified Virtual Addressing) zero-copy
+                        offloading.
+                        - "prefetch": Async prefetch with group-based layer
+                        offloading. (default: auto)
+  --offload-group-size OFFLOAD_GROUP_SIZE
+                        Group every N layers together. Offload last
+                        `offload_num_in_group` layers of each group. Default
+                        is 0 (disabled). Example: group_size=8, num_in_group=2
+                        offloads layers 6,7,14,15,22,23,... Unlike
+                        cpu_offload_gb, this uses explicit async prefetching
+                        to hide transfer latency. (default: 0)
+  --offload-num-in-group OFFLOAD_NUM_IN_GROUP
+                        Number of layers to offload per group. Must be <=
+                        offload_group_size. Default is 1. (default: 1)
+  --offload-params OFFLOAD_PARAMS [OFFLOAD_PARAMS ...]
+                        The set of parameter name segments to target for
+                        prefetch offloading. Unmatched parameters are not
+                        offloaded. If this set is empty, ALL parameters of
+                        each offloaded layer are offloaded. Uses segment
+                        matching: "w13_weight" matches
+                        "mlp.experts.w13_weight" but not
+                        "mlp.experts.w13_weight_scale". (default: set())
+  --offload-prefetch-step OFFLOAD_PREFETCH_STEP
+                        Number of layers to prefetch ahead. Higher values hide
+                        more latency but use more GPU memory. Default is 1.
+                        (default: 1)
+
+MultiModalConfig:
+  Controls the behavior of multimodal models.
+
+  --enable-mm-embeds, --disable-mm-embeds
+                        If `True`, enables passing multimodal embeddings: for
+                        `LLM` class, this refers to tensor inputs under
+                        `multi_modal_data`; for the OpenAI-compatible server,
+                        this refers to chat messages with content `"type":
+                        "*_embeds"`.
+                        When enabled with `--limit-mm-per-prompt` set to 0 for
+                        a modality, precomputed embeddings skip count
+                        validation for that modality,  saving memory by not
+                        loading encoder modules while still enabling
+                        embeddings as an input. Limits greater than 0 still
+                        apply to embeddings.
+                        WARNING: The vLLM engine may crash if incorrect shape
+                        of embeddings is passed. Only enable this flag for
+                        trusted users! (default: False)
+  --interleave-mm-strings, --no-interleave-mm-strings
+                        Enable fully interleaved support for multimodal
+                        prompts, while using
+                        --chat-template-content-format=string. (default:
+                        False)
+  --language-model-only, --no-language-model-only
+                        If True, disables all multimodal inputs by setting all
+                        modality limits to 0. Equivalent to setting `--limit-
+                        mm-per-prompt` to 0 for every modality. (default:
+                        False)
+  --limit-mm-per-prompt LIMIT_MM_PER_PROMPT
+                        The maximum number of input items and options allowed
+                        per prompt for each modality.
+                        Defaults to 999 for each modality.
+                        Legacy format (count only): {"image": 16, "video": 2}
+                        Configurable format (with options): {"video":
+                        {"count": 1, "num_frames": 32, "width": 512, "height":
+                        512}, "image": {"count": 5, "width": 512, "height":
+                        512}}
+                        Mixed format (combining both): {"image": 16, "video":
+                        {"count": 1, "num_frames": 32, "width": 512, "height":
+                        512}}
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: {})
+  --media-io-kwargs MEDIA_IO_KWARGS
+                        Additional args passed to process media inputs, keyed
+                        by modalities. For example, to set num_frames for
+                        video, set `--media-io-kwargs '{"video":
+                        {"num_frames": 40} }'`
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: {})
+  --mm-device-do-normalize, --no-mm-device-do-normalize
+                        Move the do_normalize computation in the mm
+                        preprocessing to before the ViT,  and let the device
+                        do it, so that CPU computation can be saved. (default:
+                        None)
+  --mm-encoder-attn-backend MM_ENCODER_ATTN_BACKEND
+                        Optional override for the multi-modal encoder
+                        attention backend when using vision transformers.
+                        Accepts any value from `vllm.v1.attention.backends.reg
+                        istry.AttentionBackendEnum` (e.g. `FLASH_ATTN`).
+                        (default: None)
+  --mm-encoder-attn-dtype {fp8,None}
+                        Optional dtype override for ViT encoder attention. Set
+                        to `"fp8"` to enable FP8 quantization via the
+                        FlashInfer cuDNN backend. When set to `"fp8"` without
+                        a scale file, dynamic scaling is used automatically.
+                        See docs/features/quantization/fp8_vit_attn.md for
+                        details. (default: None)
+  --mm-encoder-fp8-scale-path MM_ENCODER_FP8_SCALE_PATH
+                        Path to a JSON file containing per-layer FP8 Q/K/V
+                        scales for ViT encoder attention. When provided (with
+                        `mm_encoder_attn_dtype="fp8"`), static scaling is
+                        used. When omitted, dynamic scaling is used. (default:
+                        None)
+  --mm-encoder-fp8-scale-save-margin MM_ENCODER_FP8_SCALE_SAVE_MARGIN
+                        Safety margin multiplied onto scales when auto-saving.
+                        A value > 1 leaves headroom so that inputs with larger
+                        activations than the calibration set do not overflow
+                        FP8 range. Default 1.5. (default: 1.5)
+  --mm-encoder-fp8-scale-save-path MM_ENCODER_FP8_SCALE_SAVE_PATH
+                        When set with dynamic FP8 scaling
+                        (`mm_encoder_attn_dtype="fp8"` and no
+                        `mm_encoder_fp8_scale_path`), saves the calibrated
+                        scales to this file after the amax history buffer is
+                        full. The saved file can then be used as
+                        `mm_encoder_fp8_scale_path` in subsequent runs.
+                        (default: None)
+  --mm-encoder-only, --no-mm-encoder-only
+                        When enabled, skips the language component of the
+                        model.
+                        This is usually only valid in disaggregated Encoder
+                        process. (default: False)
+  --mm-encoder-tp-mode {data,weights}
+                        Indicates how to optimize multi-modal encoder
+                        inference using tensor parallelism (TP).
+                        - `"weights"`: Within the same vLLM engine, split the
+                        weights of each layer across TP ranks. (default TP
+                        behavior)
+                        - `"data"`: Within the same vLLM engine, split the
+                        batched input data across TP ranks to process the data
+                        in parallel, while hosting the full weights on each TP
+                        rank. This batch-level DP is not to be confused with
+                        API request-level DP (which is controlled by `--data-
+                        parallel-size`). This is only supported on a per-model
+                        basis and falls back to `"weights"` if the encoder
+                        does not support DP. (default: weights)
+  --mm-hasher-algorithm {blake3,sha256,sha512}
+                        Hash algorithm to use for multi-modal input caching.
+                        Use `"sha256"` or `"sha512"` for FIPS-compliant
+                        deployments. (default: blake3)
+  --mm-ipc-gpu-memory-gb MM_IPC_GPU_MEMORY_GB
+                        Amount of GPU memory (in GiB) sequestered on the
+                        engine's device for GPU-side multimodal work in the
+                        API-server (frontend) process, such as hardware video
+                        decoding.
+                        This budget is carved out of the engine's KV-cache
+                        memory so the headroom physically exists, and frontend
+                        GPU decode paths acquire from a blocking byte-counting
+                        semaphore of this size before allocating on the
+                        device.
+                        Set to `0` (default) to disable frontend GPU
+                        multimodal memory gating. (default: 0)
+  --mm-processor-cache-gb MM_PROCESSOR_CACHE_GB
+                        The size (in GiB) of the multi-modal processor cache,
+                        which is used to avoid re-processing past multi-modal
+                        inputs.
+                        This cache is duplicated for each API process and
+                        engine core process, resulting in a total memory usage
+                        of `mm_processor_cache_gb * (api_server_count +
+                        data_parallel_size)`.
+                        A single processed item larger than this budget is
+                        served uncached (with a warning) instead of failing.
+                        Raise this value to cache such items.
+                        Set to `0` to disable this cache completely (not
+                        recommended). (default: 4)
+  --mm-processor-cache-type {lru,shm}
+                        Type of cache to use for the multi-modal
+                        preprocessor/mapper. If `shm`, use shared memory FIFO
+                        cache. If `lru`, use mirrored LRU cache. (default:
+                        lru)
+  --mm-processor-device {auto,cpu,cuda}
+                        Device the HF multi-modal processor runs the
+                        image/video transform on. Convenience for `--mm-
+                        processor-kwargs '{"device": ...}'`: the value is
+                        resolved here and stored there, it is not kept as
+                        separate state. Only takes effect for HF "fast"
+                        (torchvision-backed) processors, which accept a
+                        `device` argument; the others ignore it and stay on
+                        CPU.
+                        "auto" uses the accelerator on encoder instances of an
+                        encode/prefill/decode deployment -- an EC producer
+                        that is not also a consumer allocates no KV cache, so
+                        its accelerator is not contended by the language model
+                        -- and then only when `--mm-tensor-ipc=torch_shm` can
+                        carry device tensors, since every other transport
+                        would copy the result back to the host and that copy
+                        costs more than it saves. "auto" resolves to "cpu"
+                        everywhere else. (default: auto)
+  --mm-processor-kwargs MM_PROCESSOR_KWARGS
+                        Arguments to be forwarded to the model's processor for
+                        multi-modal data, e.g., image processor. Overrides for
+                        the multi-modal processor obtained from
+                        `transformers.AutoProcessor.from_pretrained`.
+                        The available overrides depend on the model that is
+                        being run.
+                        For example, for Phi-3-Vision: `{"num_crops": 4}`.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --mm-shm-cache-max-object-size-mb MM_SHM_CACHE_MAX_OBJECT_SIZE_MB
+                        Size limit (in MiB) for each object stored in the
+                        multi-modal processor shared memory cache. Only
+                        effective when `mm_processor_cache_type` is `"shm"`.
+                        (default: 128)
+  --mm-tensor-ipc {direct_rpc,torch_shm}
+                        IPC (inter-process communication) method for
+                        multimodal tensors.
+                        - "direct_rpc": Use msgspec serialization via RPC
+                        - "torch_shm": Use torch.multiprocessing shared memory
+                        for zero-copy IPC Defaults to "direct_rpc". (default:
+                        direct_rpc)
+  --skip-mm-profiling, --no-skip-mm-profiling
+                        When enabled, skips multimodal memory profiling and
+                        only profiles with language backbone model during
+                        engine initialization.
+                        This reduces engine startup time but shifts the
+                        responsibility to users for estimating the peak memory
+                        usage of the activation of multimodal encoder and
+                        embedding cache. (default: False)
+  --video-pruning-method {evs,vidcom2}
+                        Video token pruning algorithm applied when
+                        `video_pruning_rate` > 0:
+                        - "evs": Efficient Video Sampling.
+                        - "vidcom2": Video Compression Commander. (default:
+                        evs)
+  --video-pruning-rate VIDEO_PRUNING_RATE
+                        Fraction of video tokens to prune from each video.
+                        Value sits in range [0;1); pruning is enabled when it
+                        is greater than 0. The pruning algorithm is selected
+                        by `video_pruning_method`. (default: None)
+
+LoRAConfig:
+  Configuration for LoRA.
+
+  --default-mm-loras DEFAULT_MM_LORAS
+                        Dictionary mapping specific modalities to LoRA model
+                        paths; this field is only applicable to multimodal
+                        models and should be leveraged when a model always
+                        expects a LoRA to be active when a given modality is
+                        present. Note that currently, if a request provides
+                        multiple additional modalities, each of which have
+                        their own LoRA, we do NOT apply default_mm_loras
+                        because we currently only support one lora adapter per
+                        prompt. When run in offline mode, the lora IDs for n
+                        modalities will be automatically assigned to 1-n with
+                        the names of the modalities in alphabetic order.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --enable-lora, --disable-lora
+                        If True, enable handling of LoRA adapters. (default:
+                        None)
+  --enable-mixed-moe-lora-format, --disable-mixed-moe-lora-format
+                        If True, force the engine to use the universal 2D MoE
+                        LoRA wrapper (`FusedMoEWithLoRA`) regardless of the
+                        model's `is_3d_moe_weight` flag, so that 2D-format and
+                        3D-format MoE LoRA adapters can be served in the same
+                        deployment. Only meaningful for MoE models; ignored
+                        otherwise. Default False keeps the existing model-
+                        driven behavior. (default: False)
+  --enable-moe-shared-loras, --disable-moe-shared-loras
+                        If True, load MoE expert adapters in the "shared-
+                        outer" layout, where the gate/up (`w1`/`w3`) lora_A
+                        and the down (`w2`) lora_B are shared across all
+                        experts (stored once with expert-dim 1) instead of
+                        per-expert. The shared factors are broadcast to the
+                        expert count at kernel time. 3D-weight MoE models use
+                        `FusedMoEWithLoRA` for this layout. Only meaningful
+                        for MoE models whose adapters use this layout; ignored
+                        otherwise. (default: False)
+  --enable-tower-connector-lora, --disable-tower-connector-lora
+                        If `True`, LoRA support for the tower (vision encoder)
+                        and connector  of multimodal models will be enabled.
+                        This is an experimental feature and  currently only
+                        supports some MM models such as the Qwen VL series.
+                        The default  is False. (default: False)
+  --fully-sharded-loras, --no-fully-sharded-loras
+                        By default, only half of the LoRA computation is
+                        sharded with tensor parallelism. Enabling this will
+                        use the fully sharded layers. At high sequence length,
+                        max rank or tensor parallel size, this is likely
+                        faster. (default: False)
+  --lora-dtype {auto,bfloat16,float16}
+                        Data type for LoRA. If auto, will default to base
+                        model dtype. (default: auto)
+  --lora-target-modules LORA_TARGET_MODULES [LORA_TARGET_MODULES ...]
+                        Restrict LoRA to specific module suffixes (e.g.,
+                        ["o_proj", "qkv_proj"]). If None, all supported LoRA
+                        modules are used. This allows deployment-time control
+                        over which modules have LoRA applied, useful for
+                        performance tuning. (default: None)
+  --max-cpu-loras MAX_CPU_LORAS
+                        Maximum number of LoRAs to store in CPU memory. Must
+                        be >= than `max_loras`. (default: None)
+  --max-lora-cls-labels MAX_LORA_CLS_LABELS
+                        Maximum output size for LoRA classification heads.
+                        Defaults to the base classification head size.
+                        (default: None)
+  --max-lora-rank {1,8,16,32,64,128,256,320,512}
+                        Max LoRA rank. (default: 16)
+  --max-loras MAX_LORAS
+                        Max number of LoRAs in a single batch. (default: 1)
+  --specialize-active-lora, --no-specialize-active-lora
+                        Whether to construct lora kernel grid by the number of
+                        active LoRA adapters. When set to True, separate cuda
+                        graphs will be captured for different counts of active
+                        LoRAs (powers of 2 up to max_loras), which can improve
+                        performance for variable LoRA usage patterns at the
+                        cost of increased startup time and memory usage. Only
+                        takes effect when cudagraph_specialize_lora is True.
+                        (default: False)
+
+LoggingConfig:
+  vLLM logging. Default ``dictConfig`` adds a formatted stream handler.
+  
+      Supply a JSON object with ``--logging-config`` or individual fields with
+      dotted arguments such as ``--logging-config.log_level DEBUG`` and
+      ``--logging-config.formatter json``. ``--log-level`` and legacy
+      ``--log-config-file`` override their matching fields. Set
+      ``configure_logging`` to false to skip applying a ``dictConfig``.
+      
+
+  --log-config-file PYLOGGING_CONFIG_FILE
+                        --log-config-file is deprecated and will be removed in
+                        v0.33.0. Use --logging-config.pylogging_config_file
+                        instead.
+  --log-level {CRITICAL,ERROR,WARNING,INFO,DEBUG,NOTSET}
+                        Shortcut for --logging-config.log_level. Overrides
+                        that field if both are specified.
+  --logging-config LOGGING_CONFIG
+                        Logging configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.LoggingConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually.
+
+ObservabilityConfig:
+  Configuration for observability - metrics and tracing.
+
+  --collect-detailed-traces {all,model,worker,None} [{all,model,worker,None} ...]
+                        It makes sense to set this only if `--otlp-traces-
+                        endpoint` is set. If set, it will collect detailed
+                        traces for the specified modules. This involves use of
+                        possibly costly and or blocking operations and hence
+                        might have a performance impact.
+                        Note that collecting detailed timing information for
+                        each request can be expensive. (default: None)
+  --cudagraph-metrics, --no-cudagraph-metrics
+                        Enable CUDA graph metrics (number of padded/unpadded
+                        tokens, runtime cudagraph dispatch modes, and their
+                        observed frequencies at every logging interval).
+                        (default: False)
+  --custom-histogram-buckets CUSTOM_HISTOGRAM_BUCKETS
+                        Custom Prometheus histogram bucket boundaries, as a
+                        JSON mapping from bucket-family key to a list of
+                        strictly increasing, positive, finite upper bounds.
+                        When a family key is present, its list replaces the
+                        default buckets for every histogram in that family;
+                        families not listed keep their defaults. Known
+                        families: `request_latency`, `time_to_first_token`,
+                        `inter_token_latency`, `iteration_tokens`,
+                        `request_params_n`, `request_num_preemptions`,
+                        `request_tokens`, `kv_cache_residency`. Example:
+                        `--custom-histogram-buckets '{"request_latency":
+                        [0.01, 0.05, 0.1, 0.5]}'`. Note that every extra
+                        bucket adds one time series per metric and label set.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --enable-layerwise-nvtx-tracing, --disable-layerwise-nvtx-tracing
+                        Deprecated: per-layer tracing was only implemented by
+                        the removed Model Runner V1. This now only adds NVTX
+                        range markers around calls to the compiled model, and
+                        will be removed in a future release. It doesn't work
+                        with CUDA graphs enabled. (default: False)
+  --enable-logging-iteration-details, --disable-logging-iteration-details
+                        Enable detailed logging of iteration details. If set,
+                        vllm EngineCore will log iteration details This
+                        includes number of context/generation requests and
+                        tokens and the elapsed cpu time for the iteration.
+                        (default: False)
+  --enable-mfu-metrics, --disable-mfu-metrics
+                        Enable Model FLOPs Utilization (MFU) metrics.
+                        (default: False)
+  --jit-monitor-mode {error,warn}
+                        How to handle post-warmup JIT compilation events.
+                        (default: warn)
+  --jit-monitor-verbose, --no-jit-monitor-verbose
+                        Log every monitored JIT compile with runtime details.
+                        This can emit many logs and add overhead, so it is
+                        intended for debugging. (default: False)
+  --kv-cache-metrics, --no-kv-cache-metrics
+                        Enable KV cache residency metrics (lifetime, idle
+                        time, reuse gaps). Uses sampling to minimize overhead.
+                        Requires log stats to be enabled (i.e., --disable-log-
+                        stats not set). (default: False)
+  --kv-cache-metrics-sample KV_CACHE_METRICS_SAMPLE
+                        Sampling rate for KV cache metrics (0.0, 1.0]. Default
+                        0.01 = 1% of blocks. (default: 0.01)
+  --otlp-traces-endpoint OTLP_TRACES_ENDPOINT
+                        Target URL to which OpenTelemetry traces will be sent.
+                        (default: None)
+  --per-request-spec-decode-metrics {detailed,none,summary}
+                        Include per-request speculative-decoding acceptance
+                        metrics in the response under
+                        `metrics.speculative_decoding`. `none` disables;
+                        `summary` adds mean acceptance length, draft
+                        acceptance rate, and the step-by-draft-length
+                        histogram; `detailed` additionally records the ordered
+                        per-step accepted/proposed arrays (one entry per
+                        verify step). Only reported for single-sequence
+                        requests (`n == 1`), mirroring the timing metrics. No
+                        effect unless speculative decoding is enabled.
+                        Independent of `--disable-log-stats`. This is the per-
+                        request response-body counterpart of the aggregate
+                        `vllm:spec_decode_*` Prometheus metrics. The response
+                        field is experimental and its shape may change in a
+                        future release. (default: none)
+  --show-hidden-metrics-for-version SHOW_HIDDEN_METRICS_FOR_VERSION
+                        Enable deprecated Prometheus metrics that have been
+                        hidden since the specified version. For example, if a
+                        previously deprecated metric has been hidden since the
+                        v0.7.0 release, you use `--show-hidden-metrics-for-
+                        version=0.7` as a temporary escape hatch while you
+                        migrate to new metrics. The metric is likely to be
+                        removed completely in an upcoming release. (default:
+                        None)
+
+SchedulerConfig:
+  Scheduler configuration.
+
+  --async-scheduling, --no-async-scheduling
+                        If set to False, disable async scheduling. Async
+                        scheduling helps to avoid gaps in GPU utilization,
+                        leading to better latency and throughput. (default:
+                        None)
+  --cache-aware-admission-threshold CACHE_AWARE_ADMISSION_THRESHOLD
+                        KV cache usage below which
+                        `cache_aware_admission_window` is not applied.
+                        Defaults to 0.5, so the window engages only once the
+                        cache is at least half used. Below that there is room
+                        for both prompts and reordering would change admission
+                        order without an eviction to avoid, which is a
+                        fairness cost for no benefit. It also means the per-
+                        request cache probe is skipped entirely while the
+                        cache is roomy. Set to 0.0 to reorder on every step.
+                        (default: 0.5)
+  --cache-aware-admission-window CACHE_AWARE_ADMISSION_WINDOW
+                        Look-ahead window for cache-aware admission. Within
+                        the first N waiting requests, those whose prefix is
+                        already in the KV cache are admitted ahead of requests
+                        that would have to compute theirs, so a cold request
+                        does not evict blocks a resident one still needs. 0
+                        (the default) admits strictly in arrival order.
+                        Reordering is confined to the window and to requests
+                        that are merely waiting, so a request that is blocked
+                        or already partially computed keeps its position and
+                        nothing is moved past it. Requires prefix caching and
+                        the "fcfs" policy; it is ignored otherwise. Costs one
+                        prefix-cache lookup per request in the window per
+                        step, so prefer the smallest window that spans the
+                        usual queue depth. (default: 0)
+  --decode-stall-budget-ms DECODE_STALL_BUDGET_MS
+                        While requests are decoding, bound the prefill tokens
+                        of each step so that the step's measured cost (fitted
+                        online from earlier prefill-carrying steps) stays
+                        within about this many milliseconds; decoders wait for
+                        the whole step. None or 0 disables it (upstream
+                        behaviour). See `vllm/v1/core/sched/mixed_step.py`.
+                        (default: None)
+  --decode-time-share DECODE_TIME_SHARE
+                        With `decode_stall_budget_ms`, the minimum share of
+                        wall time kept for pure-decode steps while a prefill
+                        runs alongside decoders (prefills are deferred until
+                        it is paid). 0 disables the cadence. (default: 0.0)
+  --disable-chunked-mm-input, --enable-chunked-mm-input
+                        If set to true and chunked prefill is enabled, we do
+                        not want to partially schedule a multimodal item. Only
+                        used in V1 This ensures that if a request has a mixed
+                        prompt (like text tokens TTTT followed by image tokens
+                        IIIIIIIIII) where only some image tokens can be
+                        scheduled (like TTTTIIIII, leaving IIIII), it will be
+                        scheduled as TTTT in one step and IIIIIIIIII in the
+                        next. (default: False)
+  --disable-hybrid-kv-cache-manager, --enable-hybrid-kv-cache-manager
+                        If set to True, KV cache manager will allocate the
+                        same size of KV cache for all attention layers even if
+                        there are multiple type of attention layers like full
+                        attention and sliding window attention. If set to
+                        None, the default value will be determined based on
+                        the environment and starting configuration. (default:
+                        None)
+  --enable-chunked-prefill, --disable-chunked-prefill
+                        If True, prefill requests can be chunked based on the
+                        remaining `max_num_batched_tokens`.
+                        The default value here is mainly for convenience when
+                        testing. In real usage, this should be set in
+                        `EngineArgs.create_engine_config`. (default: None)
+  --long-prefill-token-threshold LONG_PREFILL_TOKEN_THRESHOLD
+                        For chunked prefill, a request is considered long if
+                        the prompt is longer than this number of tokens. 0
+                        disables the cap (default). Ignored when chunked
+                        prefill is disabled.
+                        The cap is not applied when the request is the only
+                        one in the batch, since there is no other request for
+                        it to starve. (default: 0)
+  --long-prefill-token-threshold-adaptive, --no-long-prefill-token-threshold-adaptive
+                        Floor the effective long prefill token threshold at a
+                        fair share of the token budget: max_num_batched_tokens
+                        divided by the number of queued and running requests.
+                        Only applies when long_prefill_token_threshold is
+                        nonzero. (default: False)
+  --max-num-active-seqs MAX_NUM_ACTIVE_SEQS
+                        Maximum number of requests the scheduler admits into
+                        RUNNING.
+                        ``max_num_seqs`` sizes the model runner (per-request
+                        buffers and CUDA graph capture) and is also the
+                        default admission limit. Setting this lowers only the
+                        number of requests that may occupy RUNNING, so decode
+                        batches stay smaller without shrinking runner or graph
+                        capacity. Must be ``<= max_num_seqs``. ``None``
+                        (default) keeps current behavior. (default: None)
+  --max-num-batched-tokens MAX_NUM_BATCHED_TOKENS
+                        Maximum number of tokens that can be processed in a
+                        single iteration.
+                        The default value here is mainly for convenience when
+                        testing. In real usage, this should be set in
+                        `EngineArgs.create_engine_config`.
+                        Parse human-readable integers like '1k', '2M', etc.
+                        Including decimal values with decimal multipliers.
+                            Examples:
+                            - '1k' -> 1,000
+                            - '1K' -> 1,024
+                            - '25.6k' -> 25,600
+                             (default: None)
+  --max-num-inflight-kv-loads MAX_NUM_INFLIGHT_KV_LOADS
+                        Maximum number of requests holding KV blocks for an
+                        async KV connector load (e.g. a P/D NIXL pull) before
+                        they run: loads in progress, or finished and waiting
+                        for a running slot.
+                        Setting it also lets requests the connector may load
+                        asynchronously (``KVConnectorBase_V1.may_load_async``,
+                        by default P/D remote-prefill requests) start their
+                        loads while the running batch is full, so they are
+                        ready when a slot frees. ``None`` (default) keeps
+                        current behavior: no cap, and loads start only when a
+                        running slot is free. (default: None)
+  --max-num-queued-reqs MAX_NUM_QUEUED_REQS
+                        Maximum number of requests that can be in-flight
+                        (waiting or running) at the same time, or None for no
+                        limit. When the limit is reached, new requests are
+                        rejected with HTTP 503 so the client can retry on
+                        another instance. This bounds vLLM's otherwise
+                        unbounded request queue and is primarily a coarse
+                        capacity valve.
+                        Unlike ``max_num_seqs``, which applies per data-
+                        parallel rank, this limit is enforced in the API
+                        server process and counts in-flight requests across
+                        all DP ranks it routes to. Size it as roughly
+                        ``data_parallel_size * max_num_seqs`` plus the desired
+                        queue depth if it should not bind before per-rank
+                        admission does. (default: None)
+  --max-num-queued-tokens MAX_NUM_QUEUED_TOKENS
+                        Maximum total prompt tokens of requests currently in
+                        the prefill phase, or None for no limit. When the
+                        limit is reached, new requests are rejected with HTTP
+                        503.
+                        This is a TTFT QoS mechanism: by setting it to
+                        ``target_TTFT * prefill_throughput`` you reject
+                        requests when the prefill backlog would exceed the
+                        latency target.  In a disaggregated prefill-decode
+                        setup this maps directly to the prefill pool's
+                        capacity.
+                        Like ``max_num_queued_reqs``, this limit is enforced
+                        in the API server process and covers the prefill
+                        backlog across all DP ranks it routes to, so
+                        ``prefill_throughput`` in the formula above is the
+                        aggregate throughput of the deployment.
+                        Note: the count is conservative.  A partially
+                        prefilled request still contributes its full
+                        ``prompt_len`` until it transitions out of the prefill
+                        phase, because the scheduler's per-iteration
+                        ``num_computed_tokens`` progress is not propagated to
+                        the API server process during prefill
+                        (``EngineCoreOutput`` is only emitted once the request
+                        starts producing tokens).  Similarly, prefix-cache
+                        hits (``num_cached_tokens``) are only known to the
+                        OutputProcessor after prefill completes.  This
+                        overestimates the real backlog, causing earlier
+                        rejection than strictly necessary — the safe direction
+                        for QoS.  The impact is limited to long prompts under
+                        chunked prefill; short prompts that prefill in a
+                        single iteration are unaffected.
+                        Parse human-readable integers like '1k', '2M', etc.
+                        Including decimal values with decimal multipliers.
+                            Examples:
+                            - '1k' -> 1,000
+                            - '1K' -> 1,024
+                            - '25.6k' -> 25,600
+                             (default: None)
+  --max-num-scheduled-tokens MAX_NUM_SCHEDULED_TOKENS
+                        Maximum number of tokens that the scheduler may issue
+                        in a single iteration.
+                        This is usually equal to max_num_batched_tokens, but
+                        can be smaller in cases when the model might append
+                        tokens into the batch (such as speculative decoding).
+                        Defaults to max_num_batched_tokens.
+                        Parse human-readable integers like '1k', '2M', etc.
+                        Including decimal values with decimal multipliers.
+                            Examples:
+                            - '1k' -> 1,000
+                            - '1K' -> 1,024
+                            - '25.6k' -> 25,600
+                             (default: None)
+  --max-num-seqs MAX_NUM_SEQS
+                        Maximum number of sequences to be processed in a
+                        single iteration.
+                        The default value here is mainly for convenience when
+                        testing. In real usage, this should be set in
+                        `EngineArgs.create_engine_config`. (default: None)
+  --prefill-schedule-interval PREFILL_SCHEDULE_INTERVAL
+                        Admit new prefill requests only once every N engine
+                        steps, so decoders get pure-decode steps in between.
+                        On data-parallel deployments the cadence is aligned
+                        across DP ranks. 1 (the default) disables it.
+                        (default: 1)
+  --scheduler-cls SCHEDULER_CLS
+                        The scheduler class to use.
+                        "vllm.v1.core.sched.scheduler.Scheduler" is the
+                        default scheduler. Can be a class directly or the path
+                        to a class of form "mod.custom_class". (default: None)
+  --scheduler-reserve-full-isl, --no-scheduler-reserve-full-isl
+                        If True, the scheduler checks whether the full input
+                        sequence length fits in the KV cache before admitting
+                        a new request, rather than only checking the first
+                        chunk. Prevents over-admission and KV cache thrashing
+                        with chunked prefill. (default: True)
+  --scheduling-policy {fcfs,priority}
+                        The scheduling policy to use:
+                        - "fcfs" means first come first served, i.e. requests
+                        are handled in order  of arrival.
+                        - "priority" means requests are handled based on given
+                        priority (lower value means earlier handling) and time
+                        of arrival deciding any ties). (default: fcfs)
+  --stream-interval STREAM_INTERVAL
+                        The interval (or buffer size) for streaming in terms
+                        of token length. A smaller value (1) makes streaming
+                        smoother by sending each token immediately, while a
+                        larger value (e.g., 10) reduces host overhead and may
+                        increase throughput by batching multiple tokens before
+                        sending. (default: 1)
+  --watermark WATERMARK
+                        Fraction of total KV cache blocks to keep free (the
+                        watermark) when admitting waiting or preempted
+                        requests into the running queue. This headroom helps
+                        avoid frequent KV cache eviction and the resulting
+                        repeated preemption of requests when GPU memory is
+                        scarce. Must be in the range [0.0, 1.0); 0.0 (the
+                        default) disables the watermark. (default: 0.0)
+
+CompilationConfig:
+  Configuration for compilation.
+  
+      You must pass CompilationConfig to VLLMConfig constructor.
+      VLLMConfig's post_init does further initialization. If used outside of the
+      VLLMConfig, some fields will be left in an improper state.
+  
+      It contains PassConfig, which controls the custom fusion/transformation passes.
+      The rest has three parts:
+  
+      - Top-level Compilation control:
+          - [`mode`][vllm.config.CompilationConfig.mode]
+          - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
+          - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
+          - [`backend`][vllm.config.CompilationConfig.backend]
+          - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
+          - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
+          - [`compile_mm_encoder`][vllm.config.CompilationConfig.compile_mm_encoder]
+      - CudaGraph capture:
+          - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
+          - [`cudagraph_capture_sizes`]
+          [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+          - [`max_cudagraph_capture_size`]
+          [vllm.config.CompilationConfig.max_cudagraph_capture_size]
+          - [`prefill_cudagraph_capture_token_sizes`]
+          [vllm.config.CompilationConfig.prefill_cudagraph_capture_token_sizes]
+          - [`max_prefill_cudagraph_capture_tokens`]
+          [vllm.config.CompilationConfig.max_prefill_cudagraph_capture_tokens]
+          - [`decode_cudagraph_capture_request_sizes`]
+          [vllm.config.CompilationConfig.decode_cudagraph_capture_request_sizes]
+          - [`max_decode_cudagraph_capture_requests`]
+          [vllm.config.CompilationConfig.max_decode_cudagraph_capture_requests]
+          - [`cudagraph_num_of_warmups`]
+          [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
+          - [`cudagraph_copy_inputs`]
+          [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+      - Inductor compilation:
+          - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+          - [`compile_ranges_endpoints`]
+              [vllm.config.CompilationConfig.compile_ranges_endpoints]
+          - [`inductor_compile_config`]
+          [vllm.config.CompilationConfig.inductor_compile_config]
+          - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
+          - custom inductor passes
+  
+      Why we have different sizes for cudagraph and inductor:
+      - cudagraph: a cudagraph captured for a specific size can only be used
+          for the same size. We need to capture all the sizes we want to use.
+      - inductor: a graph compiled by inductor for a general shape can be used
+          for different sizes. Inductor can also compile for specific sizes,
+          where it can have more information to optimize the graph with fully
+          static shapes. However, we find the general shape compilation is
+          sufficient for most cases. It might be beneficial to compile for
+          certain small batchsizes, where inductor is good at optimizing.
+      
+
+  --cudagraph-capture-sizes CUDAGRAPH_CAPTURE_SIZES [CUDAGRAPH_CAPTURE_SIZES ...]
+                        Sizes to capture cudagraph.
+                        - None (default): capture sizes are inferred from vllm
+                        config.
+                        - list[int]: capture sizes are specified as given.
+                        Deprecated with model runner V2, which takes
+                        `prefill_cudagraph_capture_token_sizes` and
+                        `decode_cudagraph_capture_request_sizes` instead. Set
+                        there, these token counts are the prefill sizes and,
+                        rounded up to whole requests of the target model's
+                        query length, the decode sizes. After config
+                        resolution it holds the token count of every captured
+                        graph. (default: None)
+  --max-cudagraph-capture-size MAX_CUDAGRAPH_CAPTURE_SIZE
+                        The maximum cudagraph capture size.
+                        If cudagraph_capture_sizes is specified, this will be
+                        set to the largest size in that list (or checked for
+                        consistency if specified). If cudagraph_capture_sizes
+                        is not specified, the list of sizes is generated
+                        automatically following the pattern:
+                            [1, 2, 4] + list(range(8, 256, 8)) + list(
+                        range(256, max_cudagraph_capture_size + 1, 16))
+                        If not specified, max_cudagraph_capture_size is capped
+                        at 512 by default, or 1024 on data center Blackwell
+                        GPUs. This avoids OOM in tight memory scenarios with
+                        small max_num_seqs, and limits capture of large graphs
+                        that increase startup time and memory usage. Uniform
+                        decode sizes are appended only within this default
+                        ceiling.
+                        Deprecated with model runner V2, which takes
+                        `max_prefill_cudagraph_capture_tokens` (tokens) and
+                        `max_decode_cudagraph_capture_requests` (requests)
+                        instead. After config resolution it holds the token
+                        count of the widest captured graph. (default: None)
+
+KernelConfig:
+  Configuration for kernel selection and warmup behavior.
+
+  --enable-flashinfer-autotune, --disable-flashinfer-autotune
+                        Benchmark FlashInfer kernel implementations during
+                        warmup and use the fastest. Enabled by default except
+                        at `-O0`; disable for faster startup. (default: None)
+  --ir-op-priority IR_OP_PRIORITY
+                        vLLM IR op priority for dispatching/lowering during
+                        the forward pass. Platform defaults appended
+                        automatically during VllmConfig.__post_init__.
+                        Deprecated: vLLM IR is being removed, and this option
+                        will be removed in v0.34.0. Kernels will be selected
+                        by the platform, as for other custom ops.
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default:
+                        IrOpPriorityConfig(rms_norm=[], fused_add_rms_norm=[],
+                        gelu_and_mul_sparse=[]))
+  --linear-backend {aiter,auto,b12x,conch,cutlass,deep_gemm,emulation,exllama,fbgemm,flashinfer_b12x,flashinfer_cudnn,flashinfer_cutedsl,flashinfer_cutlass,flashinfer_trtllm,humming,machete,marlin,rdna2,rdna_hybrid,torch,triton,xpu,xpu_woq}
+                        Backend for linear layer GEMM kernels. Available
+                        options:
+                        Layer types without an implementation from the
+                        requested backend use automatic selection.
+                        - "auto": Automatically select the best backend based
+                        on model and hardware
+                        - "cutlass": Use CUTLASS-based kernels
+                        - "flashinfer_cutlass": Use FlashInfer with CUTLASS
+                        kernels
+                        - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL
+                        kernels (BF16, NVFP4, MXFP8, W4A16_NVFP4)
+                        - "flashinfer_trtllm": Use FlashInfer with TensorRT-
+                        LLM kernels
+                        - "flashinfer_cudnn": Use FlashInfer with cuDNN
+                        kernels
+                        - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4
+                        GEMM (SM120+)
+                        - "b12x": Use native B12X FP8 and FP4 linear kernels
+                        on SM12x
+                        - "marlin": Use Marlin kernels
+                        - "triton": Use Triton-based kernels
+                        - "deep_gemm": Use DeepGEMM kernels
+                        - "torch": Use PyTorch native scaled_mm kernels
+                        - "aiter": Use AMD AITer kernels (ROCm only)
+                        - "machete": Use Machete kernels (mixed-precision)
+                        - "fbgemm": Use FBGEMM kernels
+                        - "conch": Use Conch mixed-precision kernels
+                        - "exllama": Use Exllama mixed-precision kernels
+                        - "rdna2": Use RDNA2W4A16LinearKernel (gfx1030 HIP
+                        decode/prefill)
+                        - "rdna_hybrid": Use RDNAHybridW4A16LinearKernel
+                        (skinny HIP + Triton; gfx10 also dequants to dense +
+                        rocBLAS at M>=256)
+                        - "emulation": Use slow dequant-to-BF16 emulation (for
+                        testing only)
+                        - "xpu": Use XPU kernels
+                        - "xpu_woq": Use XPU kernels for weight-only
+                        quantization (e.g. W8A16) (default: auto)
+  --moe-backend {aiter,aiter_mega_moe,aiter_triton_mxfp4_bf16,aiter_triton_mxfp4_mxfp4,auto,b12x,batched_triton,cutlass,deep_gemm,deep_gemm_mega_moe,emulation,flashinfer_b12x,flashinfer_cutedsl,flashinfer_cutlass,flashinfer_moe_ep_cutedsl,flashinfer_moe_ep_mega_deep_gemm,flashinfer_trtllm,flydsl,hpc,humming,marlin,rdna3,triton,triton_unfused}
+                        Backend for MoE expert computation kernels. Available
+                        options:
+                        - "auto": Automatically select the best backend based
+                        on model and hardware
+                        - "triton": Use Triton-based fused MoE kernels
+                        - "batched_triton": Use batched Triton experts
+                        (moe_mmk) on the batched activation format ([E_local,
+                        max_num_tokens, K])
+                        - "deep_gemm": Use DeepGEMM kernels (FP8 block-
+                        quantized only)
+                        - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
+                        - "cutlass": Use vLLM CUTLASS kernels
+                        - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN
+                        kernels
+                        - "flashinfer_cutlass": Use FlashInfer with CUTLASS
+                        kernels
+                        - "flashinfer_cutedsl": Use FlashInfer with CuteDSL
+                        kernels (FP4 only)
+                        - "flashinfer_moe_ep_cutedsl": Use FlashInfer's
+                        CuTeDSL MoE-EP mega-kernel with NVFP4 weights (MXFP4
+                        checkpoints are requantized at load); requires
+                        Blackwell, expert parallelism, and NVSHMEM
+                        - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE
+                        for SM12x (RTX Pro 6000 / DGX Spark)
+                        - "b12x": Use b12x FP4 MoE kernels on SM12x
+                        - "flashinfer_moe_ep_mega_deep_gemm": Use the
+                        FlashInfer moe_ep expert-parallel mega-MoE with the
+                        DeepGEMM megakernel, which consumes an MXFP4
+                        checkpoint verbatim (Blackwell, requires expert
+                        parallel; DeepSeek-V4 only)
+                        - "marlin": Use Marlin kernels (weight-only
+                        quantization)
+                        - "humming": Use Humming Mixed Precision kernels
+                        - "triton_unfused": Use Triton unfused MoE kernels
+                        - "aiter": Use AMD AITer kernels (ROCm only)
+                        - "aiter_mega_moe": Use the AITER MegaMoE fused
+                        dispatch/GEMM/combine kernel (ROCm gfx950, requires
+                        DP+EP with a MoRI all2all backend; DeepSeek-V4 only)
+                        - "aiter_triton_mxfp4_bf16": Use the AITER Triton
+                        MXFP4 W4A16 (moe_gemm_a16w4) MoE kernel (ROCm
+                        gfx942/gfx950/gfx1250)
+                        - "aiter_triton_mxfp4_mxfp4": Use the AITER
+                        Triton/Gluon MXFP4 W4A4 (moe_gemm_a4w4) MoE kernel
+                        (ROCm gfx1250)
+                        - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+                        - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm
+                        gfx1100 only)
+                        - "hpc": Use HPC kernels (FP8 and Hopper only)
+                        - "emulation": use BF16/FP16 GEMM, dequantizing
+                        weights and running QDQ on activations. (default:
+                        auto)
+  --monokernel, --no-monokernel
+                        If True, run the eligible layers of decode steps on
+                        the model's MonoKernel: a persistent kernel that runs
+                        most or all of one decoder layer in a single launch
+                        (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
+                        MI355X; Muse Spark MXFP4 on MI355X with tensor
+                        parallel size 8, expert parallelism and a 7-token
+                        DSpark draft, for speculative verify steps of 1-16
+                        requests, with bf16 MoE activations instead of the
+                        checkpoint's MXFP4). A deployment that cannot run it
+                        is refused at startup. (default: False)
+  --sparse-indexer-topk-backend {aiter,auto,cooperative,deep_select,flashinfer,per_row,persistent,torch}
+                        Backend for the DSA sparse indexer decode top-k
+                        kernel. Available options:
+                        - "auto": The pre-existing chain (cooperative ->
+                        persistent -> per_row); the other backends are opt-in
+                        - "deep_select": Use DeepSelect kernels (SM100a/SM103a
+                        only)
+                        - "cooperative": Use vLLM's cooperative_topk kernel
+                        - "persistent": Use vLLM's persistent_topk kernel
+                        - "per_row": Use vLLM's top_k_per_row_decode kernel
+                        - "flashinfer": Use FlashInfer's
+                        top_k_ragged_transform kernel
+                        - "torch": Use a plain torch.topk implementation
+                        (debug reference)
+                        - "aiter": Use AITER's top_k_per_row_decode kernel
+                        (ROCm gfx950 only, requires VLLM_ROCM_USE_AITER)
+                        Explicit values raise RuntimeError when their
+                        constraints are not met.
+                        On SM100 decode without DCP, cooperative and
+                        persistent (including auto selecting them) read BF16
+                        logits directly and widen scores inside the kernel,
+                        avoiding a full FP32 logits copy. (default: auto)
+
+VllmConfig:
+  Dataclass which contains all vllm-related configuration. This
+      simplifies passing around the distinct configurations in the codebase.
+      
+
+  --additional-config ADDITIONAL_CONFIG
+                        Additional config for specified platform. Different
+                        platforms may support different configs. Make sure the
+                        configs are valid for the platform you are using.
+                        Contents must be hashable. (default: {})
+  --attention-config ATTENTION_CONFIG, -ac ATTENTION_CONFIG
+                        Attention configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.AttentionConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default:
+                        AttentionConfig(backend=None,
+                        minimax_m3_msa_decode_backend='cutlass',
+                        backend_per_kind={}, flash_attn_version=None,
+                        flash_attn_max_num_splits_for_cuda_graph=32,
+                        tokenspeed_mla_min_split_kv=1,
+                        tq_max_kv_splits_for_cuda_graph=32,
+                        use_trtllm_attention=None,
+                        disable_flashinfer_q_quantization=False,
+                        mla_prefill_backend=None,
+                        use_prefill_query_quantization=False,
+                        trtllm_ragged_backend='trtllm-gen',
+                        indexer_kv_dtype='auto', indexer_decode_cp=False,
+                        indexer_sparse_logits=None,
+                        indexer_logits_dtype='auto',
+                        indexer_tp_shard_min_rows=None,
+                        sparse_mla_shard_q=True,
+                        sparse_mla_shard_q_min_tokens=1024,
+                        minimax_m3_indexer_cp=False, hisparse_config=None,
+                        use_non_causal=False, sparse_mla_force_mqa=False,
+                        sparse_mla_prefill_workspace_factor=None,
+                        flex_attn_block_m=None, flex_attn_block_n=None,
+                        flex_attn_q_block_size=None,
+                        flex_attn_kv_block_size=None))
+  --aux-output-config AUX_OUTPUT_CONFIG
+                        Execution auxiliary output configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.AuxOutputConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default:
+                        AuxOutputConfig(enable_return_routed_experts=False,
+                        max_bytes=None))
+  --compilation-config COMPILATION_CONFIG, -cc COMPILATION_CONFIG
+                        `torch.compile` and cudagraph capture configuration
+                        for the model.
+                        As a shorthand, one can append compilation arguments
+                        via
+                        -cc.parameter=argument such as `-cc.mode=3` (same as
+                        `-cc='{"mode":3}'`).
+                        You can specify the full compilation config like so:
+                        `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.CompilationConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: {'mode': None,
+                        'debug_dump_path': None, 'cache_dir': '',
+                        'compile_cache_save_format': 'binary', 'backend':
+                        'inductor', 'custom_ops': [], 'ir_enable_torch_wrap':
+                        None, 'splitting_ops': None, 'compile_mm_encoder':
+                        False, 'cudagraph_mm_encoder': False,
+                        'encoder_cudagraph_token_budgets': [],
+                        'encoder_cudagraph_max_token_budget': 5120,
+                        'encoder_cudagraph_max_vision_items_per_batch': 0,
+                        'encoder_cudagraph_max_frames_per_batch': None,
+                        'cudagraph_decoder_replay': True,
+                        'decoder_replay_cudagraph_capture_sizes': [],
+                        'decoder_replay_trim_threshold': 768, 'compile_sizes':
+                        None, 'compile_ranges_endpoints': None,
+                        'inductor_compile_config':
+                        {'enable_auto_functionalized_v2': False,
+                        'combo_kernels': True, 'benchmark_combo_kernel':
+                        True}, 'inductor_passes': {}, 'cudagraph_mode': None,
+                        'use_breakable_cudagraph': None,
+                        'cudagraph_num_of_warmups': 0,
+                        'cudagraph_capture_sizes': None,
+                        'prefill_cudagraph_capture_token_sizes': None,
+                        'max_prefill_cudagraph_capture_tokens': None,
+                        'decode_cudagraph_capture_request_sizes': None,
+                        'max_decode_cudagraph_capture_requests': None,
+                        'max_decode_cudagraph_capture_tokens': None,
+                        'cudagraph_copy_inputs': False,
+                        'cudagraph_specialize_lora': True,
+                        'use_inductor_graph_partition': None, 'pass_config':
+                        {}, 'max_cudagraph_capture_size': None,
+                        'dynamic_shapes_config': {'type':
+                        <DynamicShapesType.BACKED: 'backed'>,
+                        'evaluate_guards': False, 'assume_32_bit_indexing':
+                        False}, 'local_cache_dir': None,
+                        'fast_moe_cold_start': None, 'static_all_moe_layers':
+                        []})
+  --diffusion-config DIFFUSION_CONFIG, -dc DIFFUSION_CONFIG
+                        Diffusion LLM (dLLM) configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.DiffusionConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --ec-manager-config EC_MANAGER_CONFIG
+                        The configurations for custom encoder cache manager.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.EncoderCacheManagerConfi
+                        g
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: EncoderCacheManagerConf
+                        ig(encoder_cache_manager_cls=None, manager_config={}))
+  --ec-transfer-config EC_TRANSFER_CONFIG
+                        The configurations for distributed EC cache transfer.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.ECTransferConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --engram-config ENGRAM_CONFIG
+                        N-gram embedding storage and sharding settings.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.EngramConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --kernel-config KERNEL_CONFIG
+                        Kernel configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.KernelConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: KernelConfig(ir_op_prio
+                        rity=IrOpPriorityConfig(rms_norm=[],
+                        fused_add_rms_norm=[], gelu_and_mul_sparse=[]),
+                        enable_flashinfer_autotune=None,
+                        enable_rocm_segmented_attn_autotune=False,
+                        enable_rocm_aiter_gemm_warmup=False,
+                        enable_cutedsl_warmup=True, enable_jit_warmup=True,
+                        monokernel=False, moe_backend='auto',
+                        sparse_indexer_topk_backend='auto',
+                        linear_backend='auto', linear_backend_per_quant=None,
+                        rdna_hybrid_w4a16_prefill_dequant='disable'))
+  --kv-events-config KV_EVENTS_CONFIG
+                        The configurations for event publishing.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.KVEventsConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --kv-transfer-config KV_TRANSFER_CONFIG
+                        The configurations for distributed KV cache transfer.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.KVTransferConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --optimization-level OPTIMIZATION_LEVEL
+                        The optimization level. These levels trade startup
+                        time cost for performance, with -O0 having the best
+                        startup time and -O3 having the best performance. -O2
+                        is used by default. See OptimizationLevel for full
+                        description. (default: 2)
+  --performance-mode {balanced,interactivity,throughput}
+                        Performance mode for runtime behavior, 'balanced' is
+                        the default. 'interactivity' favors low end-to-end
+                        per-request latency at small batch sizes (fine-grained
+                        CUDA graphs, latency-oriented kernels). 'throughput'
+                        favors aggregate tokens/sec at high concurrency
+                        (larger CUDA graphs, more aggressive batching,
+                        throughput-oriented kernels). (default: balanced)
+  --profiler-config PROFILER_CONFIG
+                        Profiling configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.ProfilerConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default:
+                        ProfilerConfig(profiler=None, torch_profiler_dir='',
+                        torch_profiler_activities=None,
+                        proton_profiler_dir='', proton_context='shadow',
+                        proton_data='tree', proton_backend=None,
+                        proton_mode=None, proton_hook=None,
+                        proton_output_format=None,
+                        proton_graph_attribution=False,
+                        torch_profiler_with_stack=True,
+                        torch_profiler_with_flops=False,
+                        torch_profiler_use_gzip=True,
+                        torch_profiler_dump_cuda_time_total=True,
+                        torch_profiler_record_shapes=False,
+                        torch_profiler_with_memory=False,
+                        capture_torch_profiler=False,
+                        detailed_trace_annotation=False,
+                        ignore_frontend=False, delay_iterations=0,
+                        max_iterations=0, warmup_iterations=0,
+                        active_iterations=5, wait_iterations=0))
+  --reasoning-config REASONING_CONFIG
+                        The configurations for reasoning model.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.ReasoningConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --spec-method ['bailing_hybrid_mtp', 'bailing_hybrid_v3_mtp', 'deepseek_mtp', 'dflash', 'dots3_note_mtp', 'draft_model', 'dspark', 'eagle', 'eagle3', 'ernie_mtp', 'exaone4_5_mtp', 'exaone_moe_mtp', 'extract_hidden_states', 'gemma4_mtp', 'glm4_moe_lite_mtp', 'glm4_moe_mtp', 'glm5_next_mtp', 'glm_ocr_mtp', 'hy_v3_mtp', 'hy_v4_mtp', 'inkling_mtp', 'kimi_k3_mtp', 'longcat_flash_mtp', 'mimo_mtp', 'mimo_v2_mtp', 'minimax_m3_mtp', 'mtp', 'nemotron3_5_transcribe_mtp', 'nemotron_h_mtp', 'ngram', 'ngram_gpu', 'pangu_ultra_moe_mtp', 'qwen3_5_mtp', 'qwen3_next_mtp', 'qwen4_exp_mtp', 'step3p5_mtp', 'step5_mtp', 'suffix']
+                        The name of the speculative method to use. If users
+                        provide and set the `model` param, the speculative
+                        method type will be detected automatically if
+                        possible, if `model` param is not provided, the method
+                        name must be provided.
+                        If using `ngram` method, the related configuration
+                        `prompt_lookup_max` and `prompt_lookup_min` should be
+                        considered.
+                        A configured method is never changed based on the
+                        draft checkpoint, but it is checked against it where
+                        the checkpoint can be recognized (e.g. `mtp` requires
+                        an MTP draft, and `draft_model` rejects one).
+                        Besides the built-in methods, this can be a custom
+                        method registered with `vllm.v1.worker.gpu.spec_decode
+                        .speculator_config.register_speculative_method` (e.g.
+                        by a vLLM plugin). It is then moved to
+                        `custom_method`, and this is set to the built-in
+                        method that its config is based on (None if it isn't
+                        based on one). (default: None)
+  --spec-model SPEC_MODEL
+                        The name of the draft model, eagle head, or additional
+                        weights, if provided. (default: None)
+  --spec-tokens SPEC_TOKENS
+                        The number of speculative tokens, if provided. It will
+                        default to the number in the draft model config if
+                        present, otherwise, it is required. (default: None)
+  --speculative-config SPECULATIVE_CONFIG, -sc SPECULATIVE_CONFIG
+                        Speculative decoding configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.SpeculativeConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --structured-outputs-config STRUCTURED_OUTPUTS_CONFIG
+                        Structured outputs configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.StructuredOutputsConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default:
+                        StructuredOutputsConfig(backend='auto',
+                        disable_any_whitespace=False,
+                        disable_additional_properties=False,
+                        reasoning_parser='', reasoning_parser_plugin='',
+                        enable_in_reasoning=False))
+  --watchdog-config WATCHDOG_CONFIG
+                        Configuration for the stack-dump watchdog.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.WatchdogConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default:
+                        WatchdogConfig(timeout=300, check_interval=10,
+                        dump_dir=''))
+  --watermark-config WATERMARK_CONFIG
+                        Text watermarking configuration.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.WatermarkConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+  --weight-transfer-config WEIGHT_TRANSFER_CONFIG
+                        The configurations for weight transfer during RL
+                        training.
+                        API docs: https://docs.vllm.ai/en/v0.34.0+rdna.rocm714
+                        /api/vllm/config/#vllm.config.WeightTransferConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
+
+When passing JSON CLI arguments, the following sets of arguments are equivalent:
+   --json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'
+   --json-arg.key1 value1 --json-arg.key2.key3 value2
+
+Additionally, list elements can be passed individually using +:
+   --json-arg '{"key4": ["value3", "value4", "value5"]}'
+   --json-arg.key4+ value3 --json-arg.key4+='value4,value5'

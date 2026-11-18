@@ -1050,5 +1050,16 @@ the same missing CUDA-platform gate in the SM100 capture-default heuristic;
 that heuristic is now CUDA-only. CLI tests use local model configs rather
 than a remote `dummy` repository, and PLE fixtures include EXL3 lookup
 metadata and cover the distinct CUDA-wait/ROCm-host-sync contracts.
-The CPU rerun and model-runtime gates remain pending. No performance result
-is claimed.
+The repaired batch passes 63 cases at `6601d70678`. The capture-contract
+gate passes 14 cases at `5d388329bb`: its autoregressive-draft fixture now
+uses the production initializer, including the independent one-token draft
+request grid, rather than reusing the target's verification-token bound.
+Raw native and CPU receipts are in
+`bench_results/2026-11-18_v034-rebase/`; their source checkpoints are recorded
+separately because the native code is unchanged after `6333bc722e`.
+The actual CLI reports `0.34.0+rdna.rocm714`; `serve --help=all` exposes
+`--replayssm-state-dtype {auto,leapquant}`. Its logs retain an optional
+`triton_kernels`/Triton 3.7.1 compatibility error (`is_hip_gfx1250` is
+missing). That backend is not qualified by the native/CPU receipts.
+GPU operator and Flash-Next/HI2 model-runtime gates remain pending. No
+performance result is claimed.

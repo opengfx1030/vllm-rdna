@@ -1,0 +1,186 @@
+_rocm_C::LLMM1(Tensor in_a, Tensor in_b, int rows_per_block) -> Tensor
+_rocm_C::apply_grammar_bitmask_rdna2(Tensor(a!) logits, int logits_stride, Tensor logits_indices, Tensor cu_num_logits, Tensor bitmask, int bitmask_stride, int vocab_size, int mask_stride) -> ()
+_rocm_C::apply_write_rdna2(Tensor(a!) out, int out_stride, Tensor write_indices, Tensor write_starts, Tensor write_contents, Tensor write_cu_lens) -> ()
+_rocm_C::bad_words_rdna2(Tensor(a!) logits, int logits_stride, Tensor expanded_idx_mapping, Tensor bad_word_token_ids, int bad_word_token_ids_stride, Tensor bad_word_offsets, int bad_word_offsets_stride, Tensor num_bad_words, Tensor all_token_ids, int all_token_ids_stride, Tensor prompt_len, Tensor total_len, Tensor input_ids, Tensor expanded_local_pos, int max_num_bad_words) -> ()
+_rocm_C::batch_memcpy_rdna2(Tensor src_ptrs, Tensor dst_ptrs, Tensor sizes) -> ()
+_rocm_C::bilinear_pos_embed_rdna2(Tensor embed_weight, Tensor(a!) out, int H, int W, float h_scale, float w_scale, int num_grid, int m_size) -> Tensor
+_rocm_C::bincount_rdna2(Tensor expanded_idx_mapping, Tensor all_token_ids, int all_token_ids_stride, Tensor prompt_len, Tensor prefill_len, Tensor(a!) prompt_bin_mask, int prompt_bin_mask_stride, Tensor(b!) output_bin_counts, int output_bin_counts_stride, int max_prefill_len) -> ()
+_rocm_C::build_qsa_metadata_rdna2(Tensor query_start_loc, Tensor seq_lens, Tensor common_slot_mapping, Tensor block_table, Tensor(a!) token_to_req, Tensor(b!) logical_positions, Tensor(c!) visible_blocks, Tensor(d!) slot_mapping, Tensor? k_work_metadata, int num_reqs, int num_mapped_tokens, int num_tokens, int max_num_work, int num_search_steps, int work_search_steps, int request_scan_size, int storage_block_size, int compress_ratio, int circular_buffer_size) -> ()
+_rocm_C::causal_conv1d_fwd_rdna2(Tensor x, Tensor weight, Tensor bias, Tensor conv_state, Tensor query_start_loc, Tensor cache_indices, Tensor has_initial_state, Tensor out, bool silu_activation, int null_block_id=0) -> ()
+_rocm_C::causal_conv1d_update_rdna2(Tensor x, Tensor conv_state, Tensor weight, Tensor bias, Tensor out, Tensor conv_state_indices, bool silu_activation) -> ()
+_rocm_C::causal_conv1d_update_spec_rdna2(Tensor x, Tensor conv_state, Tensor weight, Tensor bias, Tensor out, Tensor conv_state_indices, Tensor num_accepted_tokens, Tensor query_start_loc, int state_len, int max_query_len, int null_block_id, bool silu_activation) -> ()
+_rocm_C::combine_sampled_and_draft_tokens_rdna2(Tensor(a!) input_ids, Tensor idx_mapping, Tensor last_sampled_tokens, Tensor query_start_loc, Tensor seq_lens, Tensor prefill_len, Tensor draft_tokens, int draft_tokens_stride, Tensor cu_num_logits, Tensor(b!) logits_indices, int num_new_sampled_tokens) -> ()
+_rocm_C::compute_slot_mappings_rdna2(int max_num_tokens, Tensor idx_mapping, Tensor query_start_loc, Tensor pos, Tensor block_table_ptrs, Tensor block_table_strides, Tensor block_sizes, Tensor slot_mapping_enabled, Tensor dcp_sharded, Tensor(a!) slot_mappings, int slot_mappings_stride, int cp_rank, int cp_size, int cp_interleave, int pad_id) -> ()
+_rocm_C::dsv4_mhc_post_rdna(Tensor x, Tensor residual, Tensor post, Tensor comb) -> Tensor
+_rocm_C::dsv4_mhc_pre_rdna(Tensor residual, Tensor mixes, Tensor hc_scale, Tensor hc_base, float rms_eps, float pre_eps, float sinkhorn_eps, float post_mult, int sinkhorn_repeat) -> Tensor[]
+_rocm_C::dsv4_qnorm_rope_kv_insert_rdna(Tensor q_in, Tensor kv, Tensor(a!) k_cache, Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, int q_head_padded, float eps, int cache_block_size, bool apply_q_norm=True, bool apply_q_rope=True) -> Tensor
+_rocm_C::exl3_decode_trellis_rdna2(Tensor trellis, Tensor($0! -> ) out, int bits, int cb) -> ()
+_rocm_C::exl3_dequant_bits6_mul1(Tensor trellis, Tensor(a!) out) -> ()
+_rocm_C::exl3_gemm_rdna2(Tensor a, Tensor($0! -> ) c, Tensor b_q_weight, int bits, int cb) -> ()
+_rocm_C::exl3_hadamard_128(Tensor input, Tensor($0! -> ) output, Tensor? pre_scale, Tensor? post_scale, float scale) -> ()
+_rocm_C::exl3_project_rdna2(Tensor x, Tensor(a!) xh, Tensor(a!) mid, Tensor(a!) out, Tensor trellis, Tensor suh, Tensor svh, int bits, int cb) -> ()
+_rocm_C::expand_idx_mapping_rdna2(Tensor idx_mapping, Tensor(a!) expanded_idx_mapping, Tensor(b!) expanded_local_pos, Tensor cu_num_logits) -> ()
+_rocm_C::fa_rdna2_decode_paged(Tensor Q, Tensor key_cache, Tensor value_cache, Tensor block_table, Tensor seq_lens, int block_size, int kv_splits, int sliding_window, float scale, Tensor(a!) out, Tensor? cu_query_lens=None) -> ()
+_rocm_C::fa_rdna2_paged_int4_fp16_block(Tensor Q, Tensor key_cache, Tensor value_cache, Tensor k_scale, Tensor v_scale, Tensor block_table, Tensor cu_query_lens, Tensor seq_lens, int block_size, int kv_splits, int sliding_window, float scale, bool decode, Tensor(a!) out) -> ()
+_rocm_C::fa_rdna2_prefill_paged_varlen(Tensor Q, Tensor key_cache, Tensor value_cache, Tensor block_table, Tensor cu_query_lens, Tensor seq_lens, int block_size, int causal, int sliding_window, float scale, Tensor(a!) out) -> ()
+_rocm_C::fa_rdna2_prefill_paged_varlen_gqa(Tensor Q, Tensor key_cache, Tensor value_cache, Tensor block_table, Tensor cu_query_lens, Tensor seq_lens, int block_size, int causal, int sliding_window, float scale, Tensor(a!) out) -> ()
+_rocm_C::fa_rdna2_prefill_paged_varlen_int8(Tensor Q, Tensor key_cache, Tensor value_cache, Tensor block_table, Tensor cu_query_lens, Tensor seq_lens, int block_size, int causal, int sliding_window, int kv_splits, Tensor k_scale, Tensor v_scale) -> Tensor
+_rocm_C::fa_rdna2_prefill_paged_varlen_short(Tensor Q, Tensor key_cache, Tensor value_cache, Tensor block_table, Tensor cu_query_lens, Tensor seq_lens, int block_size, int causal, int sliding_window, float scale, Tensor(a!) out) -> ()
+_rocm_C::fa_rdna2_prefill_paged_varlen_splitk(Tensor Q, Tensor key_cache, Tensor value_cache, Tensor block_table, Tensor cu_query_lens, Tensor seq_lens, int block_size, int causal, int kv_splits, int sliding_window, float scale, Tensor(a!) out) -> ()
+_rocm_C::fa_rdna2_prefill_splitk_workspaces(bool int8) -> Tensor[]
+_rocm_C::fill_num_accepted_rdna2(Tensor idx_mapping, Tensor(a!) num_accepted, int value, int num_reqs) -> ()
+_rocm_C::fused_add_rms_norm(Tensor($0! -> ) input, Tensor($1! -> ) residual, Tensor weight, float epsilon) -> ()
+_rocm_C::fused_apply_write_rdna2(Tensor output_ptrs, Tensor output_strides, Tensor write_indices, Tensor write_starts, Tensor write_contents, Tensor write_cu_lens, Tensor write_group_ids) -> ()
+_rocm_C::gated_rms_norm(Tensor($0! -> ) out, Tensor input, Tensor z, Tensor weight, float epsilon, int activation) -> ()
+_rocm_C::gather_block_tables_rdna2(Tensor batch_idx_to_req_idx, Tensor src_block_table_ptrs, Tensor dst_block_table_ptrs, Tensor block_table_strides, Tensor num_blocks_ptr, int num_blocks_stride, int num_reqs, int num_reqs_padded, Tensor num_computed_tokens, Tensor sliding_window_reach, Tensor block_sizes, bool mask_sliding_window) -> ()
+_rocm_C::gdn_decode_rdna2(Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, Tensor($0! -> ) out, Tensor($1! -> ) initial_state, Tensor ssm_state_indices, float scale, bool use_qk_l2norm) -> ()
+_rocm_C::gdn_lq_decode_rdna2(Tensor q, Tensor k, Tensor v, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, Tensor($0! -> ) out, Tensor($1! -> ) blob, Tensor cu_seqlens, Tensor state_indices, float scale, int num_comp, int capacity, int window) -> ()
+_rocm_C::gdn_lq_materialize_rdna2(Tensor blob, Tensor($0! -> ) state, Tensor state_indices, int num_comp, int capacity, int window) -> ()
+_rocm_C::gdn_lq_normalize_rdna2(Tensor($0! -> ) blob, Tensor state_indices, Tensor? num_accepted, int head_v_dim, int num_comp, int capacity, int window, int power_iters, Tensor? layer_offsets=None) -> ()
+_rocm_C::gdn_lq_store_rdna2(Tensor state, Tensor($0! -> ) blob, Tensor state_indices, int num_comp, int capacity, int window, int power_iters) -> ()
+_rocm_C::gdn_prefill_delta_h_rdna2(Tensor k, Tensor u, Tensor w, Tensor g, Tensor($0! -> ) h, Tensor($1! -> ) v_new, Tensor? initial_state, Tensor? final_state, Tensor? cu_seqlens, Tensor? chunk_offsets, int chunk_size) -> ()
+_rocm_C::gdn_prefill_kkt_rdna2(Tensor k, Tensor beta, Tensor g, Tensor($0! -> ) A, Tensor cu_seqlens, Tensor chunk_indices) -> ()
+_rocm_C::gdn_prefill_o_rdna2(Tensor q, Tensor k, Tensor v, Tensor h, Tensor g, Tensor($0! -> ) o, float scale, Tensor cu_seqlens, Tensor chunk_offsets) -> ()
+_rocm_C::gdn_prefill_prep_rdna2(Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, Tensor($0! -> ) q, Tensor($1! -> ) k_out, Tensor($2! -> ) v, Tensor($3! -> ) g_cumsum, Tensor($4! -> ) beta, Tensor cu_seqlens, Tensor chunk_indices) -> ()
+_rocm_C::gdn_prefill_solve_wy_rdna2(Tensor A, Tensor k, Tensor v, Tensor beta, Tensor g, Tensor($0! -> ) A_inv, Tensor($1! -> ) w, Tensor($2! -> ) u, Tensor cu_seqlens, Tensor chunk_indices) -> ()
+_rocm_C::gdn_spec_verify_rdna2(Tensor q, Tensor k, Tensor v, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, Tensor($0! -> ) out, Tensor($1! -> ) initial_state, Tensor cu_seqlens, Tensor ssm_state_indices, Tensor num_accepted_tokens, float scale) -> ()
+_rocm_C::gemm_w8a16_fp8_dense(Tensor a, Tensor b_q_weight, Tensor b_scales, Tensor(a!) c, int group_size) -> ()
+_rocm_C::gemm_w8a8_fp8_dense(Tensor a_q, Tensor a_scale, Tensor b_q_weight, Tensor b_scales, Tensor(a!) c, int group_size, int a_scale_K_groups) -> ()
+_rocm_C::gemma_rms_norm(Tensor($0! -> ) out, Tensor input, Tensor weight, float epsilon) -> ()
+_rocm_C::gemv_f16_rdna2(Tensor x, Tensor w, Tensor? bias) -> Tensor
+_rocm_C::gemv_i8_rdna2(Tensor x, Tensor w, Tensor scale, Tensor? bias) -> Tensor
+_rocm_C::get_num_sampled_and_rejected_rdna2(Tensor(a!) num_sampled, Tensor(b!) num_rejected, Tensor seq_lens, Tensor cu_num_logits, Tensor idx_mapping, Tensor prefill_len) -> ()
+_rocm_C::gptq_gemm_rdna2(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, bool use_v2_format, bool deterministic=False) -> Tensor
+_rocm_C::gptq_gemm_rdna2_prefill(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, bool use_v2_format, bool deterministic=False) -> Tensor
+_rocm_C::gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, bool use_v2_format) -> Tensor
+_rocm_C::gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, bool use_v2_format) -> Tensor
+_rocm_C::gumbel_sample_rdna2(Tensor(a!) local_argmax, int local_argmax_stride, Tensor(b!) local_max, int local_max_stride, Tensor? logits_cache, int logits_cache_stride_0, int logits_cache_stride_1, Tensor? logits_cache_col, Tensor logits, int logits_stride, Tensor expanded_idx_mapping, Tensor seeds, Tensor pos, Tensor temperature, int vocab_size, bool is_drafting, bool apply_temperature, bool use_fp64, bool per_token_col) -> ()
+_rocm_C::hc_combine_norm_rdna2(Tensor residual, Tensor block_output, Tensor injection_logits, Tensor norm_weight, Tensor(a!) out, Tensor(a!) y, int hc_count, float eps) -> ()
+_rocm_C::hc_combine_rdna2(Tensor residual, Tensor block_output, Tensor injection_logits, Tensor(a!) out, int hc_count) -> ()
+_rocm_C::hc_gate_mix_rdna2(Tensor x, Tensor gate, Tensor(a!) y, int hc_count) -> ()
+_rocm_C::hc_grouped_gemma_rmsnorm_rdna2(Tensor x, Tensor weight, Tensor(a!) y, int num_groups, float eps) -> ()
+_rocm_C::hc_silu_rdna2(Tensor x, Tensor(a!) y, int hc_count) -> ()
+_rocm_C::logit_bias_rdna2(Tensor(a!) logits, int logits_stride, int vocab_size, Tensor expanded_idx_mapping, Tensor num_allowed, Tensor allowed_ids, int allowed_ids_stride, Tensor num_bias, Tensor bias_ids, int bias_ids_stride, Tensor bias, int bias_stride, Tensor pos, Tensor min_lens, Tensor num_stop, Tensor restore_when_all_masked, Tensor stop_ids, int stop_ids_stride, int block_size, bool check_all_masked) -> ()
+_rocm_C::min_p_rdna2(Tensor(a!) logits, int logits_stride, Tensor expanded_idx_mapping, Tensor min_p, int vocab_size) -> ()
+_rocm_C::moe_down_unquantized_rdna2(Tensor act, Tensor w2, Tensor topk_ids, Tensor? expert_map, Tensor topk_weights, bool mul_topk_weight, Tensor(b!) out, int topk, int N, int K) -> ()
+_rocm_C::moe_exl3_gemm_rdna2(Tensor a, Tensor($0! -> ) c, Tensor b_q_weight, Tensor topk_weights, Tensor sorted_token_ids, Tensor expert_ids, Tensor num_tokens_post_padded, int top_k, int block_size_m, bool mul_topk_weight, int output_topk, int bits, int cb) -> ()
+_rocm_C::moe_fixedpoint_to_half_rdna2(Tensor accumulator, Tensor($0! -> ) output) -> ()
+_rocm_C::moe_gate_up_silu_unquantized_rdna2(Tensor x, Tensor w13, Tensor topk_ids, Tensor? expert_map, Tensor(a!) act, int topk, int N, int K) -> ()
+_rocm_C::moe_gptq_gemm_rdna2(Tensor a, Tensor($0! -> ) c, Tensor b_q_weight, Tensor(a) b_scales, Tensor b_qzeros, Tensor(a) topk_weights, Tensor sorted_token_ids, Tensor expert_ids, Tensor num_tokens_post_padded, int top_k, int block_size_m, bool mul_topk_weight, int output_topk, bool fp32_accum=True, bool use_v2_format=False) -> ()
+_rocm_C::moe_gptq_gemm_rdna3(Tensor a, Tensor($0! -> ) c, Tensor b_q_weight, Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, Tensor sorted_token_ids, Tensor expert_ids, Tensor num_tokens_post_padded, int top_k, int block_size_m, bool mul_topk_weight, int output_topk) -> ()
+_rocm_C::moe_mxfp4_gemm_rdna2(Tensor a, Tensor($0! -> ) c, Tensor b_q_weight, Tensor b_scales, Tensor topk_weights, Tensor sorted_token_ids, Tensor expert_ids, Tensor num_tokens_post_padded, int top_k, int block_size_m, bool mul_topk_weight, int output_topk) -> ()
+_rocm_C::moe_resident_int4_decode(Tensor input, Tensor w13, Tensor w13_scale, Tensor w2, Tensor w2_scale, Tensor topk_weights, Tensor topk_ids, Tensor($0! -> ) act_buf, Tensor($1! -> ) output, int group_size, Tensor? expert_map) -> ()
+_rocm_C::moe_skinny_int4_decode(Tensor input, Tensor w13, Tensor w13_scale, Tensor w2, Tensor w2_scale, Tensor topk_weights, Tensor topk_ids, Tensor($0! -> ) act_buf, Tensor($1! -> ) output, int group_size, Tensor? expert_map) -> ()
+_rocm_C::moe_w4a8_gemm_rdna2(Tensor a, Tensor($0! -> ) c, Tensor b_q_weight, Tensor(a) b_scales, Tensor b_qzeros, Tensor(a) topk_weights, Tensor sorted_token_ids, Tensor expert_ids, Tensor num_tokens_post_padded, int top_k, int block_size_m, bool mul_topk_weight, int output_topk=0, bool use_v2_format=False, bool fp32_accum=True) -> ()
+_rocm_C::moe_w8a16_gemm_rdna2(Tensor a, Tensor($0! -> ) c, Tensor b_q_weight, Tensor(a) b_scales, Tensor b_qzeros, Tensor(a) topk_weights, Tensor sorted_token_ids, Tensor expert_ids, Tensor num_tokens_post_padded, int top_k, int block_size_m, bool mul_topk_weight, int output_topk) -> ()
+_rocm_C::mono_gdn_lq_rdna2(Tensor qkvz, Tensor ba, Tensor conv_w, Tensor conv_b, Tensor($0! -> ) conv_state, Tensor($1! -> ) blob, Tensor A_log, Tensor dt_bias, Tensor norm_w, Tensor sidx, Tensor nacc, Tensor qsl, Tensor($2! -> ) y, Tensor($3! -> ) scratch, int num_k_heads, float scale, float eps, int gate_sigmoid, int num_comp, int capacity, int window) -> ()
+_rocm_C::mono_gdn_rdna2(Tensor qkvz, Tensor ba, Tensor conv_w, Tensor conv_b, Tensor($0! -> ) conv_state, Tensor($1! -> ) ssm_state, Tensor A_log, Tensor dt_bias, Tensor norm_w, Tensor sidx, Tensor nacc, Tensor qsl, Tensor($2! -> ) y, Tensor($3! -> ) scratch, int num_k_heads, float scale, float eps, int gate_sigmoid) -> ()
+_rocm_C::mono_gdn_rdna2_scratch_bytes(int M, int HV, int H) -> int
+_rocm_C::mono_k1_rdna2(Tensor res, Tensor blk, Tensor inj, Tensor norm_w, Tensor wd, Tensor wu, Tensor($0! -> ) res_out, Tensor($1! -> ) inj_out, Tensor($2! -> ) out, Tensor($3! -> ) workspace, int num_wg, float eps, float timeout_ms, bool reset_control=False, bool preserve_fault=False) -> ()
+_rocm_C::mono_k2_offload_rdna2(Tensor res, Tensor blk, Tensor inj, Tensor norm_w, Tensor wd, Tensor wu, Tensor wr, Tensor se_w1, Tensor se_w2, Tensor se_wg, Tensor w13, Tensor s13, Tensor z13, Tensor w2, Tensor s2, Tensor z2, Tensor($0! -> ) res_out, Tensor($1! -> ) inj_out, Tensor($2! -> ) out, Tensor($3! -> ) workspace, Tensor($4! -> ) route_ids, Tensor($5! -> ) route_weights, Tensor local_to_slot, int stage, int expert_base, int zero_offset, int num_wg, float eps, float timeout_ms) -> ()
+_rocm_C::mono_k2_rdna2(Tensor res, Tensor blk, Tensor inj, Tensor norm_w, Tensor wd, Tensor wu, Tensor wr, Tensor se_w1, Tensor se_w2, Tensor se_wg, Tensor w13, Tensor s13, Tensor z13, Tensor w2, Tensor s2, Tensor z2, Tensor($0! -> ) res_out, Tensor($1! -> ) inj_out, Tensor($2! -> ) out, Tensor($3! -> ) workspace, int expert_base, int zero_offset, int num_wg, float eps, float timeout_ms, bool reset_control=False, bool dense_mtp=False, bool preserve_fault=False) -> ()
+_rocm_C::mono_k2_rdna2_e1a(Tensor res, Tensor blk, Tensor inj, Tensor norm_w, Tensor wd, Tensor wu, Tensor wq, Tensor wba, Tensor convw, Tensor convb, Tensor($0! -> ) conv_state, Tensor($1! -> ) ssm_state, Tensor alog, Tensor dtb, Tensor gnorm_w, Tensor wo, Tensor sidx, Tensor($2! -> ) res_out, Tensor($3! -> ) inj_out, Tensor($4! -> ) out, Tensor($5! -> ) workspace, int num_wg, float eps, float gn_eps, int gn_sigmoid, float scale, float timeout_ms) -> ()
+_rocm_C::mono_k2_rdna2_error(Tensor workspace) -> Tensor
+_rocm_C::mono_k2_rdna2_mark(Tensor($0! -> ) stats, int kind, int width) -> ()
+_rocm_C::mono_k2_rdna2_mem_flags(Tensor t) -> int
+_rocm_C::mono_k2_rdna2_set_ar(int handle, int device) -> int
+_rocm_C::mono_k2_rdna2_workspace_alloc(int nbytes, int device) -> Tensor
+_rocm_C::mono_k2_rdna2_workspace_bytes(int H, int R, int ND, int E, int Ise, int I) -> int
+_rocm_C::mono_qsa_decode_rdna2(Tensor q, Tensor k_cache, Tensor v_cache, Tensor indices, Tensor block_table, Tensor token_to_req, Tensor($0! -> ) out, Tensor($1! -> ) scratch, Tensor($2! -> ) counters, int splits) -> ()
+_rocm_C::mono_qsa_decode_rdna2_splits(int M, int KVH, int W) -> int
+_rocm_C::mono_qsa_epilogue_rdna2(Tensor qk, Tensor($0! -> ) q_out, Tensor q_w, Tensor k_w, float q_eps, float k_eps, float norm_beta, Tensor cos_sin_cache, Tensor positions, int rotary_dim, int mrope_h, int mrope_w, Tensor state_table, Tensor token_to_req, Tensor query_start_loc, Tensor end_positions, int compress_ratio, Tensor($1! -> ) c_cache, Tensor c_slots, Tensor($2! -> ) r_cache, Tensor r_slots, Tensor($3! -> ) p_cache) -> ()
+_rocm_C::mono_qsa_k_store_rdna2(Tensor pooled, Tensor weight, Tensor cos_sin_cache, Tensor positions, float eps, float norm_beta, int rotary_dim, int mrope_h, int mrope_w, Tensor($0! -> ) c_cache, Tensor c_slots, Tensor($1! -> ) r_cache, Tensor r_slots, Tensor r_rows, Tensor($2! -> ) p_cache, Tensor p_rows) -> ()
+_rocm_C::mono_qsa_mqa_rdna2(Tensor q, Tensor k_cache, Tensor page_table, Tensor token_to_req, Tensor query_positions, Tensor sequence_lengths, Tensor($0! -> ) logits, Tensor($1! -> ) visible_blocks, int compress_ratio, float score_divisor, int group, int waves, int tiles, int lanes_per_key, int unroll, bool q_lds) -> ()
+_rocm_C::mono_qsa_store3_rdna2(Tensor($0! -> ) c_cache, Tensor c_slots, Tensor c_rows, Tensor($1! -> ) r_cache, Tensor r_slots, Tensor r_rows, Tensor($2! -> ) p_cache, Tensor p_rows) -> ()
+_rocm_C::mqa_logits_prefill_rdna2(Tensor q, Tensor k, Tensor k_scale, Tensor weights, Tensor ks, Tensor ke) -> Tensor
+_rocm_C::mrope_forward_rdna2(Tensor q, Tensor k, Tensor cos, Tensor sin, int num_tokens, int n_qh, int n_kh, int hd, int rd, int sec_t, int sec_h, int sec_w, bool is_interleaved, bool is_neox_style) -> ()
+_rocm_C::mxfp4_gemm_rdna2(Tensor a, Tensor($0! -> ) c, Tensor b_q_weight, Tensor b_scales, int size_m, int size_n, int size_k) -> ()
+_rocm_C::mxfp4_w4a8_gemv_rdna3(Tensor a, Tensor b_q, Tensor b_scale) -> Tensor
+_rocm_C::paged_attention(Tensor($0! -> ) out, Tensor exp_sums, Tensor max_logits, Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor seq_lens, Tensor? query_start_loc, int block_size, int max_seq_len, Tensor? alibi_slopes, str kv_cache_dtype, Tensor k_scale, Tensor v_scale, Tensor? fp8_out_scale, str mfma_type, bool use_interleaved_v_cache=False) -> ()
+_rocm_C::paged_mqa_logits_decode_rdna2(Tensor q_fp8, Tensor kv_cache, Tensor weights, Tensor context_lens, Tensor block_tables, int max_model_len, bool block_flat=False) -> Tensor
+_rocm_C::penalties_rdna2(Tensor(a!) logits, int logits_stride, Tensor expanded_idx_mapping, Tensor token_ids, Tensor expanded_local_pos, Tensor repetition_penalty, Tensor frequency_penalty, Tensor presence_penalty, Tensor prompt_bin_mask, int prompt_bin_mask_stride, Tensor output_bin_counts, int output_bin_counts_stride, int vocab_size) -> ()
+_rocm_C::ple_short_conv_decode_rdna2(Tensor x, Tensor(a!) conv_state, Tensor weight, Tensor? bias, Tensor(a!) out, Tensor state_idx, Tensor? has_init, int dilation, int state_len, bool silu, int null_block) -> ()
+_rocm_C::ple_short_conv_prefill_rdna2(Tensor x_packed, Tensor init_state, Tensor weight, Tensor? bias, Tensor(a!) out, Tensor lengths, Tensor? valid_state, int dilation, int state_len, bool silu) -> ()
+_rocm_C::post_update_rdna2(Tensor idx_mapping, Tensor(a!) num_computed_tokens, Tensor(b!) last_sampled_tokens, Tensor? output_bin_counts, int output_bin_counts_stride, Tensor sampled_tokens, int sampled_tokens_stride, Tensor num_sampled, Tensor num_rejected, Tensor? query_start_loc, Tensor(c!) all_token_ids, int all_token_ids_stride, Tensor(d!) total_len, Tensor? draft_tokens, Tensor(e!)? draft_tokens_out, int num_draft_tokens) -> ()
+_rocm_C::postprocess_mamba_fused_rdna2(Tensor num_accepted_tokens, Tensor mamba_state_idx, Tensor? num_scheduled_tokens, Tensor num_computed_tokens, Tensor? num_draft_tokens, Tensor block_table_ptrs, int block_table_stride_req, Tensor state_base_addrs, Tensor state_block_strides, Tensor state_elem_sizes, Tensor state_inner_sizes, Tensor state_conv_widths, Tensor state_group_indices, Tensor state_dim_row_count, Tensor state_dim_row_stride, Tensor(a!) num_accepted_tokens_out, Tensor? idx_mapping, int num_reqs, int block_size, bool conv_state_dim_first, bool precomputed_new_computed, int temporal_tiles) -> ()
+_rocm_C::precopy_mamba_align_fused_rdna2(Tensor mamba_state_idx, Tensor src_col, Tensor token_bias, Tensor block_table_ptrs, int block_table_stride_req, Tensor state_base_addrs, Tensor state_block_strides, Tensor state_elem_sizes, Tensor state_inner_sizes, Tensor state_conv_widths, Tensor state_group_indices, Tensor state_dim_row_count, Tensor state_dim_row_stride, Tensor? idx_mapping, int num_reqs, bool conv_state_dim_first, int temporal_tiles) -> ()
+_rocm_C::prepare_pos_seq_lens_rdna2(Tensor(a!) pos, Tensor(b!) seq_lens, Tensor idx_mapping, Tensor query_start_loc, Tensor num_computed_tokens, int max_num_reqs) -> ()
+_rocm_C::prepare_prefill_inputs_rdna2(Tensor(a!) input_ids, Tensor(b!) next_prefill_tokens, int next_prefill_tokens_stride, int num_lookahead, Tensor idx_mapping, Tensor query_start_loc, Tensor all_token_ids, int all_token_ids_stride, Tensor prefill_len, Tensor num_computed_tokens) -> ()
+_rocm_C::prepare_rope_positions_rdna2(Tensor(a!) positions, int positions_stride, Tensor prefill_positions, int prefill_stride0, int prefill_stride1, Tensor prefill_delta, Tensor idx_mapping, Tensor query_start_loc, Tensor prefill_lens, Tensor num_computed_tokens, int num_dims) -> ()
+_rocm_C::preprocess_mamba_align_fused_rdna2(Tensor idx_mapping, Tensor(a!) state_idx, Tensor num_computed_tokens, Tensor query_start_loc, Tensor(b!) num_accepted_tokens, Tensor(c!) src_col, Tensor(d!) src_off, int num_reqs, int mamba_block_size) -> ()
+_rocm_C::prompt_logprobs_token_ids_rdna2(Tensor(a!) prompt_logprobs_token_ids, Tensor query_start_loc, Tensor idx_mapping, Tensor num_computed_tokens, Tensor all_token_ids, int all_token_ids_stride) -> ()
+_rocm_C::qsa_compress_groups_rdna2(Tensor raw_keys, Tensor raw_positions, Tensor compressor_state_cache, Tensor rope_cache, Tensor compressor_state_table, Tensor token_to_req, Tensor query_start_loc, Tensor logical_positions, Tensor compressed_slots, Tensor(a!) pooled, Tensor(a!) first_positions, Tensor compress_ratio, Tensor compressor_state_size, Tensor head_dim, bool load_rope_positions) -> ()
+_rocm_C::qsa_expand_indices_rdna2(Tensor block_indices, Tensor query_positions, Tensor sequence_lengths, Tensor token_to_req, int compress_ratio, int token_topk, Tensor? out, bool canonical_order=False) -> Tensor
+_rocm_C::qsa_mqa_paged_rdna2(Tensor q, Tensor k_cache, Tensor page_table, Tensor token_to_req, Tensor query_positions, Tensor sequence_lengths, int compress_ratio, int num_columns, float score_scale) -> (Tensor, Tensor)
+_rocm_C::qsa_sparse_paged_attention_int4_rdna2(Tensor q, Tensor k_cache, Tensor v_cache, Tensor k_scale, Tensor v_scale, Tensor logical_indices, Tensor block_table, Tensor token_to_req, Tensor? out) -> Tensor
+_rocm_C::qsa_sparse_paged_attention_rdna2(Tensor q, Tensor k_cache, Tensor v_cache, Tensor logical_indices, Tensor block_table, Tensor token_to_req, Tensor? out) -> Tensor
+_rocm_C::qsa_store_cache_rows_rdna2(Tensor rows, Tensor slots, Tensor(a!) cache, Tensor page_size, Tensor width) -> ()
+_rocm_C::rdna2_expert_cache_copy(Tensor[] sources, Tensor(a!)[] destinations, int[] experts, int[] slots) -> bool
+_rocm_C::rdna_ar_all_gather(int handle, Tensor t) -> Tensor
+_rocm_C::rdna_ar_all_reduce(int handle, Tensor t) -> Tensor
+_rocm_C::rdna_ar_all_reduce_algo(int handle, Tensor t, int algo, int blocks) -> Tensor
+_rocm_C::rdna_ar_argmax(int handle, Tensor vals, Tensor idx) -> Tensor
+_rocm_C::rdna_ar_can(int handle, Tensor t) -> bool
+_rocm_C::rdna_ar_can_all_gather(int handle, Tensor t) -> bool
+_rocm_C::rdna_ar_can_argmax(int handle, Tensor vals, Tensor idx) -> bool
+_rocm_C::rdna_ar_connect(int handle, Tensor handles) -> ()
+_rocm_C::rdna_ar_fast_calls(int handle) -> int
+_rocm_C::rdna_ar_hier_init(int handle, Tensor island_of_rank, int owners, int min_kb, int algo, int blocks, int gate_kb) -> ()
+_rocm_C::rdna_ar_init(int rank, int world, Tensor device_ids, int max_bytes, str shm_name, int gate_bytes=0) -> Tensor
+_rocm_C::rdna_ar_slow_info(int handle) -> int
+_rocm_C::rdna_ar_timed_out(int handle) -> bool
+_rocm_C::rdna_ar_timeout_info(int handle) -> int
+_rocm_C::rdna_eplb_stats(Tensor topk_ids, Tensor? is_padding, Tensor($0! -> ) state, Tensor($1! -> )? ring, Tensor($2! -> )? gseq, Tensor($3! -> )? hist, Tensor owner, Tensor edges, int layer_pos, int sample_mask, int ranks, int num_experts) -> ()
+_rocm_C::rdna_gemm_smallm(Tensor x, Tensor w) -> Tensor
+_rocm_C::rdna_gemv_act(Tensor x, Tensor w, Tensor? scale, int act_cols, float act_scale, int inj_cols) -> (Tensor, Tensor)
+_rocm_C::rdna_hc_mix_prefill(Tensor xn, Tensor w_down, Tensor w_up, int lora_rank, int hc_count) -> (Tensor, Tensor)
+_rocm_C::rdna_hc_up_gate_mix(Tensor lora, Tensor w, Tensor? scale, Tensor xn, int hc_count) -> Tensor
+_rocm_C::rdna_hc_up_gate_mix_prefill(Tensor dai, Tensor w_up, Tensor xn, int lora_rank, int hc_count) -> Tensor
+_rocm_C::rdna_hint_flex_act_quant64_rdna2(Tensor x, Tensor col_scale, Tensor had, bool transform, Tensor($0! -> ) xq, Tensor($1! -> ) sx, Tensor($2! -> ) sq16) -> ()
+_rocm_C::rdna_hint_flex_act_quant_rdna2(Tensor x, Tensor col_scale, Tensor had, bool transform, Tensor($0! -> ) xq, Tensor($1! -> ) sx, Tensor($2! -> ) sumq) -> ()
+_rocm_C::rdna_hint_flex_act_transform_rdna2(Tensor x, Tensor col_scale, Tensor had, Tensor($0! -> ) out, bool pair_interleaved=False, bool silu_mul=False) -> ()
+_rocm_C::rdna_hint_flex_dense_gemm_pick_rdna2(int m, int n, int k) -> int
+_rocm_C::rdna_hint_flex_dense_gemm_rdna2(Tensor x, Tensor w, Tensor($0! -> ) out, int design=-1) -> ()
+_rocm_C::rdna_hint_flex_dequant_rdna2(Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, Tensor row_consts, Tensor row_nbits, Tensor row_block, Tensor($0! -> ) out) -> ()
+_rocm_C::rdna_hint_flex_gemm_rdna2(Tensor x, Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, Tensor row_consts, Tensor row_nbits, Tensor row_block, Tensor($0! -> ) out) -> ()
+_rocm_C::rdna_hint_flex_gemv2_rdna2(Tensor x, Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, Tensor row_consts, Tensor row_nbits, Tensor row_block, Tensor($0! -> ) out, int mt, int rpw, int wpb, bool x_pi) -> ()
+_rocm_C::rdna_hint_flex_gemv_i8_rdna2(Tensor xq, Tensor sx, Tensor sumq, Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, Tensor row_consts, Tensor row_nbits, Tensor row_block, Tensor($0! -> ) out) -> ()
+_rocm_C::rdna_hint_flex_gemv_rdna2(Tensor x, Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, Tensor row_consts, Tensor row_nbits, Tensor row_block, Tensor($0! -> ) out) -> ()
+_rocm_C::rdna_hint_flex_i8gemm_rdna2(Tensor xq, Tensor sx, Tensor sq16, Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, Tensor row_consts, Tensor row_nbits, Tensor row_block, Tensor($0! -> ) out, int tile) -> ()
+_rocm_C::rdna_hint_flex_linear_rdna2(Tensor x, Tensor col_scale, Tensor had, Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, Tensor row_consts, Tensor row_nbits, Tensor row_block, bool transform, int decode_max_m, int mode, bool silu_mul=False, int prefill_gemm=0) -> Tensor
+_rocm_C::rdna_hint_flex_moe_gemm_rdna2(Tensor x, Tensor sorted_ids, Tensor expert_ids, Tensor ntpp, Tensor codes, Tensor code_off, Tensor blk_params, Tensor param_off, Tensor row_consts, Tensor row_nbits, Tensor row_block, int n_out, Tensor($0! -> ) out) -> ()
+_rocm_C::rdna_hint_flex_moe_rdna2(Tensor x, Tensor topk_ids, Tensor topk_weights, Tensor w13_codes, Tensor w13_code_off, Tensor w13_blk_params, Tensor w13_param_off, Tensor w13_row_consts, Tensor w13_row_nbits, Tensor w13_row_block, Tensor w13_col_scale, Tensor w13_had, bool w13_transform, Tensor w2_codes, Tensor w2_code_off, Tensor w2_blk_params, Tensor w2_param_off, Tensor w2_row_consts, Tensor w2_row_nbits, Tensor w2_row_block, Tensor w2_col_scale, Tensor w2_had, bool w2_transform, int num_experts, int intermediate, int mode, int decode_max_m) -> Tensor
+_rocm_C::rdna_hint_flex_moe_transform_rdna2(Tensor x, int src_div, Tensor expert, Tensor col_scale, Tensor had, bool transform, Tensor($0! -> ) out) -> ()
+_rocm_C::rdna_moe_route_zero(Tensor topk_ids, int block_size, int num_experts, Tensor? expert_map, Tensor($0! -> ) zero1, Tensor($1! -> ) zero2) -> (Tensor, Tensor, Tensor)
+_rocm_C::rdna_moe_route_zero_stats(Tensor topk_ids, int block_size, int num_experts, Tensor? expert_map, Tensor($0! -> ) zero1, Tensor($1! -> ) zero2, Tensor? is_padding, Tensor($2! -> ) state, Tensor($3! -> )? ring, Tensor($4! -> )? gseq, Tensor($5! -> )? hist, Tensor owner, Tensor edges, int layer_pos, int sample_mask, int ranks) -> (Tensor, Tensor, Tensor)
+_rocm_C::rdna_se_down_gated(Tensor act, Tensor w, Tensor? scale, Tensor gate) -> Tensor
+_rocm_C::rdna_se_down_tile(Tensor act, Tensor w, Tensor gate) -> Tensor
+_rocm_C::rdna_se_gate_up_silu(Tensor x, Tensor w, Tensor? scale, Tensor w_gate) -> (Tensor, Tensor)
+_rocm_C::rdna_se_gate_up_tile(Tensor x, Tensor w, Tensor w_gate) -> (Tensor, Tensor)
+_rocm_C::reshape_and_cache_flash_rdna2(Tensor key, Tensor value, Tensor(a!) key_cache, Tensor(a!) value_cache, Tensor slot_mapping) -> ()
+_rocm_C::reshape_and_cache_int4_fp16_rdna2(Tensor key, Tensor value, Tensor(a!) cache, Tensor slot_mapping) -> ()
+_rocm_C::reshape_and_cache_int8_rdna2(Tensor key, Tensor value, Tensor(a!) kv_cache, Tensor slot_mapping) -> ()
+_rocm_C::rms_norm(Tensor($0! -> ) out, Tensor input, Tensor weight, float epsilon) -> ()
+_rocm_C::scatter_num_accepted_rdna2(Tensor idx_mapping, Tensor num_sampled, Tensor(a!) num_accepted, int num_reqs) -> ()
+_rocm_C::sparse_mla_decode_rdna2(Tensor q, Tensor main_cache, Tensor main_indices, Tensor main_indptr, Tensor extra_cache, Tensor extra_indices, Tensor extra_indptr, int main_block_size, int main_num_rows, int extra_block_size, int extra_num_rows, float scale, Tensor attn_sink, Tensor(a!) out) -> ()
+_rocm_C::sparse_mla_prefill_rdna2(Tensor q, Tensor kv, Tensor indices, Tensor indptr, int num_kv, float scale, Tensor attn_sink, Tensor(a!) out) -> ()
+_rocm_C::spec_compute_local_logits_stats_rdna2(Tensor(a!) target_local_argmax, Tensor(b!) target_local_max, Tensor(c!) target_local_sumexp, Tensor(d!) draft_local_max, Tensor(e!) draft_local_sumexp, Tensor target_logits, Tensor? draft_logits, Tensor expanded_idx_mapping, Tensor expanded_local_pos, Tensor temp, int vocab_size, int num_speculative_steps, bool has_draft_logits) -> ()
+_rocm_C::spec_flatten_sampled_rdna2(Tensor(a!) flat_sampled, Tensor sampled, Tensor num_sampled, Tensor cu_num_logits) -> ()
+_rocm_C::spec_gather_draft_sampled_rdna2(Tensor(a!) draft_sampled, Tensor(b!) pos, Tensor input_ids, Tensor positions, Tensor logits_indices, Tensor expanded_idx_mapping, Tensor expanded_local_pos, Tensor prefill_len) -> ()
+_rocm_C::spec_insert_resampled_rdna2(Tensor(a!) sampled, Tensor(b!) num_sampled, Tensor resampled_local_argmax, Tensor resampled_local_max, int resample_num_blocks, Tensor cu_num_logits, Tensor expanded_idx_mapping, Tensor temperature) -> ()
+_rocm_C::spec_prepare_decode_inputs_rdna2(Tensor draft_tokens, Tensor target_seq_lens, Tensor num_rejected, Tensor(a!) input_ids, Tensor(b!) positions, Tensor(c!) sample_src_positions, Tensor(d!) query_start_loc, Tensor(e!) seq_lens, int max_model_len, int max_num_reqs, bool advance_draft_positions) -> ()
+_rocm_C::spec_prepare_prefill_inputs_rdna2(Tensor(a!) last_token_indices, Tensor(b!) draft_current_step, Tensor(c!) draft_input_ids, Tensor(d!) draft_positions, Tensor(e!) draft_query_start_loc, Tensor(f!) draft_seq_lens, Tensor target_input_ids, Tensor target_positions, Tensor idx_mapping, Tensor last_sampled, Tensor next_prefill_tokens, Tensor num_sampled, Tensor num_rejected, Tensor query_start_loc, Tensor seq_lens, int max_num_reqs) -> ()
+_rocm_C::spec_rejection_rdna2(Tensor(a!) sampled, Tensor(b!) rejected_steps, Tensor(c!) target_rejected_logsumexp, Tensor(d!) draft_rejected_logsumexp, Tensor target_logits, Tensor target_local_argmax, Tensor target_local_max, Tensor target_local_sumexp, Tensor draft_sampled, Tensor? draft_logits, Tensor draft_local_max, Tensor draft_local_sumexp, Tensor cu_num_logits, Tensor idx_mapping, Tensor temperature, Tensor seed, Tensor pos, Tensor? synthetic_conditional_rates, Tensor? cumulative_log_p, Tensor? local_residual_mass, int vocab_num_blocks, int padded_vocab_num_blocks, bool has_draft_logits, bool synthetic_mode, bool use_block_verification) -> ()
+_rocm_C::spec_resample_rdna2(Tensor(a!) resampled_local_argmax, Tensor(b!) resampled_local_max, Tensor target_logits, Tensor target_rejected_logsumexp, Tensor? draft_logits, Tensor draft_rejected_logsumexp, Tensor rejected_step, Tensor cu_num_logits, Tensor expanded_idx_mapping, Tensor draft_sampled, Tensor temperature, Tensor seed, Tensor pos, Tensor? cumulative_log_p, int vocab_size, bool has_draft_logits, bool use_fp64, bool use_block_verification) -> ()
+_rocm_C::spec_update_draft_inputs_rdna2(Tensor(a!) output_draft_tokens, Tensor(b!) next_input_hidden_states, Tensor(c!) input_ids, Tensor(d!) positions, Tensor(e!) sample_src_positions, Tensor(f!) seq_lens, Tensor draft_tokens, Tensor current_draft_step, Tensor hidden_states, int hidden_size, int max_model_len, int num_speculative_steps, bool advance_draft_positions) -> ()
+_rocm_C::temperature_rdna2(Tensor(a!) logits, int logits_stride, Tensor expanded_idx_mapping, Tensor temperature, int vocab_size) -> ()
+_rocm_C::token_ranks_rdna2(Tensor(a!) token_ranks, Tensor logits, int logits_stride, Tensor sampled_token_ids, int vocab_size) -> ()
+_rocm_C::topk_log_softmax_rdna2(Tensor(a!) output, Tensor logits, int logits_stride, Tensor topk_ids, int topk_ids_stride, int topk, int vocab_size, int topk_block_size) -> ()
+_rocm_C::topk_topp_rdna2(Tensor(a!) logits, int logits_stride, Tensor? k, Tensor? p, float mask_value) -> ()
+_rocm_C::w4a8_act_quant_rdna2(Tensor x, int group_size, Tensor(a!) a_i8, Tensor(a!) a_scale, Tensor(a!) a_asum) -> Tensor
+_rocm_C::w4a8_gemm_rdna2(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor
+_rocm_C::wvSplitK(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> Tensor
+_rocm_C::wvSplitKQ(Tensor in_a, Tensor in_b, Tensor? in_bias, Tensor($0! -> ) out_c, Tensor scale_a, Tensor scale_b, int CuCount) -> ()
+_rocm_C::wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, Tensor? in_zero_points, Tensor? in_bias, int CuCount, int group_size) -> Tensor
+_rocm_C::wvSplitKrc(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> Tensor
+_rocm_C::zero_kv_blocks_rdna2(Tensor seg_addrs, Tensor seg_block_strides, Tensor seg_page_sizes, Tensor block_ids, int chunk_size, int max_chunks) -> ()
