@@ -28,7 +28,8 @@ for cell in ${TRACE_CELLS:-16384:512:1:1 1024:512:8:8}; do
     if [[ -n ${TRACE_DATASET_DIR:-} ]]; then
         corpus="$TRACE_DATASET_DIR/${input}.jsonl"
         [[ -s "$corpus" ]] || { echo "Missing trace corpus: $corpus" >&2; exit 1; }
-        dataset=(--dataset-name custom --dataset-path "$corpus" --skip-chat-template)
+        dataset=(--dataset-name custom --dataset-path "$corpus" --skip-chat-template
+            --custom-output-len "$output")
         sha256sum "$corpus" > "$dir/dataset.sha256"
     fi
     curl -fsS --max-time 60 -X POST "$base/reset_prefix_cache" > "$dir/reset.json"
@@ -52,6 +53,17 @@ for cell in ${TRACE_CELLS:-16384:512:1:1 1024:512:8:8}; do
         --data '{"method":"rdna_expert_cache_trace","kwargs":{"action":"stop"}}' \
         "$base/collective_rpc" > "$dir/stop.json"
     started=0
+    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+        python3 - "$dir/diagnostic-bench.json" "$output" "$requests" <<'PY'
+import json
+import sys
+
+result = json.load(open(sys.argv[1]))
+expected_output, expected_requests = map(int, sys.argv[2:])
+assert result["completed"] == expected_requests, result["completed"]
+assert len(result["output_lens"]) == expected_requests, result["output_lens"]
+assert set(result["output_lens"]) == {expected_output}, result["output_lens"]
+PY
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
         python3 "$TREE/tools/rdna/mono/ram10_prefetch.py" "$dir/stop.json" \
         --warmup-calls 64 --budget 2 --out "$dir/prefetch.json" > "$dir/replay.log"
