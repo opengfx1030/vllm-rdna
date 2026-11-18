@@ -51,6 +51,8 @@ for arm in C1 C2; do
         export QUALIFY_ABORT=$OUT/ABORT OUT=$OUT/boots/$arm
         if ((DRY_RUN)); then
             HIP_VISIBLE_DEVICES='' PRINT=1 bash "$TREE/tools/rdna/serve_rdna.sh" \
+                RECIPE="$RECIPE" MODEL="$MODEL" VENV="$VENV" \
+                VLLM_TREE="$TREE" PORT="$PORT" HOST=127.0.0.1 \
                 VLLM_RDNA_EPLB=1 VLLM_RDNA_EPLB_CHAOS=1 \
                 VLLM_RDNA_EPLB_DECISION_STEPS=1000000000 EXTRA_ARGS=--monokernel
         else
