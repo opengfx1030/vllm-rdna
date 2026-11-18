@@ -258,3 +258,26 @@ reproduction of the balancer's int32 all-reduces (196 and 32768 words, 9000
 each, RCCL, four ranks) passed with exact sums, and later runs completed
 without reproducing the fault. Cause remains open; neither the balancer
 collective nor an unrelated hardware cause has been established.
+
+### Final qualification protocol (not yet a qualification result)
+
+`tools/rdna/eplb/qualify_final.sh` runs two bounded campaigns:
+
+- `MODE=r1`: the native eight-cell flag-off ABBA receipt, token-exact checks,
+  overlap and default seven-decoder stall probes, using independently built
+  base/head extension sets. Speed verdicts remain reported, not relabelled.
+- `MODE=r2`: Mono enabled throughout; fresh off/chaos/chaos/off boots at
+  1k/512 and 16k/1k, c=1/8, with native request counts and the existing ITL
+  envelope. Every on-arm measured cell must overlap a committed plan.
+
+Native benchmark JSON records `benchmark_start_time_monotonic`; controller
+start/commit logs record the same host's monotonic clock. Warm-up or an
+unfinished plan alone cannot satisfy measured-plan coverage. Guards reject
+incomplete results, failed probes, unknown kernel telemetry, KFD eviction,
+changed/reset PCIe AER counters, thermal alarms and application fault markers.
+A live fault latches an abort; no automatic retry or four-hour soak.
+
+These campaigns do not establish stationarity or resolve the historical
+PCIe incident. The base build log was not located; the reused head extensions
+come from the recorded Mono build. Record all seven extension hashes rather
+than describing this as a newly rebuilt production baseline.

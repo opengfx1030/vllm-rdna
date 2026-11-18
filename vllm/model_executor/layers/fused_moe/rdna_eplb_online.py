@@ -504,10 +504,11 @@ class OnlineEplb:
         self.plans += 1
         if self.rank == 0:
             logger.info(
-                "Online EPLB: plan %d at step %d, %d swap(s)",
+                "Online EPLB: plan %d at step %d, %d swap(s) monotonic=%.9f",
                 self._plan_seq,
                 self.t,
                 count,
+                self._plan_wall,
             )
 
     def _encode(self, swaps: list[tuple[int, int, int]]) -> np.ndarray | None:
@@ -638,12 +639,15 @@ class OnlineEplb:
         self._xfer = None
         self.committed += 1
         if not self._queue and self.rank == 0:
+            end = time.monotonic()
             logger.info(
-                "Online EPLB: plan %d done, %d swap(s) in %d steps (%.1f s)",
+                "Online EPLB: plan %d done, %d swap(s) in %d steps (%.1f s) "
+                "monotonic=%.9f",
                 self._plan_seq,
                 self._plan_swaps,
                 self.t - self._plan_t0,
-                time.monotonic() - self._plan_wall,
+                end - self._plan_wall,
+                end,
             )
 
     def _commit(self, swap: Swap) -> None:

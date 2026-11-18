@@ -83,6 +83,7 @@ tests/tools/rdna/test_hetero_moe.py  # fork-only hetero-MoE expert-stats IO, pla
 tests/tools/rdna/test_eplb_model.py  # fork-only lean-EPLB study tools (geometry, placement, simulator, rebalance policy), CPU unit test; not in CI
 tests/tools/rdna/test_eplb_io.py  # fork-only lean-EPLB trace readers, counter summary, placement solver and kernel-time objective fit, CPU unit test; not in CI
 tests/tools/rdna/test_eplb_replay_check.py  # fork-only replay analyzer of the cross-rank top-k study (synthetic counter dumps), CPU unit test; not in CI
+tests/tools/rdna/test_eplb_qualification.py  # fork-only final EPLB qualification guards and monotonic coverage, CPU unit test; not in CI
 tests/tools/rdna/test_tunable_bits.py  # fork-only bitwise comparison of the router GEMM across rank tables (synthetic run files), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_report.py  # fork-only PR receipt logic (cells, ABBA verdicts, summary parsing, gates), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_driver.py  # fork-only pr_receipt.sh driver against stub trees and a stub serve_validate.sh, CPU unit test; not in CI
