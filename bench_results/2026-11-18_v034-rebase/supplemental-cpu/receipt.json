@@ -1,0 +1,26 @@
+{
+  "native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+  "checks": [
+    {
+      "source_commit": "1db566a865d680189fb69e03ddbbb227f3e23910",
+      "command": "pytest -q tests/platforms/test_rocm_device_count.py",
+      "red_junit": "device-count-red.xml",
+      "red_failures": 1,
+      "green_junit": "device-count-green.xml",
+      "passed": 4,
+      "scope": "CPU-only simulated AMDSMI/native discovery, not GPU numerical qualification"
+    },
+    {
+      "source_commit": "88df94029e35085274bad06c0881f8cc6e756800",
+      "command": "pytest -q tests/tools/rdna/test_mlock_pinned_proof.py -k 'quiet_lock_timeout or quiet_begin'",
+      "red_junit": "quiet-lock-red.xml",
+      "red_failures": 1,
+      "green_junit": "quiet-lock-green.xml",
+      "passed": 4,
+      "scope": "CPU-only shell-driver lock/quiet-window behavior"
+    }
+  ],
+  "supplemental_passed": 8,
+  "ci_wiring": "Device-count cases added to the AMD CPU audit job; commit hooks passed, no CI execution claimed.",
+  "gpu_qualification": "Paused after the separate Triton PR GPU fault on HIP1/d4; no operator/model/performance pass."
+}

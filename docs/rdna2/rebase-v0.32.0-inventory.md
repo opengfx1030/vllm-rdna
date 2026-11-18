@@ -1061,5 +1061,19 @@ The actual CLI reports `0.34.0+rdna.rocm714`; `serve --help=all` exposes
 `--replayssm-state-dtype {auto,leapquant}`. Its logs retain an optional
 `triton_kernels`/Triton 3.7.1 compatibility error (`is_hip_gfx1250` is
 missing). That backend is not qualified by the native/CPU receipts.
-GPU operator and Flash-Next/HI2 model-runtime gates remain pending. No
-performance result is claimed.
+
+GPU preflight exposed a discovery discrepancy in the fresh environment:
+native HIP and Torch's native API find four leased devices, while Torch's
+pre-initialization AMDSMI path reports zero. The ROCm platform now consults
+native HIP when AMDSMI returns zero as well as when it is unavailable.
+Four CPU cases pass, preserving positive AMDSMI counts and the genuinely
+empty-device case; the missing-device case fails before the fix.
+
+The benchmark driver also aborts when the boot lock outlives its wait
+timeout, rather than starting a measurement under another boot. Its new
+regression fails before the fix; four quiet-window cases pass afterwards.
+
+GPU operator and Flash-Next/HI2 model-runtime gates remain pending. Hardware
+qualification is paused after the independent Triton PR #12747 unit run
+faulted HIP1 (`d4`); no model-runtime or performance result is claimed.
+That run used isolated Triton 3.9 PR code, not this environment's Triton 3.7.1.

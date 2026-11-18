@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="0.563" timestamp="2026-11-18T23:34:46.618828+01:00" hostname="par1-cs25"><testcase classname="tests.platforms.test_rocm_device_count" name="test_device_count_uses_native_discovery_when_amdsmi_finds_no_gpus[0-4-4]" time="0.491"><failure message="AssertionError: assert 0 == 4&#10; +  where 0 = device_count()&#10; +    where device_count = &lt;class 'vllm.platforms.rocm.RocmPlatform'&gt;.device_count&#10; +      where &lt;class 'vllm.platforms.rocm.RocmPlatform'&gt; = &lt;module 'vllm.platforms.rocm' from '/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/platforms/rocm.py'&gt;.RocmPlatform">monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x7ef6d8389e50&gt;
+amdsmi_count = 0, native_count = 4, expected = 4
+
+    @pytest.mark.parametrize(
+        ("amdsmi_count", "native_count", "expected"),
+        [(0, 4, 4), (-1, 4, 4), (2, 4, 2), (0, 0, 0)],
+    )
+    def test_device_count_uses_native_discovery_when_amdsmi_finds_no_gpus(
+        monkeypatch, amdsmi_count, native_count, expected
+    ):
+        from vllm.platforms import rocm
+    
+        monkeypatch.setattr(torch.cuda, "_device_count_amdsmi", lambda: amdsmi_count)
+        monkeypatch.setattr(torch._C, "_cuda_getDeviceCount", lambda: native_count)
+        rocm._rocm_device_count_stateless.cache_clear()
+        try:
+&gt;           assert rocm.RocmPlatform.device_count() == expected
+E           AssertionError: assert 0 == 4
+E            +  where 0 = device_count()
+E            +    where device_count = &lt;class 'vllm.platforms.rocm.RocmPlatform'&gt;.device_count
+E            +      where &lt;class 'vllm.platforms.rocm.RocmPlatform'&gt; = &lt;module 'vllm.platforms.rocm' from '/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/platforms/rocm.py'&gt;.RocmPlatform
+
+tests/platforms/test_rocm_device_count.py:28: AssertionError</failure></testcase></testsuite></testsuites>
