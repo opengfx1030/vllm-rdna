@@ -372,7 +372,7 @@ def test_solve_packs_skewed_layers_and_leaves_balanced_ones_linear():
     assert solve.validate_doc(doc) == []
     assert doc["version"] == 1 and doc["ep_size"] == 4 and doc["num_experts"] == 64
     assert set(doc["layers"]) <= {"0", "1", "2"} and doc["layers"]
-    for key, entry in doc["layers"].items():
+    for key, _entry in doc["layers"].items():
         assert (
             report[key]["objective_ratio_packed"]
             < report[key]["objective_ratio_linear"]
@@ -538,7 +538,11 @@ def test_read_kernels_keeps_only_the_moe_gemms(tmp_path):
 
 
 def _bench_dir(path: Path, cells: dict[str, tuple[float, float]], invalid=()) -> Path:
-    """A serve_validate-style arm directory: cell name -> (ITL p50, ITL p99)."""
+    """A serve_validate-style arm directory: cell name -> (ITL p50, ITL p99).
+
+    ``serve_validate.sh`` logs the cell, its result line, and then an indented KFD
+    verdict that does **not** repeat the cell name.
+    """
     path.mkdir(parents=True)
     for name, (p50, p99) in cells.items():
         doc = {
@@ -549,9 +553,24 @@ def _bench_dir(path: Path, cells: dict[str, tuple[float, float]], invalid=()) ->
         }
         (path / f"bench-{name}.json").write_text(json.dumps(doc))
     if invalid:
-        lines = [f"cell bench-{n} INVALID (KFD evictions)" for n in invalid]
+        lines = []
+        for name in cells:
+            lines.append(f"[00:00:00] bench bench-{name} (n=8)")
+            lines.append(f"    bench-{name} prefill 1.0 tok/s/req | ok 8")
+            if name in invalid:
+                lines.append(
+                    "    evicted_ms Worker_TP0_EP0=+1 -> INVALID (KFD evicted a "
+                    "worker's GPU queues during this window; rerun it)"
+                )
         (path / "summary.txt").write_text("\n".join(lines))
     return path
+
+
+def _drop_metric(path: Path, cell: str, metric: str) -> None:
+    """Remove one field from a bench result, as a bench that stopped short leaves it."""
+    doc = json.loads((path / f"bench-{cell}.json").read_text())
+    del doc[metric]
+    (path / f"bench-{cell}.json").write_text(json.dumps(doc))
 
 
 def test_itl_gate_passes_inside_the_noise_and_fails_outside(tmp_path):
@@ -603,5 +622,110 @@ def test_itl_gate_has_a_floor_unknown_verdicts_and_refuses_invalid_cells(tmp_pat
     )
     assert {r["verdict"] for r in one if r["metric"] in itl_gate.GATED} == {"unknown"}
     dirty = _bench_dir(tmp_path / "D", cells, invalid=["1024x512-c1"])
-    assert itl_gate.load_cells(str(dirty)) == {}
+    with pytest.raises(itl_gate.GateInputError, match="bench-1024x512-c1"):
+        itl_gate.load_cells(str(dirty))
     assert itl_gate.main(["--off", str(a1), "--on", str(dirty)]) == 3
+
+
+def test_itl_gate_refuses_a_partial_cell_set(tmp_path, capsys):
+    two = {"1024x512-c1": (22.5, 30.0), "1024x512-c8": (44.0, 60.0)}
+    a1 = _bench_dir(tmp_path / "A1", two)
+    a3 = _bench_dir(tmp_path / "A3", two)
+    b1 = _bench_dir(tmp_path / "B1", two)
+    b2 = _bench_dir(tmp_path / "B2", two)
+    # A2 lost the c8 result; the c1 values alone would pass
+    a2 = _bench_dir(tmp_path / "A2", {"1024x512-c1": (22.5, 30.0)})
+    with pytest.raises(
+        itl_gate.GateInputError, match="off arm 2 is missing.*bench-1024x512-c8"
+    ):
+        itl_gate.compare(
+            [itl_gate.load_cells(str(d)) for d in (a1, a2)],
+            [itl_gate.load_cells(str(d)) for d in (b1, b2)],
+        )
+    assert itl_gate.main(["--off", str(a1), str(a3), "--on", str(b1), str(b2)]) == 0
+    partial = itl_gate.main(["--off", str(a1), str(a2), "--on", str(b1), str(b2)])
+    assert partial == 3
+    err = capsys.readouterr().err
+    assert "off arm 2" in err and "bench-1024x512-c8" in err
+
+
+def test_itl_gate_refuses_an_invalid_cell_instead_of_a_reduced_pass(tmp_path, capsys):
+    cells = {"1024x512-c1": (22.5, 30.0), "1024x512-c8": (44.0, 60.0)}
+    a1 = _bench_dir(tmp_path / "A1", cells)
+    a2 = _bench_dir(tmp_path / "A2", cells)
+    b2 = _bench_dir(tmp_path / "B2", cells)
+    # the c8 window of B1 overlapped a KFD eviction: dropping it would leave c1, which
+    # passes, and the gate would report success for a half-measured arm
+    b1 = _bench_dir(tmp_path / "B1", cells, invalid=["1024x512-c8"])
+    with pytest.raises(itl_gate.GateInputError, match="bench-1024x512-c8"):
+        itl_gate.load_cells(str(b1))
+    assert itl_gate.main(["--off", str(a1), str(a2), "--on", str(b1), str(b2)]) == 3
+    err = capsys.readouterr().err
+    assert "INVALID" in err and "bench-1024x512-c8" in err
+    # a cell invalid in every arm is still no measurement, not a smaller comparison
+    a3 = _bench_dir(tmp_path / "A3", cells, invalid=["1024x512-c8"])
+    with pytest.raises(itl_gate.GateInputError, match="bench-1024x512-c8"):
+        itl_gate.load_cells(str(a3))
+    assert itl_gate.main(["--off", str(a3), str(a2), "--on", str(b1), str(b2)]) == 3
+    # the invalid window may not even have left a result file behind
+    a4 = _bench_dir(tmp_path / "A4", {"1024x512-c1": (22.5, 30.0)})
+    (a4 / "summary.txt").write_text(
+        "[00:00:00] bench bench-1024x512-c8 (n=32)\n"
+        "    evicted_ms Worker_TP0_EP0=+1 -> INVALID (KFD evicted a worker's GPU "
+        "queues during this window; rerun it)\n"
+    )
+    with pytest.raises(itl_gate.GateInputError, match="bench-1024x512-c8"):
+        itl_gate.load_cells(str(a4))
+
+
+def test_itl_gate_refuses_a_missing_gated_metric(tmp_path, capsys):
+    cells = {"1024x512-c1": (22.5, 30.0)}
+    a1 = _bench_dir(tmp_path / "A1", cells)
+    b1 = _bench_dir(tmp_path / "B1", cells)
+    _drop_metric(b1, "1024x512-c1", "p99_itl_ms")
+    with pytest.raises(
+        itl_gate.GateInputError, match="p99_itl_ms is missing from on arm 1"
+    ):
+        itl_gate.compare([itl_gate.load_cells(str(a1))], [itl_gate.load_cells(str(b1))])
+    assert itl_gate.main(["--off", str(a1), "--on", str(b1)]) == 3
+    # no ITL in either arm: the context metrics must not carry a gate on their own
+    a2 = _bench_dir(tmp_path / "A2", cells)
+    b2 = _bench_dir(tmp_path / "B2", cells)
+    for d in (a2, b2):
+        _drop_metric(d, "1024x512-c1", "median_itl_ms")
+        _drop_metric(d, "1024x512-c1", "p99_itl_ms")
+    with pytest.raises(itl_gate.GateInputError, match="median_itl_ms"):
+        itl_gate.compare([itl_gate.load_cells(str(a2))], [itl_gate.load_cells(str(b2))])
+    assert itl_gate.main(["--off", str(a2), "--on", str(b2)]) == 3
+    assert "median_itl_ms" in capsys.readouterr().err
+
+
+def test_invalid_cells_charges_the_verdict_to_the_preceding_bench_cell(tmp_path):
+    cells = {"1024x512-c1": (22.5, 30.0), "1024x512-c8": (44.0, 60.0)}
+    arm = _bench_dir(tmp_path / "A1", cells)
+    (arm / "summary.txt").write_text(
+        "[00:00:00] bench bench-1024x512-c1 (n=8)\n"
+        "    bench-1024x512-c1 prefill 1.0 tok/s/req | ok 8\n"
+        "    evicted_ms Worker_TP0_EP0=+1 -> INVALID (KFD evicted a worker's GPU "
+        "queues during this window; rerun it)\n"
+        "[00:00:30] bench bench-1024x512-c8 (n=32)\n"
+        "    bench-1024x512-c8 prefill 1.0 tok/s/req | ok 32\n"
+        "    evicted_ms Worker_TP0_EP0=+0 -> ok\n"
+        # a healthy arm-wide verdict follows the last cell and belongs to no cell
+        "[00:01:00] evicted_ms since READY: Worker_TP0_EP0=+0 -> ok\n"
+    )
+    assert itl_gate.invalid_cells(str(arm)) == {"bench-1024x512-c1"}
+    with pytest.raises(itl_gate.GateInputError, match="bench-1024x512-c1"):
+        itl_gate.load_cells(str(arm))
+
+
+def test_itl_gate_refuses_an_arm_wide_eviction(tmp_path):
+    cells = {"1024x512-c1": (22.5, 30.0)}
+    a1 = _bench_dir(tmp_path / "A1", cells)
+    a2 = _bench_dir(tmp_path / "A2", cells)
+    b1 = _bench_dir(tmp_path / "B1", cells)
+    (b1 / "summary.txt").write_text(
+        "[00:01:00] PROBE-AFTER-LOAD PASS\n"
+        "[00:01:01] evicted_ms since READY: Worker_TP0_EP0=+5 -> INVALID\n"
+    )
+    assert itl_gate.main(["--off", str(a1), str(a2), "--on", str(b1)]) == 3
