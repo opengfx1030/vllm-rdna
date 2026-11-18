@@ -4,6 +4,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,6 +30,9 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive import (
 )
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
+)
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
+    AutoRegressiveSpeculator,
 )
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     speculator as spec_module,
@@ -348,11 +352,16 @@ def _create_decode_vllm_config(
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.cache_config = SimpleNamespace(use_kda_recoverssm=use_kda_recoverssm)
     vllm_config.num_speculative_tokens = num_speculative_tokens
-    if dynamic_spec_schedule is None:
+    if num_speculative_tokens == 0 and dynamic_spec_schedule is None:
         vllm_config.speculative_config = None
     else:
         speculative_config = MagicMock()
-        speculative_config.uses_dynamic_speculative_decoding.return_value = True
+        speculative_config.method = "mtp"
+        speculative_config.uses_dynamic_speculative_decoding.return_value = (
+            dynamic_spec_schedule is not None
+        )
+        speculative_config.use_multi_module_mtp.return_value = False
+        speculative_config.use_gemma4_mtp.return_value = False
         speculative_config.num_speculative_tokens_per_batch_size = dynamic_spec_schedule
         speculative_config.enable_adaptive_verification = False
         vllm_config.speculative_config = speculative_config
@@ -370,6 +379,9 @@ def _split_capture_sizes(vllm_config: MagicMock, legacy_sizes: bool) -> None:
         VllmConfig.get_varlen_decode_cudagraph_token_sizes(
             vllm_config, decode_query_len
         )
+    )
+    vllm_config.get_draft_decode_cudagraph_request_sizes = lambda: (
+        VllmConfig.get_draft_decode_cudagraph_request_sizes(vllm_config)
     )
     VllmConfig._split_cudagraph_capture_sizes(
         vllm_config,
@@ -391,6 +403,7 @@ def _make_spec_decode_manager(
     use_kda_recoverssm: bool = False,
     varlen_decode: bool = False,
     manager_cls: type = gpu_cudagraph_utils.CudaGraphManager,
+    autoregressive_draft: bool = False,
     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.FULL_AND_PIECEWISE,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     if num_speculative_tokens is None:
@@ -412,15 +425,26 @@ def _make_spec_decode_manager(
         max_num_seqs=max_num_seqs,
         use_kda_recoverssm=use_kda_recoverssm,
     )
-    manager = manager_cls(
-        vllm_config=vllm_config,
-        device=torch.device("cpu"),
-        cudagraph_mode=cudagraph_mode,
-        decode_query_lens=VllmConfig.get_decode_cudagraph_query_lens(
-            vllm_config, decode_query_len
-        ),
-        varlen_decode=varlen_decode,
-    )
+    if autoregressive_draft:
+        draft = SimpleNamespace(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            max_num_reqs=max_num_seqs,
+        )
+        AutoRegressiveSpeculator.init_cudagraph_manager(
+            cast(AutoRegressiveSpeculator, draft), cudagraph_mode
+        )
+        manager = draft.decode_cudagraph_manager
+    else:
+        manager = manager_cls(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            cudagraph_mode=cudagraph_mode,
+            decode_query_lens=VllmConfig.get_decode_cudagraph_query_lens(
+                vllm_config, decode_query_len
+            ),
+            varlen_decode=varlen_decode,
+        )
     manager._graphs_captured = True
     return manager
 
@@ -444,7 +468,7 @@ def test_autoregressive_draft_ignores_target_speculation_schedule(
         dynamic_spec_schedule=(
             [(1, 1, 4), (2, 2, 2), (3, 4, 1), (5, 256, 0)] if dynamic else None
         ),
-        manager_cls=SpeculatorCudaGraphManager,
+        autoregressive_draft=True,
         cudagraph_mode=cudagraph_mode,
     )
     manager._graphs_captured = True
