@@ -1,0 +1,345 @@
+{
+  "runtime_sha": "06e01fee103a42a86b760e26d62c2c8f155e7c27",
+  "runtime_change_since_original": "Client prefix probe and qualification reporting only; model/runtime/native code unchanged.",
+  "extensions": "Reused all seven original head binaries; no native rebuild. Full hashes in archive extensions.sha256 and original-summary.json.",
+  "design": "A1 off, B1 chaos, B2 chaos, A2 off; MTP2, FULL_AND_PIECEWISE, Mono; HIP 2,3,4,5 (d9 dc df e2).",
+  "result": "not qualified",
+  "itl_rows": [
+    {
+      "cell": "1024x512-c1",
+      "metric": "median_itl_ms",
+      "off": 23.374362994218245,
+      "on": 24.152008001692593,
+      "rel": 0.03326914225070869,
+      "noise": 0.0040809239422947416,
+      "verdict": "FAIL"
+    },
+    {
+      "cell": "1024x512-c1",
+      "metric": "p99_itl_ms",
+      "off": 23.95188541508105,
+      "on": 27.63837181169947,
+      "rel": 0.15391215901096716,
+      "noise": 0.0025644452489997274,
+      "verdict": "FAIL"
+    },
+    {
+      "cell": "1024x512-c1",
+      "metric": "median_ttft_ms",
+      "off": 398.1595107507019,
+      "on": 403.0641375029518,
+      "rel": 0.012318245878398248,
+      "noise": 0.001971095686611554,
+      "verdict": "-"
+    },
+    {
+      "cell": "1024x512-c1",
+      "metric": "output_throughput",
+      "off": 70.67415204740934,
+      "on": 68.47741695772598,
+      "rel": -0.031082581481978778,
+      "noise": 0.07432363143901864,
+      "verdict": "-"
+    },
+    {
+      "cell": "1024x512-c8",
+      "metric": "median_itl_ms",
+      "off": 46.916183000575984,
+      "on": 47.5080762480502,
+      "rel": 0.0126159719230985,
+      "noise": 0.005980580118238712,
+      "verdict": "FAIL"
+    },
+    {
+      "cell": "1024x512-c8",
+      "metric": "p99_itl_ms",
+      "off": 380.8809969779395,
+      "on": 383.7392760136572,
+      "rel": 0.007504388663116383,
+      "noise": 0.003195970306193699,
+      "verdict": "FAIL"
+    },
+    {
+      "cell": "1024x512-c8",
+      "metric": "median_ttft_ms",
+      "off": 541.2851675027923,
+      "on": 546.4365745028772,
+      "rel": 0.009516992722802254,
+      "noise": 0.00550840145125737,
+      "verdict": "-"
+    },
+    {
+      "cell": "1024x512-c8",
+      "metric": "output_throughput",
+      "off": 270.0869145235765,
+      "on": 271.3711173558579,
+      "rel": 0.0047547761969389275,
+      "noise": 0.02365436335579861,
+      "verdict": "-"
+    },
+    {
+      "cell": "16384x1024-c1",
+      "metric": "median_itl_ms",
+      "off": 24.097647747112205,
+      "on": 24.722110745642567,
+      "rel": 0.025913857032174258,
+      "noise": 0.0017977068298385456,
+      "verdict": "FAIL"
+    },
+    {
+      "cell": "16384x1024-c1",
+      "metric": "p99_itl_ms",
+      "off": 24.59540494324756,
+      "on": 28.042339814637675,
+      "rel": 0.140145481619177,
+      "noise": 0.00045957824422448003,
+      "verdict": "FAIL"
+    },
+    {
+      "cell": "16384x1024-c1",
+      "metric": "median_ttft_ms",
+      "off": 5935.2743410017865,
+      "on": 5954.66987375039,
+      "rel": 0.0032678409849762812,
+      "noise": 0.0033430323282391252,
+      "verdict": "-"
+    },
+    {
+      "cell": "16384x1024-c1",
+      "metric": "output_throughput",
+      "off": 66.08655831605402,
+      "on": 62.47193435982691,
+      "rel": -0.054695297324161514,
+      "noise": 0.008680580594534222,
+      "verdict": "-"
+    },
+    {
+      "cell": "16384x1024-c8",
+      "metric": "median_itl_ms",
+      "off": 49.37696449633222,
+      "on": 49.63010649953503,
+      "rel": 0.005126722668859374,
+      "noise": 0.0031362601896314287,
+      "verdict": "FAIL"
+    },
+    {
+      "cell": "16384x1024-c8",
+      "metric": "p99_itl_ms",
+      "off": 429.3920563394205,
+      "on": 430.64783327536134,
+      "rel": 0.0029245462681503193,
+      "noise": 0.001031042535944784,
+      "verdict": "pass"
+    },
+    {
+      "cell": "16384x1024-c8",
+      "metric": "median_ttft_ms",
+      "off": 10877.897318001487,
+      "on": 7141.570494000916,
+      "rel": -0.34347877303616775,
+      "noise": 0.3290041108477714,
+      "verdict": "-"
+    },
+    {
+      "cell": "16384x1024-c8",
+      "metric": "output_throughput",
+      "off": 124.85963736000551,
+      "on": 121.0667090779956,
+      "rel": -0.030377537226652596,
+      "noise": 0.02726310543768344,
+      "verdict": "-"
+    }
+  ],
+  "failed_itl_rows": 7,
+  "gate": "abs(relative on/off change) <= max(0.005, off-boot spread / off mean), per p50 and p99 ITL row; unchanged.",
+  "arms": {
+    "A1": {
+      "mono_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "k2_3row_full_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "modules_24row_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "eplb_on_lines": 0,
+      "counter_lines": 0,
+      "plan_starts": 0,
+      "plan_overlap": {},
+      "unfinished_plans": [],
+      "on": false,
+      "cells": "1024:512:1 1024:512:8 16384:1024:1 16384:1024:8",
+      "faults": 0,
+      "ok": true,
+      "problems": [],
+      "head_sha": "06e01fee103a42a86b760e26d62c2c8f155e7c27"
+    },
+    "B1": {
+      "mono_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "k2_3row_full_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "modules_24row_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "eplb_on_lines": 4,
+      "counter_lines": 4,
+      "plan_starts": 14,
+      "plan_overlap": {
+        "bench-1024x512-c1": [
+          2,
+          3,
+          4
+        ],
+        "bench-1024x512-c8": [
+          5,
+          6
+        ],
+        "bench-16384x1024-c1": [
+          7,
+          8,
+          9,
+          10
+        ],
+        "bench-16384x1024-c8": [
+          10,
+          11,
+          12,
+          13
+        ]
+      },
+      "unfinished_plans": [
+        14
+      ],
+      "on": true,
+      "cells": "1024:512:1 1024:512:8 16384:1024:1 16384:1024:8",
+      "faults": 0,
+      "ok": true,
+      "problems": [],
+      "head_sha": "06e01fee103a42a86b760e26d62c2c8f155e7c27"
+    },
+    "B2": {
+      "mono_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "k2_3row_full_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "modules_24row_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "eplb_on_lines": 4,
+      "counter_lines": 4,
+      "plan_starts": 15,
+      "plan_overlap": {
+        "bench-1024x512-c1": [
+          2,
+          3,
+          4
+        ],
+        "bench-1024x512-c8": [
+          5,
+          6
+        ],
+        "bench-16384x1024-c1": [
+          7,
+          8,
+          9,
+          10
+        ],
+        "bench-16384x1024-c8": [
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      },
+      "unfinished_plans": [
+        15
+      ],
+      "on": true,
+      "cells": "1024:512:1 1024:512:8 16384:1024:1 16384:1024:8",
+      "faults": 0,
+      "ok": true,
+      "problems": [],
+      "head_sha": "06e01fee103a42a86b760e26d62c2c8f155e7c27"
+    },
+    "A2": {
+      "mono_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "k2_3row_full_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "modules_24row_ranks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "eplb_on_lines": 0,
+      "counter_lines": 0,
+      "plan_starts": 0,
+      "plan_overlap": {},
+      "unfinished_plans": [],
+      "on": false,
+      "cells": "1024:512:1 1024:512:8 16384:1024:1 16384:1024:8",
+      "faults": 0,
+      "ok": true,
+      "problems": [],
+      "head_sha": "06e01fee103a42a86b760e26d62c2c8f155e7c27"
+    }
+  },
+  "functional": "All four native boot validations PASS: greedy, short PPL, measured prefix reuse, concurrency and hardware guards.",
+  "full_quality": "NOT RUN; the PPL probe has only 261 tokens.",
+  "measurement_limits": [
+    "Single four-boot ABBA campaign; no reroll.",
+    "Chaos is a migration stress mode, not workload-optimized placement.",
+    "TTFT and aggregate output are context metrics; spec-decode trajectories and cache state can vary.",
+    "Unfinished final plans excluded from plan-overlap witnesses; historical PCIe fault remains unisolated."
+  ],
+  "lease": "b4 released after campaign exit 1",
+  "archive": {
+    "file": "corrected-receipts.tar.gz",
+    "files": 191,
+    "bytes": 2324376,
+    "sha256": "3e832f856f4d222c704abb7547615bd62e47fa103d1f6ed55d6c9c8bbfa1029d"
+  }
+}
