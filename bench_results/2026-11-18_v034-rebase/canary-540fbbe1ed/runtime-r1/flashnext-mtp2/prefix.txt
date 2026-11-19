@@ -1,0 +1,4 @@
+cold TTFT 0.731253 s, warm TTFT 0.393929 s, speedup 1.86x; probe PASS
+prefix cache: prompt 1927 tokens, queries +3854, hits +1024, warm hit rate 53.1% (required > 50%); latency target: none (TTFT reported as context)
+cold text: '\n\n<think>\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms (like '
+warm text: '\n\n<think>\nThe user wants me to summarize a long text that appears to be a sequence of GPU/computing-related terms. Let m'

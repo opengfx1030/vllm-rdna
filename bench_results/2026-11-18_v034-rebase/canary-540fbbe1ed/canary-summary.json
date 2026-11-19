@@ -1,0 +1,155 @@
+{
+  "schema": "v034-canary-summary/1",
+  "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+  "docs_commit": "87cb7f2555354db9e799712498de75fd5f6cc408",
+  "artifact_sha256": "579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042",
+  "cpu_capture_checkpoint": "5d388329bb5a5333f677de6fcb7ff36bbb263bfa",
+  "grant": "V034FinalArtifactCanary20261119R1",
+  "triton_stop": {
+    "path": "/home/chenco_adm/w4a8_runs/triton-pr12747/full-amd/STOP",
+    "sha256": "6fedfb2bed9df48a10d7ea21d3013d10a6f96fc8ebcd5e6ddd594259e1f637a4",
+    "bytes": 641,
+    "unchanged": true
+  },
+  "focused": {
+    "receipt": "vllm-v034/bench_results/2026-11-18_v034-rebase/canary-540fbbe1ed/focused-r2/receipt.json",
+    "sha256": "132bfee85afe3446591c62104a51a46848268359b3d64705801253712ae721f6",
+    "junit_sha256": "b8604ea5e69ac7184f31483f7b62792abfe8748ee5e0a72addaf2eb76662816d",
+    "cases": 7,
+    "failures": 0,
+    "skipped": 0,
+    "pytest_exit": 0,
+    "max_junction_c": {
+      "d9": 33.0,
+      "dc": 31.0,
+      "df": 32.0,
+      "e2": 32.0
+    },
+    "kfd": {
+      "observed": true,
+      "before": 0,
+      "last": 0,
+      "after_exit": null,
+      "jump": 0
+    },
+    "aer_jumps": {},
+    "new_kernel_faults": [],
+    "pass": true
+  },
+  "runtime": {
+    "receipt": "vllm-v034/bench_results/2026-11-18_v034-rebase/canary-540fbbe1ed/runtime-r1/receipt.json",
+    "sha256": "e840b30d7268b98bbbf1547d34753bd33e7bb3c1900f9500a85205dff1a5c930",
+    "pass": true,
+    "run_fault_lines": [],
+    "recipes": {
+      "flashnext-mtp2": {
+        "recipe": "flashnext-mtp2",
+        "out": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/runtime-r1/flashnext-mtp2",
+        "passed": true,
+        "ppl": 4.83,
+        "ppl_bound": 5.0,
+        "prefix": {
+          "speedup": 1.86,
+          "hits": 1024,
+          "hit_rate_pct": 53.1
+        },
+        "cells": {
+          "bench-1024x512-c1": {
+            "in": 1024,
+            "out": 512,
+            "concurrency": 1,
+            "requests": 2,
+            "output_tps": 78.04650821607021,
+            "ttft_ms": 392.48218848661054,
+            "tpot_ms": 12.068382439346175
+          },
+          "bench-1024x512-c8": {
+            "in": 1024,
+            "out": 512,
+            "concurrency": 8,
+            "requests": 8,
+            "output_tps": 262.7201044988564,
+            "ttft_ms": 2011.3091966195498,
+            "tpot_ms": 24.159325898239715
+          }
+        },
+        "failures": [],
+        "measurement_claim": "bounded smoke/timing receipt only: PPL bounds are corruption gates, one boot per recipe, no baseline parity or performance-improvement claim",
+        "driver_exit": 0,
+        "new_dmesg_lines": 13,
+        "new_kernel_faults": [],
+        "aer_jumps": {},
+        "aer_unverified": [],
+        "all_run_new_faults": []
+      },
+      "27b-hi2-tp2-mtp2": {
+        "recipe": "27b-hi2-tp2-mtp2",
+        "out": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/runtime-r1/27b-hi2-tp2-mtp2",
+        "passed": true,
+        "ppl": 5.73,
+        "ppl_bound": 6.0,
+        "prefix": {
+          "speedup": 2.0,
+          "hits": 1024,
+          "hit_rate_pct": 53.1
+        },
+        "cells": {
+          "bench-1024x512-c1": {
+            "in": 1024,
+            "out": 512,
+            "concurrency": 1,
+            "requests": 2,
+            "output_tps": 63.382433893113586,
+            "ttft_ms": 1305.7153624977218,
+            "tpot_ms": 13.251432228963065
+          },
+          "bench-1024x512-c8": {
+            "in": 1024,
+            "out": 512,
+            "concurrency": 8,
+            "requests": 8,
+            "output_tps": 108.68212998865917,
+            "ttft_ms": 6811.025303370116,
+            "tpot_ms": 43.76375594276677
+          }
+        },
+        "failures": [],
+        "measurement_claim": "bounded smoke/timing receipt only: PPL bounds are corruption gates, one boot per recipe, no baseline parity or performance-improvement claim",
+        "driver_exit": 0,
+        "new_dmesg_lines": 0,
+        "new_kernel_faults": [],
+        "aer_jumps": {},
+        "aer_unverified": [],
+        "all_run_new_faults": []
+      }
+    },
+    "measurement_claim": "bounded smoke/timing gate; one boot per recipe; PPL bounds are corruption thresholds; not a parity or performance-improvement measurement",
+    "thermal_max_c": {
+      "flashnext-mtp2": {
+        "d9": 66.0,
+        "dc": 64.0,
+        "df": 66.0,
+        "e2": 66.0
+      },
+      "27b-hi2-tp2-mtp2": {
+        "d9": 76.0,
+        "dc": 73.0,
+        "df": 49.0,
+        "e2": 48.0
+      }
+    },
+    "a2_quiet_after_empty": true,
+    "b4_lease_after_empty": true
+  },
+  "preserved_failures": {
+    "focused-r0-invalid-nodeids": "test-selection only: pytest reported not-found for wrong gumbel parameter IDs; no GPU workload ran",
+    "focused-r1-tests-pass-kfd-wrapper-false-negative": "7/7 tests passed; wrapper failed because it required a post-exit KFD context; corrected wrapper records KFD samples during the run"
+  },
+  "notes": [
+    "Both runtime recipes used only 1024:512:1:2 and 1024:512:8:8; no 504 or 16k cells.",
+    "One boot per recipe; PPL values are corruption-threshold smoke bounds, not quality parity.",
+    "Timing cells are single-boot observations, not a performance-improvement claim.",
+    "No A2 quiet marker appeared; no A2 timed cells were run during this canary.",
+    "No source or artifact mismatch observed: source 540... and artifact 579d8..."
+  ]
+}

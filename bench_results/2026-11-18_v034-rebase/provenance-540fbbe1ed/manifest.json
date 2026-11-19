@@ -22,8 +22,8 @@
   "native_receipt_sha256": "42e94b2499d4dcfa6e48e90572a8640fb5266446e40f883e36adc06ee8b0fbeb",
   "r3_attestation_sha256": "94a121082f4b0daf0e67f1da6873569364f483c4d30feebaef8f1e6a82b4ac19",
   "committed_native_receipt_sha256": "476d7c12300a0e35eb0889545aa9a96c2183f13b33bb901bcfc24eb5499d00c5",
-  "provenance_proof_sha256": "8cc124ed122c7e00dd54f9d1543c4c0f8b90125da43112b94f487b37b99cdc58",
-  "canary_plan_sha256": "66ecaa8b52354066843c6f3de378d648a4bd52183f3fe6cf4955ba9e4c8385ef",
+  "provenance_proof_sha256": "477ea6e2ec9a651122116a7a56c6379e3fc484a36b13826fd982c19e5249bf31",
+  "canary_plan_sha256": "ea9658201e43c425217649593d4a739b0351d672c82f153968b8c53a85f60b3e",
   "incident_sha256": "f1b78767231aee985c51bcb39eae218f09127e883c2e318080aa37af996aba54"
  },
  "operator": {
@@ -538,18 +538,20 @@
  },
  "provenance_proof": {
   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/provenance-proof-540fbbe1ed.json",
-  "sha256": "8cc124ed122c7e00dd54f9d1543c4c0f8b90125da43112b94f487b37b99cdc58",
-  "bytes": 11842
+  "sha256": "477ea6e2ec9a651122116a7a56c6379e3fc484a36b13826fd982c19e5249bf31",
+  "bytes": 12305
  },
- "inventory_note": "Top-level source_commit/native_mismatch and r3 sections describe the historical GPU-tested 93d737 patched-working-tree artifact (41d5). committed_source/committed_build describe the CPU-only committed rebuild at 540fbbe1ed (579d8). Root source-commit.txt still points at 93d737 pending parent inventory update.",
+ "inventory_note": "Root source-commit.txt now verified as full 540fbbe1ed; docs/provenance commit 87cb7f2555 changed no ABI/code and did not trigger a rebuild. Artifact remains 579d8...; canary is parked pending explicit b4 release.",
  "canary_plan": {
   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/canary-plan-540fbbe1ed.json",
-  "sha256": "66ecaa8b52354066843c6f3de378d648a4bd52183f3fe6cf4955ba9e4c8385ef",
-  "bytes": 5807
+  "sha256": "ea9658201e43c425217649593d4a739b0351d672c82f153968b8c53a85f60b3e",
+  "bytes": 6551
  },
  "incident": {
   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/incident-41d5-preservation.json",
   "sha256": "f1b78767231aee985c51bcb39eae218f09127e883c2e318080aa37af996aba54",
   "bytes": 3616
- }
+ },
+ "source_pointer_verified": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+ "docs_commit": "87cb7f2555354db9e799712498de75fd5f6cc408"
 }

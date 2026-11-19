@@ -984,7 +984,7 @@ no other call-signature breaks (remaining findings are vendored Triton typing no
 Not servable on the box: DSV4 / MXFP4 (no checkpoint present), so those stay
 statically verified only.
 
-## v0.34.0 integration branch (qualification in progress)
+## v0.34.0 integration branch (bounded final-artifact canary passed)
 
 The isolated `rebase/v0.34.0` branch starts from production
 `1e1cac5340a9c9af8c9df3db331978548d709b42` and integrates upstream
@@ -1084,9 +1084,9 @@ input updates must read `max_model_len` from its device tensor rather than
 coercing it with `.item()` during FULL graph capture. Stale test call
 signatures were migrated to the v0.34 interfaces.
 
-The operator gate passes __504/504__ cases across seven suites. Both
-`FULL_AND_PIECEWISE`/MTP2 runtime gates pass, including requests after the
-first replay, greedy probes, concurrency, prefix caching and 16k cells:
+The historical `41d5030b...` operator gate passes __504/504__ cases across
+seven suites. Its two `FULL_AND_PIECEWISE`/MTP2 runtime gates pass, including
+requests after first replay, greedy probes, concurrency, prefix caching and 16k:
 
 | recipe | PPL | warm prefix hit rate | prefix TTFT speedup | concurrency failures | max junction |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -1108,9 +1108,17 @@ six targets; all seven extensions import and 186 schemas register. The
 strict actual-artifact guard and five fail-closed mutations pass.
 The exact old `41d5030b...` file was lost during an accidental in-place
 `objcopy --dump-section`; its section dumps and historical receipts remain,
-but binary equivalence cannot be established. The new artifact is therefore
-CPU-qualified only until its queued focused operator and two-recipe runtime
-canary executes. Do not transfer the old receipts' GPU claim to it.
+but binary equivalence cannot be established. Those broad GPU receipts remain
+historical, not claims about the rebuilt artifact.
+
+The exact `579d8ca2...` artifact separately passed its final canary on
+2026-11-19: seven focused Gumbel/draft-graph cases (zero failures/skips), then
+Flash-Next TP4 and HI2 TP2 with MTP2 and `FULL_AND_PIECEWISE`. Both completed
+requests after first replay, greedy/PPL/prefix/concurrency probes and the
+1k/512 c=1/n=2 and c=8/n=8 cells. Receipts record zero KFD increments, AER
+jumps and new GPU/native faults. No 504-case or 16k rerun, quality parity or
+performance-improvement claim is made. The separately hashed final receipts
+are in `bench_results/2026-11-18_v034-rebase/canary-540fbbe1ed/`.
 
 The allowlisted provenance bundle, including the preservation incident and
 canary plan, is in

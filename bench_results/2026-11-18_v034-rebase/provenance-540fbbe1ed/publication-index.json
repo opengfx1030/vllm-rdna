@@ -1,8 +1,14 @@
 {
  "schema": "v034-publication-index/1",
  "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+ "docs_commit": "87cb7f2555354db9e799712498de75fd5f6cc408",
  "artifact_sha256": "579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042",
  "files": [
+  {
+   "path": ".gitignore",
+   "sha256": "ec0671789f7f68b2bc656333bf0f59b1ca85d9d913e6f8261705e7469024aa7b",
+   "bytes": 60
+  },
   {
    "path": "attested-41d5/attestation.json",
    "sha256": "7e3ae5931f57f5110921ec306ab59d5d42325c09d7d74f0f533ebfcb1b68e715",
@@ -15,8 +21,8 @@
   },
   {
    "path": "canary-plan-540fbbe1ed.json",
-   "sha256": "66ecaa8b52354066843c6f3de378d648a4bd52183f3fe6cf4955ba9e4c8385ef",
-   "bytes": 5807
+   "sha256": "ea9658201e43c425217649593d4a739b0351d672c82f153968b8c53a85f60b3e",
+   "bytes": 6551
   },
   {
    "path": "cmake-build-rocm_C-540fbbe1ed.log",
@@ -60,8 +66,8 @@
   },
   {
    "path": "manifest.json",
-   "sha256": "e48ef7a2f1d60badebfbafc81a3b01aa77732342e14db5f9180b0b92d41e495f",
-   "bytes": 25941
+   "sha256": "2fe8a0414c78a0aa0cedf6780539e923d44c161a60792daa840fad7fefb554b7",
+   "bytes": 25976
   },
   {
    "path": "native-guard-selftest-operator-540fbbe-final.log",
@@ -110,8 +116,8 @@
   },
   {
    "path": "provenance-proof-540fbbe1ed.json",
-   "sha256": "8cc124ed122c7e00dd54f9d1543c4c0f8b90125da43112b94f487b37b99cdc58",
-   "bytes": 11842
+   "sha256": "477ea6e2ec9a651122116a7a56c6379e3fc484a36b13826fd982c19e5249bf31",
+   "bytes": 12305
   },
   {
    "path": "r3-attestation.json",
@@ -229,5 +235,5 @@
    "bytes": 5490
   }
  ],
- "note": "Allowlisted textual evidence only; no binaries, no section dumps, no secrets."
+ "note": "Allowlisted textual evidence only; no binaries, no section dumps, no secrets. Canary parked; no b4 grant."
 }

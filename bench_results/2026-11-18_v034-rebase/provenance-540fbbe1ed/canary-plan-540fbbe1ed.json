@@ -48,7 +48,19 @@
   ],
   "no_16k": true,
   "no_full_504": true,
-  "expected": "both recipe receipts passed; no new dmesg/AER faults; thermal bounds; lease released"
+  "expected": "both recipe receipts passed; no new dmesg/AER faults; thermal bounds; lease released",
+  "cells_detail": {
+   "1024:512:1:2": "1k prompt/512 output, concurrency 1, requests 2",
+   "1024:512:8:8": "1k prompt/512 output, concurrency 8, requests 8"
+  },
+  "quality": "greedy correctness probe plus bounded PPL startup/corruption smoke; no baseline parity claim",
+  "request2_plus": true,
+  "prefix": true,
+  "concurrency": true,
+  "cells_human": [
+   "1k c1 request2",
+   "1k c8 request8"
+  ]
  },
  "stop_conditions": [
   "any new GPU fault or AER increment",
@@ -60,5 +72,9 @@
   "new binary GPU qualification until canary passes",
   "performance improvement",
   "full 504 rerun"
- ]
+ ],
+ "source_pointer_verified": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+ "docs_commit": "87cb7f2555354db9e799712498de75fd5f6cc408",
+ "artifact_unchanged": true,
+ "note": "Root source-commit.txt now verified as full 540fbbe1ed; docs/provenance commit 87cb7f2555 changed no ABI/code and did not trigger a rebuild. Artifact remains 579d8..."
 }

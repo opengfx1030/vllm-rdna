@@ -236,5 +236,12 @@
   "note": "Temporary GPU_PAUSED and missing-native tests; both wrappers exited 1 before lease/GPU. Actual root marker absent."
  },
  "qualification": "CPU-only provenance. New artifact hash/size, 7 loaded modules, 186 schemas, strict actual-artifact guard; no b4 GPU lease or run. Source is committed/format-only; binary sections are not identical to the preserved reference and the preserved full 41d5 hash is missing, so no runtime/performance claim and a narrow GPU proof would be required before use.",
- "inventory_note": "Root source-commit.txt still points at 93d737 pending parent inventory update; build evidence is at 540fbbe1ed."
+ "inventory_note": "Root source-commit.txt now verified as full 540fbbe1ed; docs/provenance commit 87cb7f2555 changed no ABI/code and did not trigger a rebuild. Artifact remains 579d8...; canary is parked pending explicit b4 release.",
+ "source_pointer_verified": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+ "docs_commit": "87cb7f2555354db9e799712498de75fd5f6cc408",
+ "canary_plan": {
+  "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/canary-plan-540fbbe1ed.json",
+  "sha256": "ea9658201e43c425217649593d4a739b0351d672c82f153968b8c53a85f60b3e",
+  "bytes": 6551
+ }
 }
