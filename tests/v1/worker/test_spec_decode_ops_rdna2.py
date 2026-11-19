@@ -360,6 +360,7 @@ def triton_update_draft_inputs(
     )
     if num_reqs == 0:
         return
+    max_model_len_t = torch.tensor(max_model_len, dtype=torch.int64, device=DEVICE)
     spec._update_draft_inputs_kernel[(num_reqs,)](
         output_draft_tokens,
         output_draft_tokens.stride(0),
@@ -374,7 +375,7 @@ def triton_update_draft_inputs(
         hidden_states,
         hidden_states.stride(0),
         hidden_size,
-        max_model_len,
+        max_model_len_t,
         num_speculative_steps,
         BLOCK_SIZE=1024,
         ADVANCE_DRAFT_POSITIONS=advance,
@@ -430,6 +431,7 @@ def test_update_draft_inputs_parity(dtype, step, num_spec, hidden_size):
     nihs_got = torch.full(
         (num_reqs, hidden_size), SENTINEL_F, dtype=dtype, device=DEVICE
     )
+    max_model_len_t = torch.tensor(max_model_len, dtype=torch.int32, device=DEVICE)
     OP.spec_update_draft_inputs_rdna2(
         out_got,
         nihs_got,
@@ -441,7 +443,7 @@ def test_update_draft_inputs_parity(dtype, step, num_spec, hidden_size):
         current_draft_step,
         hs,
         hidden_size,
-        max_model_len,
+        max_model_len_t,
         num_spec,
         True,
     )
@@ -1134,6 +1136,7 @@ def triton_resample(
         None,
         0,
         None,
+        None,
         0,
         0,
         b.vocab_size,
@@ -1562,7 +1565,7 @@ def test_wrappers_do_not_fall_back_to_triton(monkeypatch):
         buffers,
         buffers.positions.new_zeros(num_reqs),
         num_reqs,
-        4096,
+        torch.tensor(4096, dtype=torch.int32, device=DEVICE),
         num_spec,
     )
     ds, pos = rs.gather_draft_sampled(

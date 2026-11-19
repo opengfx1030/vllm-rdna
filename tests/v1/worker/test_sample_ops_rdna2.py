@@ -340,10 +340,13 @@ def test_gumbel_sample_invalid_mapping_and_ties():
     assert got[0][1, 0].item() == 0
 
 
+@pytest.mark.parametrize("seed_shift", [0, 1000003])
 @pytest.mark.parametrize("per_token_col", [False, True])
-def test_gumbel_sample_logits_cache(per_token_col):
+def test_gumbel_sample_logits_cache(per_token_col, seed_shift):
     # One token per request: two rows of the same request share the cache row
     # and would race on the store (the drafted path samples one token/request).
+    # Vary the seed: the cache path must mix seed and cache column exactly like
+    # Triton's spec_step_seed; with per_token_col=False rows 0 and 2 share col 2.
     num_tokens = NUM_REQS
 
     def make():
@@ -363,7 +366,7 @@ def test_gumbel_sample_logits_cache(per_token_col):
             dtype=torch.float32,
             device=DEVICE,
         )
-        seed = torch.arange(1, 9, dtype=torch.int64, device=DEVICE)
+        seed = torch.arange(1, 9, dtype=torch.int64, device=DEVICE) + seed_shift
         pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
         return logits, mapping, temperature, seed, pos, cache, col
 

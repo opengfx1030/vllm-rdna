@@ -271,7 +271,6 @@ def triton_slot(args, out, num_groups, num_reqs):
         args["block_table_ptrs"],
         args["block_table_strides"],
         args["block_sizes"],
-        args["kernel_block_sizes"],
         args["slot_mapping_enabled"],
         args["dcp_sharded"],
         out,
@@ -293,7 +292,6 @@ def hip_slot(args, out, num_groups, num_reqs):
         args["block_table_ptrs"],
         args["block_table_strides"],
         args["block_sizes"],
-        args["kernel_block_sizes"],
         args["slot_mapping_enabled"],
         args["dcp_sharded"],
         out,
@@ -424,7 +422,7 @@ def _apply_write_case(
 
     ref = [t.clone() for t in out]
     if multi_group:
-        _apply_write_kernel[(num_writes,)](
+        _apply_write_kernel[(num_writes, (content_len + 1023) // 1024)](
             hipptrs(ref),
             torch.full((num_groups,), row_width, dtype=torch.int64, device=DEVICE),
             indices,
@@ -445,7 +443,7 @@ def _apply_write_case(
             group_ids,
         )
     else:
-        _apply_write_kernel[(num_writes,)](
+        _apply_write_kernel[(num_writes, (content_len + 1023) // 1024)](
             ref[0],
             row_width,
             indices,

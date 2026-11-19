@@ -1315,8 +1315,9 @@ void spec_update_draft_inputs_rdna2(
     torch::Tensor input_ids, torch::Tensor positions,
     torch::Tensor sample_src_positions, torch::Tensor seq_lens,
     torch::Tensor draft_tokens, torch::Tensor current_draft_step,
-    torch::Tensor hidden_states, int64_t hidden_size, int64_t max_model_len,
-    int64_t num_speculative_steps, bool advance_draft_positions);
+    torch::Tensor hidden_states, int64_t hidden_size,
+    torch::Tensor max_model_len, int64_t num_speculative_steps,
+    bool advance_draft_positions);
 
 void spec_gather_draft_sampled_rdna2(torch::Tensor draft_sampled,
                                      torch::Tensor pos, torch::Tensor input_ids,

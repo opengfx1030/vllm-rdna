@@ -980,7 +980,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor(b!) next_input_hidden_states, Tensor(c!) input_ids, "
       "Tensor(d!) positions, Tensor(e!) sample_src_positions, "
       "Tensor(f!) seq_lens, Tensor draft_tokens, Tensor current_draft_step, "
-      "Tensor hidden_states, int hidden_size, int max_model_len, "
+      "Tensor hidden_states, int hidden_size, Tensor max_model_len, "
       "int num_speculative_steps, bool advance_draft_positions) -> ()");
   rocm_ops.impl("spec_update_draft_inputs_rdna2", torch::kCUDA,
                 &spec_update_draft_inputs_rdna2);
