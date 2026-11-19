@@ -47,12 +47,15 @@ from vllm.model_executor.layers.quantization.rdna_hint_flex_names import (
     RDNA_HINT_FLEX_QUANT_METHOD,
 )
 from vllm.model_executor.layers.quantization.utils import rdna_hint_flex_utils as hu
+from vllm.model_executor.layers.quantization.utils.rdna_hint_flex_cptc import (
+    FIELDS as CPTC_FIELDS,
+)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-SPEC_VERSIONS = ("3.2",)
+SPEC_VERSIONS = ("3.2", "3.3")
 # Compute modes (spec 6): "f16" (default, v_dot2_f32_f16 on fp16 activations),
 # "i8" (v_dot4_i32_i8 on per-16-column int8 activations for M <= DECODE_MAX_M,
 # the f16 prefill path above it), "i8_all" (the I8 kernel for every M; slow
@@ -145,7 +148,11 @@ class RdnaHintFlexConfig(QuantizationConfig):
     """Config for rdna_hint_flex checkpoints (names: rdna_hint_flex_names.py)."""
 
     def __init__(
-        self, version: str = "3.2", mode: str = "flex", compute_mode: str = "f16"
+        self,
+        version: str = "3.2",
+        mode: str = "flex",
+        compute_mode: str = "f16",
+        cptc: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         compute_mode = os.environ.get("VLLM_RDNA_HINT_FLEX_COMPUTE_MODE", compute_mode)
@@ -160,6 +167,14 @@ class RdnaHintFlexConfig(QuantizationConfig):
                 f"rdna_hint_flex version {version!r} is not supported "
                 f"(supported: {SPEC_VERSIONS})"
             )
+        if (version == "3.3") != (cptc is not None):
+            raise ValueError(
+                "rdna_hint_flex: version 3.3 requires explicit CPTC metadata"
+            )
+        self.cptc = hu.CptcCodebooks.from_config(cptc) if cptc is not None else None
+        if self.cptc is not None and compute_mode != "f16":
+            raise ValueError("rdna_hint_flex CPTC requires fp16 compute mode")
+        self.fields = CPTC_FIELDS if self.cptc is not None else hu.FIELDS
         self.version = version
         self.mode = mode
         # normalized module name -> rdna_hint_flex fields present in the checkpoint.
@@ -197,6 +212,7 @@ class RdnaHintFlexConfig(QuantizationConfig):
             version=str(config.get("version", "3.2")),
             mode=str(config.get("mode", "flex")),
             compute_mode=str(config.get("compute_mode", "f16")),
+            cptc=config.get("cptc"),
         )
 
     def maybe_update_config(self, model_name: str, hf_config=None, revision=None):
@@ -238,6 +254,10 @@ class RdnaHintFlexConfig(QuantizationConfig):
             head = _norm_name(prefix) + "."
             if not any(k.startswith(head) for k in self._rdna_hint_flex_modules):
                 return None
+            if self.cptc is not None:
+                raise NotImplementedError(
+                    "rdna_hint_flex CPTC routed experts are not supported"
+                )
             if not _rdna2_kernels_available():
                 raise NotImplementedError(
                     "rdna_hint_flex routed experts need the RDNA2 kernels"
@@ -267,13 +287,15 @@ class RdnaHintFlexConfig(QuantizationConfig):
                 "quantize all of them or none"
             )
         for f in present:
-            missing = set(hu.FIELDS) - f
+            missing = set(self.fields) - f
             if missing:
                 raise ValueError(
                     f"rdna_hint_flex: {prefix} is missing {sorted(missing)}"
                 )
         has_col_scale = any("col_scale" in f for f in present)
-        return RdnaHintFlexLinearMethod(has_col_scale, COMPUTE_MODES[self.compute_mode])
+        return RdnaHintFlexLinearMethod(
+            has_col_scale, COMPUTE_MODES[self.compute_mode], self.cptc
+        )
 
 
 class RdnaHintFlexLinearMethod(LinearMethodBase):
@@ -288,10 +310,27 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
     gate/up layer is usually a single kernel call.
     """
 
-    def __init__(self, has_col_scale: bool, compute_mode: int = 0):
+    def __init__(
+        self,
+        has_col_scale: bool,
+        compute_mode: int = 0,
+        cptc: hu.CptcCodebooks | None = None,
+    ):
         self.has_col_scale = has_col_scale
         self.compute_mode = compute_mode
+        self.cptc = cptc
+        self.fields = CPTC_FIELDS if cptc is not None else hu.FIELDS
         self.use_kernels = _rdna2_kernels_available()
+        if cptc is not None and current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx10x
+
+            if on_gfx10x() and (
+                not self.use_kernels
+                or not hasattr(torch.ops._rocm_C, "rdna_hint_flex_cptc_linear_rdna2")
+            ):
+                raise RuntimeError(
+                    "rdna_hint_flex CPTC requires a rebuilt _rocm_C extension"
+                )
         self.prefill_gemm = _prefill_gemm_from_env() if self.use_kernels else 0
         if self.prefill_gemm and not hasattr(
             torch.ops._rocm_C, "rdna_hint_flex_dense_gemm_rdna2"
@@ -320,7 +359,7 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
         layer.rdna_hint_flex_k = input_size_per_partition
         layer.rdna_hint_flex_n = sum(output_partition_sizes)
         layer._rdna_hint_flex_loaded = {}
-        fields = hu.FIELDS + (("col_scale",) if self.has_col_scale else ())
+        fields = self.fields + (("col_scale",) if self.has_col_scale else ())
         for f in fields:
             # Placeholder: the real buffers are ragged and are collected by
             # the loader, then assembled in process_weights_after_loading.
@@ -379,7 +418,7 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
         parts_spec = self._partitions(layer)
         found: list[hu.Hi2 | None] = [None] * len(parts_spec)
         for shard_id, buffers in loaded.items():
-            missing = set(hu.FIELDS) - set(buffers)
+            missing = set(self.fields) - set(buffers)
             if missing:
                 raise ValueError(
                     f"rdna_hint_flex: shard {shard_id} of "
@@ -387,7 +426,7 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                     f" is missing {sorted(missing)}"
                 )
             t = hu.canonicalize(buffers)
-            hu.validate(t)
+            hu.validate(t, cptc=self.cptc)
             idx = self._covered(layer, shard_id, len(parts_spec))
             rows = [parts_spec[i][0] for i in idx]
             if hu.num_rows(t) != sum(rows):
@@ -417,7 +456,7 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                     )
                 k0 = layer.tp_rank * k_part
                 p = hu.select_cols(p, k0, k0 + k_part)
-            hu.validate(p, k_part)
+            hu.validate(p, k_part, self.cptc)
             sliced.append(p)
 
         # Consecutive partitions with the same transform form one segment.
@@ -428,6 +467,12 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
             else:
                 groups.append([p])
         segments = []
+        codebook_tensors = None
+        if self.cptc is not None and self.use_kernels:
+            codebook_tensors = (
+                self.cptc.coefficients.to(device),
+                self.cptc.tables.to(device),
+            )
         for g in groups:
             t = hu.concat_rows(g)
             seg: dict[str, Any] = {
@@ -440,11 +485,13 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                 ),
             }
             if self.use_kernels:
-                for f in hu.FIELDS:
+                for f in self.fields:
                     if f != "had":
                         seg[f] = t[f].contiguous().to(device)
+                if codebook_tensors is not None:
+                    seg["coefficients"], seg["tables"] = codebook_tensors
             else:
-                seg["weight"] = hu.dequantize_stored(t).to(device)
+                seg["weight"] = hu.dequantize_stored(t, self.cptc).to(device)
             segments.append(seg)
         layer._rdna_hint_flex_segments = segments
 
@@ -491,7 +538,25 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
             x2, silu = act, False
         outs = []
         for seg in segments:
-            if self.use_kernels:
+            if self.use_kernels and self.cptc is not None:
+                y = ops.rdna_hint_flex_cptc_linear_rdna2(
+                    x2,
+                    seg["col_scale"],
+                    seg["had"],
+                    seg["codes"],
+                    seg["code_off"],
+                    seg["scale"],
+                    seg["param_off"],
+                    seg["row_nbits"],
+                    seg["row_block"],
+                    seg["coefficients"],
+                    seg["tables"],
+                    seg["transform"],
+                    DECODE_MAX_M,
+                    silu,
+                    self.prefill_gemm,
+                )
+            elif self.use_kernels:
                 y = ops.rdna_hint_flex_linear_rdna2(
                     x2,
                     seg["col_scale"],

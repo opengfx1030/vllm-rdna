@@ -1168,6 +1168,7 @@ steps:
   - csrc/rocm/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
+  - tests/quantization/test_rdna_hint_flex_cptc.py
   - tests/kernels/quant_utils.py
   - tests/kernels/utils.py
   - vllm/_aiter_ops.py
@@ -1180,7 +1181,7 @@ steps:
   - vllm/config/
   - tests/kernels/quantization/test_rocm_skinny_gemms.py
   commands:
-  - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/quantization quantization/test_rdna_hint_flex_cptc.py -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 55

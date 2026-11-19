@@ -1404,6 +1404,17 @@ torch::Tensor rdna_hint_flex_linear_rdna2(
     torch::Tensor param_off, torch::Tensor row_consts, torch::Tensor row_nbits,
     torch::Tensor row_block, bool transform, int64_t decode_max_m, int64_t mode,
     bool silu_mul, int64_t prefill_gemm);
+// HI2 v3.3 opt-in CPTC, block-local tail-biting streams.
+torch::Tensor rdna_hint_flex_cptc_linear_rdna2(
+    torch::Tensor x, torch::Tensor col_scale, torch::Tensor had,
+    torch::Tensor codes, torch::Tensor code_off, torch::Tensor scale,
+    torch::Tensor param_off, torch::Tensor row_nbits, torch::Tensor row_block,
+    torch::Tensor coefficients, torch::Tensor tables, bool transform,
+    int64_t decode_max_m, bool silu_mul, int64_t prefill_gemm);
+torch::Tensor rdna_hint_flex_cptc_dequant_rdna2(
+    torch::Tensor codes, torch::Tensor code_off, torch::Tensor scale,
+    torch::Tensor param_off, torch::Tensor row_nbits, torch::Tensor row_block,
+    torch::Tensor coefficients, torch::Tensor tables, int64_t K);
 // Dense fp16 GEMM out = x . w^T of the prefill path (see
 // rdna_hint_flex_dense_gemm_rdna2.cu): design < 0 lets the dispatch table pick
 // (rocBLAS when it says so), design >= 0 forces one; _pick returns the table's

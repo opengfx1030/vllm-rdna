@@ -29,6 +29,9 @@ import math
 
 import torch
 
+from .rdna_hint_flex_cptc import NBITS as CPTC_NBITS
+from .rdna_hint_flex_cptc import CptcCodebooks
+
 GROUP = 16
 BLOCK_SIZES = (16, 32, 64)
 NBITS = (2, 4, 8)
@@ -45,7 +48,7 @@ FIELDS = (
     "had",
 )
 OPTIONAL_FIELDS = ("col_scale",)
-ALL_FIELDS = FIELDS + OPTIONAL_FIELDS
+ALL_FIELDS = FIELDS + OPTIONAL_FIELDS + ("scale",)
 
 Hi2 = dict[str, torch.Tensor]
 
@@ -63,34 +66,45 @@ def canonicalize(t: Hi2) -> Hi2:
     out: Hi2 = {
         "codes": t["codes"].reshape(-1).to(torch.int32),
         "code_off": t["code_off"].reshape(-1).to(torch.int64).to(torch.int32),
-        "blk_params": t["blk_params"].reshape(-1).to(torch.uint8),
         "param_off": t["param_off"].reshape(-1).to(torch.int64).to(torch.int32),
-        "row_consts": t["row_consts"].reshape(-1, 3).to(torch.float16),
         "row_nbits": t["row_nbits"].reshape(-1).to(torch.uint8),
         "row_block": t["row_block"].reshape(-1).to(torch.uint8),
         "had": t["had"].reshape(-1).to(torch.uint8),
     }
+    if "scale" in t:
+        out["scale"] = t["scale"].reshape(-1).to(torch.float16)
+    else:
+        out["blk_params"] = t["blk_params"].reshape(-1).to(torch.uint8)
+        out["row_consts"] = t["row_consts"].reshape(-1, 3).to(torch.float16)
     if t.get("col_scale") is not None:
         out["col_scale"] = t["col_scale"].reshape(-1).to(torch.float16)
     return out
 
 
-def validate(t: Hi2, k: int | None = None) -> None:
+def validate(t: Hi2, k: int | None = None, cptc: CptcCodebooks | None = None) -> None:
     """Check the buffers against each other. The kernels trust the offsets,
     so this must pass before a tensor reaches the device."""
     r = num_rows(t)
     kk = num_cols(t)
+    if ("scale" in t) != (cptc is not None):
+        raise ValueError(
+            "rdna_hint_flex: CPTC buffers and codebook metadata must agree"
+        )
+    allowed_nbits = CPTC_NBITS if cptc is not None else NBITS
     if k is not None and kk != k:
         raise ValueError(f"rdna_hint_flex tensor has K={kk}, layer expects K={k}")
     if kk % K_MULTIPLE:
         raise ValueError(f"rdna_hint_flex: K={kk} is not a multiple of {K_MULTIPLE}")
     nb = t["row_nbits"].to(torch.int64)
     bl = t["row_block"].to(torch.int64)
-    if t["row_block"].numel() != r or t["row_consts"].shape != (r, 3):
+    if t["row_block"].numel() != r or (
+        cptc is None and t["row_consts"].shape != (r, 3)
+    ):
         raise ValueError("rdna_hint_flex: row_block/row_consts do not have R rows")
-    if not bool(torch.isin(nb, torch.tensor(NBITS)).all()):
+    if not bool(torch.isin(nb, torch.tensor(allowed_nbits)).all()):
         raise ValueError(
-            f"rdna_hint_flex: row_nbits outside {NBITS}: {sorted(set(nb.tolist()))}"
+            f"rdna_hint_flex: row_nbits outside {allowed_nbits}: "
+            f"{sorted(set(nb.tolist()))}"
         )
     if not bool(torch.isin(bl, torch.tensor(BLOCK_SIZES)).all()):
         raise ValueError(
@@ -99,7 +113,12 @@ def validate(t: Hi2, k: int | None = None) -> None:
         )
     for name, per_row, buf, scale in (
         ("code_off", kk * nb // 32, t["codes"], 1),
-        ("param_off", kk // bl, t["blk_params"], 2),
+        (
+            "param_off",
+            kk // bl,
+            t["scale"] if cptc is not None else t["blk_params"],
+            1 if cptc is not None else 2,
+        ),
     ):
         off = t[name].to(torch.int64)
         if off.numel() != r + 1 or int(off[0]) != 0:
@@ -114,6 +133,12 @@ def validate(t: Hi2, k: int | None = None) -> None:
             raise ValueError(
                 f"rdna_hint_flex: {name}[-1] does not match the buffer length"
             )
+    if cptc is not None and (
+        not bool(torch.isfinite(t["scale"]).all()) or bool((t["scale"] < 0).any())
+    ):
+        raise ValueError(
+            "rdna_hint_flex CPTC: block scales must be finite and nonnegative"
+        )
     if t.get("col_scale") is not None and t["col_scale"].numel() != kk:
         raise ValueError("rdna_hint_flex: col_scale must have K entries")
 
@@ -125,9 +150,13 @@ def select_rows(t: Hi2, r0: int, r1: int) -> Hi2:
     out = dict(t)
     out["codes"] = t["codes"][int(co[r0]) : int(co[r1])]
     out["code_off"] = (co[r0 : r1 + 1] - co[r0]).to(torch.int32)
-    out["blk_params"] = t["blk_params"][2 * int(po[r0]) : 2 * int(po[r1])]
+    if "scale" in t:
+        out["scale"] = t["scale"][int(po[r0]) : int(po[r1])]
+    else:
+        out["blk_params"] = t["blk_params"][2 * int(po[r0]) : 2 * int(po[r1])]
+        out["row_consts"] = t["row_consts"][r0:r1]
     out["param_off"] = (po[r0 : r1 + 1] - po[r0]).to(torch.int32)
-    for f in ("row_consts", "row_nbits", "row_block"):
+    for f in ("row_nbits", "row_block"):
         out[f] = t[f][r0:r1]
     return out
 
@@ -216,19 +245,27 @@ def concat_rows(parts: list[Hi2], check_transform: bool = True) -> Hi2:
         return dict(parts[0])
     first = parts[0]
     for p in parts[1:]:
+        if ("scale" in p) != ("scale" in first):
+            raise ValueError(
+                "rdna_hint_flex: cannot concatenate ladder and CPTC tensors"
+            )
         if num_cols(p) != num_cols(first):
             raise ValueError("rdna_hint_flex: concat_rows needs equal K")
         if check_transform and not _same_transform(first, p):
             raise ValueError("rdna_hint_flex: concat_rows needs equal transforms")
     out = dict(first)
-    for f, off in (("codes", "code_off"), ("blk_params", "param_off")):
+    param_field = "scale" if "scale" in first else "blk_params"
+    for f, off in (("codes", "code_off"), (param_field, "param_off")):
         bases, total = [], 0
         for p in parts:
             bases.append(p[off].to(torch.int64)[:-1] + total)
             total += int(p[off][-1])
         out[off] = torch.cat(bases + [torch.tensor([total])]).to(torch.int32)
         out[f] = torch.cat([p[f] for p in parts])
-    for f in ("row_consts", "row_nbits", "row_block"):
+    row_fields = ("row_nbits", "row_block") + (
+        () if "scale" in first else ("row_consts",)
+    )
+    for f in row_fields:
         out[f] = torch.cat([p[f] for p in parts])
     return out
 
@@ -251,9 +288,11 @@ def select_cols(t: Hi2, k0: int, k1: int) -> Hi2:
     new_po = torch.zeros(r + 1, dtype=torch.int64)
     new_po[1:] = torch.cumsum(b_n, 0)
     codes = torch.empty(int(new_co[-1]), dtype=t["codes"].dtype)
-    params = torch.empty(2 * int(new_po[-1]), dtype=t["blk_params"].dtype)
-    pv = t["blk_params"].view(-1, 2)
-    nv = params.view(-1, 2)
+    param_field = "scale" if "scale" in t else "blk_params"
+    width = 1 if "scale" in t else 2
+    params = torch.empty(width * int(new_po[-1]), dtype=t[param_field].dtype)
+    pv = t[param_field].view(-1, width)
+    nv = params.view(-1, width)
     for nbits in sorted(set(nb.tolist())):
         for bs in sorted(set(bl.tolist())):
             rows = ((nb == nbits) & (bl == bs)).nonzero().flatten()
@@ -269,7 +308,7 @@ def select_cols(t: Hi2, k0: int, k1: int) -> Hi2:
     out = dict(t)
     out["codes"] = codes
     out["code_off"] = new_co.to(torch.int32)
-    out["blk_params"] = params
+    out[param_field] = params
     out["param_off"] = new_po.to(torch.int32)
     out["had"] = t["had"][k0 // GROUP : k1 // GROUP]
     if t.get("col_scale") is not None:
@@ -313,7 +352,7 @@ def unpack_codes(words: torch.Tensor, nbits: int) -> torch.Tensor:
     return c.reshape(*words.shape[:-1], -1)
 
 
-def dequantize_stored(t: Hi2) -> torch.Tensor:
+def dequantize_stored(t: Hi2, cptc: CptcCodebooks | None = None) -> torch.Tensor:
     """fp16 ``[R, K]`` reconstruction in the stored basis, bit-identical to
     the spec decode (2.2): float64 holds every intermediate exactly before the
     single roundings."""
@@ -323,7 +362,11 @@ def dequantize_stored(t: Hi2) -> torch.Tensor:
     bl = t["row_block"].to(torch.int64)
     co = t["code_off"].to(torch.int64)
     po = t["param_off"].to(torch.int64)
-    pv = t["blk_params"].view(-1, 2)
+    if ("scale" in t) != (cptc is not None):
+        raise ValueError(
+            "rdna_hint_flex: CPTC decode requires matching codebook metadata"
+        )
+    pv = t["blk_params"].view(-1, 2) if cptc is None else None
     for nbits in sorted(set(nb.tolist())):
         for bs in sorted(set(bl.tolist())):
             rows = ((nb == nbits) & (bl == bs)).nonzero().flatten()
@@ -332,6 +375,11 @@ def dequantize_stored(t: Hi2) -> torch.Tensor:
             wr, nblk = k * nbits // 32, k // bs
             words = t["codes"][co[rows].unsqueeze(1) + torch.arange(wr)]
             codes = unpack_codes(words, nbits).reshape(rows.numel(), nblk, bs)
+            if cptc is not None:
+                scales = t["scale"][po[rows].unsqueeze(1) + torch.arange(nblk)]
+                out[rows] = cptc.decode(codes, scales, nbits).reshape(-1, k)
+                continue
+            assert pv is not None
             p = pv[po[rows].unsqueeze(1) + torch.arange(nblk)]  # [r, nblk, 2]
             rc = t["row_consts"][rows].unsqueeze(1)  # [r, 1, 3]
             lo = (

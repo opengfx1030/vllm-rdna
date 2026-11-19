@@ -1,4 +1,4 @@
-# rdna_hint_flex weights on RDNA2 (HadamardINT2-FP16 spec v3.2)
+# rdna_hint_flex weights on RDNA2 (v3.2 and opt-in CPTC v3.3)
 
 `quant_method: rdna_hint_flex` (alias `hadamard_int2`) loads checkpoints
 written by the separate `tools/hi2` quantizer (spec:
@@ -38,6 +38,42 @@ Which modules are quantized is read from the checkpoint index: a module stored
 as `.hi2_*` uses this format, one stored as `.weight` stays dense (vision
 tower, embeddings, head, GDN `conv1d`, ...). No module list is needed in
 `quantization_config`.
+
+### Opt-in CPTC checkpoints (v3.3)
+
+The HI2 quantizer's `--cptc` option writes `version: "3.3"` and an explicit
+`cptc` codebook configuration. Without that option, the v3.2 format and
+decoder are unchanged. This adapts the computed-permutation tail-biting
+trellis from [arXiv:2611.22019](https://arxiv.org/abs/2611.22019) to HI2's
+existing H16 transform; it is not a reproduction of the paper's full
+randomized Hadamard pipeline.
+
+CPTC retains `codes`, `code_off`, `param_off`, `row_nbits`, `row_block`,
+`had` and optional `col_scale`. A flat fp16 `scale` buffer replaces
+`blk_params` and `row_consts`; `param_off` counts these block scales.
+Only 2/4-bit rows and 16/32/64-element blocks are supported. Each block
+closes its own cyclic bitstream, preserving the existing 64-column TP
+slicing boundary. Codebooks are validated from checkpoint metadata, not
+inferred from a filename.
+
+The metadata table scale is canonicalized to fp16 before the mirror-int8
+tables are expanded and rounded to fp16 once at load.
+Reconstruction rounds the product of that fp16 table value and the
+block's fp16 scale to fp16, including zero and subnormal scales.
+On gfx1030, compressed GEMV decodes weights directly; prefill temporarily
+dequantizes for the existing dense GEMM path. It does not retain a dense
+weight cache. Non-RDNA backends use the portable dequantization path.
+CPTC rejects I8 compute modes and quantized MoE rather than silently using
+an incompatible decoder.
+
+The producer fixture, TP column slices, 18 native tests, composite SiLU
+activation transform and changed-input graph replay pass. A fresh two-GPU
+Tiny Llama checkpoint from the post-review HI2 producer also loads through
+the real TP2 model path with `FULL_AND_PIECEWISE`: both ranks use the native
+CPTC op, checkpoint QKV slices match an independent reference at M=1/3/49,
+and three rounds of two requests complete after graph replay. The updated
+zero/subnormal-scale case passes as well. This random-Tiny engineering
+proof does not establish Qwen3.5-4B quality, throughput or latency.
 
 ## Decisions where the spec is open (for the spec to match)
 

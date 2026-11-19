@@ -1242,6 +1242,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("rdna_hint_flex_linear_rdna2", torch::kCUDA,
                 &rdna_hint_flex_linear_rdna2);
   rocm_ops.def(
+      "rdna_hint_flex_cptc_linear_rdna2(Tensor x, Tensor col_scale, Tensor "
+      "had, "
+      "Tensor codes, Tensor code_off, Tensor scale, Tensor param_off, "
+      "Tensor row_nbits, Tensor row_block, Tensor coefficients, Tensor tables, "
+      "bool transform, int decode_max_m, bool silu_mul=False, "
+      "int prefill_gemm=0) -> Tensor");
+  rocm_ops.impl("rdna_hint_flex_cptc_linear_rdna2", torch::kCUDA,
+                &rdna_hint_flex_cptc_linear_rdna2);
+  rocm_ops.def(
+      "rdna_hint_flex_cptc_dequant_rdna2(Tensor codes, Tensor code_off, Tensor "
+      "scale, "
+      "Tensor param_off, Tensor row_nbits, Tensor row_block, Tensor "
+      "coefficients, "
+      "Tensor tables, int k) -> Tensor");
+  rocm_ops.impl("rdna_hint_flex_cptc_dequant_rdna2", torch::kCUDA,
+                &rdna_hint_flex_cptc_dequant_rdna2);
+  rocm_ops.def(
       "rdna_hint_flex_dense_gemm_rdna2(Tensor x, Tensor w, Tensor! out, "
       "int design=-1) -> ()");
   rocm_ops.impl("rdna_hint_flex_dense_gemm_rdna2", torch::kCUDA,

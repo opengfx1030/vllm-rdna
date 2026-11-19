@@ -1444,6 +1444,105 @@ def rdna_hint_flex_linear_rdna2(
     return torch.ops._rocm_C.rdna_hint_flex_linear_rdna2(*args)
 
 
+def rdna_hint_flex_cptc_linear_rdna2(
+    x: torch.Tensor,
+    col_scale: torch.Tensor,
+    had: torch.Tensor,
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    scale: torch.Tensor,
+    param_off: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    coefficients: torch.Tensor,
+    tables: torch.Tensor,
+    transform: bool,
+    decode_max_m: int,
+    silu_mul: bool = False,
+    prefill_gemm: int = 0,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_hint_flex_cptc_linear_rdna2(
+        x,
+        col_scale,
+        had,
+        codes,
+        code_off,
+        scale,
+        param_off,
+        row_nbits,
+        row_block,
+        coefficients,
+        tables,
+        transform,
+        decode_max_m,
+        silu_mul,
+        prefill_gemm,
+    )
+
+
+def rdna_hint_flex_cptc_dequant_rdna2(
+    codes: torch.Tensor,
+    code_off: torch.Tensor,
+    scale: torch.Tensor,
+    param_off: torch.Tensor,
+    row_nbits: torch.Tensor,
+    row_block: torch.Tensor,
+    coefficients: torch.Tensor,
+    tables: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.rdna_hint_flex_cptc_dequant_rdna2(
+        codes,
+        code_off,
+        scale,
+        param_off,
+        row_nbits,
+        row_block,
+        coefficients,
+        tables,
+        k,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "rdna_hint_flex_cptc_linear_rdna2"
+):
+
+    @register_fake("_rocm_C::rdna_hint_flex_cptc_linear_rdna2")
+    def _rdna_hint_flex_cptc_linear_rdna2_fake(
+        x: torch.Tensor,
+        col_scale: torch.Tensor,
+        had: torch.Tensor,
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        scale: torch.Tensor,
+        param_off: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        coefficients: torch.Tensor,
+        tables: torch.Tensor,
+        transform: bool,
+        decode_max_m: int,
+        silu_mul: bool = False,
+        prefill_gemm: int = 0,
+    ) -> torch.Tensor:
+        return x.new_empty((x.size(0), row_nbits.size(0)))
+
+    @register_fake("_rocm_C::rdna_hint_flex_cptc_dequant_rdna2")
+    def _rdna_hint_flex_cptc_dequant_rdna2_fake(
+        codes: torch.Tensor,
+        code_off: torch.Tensor,
+        scale: torch.Tensor,
+        param_off: torch.Tensor,
+        row_nbits: torch.Tensor,
+        row_block: torch.Tensor,
+        coefficients: torch.Tensor,
+        tables: torch.Tensor,
+        k: int,
+    ) -> torch.Tensor:
+        return scale.new_empty((row_nbits.size(0), k))
+
+
 def rdna_hint_flex_dense_gemm_rdna2(
     x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, design: int = -1
 ) -> None:
