@@ -1,0 +1,92 @@
+{
+  "source_commit": "93d737878644180147f44d001fa00ceb2bde8f2e",
+  "native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+  "cpu_prereq": {
+    "receipt": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/capture-fixture-00295ed66c16/cpu-receipt.json",
+    "receipt_sha256": "480ceea86503f4ee6b2fa089079e941f1581d055d9c63be8e7df51a097ab84a1",
+    "native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+    "checks": [
+      {
+        "junit": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/cpu-6601d70678f0/config-worker-reload.xml",
+        "junit_sha256": "d2f43ceee60300a099906322f5d21d0fa6471c5073ed57ecd775f23501f66c55",
+        "passed": 63,
+        "skipped": 0,
+        "failed": 0,
+        "source_commit": "6601d70678f0ab6847750c5843147475ac9117e3"
+      },
+      {
+        "junit": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/capture-fixture-00295ed66c16/capture-contracts.xml",
+        "junit_sha256": "71b20e2492e5471c16c84beac35aedfadb96156e8fd2b24e25d591edcfde29c2",
+        "passed": 14,
+        "skipped": 0,
+        "failed": 0,
+        "source_commit": "5d388329bb5a5333f677de6fcb7ff36bbb263bfa"
+      }
+    ],
+    "test_source_sha256": "00295ed66c16af15fa3fc39da49461757639c93de879b4a63edfc7806b5a62ce"
+  },
+  "passed": true,
+  "owner": "MainV034Operators",
+  "lease": "/home/chenco_adm/w4a8_runs/lanes/lease/MainV034Operators.b4",
+  "pytest_exit": 0,
+  "new_fault_lines": [],
+  "max_junction_c": {
+    "d9": 35.0,
+    "dc": 32.0,
+    "df": 33.0,
+    "e2": 32.0
+  },
+  "junit": {
+    "cases": 504,
+    "passed": 504,
+    "skipped": 0,
+    "failures": [],
+    "skipped_cases": [],
+    "suites": {
+      "tests/kernels/mamba/test_precopy_mamba_align.py": {
+        "passed": 75,
+        "skipped": 0,
+        "failed": 0,
+        "cases": 75
+      },
+      "tests/v1/worker/test_mamba_rope_struct_ops_rdna2.py": {
+        "passed": 67,
+        "skipped": 0,
+        "failed": 0,
+        "cases": 67
+      },
+      "tests/v1/worker/test_input_batch_ops_rdna2.py": {
+        "passed": 49,
+        "skipped": 0,
+        "failed": 0,
+        "cases": 49
+      },
+      "tests/v1/worker/test_sample_ops_rdna2.py": {
+        "passed": 165,
+        "skipped": 0,
+        "failed": 0,
+        "cases": 165
+      },
+      "tests/v1/worker/test_spec_decode_ops_rdna2.py": {
+        "passed": 89,
+        "skipped": 0,
+        "failed": 0,
+        "cases": 89
+      },
+      "tests/v1/worker/test_worker_ops_rdna2.py": {
+        "passed": 39,
+        "skipped": 0,
+        "failed": 0,
+        "cases": 39
+      },
+      "tests/v1/worker/test_gpu_block_table.py": {
+        "passed": 20,
+        "skipped": 0,
+        "failed": 0,
+        "cases": 20
+      }
+    }
+  },
+  "measurement_claim": "operator correctness only; no performance or zero-eviction claim",
+  "lease_warnings": []
+}

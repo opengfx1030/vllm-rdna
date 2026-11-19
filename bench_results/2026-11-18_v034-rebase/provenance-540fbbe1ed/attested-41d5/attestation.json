@@ -1,0 +1,37 @@
+{
+ "schema": "v034-attested-binary/1",
+ "source_commit": "93d737878644180147f44d001fa00ceb2bde8f2e",
+ "base_native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+ "binary": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/_rocm_C.abi3.so",
+ "sha256": "41d5030b7791caf573d45df538ab3a9772bae533d572dc82416455dd2c977f6c",
+ "bytes": 201771832,
+ "native_receipt": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/native-receipt-93d737878644.json",
+ "native_receipt_sha256": "42e94b2499d4dcfa6e48e90572a8640fb5266446e40f883e36adc06ee8b0fbeb",
+ "r3_attestation": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/r3-attestation.json",
+ "r3_attestation_sha256": "a9b56a85dda72750d6e0922abc98020bb61a4f6939df08e8d48884cc0a2fae15",
+ "note": "Preserved before any committed-source rebuild. This is the r3 GPU-tested patched-working-tree binary (41d5), not a newly committed build. GPU evidence belongs to r3 only; any rebuilt binary needs its own narrow proof if material.",
+ "sections": {
+  "text": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/text.bin",
+   "sha256": "788c86c07a69d1323eef6b5967f3ada5d44d81f75a51a611a41af8275b84b516",
+   "bytes": 7282644
+  },
+  "rodata": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/rodata.bin",
+   "sha256": "2a47c0bde7bff4d7675fa69f4b07f07a91dce97c4e5c596a7eca998681eadb70",
+   "bytes": 1219808
+  },
+  "hip_fatbin": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/hip_fatbin.bin",
+   "sha256": "cee45cd824b2a7e83e07d2a435a970b4fef671a435f30d3e10811cee4fc09d34",
+   "bytes": 123211446
+  }
+ },
+ "sections_note": "Extracted sections are the immutable comparison basis for the committed-source rebuild; .hip_fatbin is device code, .text is host code.",
+ "declared_sha256": "41d5030b7791caf573d45df538ab3a9772bae533d572dc82416455dd2c977f6c",
+ "declared_bytes": 201771832,
+ "actual_sha256": "519138997d2096983de91a0245819a6a55b22a6790d3344a421eb036402a51b7",
+ "actual_bytes": 201752568,
+ "integrity_mismatch": true,
+ "integrity_note": "The full-file copy is no longer 41d5: an in-place objcopy --dump-section rewrote the ELF after the initial copy. Section dumps were retained; the original full 41d5 file is not available. Historical r3 receipts still reference the declared hash."
+}

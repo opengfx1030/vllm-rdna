@@ -1,0 +1,58 @@
+{
+  "recipe": "flashnext-mtp2",
+  "out": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/runtime-93d737878644-r3/flashnext-mtp2",
+  "passed": true,
+  "ppl": 4.89,
+  "ppl_bound": 5.0,
+  "prefix": {
+    "speedup": 1.86,
+    "hits": 1024,
+    "hit_rate_pct": 53.1
+  },
+  "cells": {
+    "bench-1024x512-c1": {
+      "in": 1024,
+      "out": 512,
+      "concurrency": 1,
+      "requests": 2,
+      "output_tps": 82.31379155597396,
+      "ttft_ms": 398.2118719868595,
+      "tpot_ms": 11.391601831748591
+    },
+    "bench-1024x512-c8": {
+      "in": 1024,
+      "out": 512,
+      "concurrency": 8,
+      "requests": 8,
+      "output_tps": 276.64284261762185,
+      "ttft_ms": 2012.5426428785431,
+      "tpot_ms": 23.55502895229771
+    },
+    "bench-16384x1024-c1": {
+      "in": 16384,
+      "out": 1024,
+      "concurrency": 1,
+      "requests": 2,
+      "output_tps": 54.13394727751847,
+      "ttft_ms": 5873.909380505211,
+      "tpot_ms": 12.747678733634503
+    },
+    "bench-16384x1024-c8": {
+      "in": 16384,
+      "out": 1024,
+      "concurrency": 8,
+      "requests": 8,
+      "output_tps": 128.88902282131428,
+      "ttft_ms": 18367.75659050545,
+      "tpot_ms": 40.03170031108966
+    }
+  },
+  "failures": [],
+  "measurement_claim": "bounded smoke/timing receipt only: PPL bounds are corruption gates, one boot per recipe, no baseline parity or performance-improvement claim",
+  "driver_exit": 0,
+  "new_dmesg_lines": 0,
+  "new_kernel_faults": [],
+  "aer_jumps": {},
+  "aer_unverified": [],
+  "all_run_new_faults": []
+}

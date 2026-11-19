@@ -1,0 +1,26 @@
+FAILS-CLOSED capture receipt at wrong source: /home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/cpu.json: 14-case batch is not at --source-sha
+FAILS-CLOSED CPU receipt 62 cases: /home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/cpu.json: passed total is not 77
+FAILS-CLOSED failed capture JUnit: /home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/junit14.xml: 1 failed cases
+FAILS-CLOSED capture test hash mismatch: /home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/tree/tests/v1/cudagraph/test_cudagraph_manager.py hash does not match the receipt
+FAILS-CLOSED capture exit file nonzero: /home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/exit.txt does not say capture_gate_exit=0
+FAILS-CLOSED missing junction temperature: d9: expected one junction temp2_input, found 0
+FAILS-CLOSED wrong PCI bus: HIP 4 is 0000:07:00.0, expected 0000:df:00.0
+FAILS-CLOSED lease collision: lease timeout: Other.b4
+FAILS-CLOSED hi2 PPL above 6.0: PPL 6.5 exceeds bounded smoke bound 6.0
+FAILS-CLOSED no-probe: missing /home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/broken-no-probe/probe-after.txt
+FAILS-CLOSED probe-fail: probe.txt: FAIL 2/3
+FAILS-CLOSED ppl-high: PPL 7.5 exceeds bounded smoke bound 5.0
+FAILS-CLOSED no-bench: cannot read /home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/broken-no-bench/bench-1024x512-c1.json: [Errno 2] No such file or directory: '/home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/broken-no-bench/bench-1024x512-c1.json'
+FAILS-CLOSED prefix-verdict-fail: prefix probe did not pass
+FAILS-CLOSED prefix-zero-hits: prefix probe measured zero cache hits
+FAILS-CLOSED no-kfd: cannot read /home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/broken-no-kfd/evicted-ready.json: [Errno 2] No such file or directory: '/home/chenco_adm/w4a8_runs/.scratch/v034-runtime-selftest-674oeg83/broken-no-kfd/evicted-ready.json'
+FAILS-CLOSED kfd-invalid: summary has 0 KFD ok lines, expected >= 3
+FAILS-CLOSED no-mtp: serve.log does not show MTP spec decoding
+FAILS-CLOSED no-fp: serve.log does not show cudagraph_mode FULL_AND_PIECEWISE
+FAILS-CLOSED concurrency-fail: concurrency probe did not report RESULT PASS: 0 failing
+FAILS-CLOSED dmesg-na: summary does not report zero new amdgpu dmesg faults
+FAILS-CLOSED no-quiet: summary reports 'refusing a measured window'
+FAILS-CLOSED failed operator JUnit: failed operator cases: tests/kernels/mamba/test_precopy_mamba_align.py::t: boom
+FAILS-CLOSED missing operator suite: no executed case in requested suites: tests/kernels/mamba/test_precopy_mamba_align.py
+FAILS-CLOSED live log fault scan: HSA_STATUS_ERROR
+SELFTEST PASS (25 negative cases + positive controls)

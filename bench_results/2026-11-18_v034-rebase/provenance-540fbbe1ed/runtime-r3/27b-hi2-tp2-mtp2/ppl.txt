@@ -1,0 +1,5 @@
+PPL 5.73 (mean NLL 1.746 over 261 tokens) PASS
+ok      'The history of the printing press begins' -> ' in the 15th century, when Johannes Gutenberg invented the movable type printing press in Europe. This invention revolutionized the way books and other printed materials were produced, making them more accessible and affordable. The printing press quickly spread throughout Europe and eventually to other parts of the world, leading to the mass production of books'
+ok      'Here is a short recipe for vegetable soup:' -> '\n\n- 1 onion, chopped\n- 2 carrots, chopped\n- 2 potatoes, chopped\n- 1 cup of water\n- 1 cup of vegetable broth\n- 1 teaspoon of salt\n- 1 teaspoon of pepper\n- 1 tablespoon of olive oil\n\nInstructions:\n\n1.'
+ok      'In mathematics, a prime number is' -> ' a natural number greater than 1 that has no positive divisors other than 1 and itself. The first few prime numbers are 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 3'
+RESULT PASS

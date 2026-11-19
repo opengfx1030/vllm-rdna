@@ -1017,7 +1017,7 @@ EPLB-online or RAM-prefetch study runtime changes. Production remains on
   speedup requirement. Prompt length comes from `/tokenize`, and missing
   tokenization or metrics evidence fails the probe.
 
-### Pending verification
+### Build and qualification
 
 Use a fresh `venv-7.14.0_0.34.0-rebase-1e1cac5340`, not the serving venv.
 Upstream's build requirements are `requirements/build/rock.txt`; Torch
@@ -1055,8 +1055,9 @@ gate passes 14 cases at `5d388329bb`: its autoregressive-draft fixture now
 uses the production initializer, including the independent one-token draft
 request grid, rather than reusing the target's verification-token bound.
 Raw native and CPU receipts are in
-`bench_results/2026-11-18_v034-rebase/`; their source checkpoints are recorded
-separately because the native code is unchanged after `6333bc722e`.
+`bench_results/2026-11-18_v034-rebase/`. These are CPU-phase checkpoints;
+the later GPU fixes below change `_rocm_C` and require their own artifact
+provenance.
 The actual CLI reports `0.34.0+rdna.rocm714`; `serve --help=all` exposes
 `--replayssm-state-dtype {auto,leapquant}`. Its logs retain an optional
 `triton_kernels`/Triton 3.7.1 compatibility error (`is_hip_gfx1250` is
@@ -1073,7 +1074,44 @@ The benchmark driver also aborts when the boot lock outlives its wait
 timeout, rather than starting a measurement under another boot. Its new
 regression fails before the fix; four quiet-window cases pass afterwards.
 
-GPU operator and Flash-Next/HI2 model-runtime gates remain pending. Hardware
-qualification is paused after the independent Triton PR #12747 unit run
-faulted HIP1 (`d4`); no model-runtime or performance result is claimed.
-That run used isolated Triton 3.9 PR code, not this environment's Triton 3.7.1.
+Hardware qualification initially paused after the independent Triton
+PR #12747 unit run faulted HIP1 (`d4`). That run used isolated Triton 3.9
+PR code, not this environment's Triton 3.7.1. It resumed on 2026-11-19.
+
+The resumed GPU gate exposed two real HIP bugs, fixed in `540fbbe1ed`:
+cached Gumbel sampling must mix the cache column into the seed, and draft
+input updates must read `max_model_len` from its device tensor rather than
+coercing it with `.item()` during FULL graph capture. Stale test call
+signatures were migrated to the v0.34 interfaces.
+
+The operator gate passes __504/504__ cases across seven suites. Both
+`FULL_AND_PIECEWISE`/MTP2 runtime gates pass, including requests after the
+first replay, greedy probes, concurrency, prefix caching and 16k cells:
+
+| recipe | PPL | warm prefix hit rate | prefix TTFT speedup | concurrency failures | max junction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Flash-Next TP4 | 4.89 | 53.1% | 1.86x | 0 | 76 C |
+| HI2 TP2 | 5.73 | 53.1% | 1.99x | 0 | 83 C |
+
+Both runs record zero KFD eviction increments, no AER counter jumps and no
+new dmesg GPU faults. These are functional qualification results, not a
+performance-improvement claim. Explicit-KV recipes still do not qualify
+the new `KV=auto` path.
+
+Raw receipts live under `~/w4a8_runs/v034-rebase-1e1cac5340/`:
+`operators-93d737878644-r3/receipt.json` and
+`runtime-93d737878644-r3/receipt.json`. Their original native-source fields
+are stale; `source-patch-93d737/r3-attestation.json` links the actual tested
+`41d5030b...` binary and source patch without rewriting those receipts.
+Committed source `540fbbe1ed` builds the new `579d8ca2...` artifact for all
+six targets; all seven extensions import and 186 schemas register. The
+strict actual-artifact guard and five fail-closed mutations pass.
+The exact old `41d5030b...` file was lost during an accidental in-place
+`objcopy --dump-section`; its section dumps and historical receipts remain,
+but binary equivalence cannot be established. The new artifact is therefore
+CPU-qualified only until its queued focused operator and two-recipe runtime
+canary executes. Do not transfer the old receipts' GPU claim to it.
+
+The allowlisted provenance bundle, including the preservation incident and
+canary plan, is in
+`bench_results/2026-11-18_v034-rebase/provenance-540fbbe1ed/`.

@@ -1,0 +1,383 @@
+[1/96] Running hipify on all extension source files.
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/base.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/base.h [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/quick_reduce_impl.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/quick_reduce_impl.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/quick_reduce.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/quick_reduce_hip.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/custom_quickreduce.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/custom_quickreduce.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_arch.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_arch.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_format.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_format.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_attn.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_attn.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_decode_wmma_rdna3.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_decode_wmma_rdna3.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_prefill_rdna3.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_prefill_rdna3.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_prefill_cdna.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_prefill_cdna.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_decode_mfma_cdna.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_decode_mfma_cdna.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cuda_view.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/hip_view.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cuda_utils.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/hip_utils.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cuda_utils_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/hip_utils_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/cuda_compat.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/hip_compat.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/async_util.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/async_util.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cuda_vec_utils.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/hip_vec_utils.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/dispatch_utils.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/dispatch_utils.h [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/torch_utils.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/torch_utils_hip.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/activation_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/activation_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/vectorization.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/vectorization.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/vectorization_utils.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/vectorization_utils.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/muse_spark_mul_tanh_soft_cap_kernel.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/muse_spark_mul_tanh_soft_cap_kernel.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/ops.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/ops.h [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/ngram_embedding_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/ngram_embedding_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/vocab_parallel_embedding_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/vocab_parallel_embedding_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/utils.hpp -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/utils.hpp [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/utils.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/utils.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_generic.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_generic.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_float32.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_float32.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_float16.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_float16.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_bfloat16.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_bfloat16_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_fp8.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/dtype_fp8.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/vec_dtypes.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/core/vec_dtypes/vec_dtypes_hip.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/nvidia/quant_utils.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/nvidia/quant_utils_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/amd/quant_utils.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/amd/quant_utils_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/common.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/common_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/activation_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/activation_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cub_helpers.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cub_helpers_hip.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/int8/scaled_quant.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/int8/scaled_quant.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/common.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/common.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/per_token_group_quant.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/per_token_group_quant.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/compat.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/compat.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_util.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_util.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/matrix_view.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/matrix_view_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_2.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_2.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_3.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_3.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_4.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_4.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_8.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/qdq_8.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/q_gemm.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/q_gemm.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/pos_encoding_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/pos_encoding_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_entry.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_entry_hip.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_api.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_api.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/type_convert.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/type_convert_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_kernel.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_kernel_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd64.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd64.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd128.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd128.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd256.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd256.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_qknorm_rope_kernel.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_qknorm_rope_kernel.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/layernorm_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/layernorm_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/layernorm_quant_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/layernorm_quant_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/quant_conversions.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/quant_conversions_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/layernorm_utils.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/layernorm_utils_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/fused_silu_mul_block_quant.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/merge_attn_states.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/merge_attn_states.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/sampler.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/sampler.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/sampler_deterministic.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/sampler_deterministic.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/topk_histogram_4096.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/topk_histogram_4096_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/topk_histogram_4096_overflow.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/topk_histogram_4096_overflow_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/persistent_topk_overflow.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/persistent_topk_overflow_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/persistent_topk.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/persistent_topk_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/sampled_topk.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/sampled_topk_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/topk.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/topk.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/mamba/selective_scan.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/mamba/selective_scan_hip.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/mamba/selective_scan_fwd.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/mamba/selective_scan_fwd.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/concat_mla_q.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/concat_mla_q_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/nvfp4_ds_mla_cache.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/nvfp4_ds_mla_cache_hip.h [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cache_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cache_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cache_kernels_fused.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cache_kernels_fused.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_collective_common.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_collective_common_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_reduce.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_reduce_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_gather_reduce_scatter.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_gather_reduce_scatter_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_gather_reduce_scatter.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_gather_reduce_scatter.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_reduce.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_reduce.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/kimi_k3/fused_kda_decode_kernel_rocm.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/kimi_k3/fused_kda_decode_kernel_rocm.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/kimi_k3/fused_kda_chunk_kernel_rocm.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/kimi_k3/fused_kda_chunk_kernel_rocm.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/moe_align_sum_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/moe_align_sum_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softmax_kernels.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softmax_kernels.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_kernels.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_kernels_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_int32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_int32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_uint32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_uint32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_int64.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_int64.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_int32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_int32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_uint32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_uint32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_int64.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_int64.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_int32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_int32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_uint32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_uint32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_int64.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_int64.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_llmm1.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_llmm1.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitk.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitk.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitkrc.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitkrc.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/dispatch_utils.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/dispatch_utils.h [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitkq.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitkq.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4.h [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/ops.h -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/ops.h [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_api.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_api.cu [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n1.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n1.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n3.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n3.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n4.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n4.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n5.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n5.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_resident_decode.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_resident_decode.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_kernels.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_kernels_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_dispatch.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_dispatch.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_auto_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_auto_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_auto_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_auto_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_auto_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_auto_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_auto_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_auto_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_auto_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_auto_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_auto_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_auto_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_auto_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_auto_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_auto_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_auto_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_f16_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_f16_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_f16_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_f16_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_f16_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_f16_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_f16_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_f16_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8_bs16.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8_bs16.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8_bs32.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8_bs32.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_allreduce.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_allreduce.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_allreduce_hier.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_allreduce_hier_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_allreduce.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_allreduce.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_expert_cache.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_expert_cache.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qdq_4_rdna2.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qdq_4_rdna2.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna2_common.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna2_common.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna2_prefill.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna2_prefill.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/w4a8_sdot4_rdna2.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/w4a8_sdot4_rdna2_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/w4a8_sdot4_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/w4a8_sdot4_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_fused_glue.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_fused_glue.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/hc_prefill_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/hc_prefill_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_k2_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_k2_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_leapquant_layout.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_leapquant_layout.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_gdn_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_gdn_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_qsa_decode_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_qsa_decode_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna2_scratch.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna2_scratch.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/int4_kv_layout_common.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/int4_kv_layout_common.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/fa_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/fa_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_kernel.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_kernel.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_table.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_table.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/int4_fp16_kv_cache.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/int4_fp16_kv_cache.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qdq_fp8_rdna2.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qdq_fp8_rdna2.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gemm_w8a8_fp8_dense_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gemm_w8a8_fp8_dense_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_accum_rdna2.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_accum_rdna2_hip.cuh [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_q_gemm_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_q_gemm_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_w4a8_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_w4a8_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_decode_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_decode_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_leapquant_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_leapquant_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/causal_conv1d_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/causal_conv1d_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_prep_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_prep_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_kkt_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_kkt_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_solve_wy_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_solve_wy_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_delta_h_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_delta_h_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_o_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_o_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_dot2_common.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_dot2_common.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_dot2_moe.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_dot2_moe.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_dot2_dense.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_dot2_dense.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qdq_8_rdna2.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qdq_8_rdna2.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_w8a16_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_w8a16_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_unquantized_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_unquantized_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_w8a16_fp8_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_w8a16_fp8_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mrope_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mrope_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/hc_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/hc_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qsa_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qsa_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/ple_short_conv_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/ple_short_conv_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_worker_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_worker_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_input_batch_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_input_batch_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_spec_decode_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_spec_decode_rdna2.hip [ok]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_mamba_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_mamba_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_rope_struct_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_rope_struct_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_sample_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_sample_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_topk_topp_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_topk_topp_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qsa_metadata_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qsa_metadata_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/vit_pos_embed_rdna2.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/vit_pos_embed_rdna2.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/indexer_mqa_logits.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/indexer_mqa_logits.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/common/arch.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/common/arch.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/common/convert.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/common/convert.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/kv_insert.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/kv_insert.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/mhc.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/mhc.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/sparse_mla_decode.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/sparse_mla_decode.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qdq_4_rdna3.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qdq_4_rdna3.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna3.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna3.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna3_wmma.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna3_wmma.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_q_gemm_rdna3.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_q_gemm_rdna3.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_w4a8_gemv_rdna3.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_common.cuh -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_common.cuh [skipped, no changes]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_moe.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_moe.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_dense.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_dense.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_dequant.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_dequant.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_hadamard.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_hadamard.hip [skipped, already hipified]
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/layernorm.cu -> /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/layernorm.hip [skipped, already hipified]
+Successfully preprocessed all matching files.
+Total number of unsupported CUDA function calls: 0
+
+
+Total number of replaced kernel launches: 388
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/quickreduce/custom_quickreduce.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_attn.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_decode_wmma_rdna3.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_prefill_rdna3.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_prefill_cdna.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/octave_decode_mfma_cdna.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/hip_view.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/hip_utils_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/activation_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/muse_spark_mul_tanh_soft_cap_kernel.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/ngram_embedding_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/vocab_parallel_embedding_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/activation_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/int8/scaled_quant.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/common.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/w8a8/fp8/per_token_group_quant.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/gptq/q_gemm.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/pos_encoding_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_api.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd64.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd128.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_muse_spark_qknorm_rope_kv_insert_hd256.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_qknorm_rope_kernel.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/layernorm_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/layernorm_quant_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/quantization/fused_kernels/fused_silu_mul_block_quant.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/attention/merge_attn_states.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/sampler.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/sampler_deterministic.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/topk.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/mamba/selective_scan_fwd.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cache_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/cache_kernels_fused.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_gather_reduce_scatter.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/custom_all_reduce.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/kimi_k3/fused_kda_decode_kernel_rocm.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/kimi_k3/fused_kda_chunk_kernel_rocm.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/moe_align_sum_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softmax_kernels.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_int32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_uint32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f32_int64.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_int32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_uint32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_f16_int64.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_int32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_uint32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/moe/topk_softplus_sqrt_bf16_int64.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_llmm1.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitk.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitkrc.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_wvsplitkq.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_api.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n1.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n3.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n4.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_int4_n5.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/skinny_gemms_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_resident_decode.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_dispatch.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_auto_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_auto_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_auto_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_auto_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_auto_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_auto_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_auto_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_auto_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_f16_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_f16_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_f16_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_f16_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8_bs16.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8_bs32.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_allreduce.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_expert_cache.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna2_prefill.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/w4a8_sdot4_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_fused_glue.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/hc_prefill_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_k2_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_gdn_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mono_qsa_decode_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/fa_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/int4_fp16_kv_cache.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gemm_w8a8_fp8_dense_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_q_gemm_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_w4a8_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_decode_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_leapquant_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/causal_conv1d_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_prep_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_kkt_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_solve_wy_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_delta_h_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/gdn_prefill_o_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_dot2_moe.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_dot2_dense.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_w8a16_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_unquantized_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_w8a16_fp8_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mrope_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/hc_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qsa_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/ple_short_conv_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_worker_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_input_batch_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_spec_decode_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_mamba_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_rope_struct_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_sample_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/v1_topk_topp_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/qsa_metadata_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/vit_pos_embed_rdna2.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/indexer_mqa_logits.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/kv_insert.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/mhc.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/rdna/dsv4/sparse_mla_decode.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna3.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/q_gemm_rdna3_wmma.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/moe_q_gemm_rdna3.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/mxfp4_w4a8_gemv_rdna3.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_moe.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_dense.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_dot2_dequant.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/exl3_hadamard.hip
+/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/csrc/rocm/layernorm.hip
+[2/11] Building HIP object CMakeFiles/_rocm_C_skinny.dir/csrc/rocm/skinny_gemms_int4_api.hip.o
+[3/11] Building CXX object CMakeFiles/_rocm_C.dir/csrc/rocm/torch_bindings.cpp.o
+[4/11] Building HIP object CMakeFiles/_rocm_C.dir/csrc/rocm/attention_dispatch.hip.o
+[5/11] Building HIP object CMakeFiles/_rocm_C.dir/csrc/rocm/q_gemm_w8a16_fp8_rdna2.hip.o
+[6/11] Building HIP object CMakeFiles/_rocm_C.dir/csrc/rocm/gemm_w8a8_fp8_dense_rdna2.hip.o
+[7/11] Building HIP object CMakeFiles/_rocm_C.dir/csrc/rocm/moe_w4a8_rdna2.hip.o
+[8/11] Building HIP object CMakeFiles/_rocm_C.dir/csrc/rocm/moe_w8a16_rdna2.hip.o
+[9/11] Building HIP object CMakeFiles/_rocm_C.dir/csrc/rocm/qsa_rdna2.hip.o
+[10/11] Building HIP object CMakeFiles/_rocm_C.dir/csrc/rocm/v1_spec_decode_rdna2.hip.o
+[11/11] Linking HIP shared module _rocm_C.abi3.so

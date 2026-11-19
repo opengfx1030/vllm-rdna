@@ -1,0 +1,13 @@
+{
+  "recipe": "27b-hi2-tp2-mtp2",
+  "driver_exit": 0,
+  "monitor_failure": null,
+  "server_cleanup": "server already gone",
+  "max_junction_c": {
+    "d9": 83.0,
+    "dc": 80.0,
+    "df": 56.0,
+    "e2": 54.0
+  },
+  "samples": 674
+}
