@@ -31,6 +31,7 @@ from typing import Any
 import numpy as np
 
 from tools.rdna.eplb import placement
+from tools.rdna.eplb._core import core
 from tools.rdna.eplb.simulate import expected_touch
 from tools.rdna.hetero_moe.sampling import inclusion_probs
 from tools.rdna.hetero_moe.stats_io import LayerStats, StatsRecord, load_stats
@@ -93,13 +94,13 @@ def solve_layer(
         cand = placement.pack_empirical(costs, ranks, cand, iters=4000)
     t_dec, t_pre, t_blend = test
     obj = t_blend if t_blend is not None else t_dec
-    before = placement.balance_ratio(obj, lin, ranks)
-    after = placement.balance_ratio(obj, cand, ranks)
+    before = core.balance_ratio(obj, lin, ranks)
+    after = core.balance_ratio(obj, cand, ranks)
     entry = {
-        "decode_ratio_linear": placement.balance_ratio(t_dec, lin, ranks),
-        "decode_ratio_packed": placement.balance_ratio(t_dec, cand, ranks),
-        "prefill_ratio_linear": placement.balance_ratio(t_pre, lin, ranks),
-        "prefill_ratio_packed": placement.balance_ratio(t_pre, cand, ranks),
+        "decode_ratio_linear": core.balance_ratio(t_dec, lin, ranks),
+        "decode_ratio_packed": core.balance_ratio(t_dec, cand, ranks),
+        "prefill_ratio_linear": core.balance_ratio(t_pre, lin, ranks),
+        "prefill_ratio_packed": core.balance_ratio(t_pre, cand, ranks),
         "objective_ratio_linear": before,
         "objective_ratio_packed": after,
         "experts_moved": int((cand != lin).sum()),

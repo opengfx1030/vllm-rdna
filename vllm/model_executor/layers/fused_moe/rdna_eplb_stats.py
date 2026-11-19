@@ -65,6 +65,7 @@ not counted.
 import json
 import os
 import time
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -79,6 +80,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STATS_DIR_ENV = "VLLM_RDNA_EPLB_STATS_DIR"
+# The online balancer (rdna_eplb_online) needs the counters but no snapshot files.
+ONLINE_ENV = "VLLM_RDNA_EPLB"
 RING_ENV = "VLLM_RDNA_EPLB_STATS_RING"
 HIST_ENV = "VLLM_RDNA_EPLB_STATS_HIST"
 EVERY_ENV = "VLLM_RDNA_EPLB_STATS_EVERY"
@@ -225,6 +228,9 @@ class LayerStats:
         device: torch.device,
     ) -> None:
         self.name = name
+        # Set at registration: weak reference to the MoE module, its EP rank.
+        self.module: Any = None
+        self.rank = 0
         self.pos = pos
         self.num_experts = num_experts
         self.top_k = top_k
@@ -418,7 +424,7 @@ class EplbStats:
 
     def __init__(
         self,
-        directory: str,
+        directory: str | None,
         *,
         ring: int = DEFAULT_RING,
         hist: int = 0,
@@ -435,7 +441,9 @@ class EplbStats:
             raise ValueError(f"eplb stats sampling must be a power of two: {every}")
         if kernel not in ("auto", "hip", "torch"):
             raise ValueError(f"{KERNEL_ENV} must be auto, hip or torch: {kernel!r}")
-        os.makedirs(directory, exist_ok=True)
+        if directory is not None:
+            os.makedirs(directory, exist_ok=True)
+        # None: counters only, no snapshot files (the online balancer reads them).
         self.directory = directory
         self.ring_n = ring
         self.hist = hist
@@ -472,8 +480,8 @@ class EplbStats:
 
     @classmethod
     def from_env(cls) -> "EplbStats | None":
-        directory = os.environ.get(STATS_DIR_ENV, "")
-        if not directory:
+        directory = os.environ.get(STATS_DIR_ENV, "") or None
+        if directory is None and os.environ.get(ONLINE_ENV, "0") != "1":
             return None
         stats = cls(
             directory,
@@ -488,8 +496,8 @@ class EplbStats:
             "EPLB load counters are ON (%s=%s, every %d call(s), ring %d, kernel=%s):"
             " one extra CTA in the MoE routing launch; the Flash-Next mono K2"
             " stands down (its top-k is not observable)",
-            STATS_DIR_ENV,
-            directory,
+            STATS_DIR_ENV if directory is not None else ONLINE_ENV,
+            directory if directory is not None else "1",
             stats.every,
             stats.ring_n,
             "hip" if stats.hip else "torch",
@@ -499,6 +507,11 @@ class EplbStats:
     def hip_for(self, device: torch.device, num_experts: int) -> bool:
         """Whether a layer takes the HIP counters (else the torch formulation)."""
         return self.hip and device.type == "cuda" and num_experts <= 1024
+
+    @property
+    def layers(self) -> list[LayerStats]:
+        """The registered layers, in the order of their first call."""
+        return list(self._order)
 
     # ---- registration (first eager call of a layer) -------------------------
 
@@ -574,6 +587,13 @@ class EplbStats:
         state = LayerStats(
             self, name, len(self._order), num_experts, top_k, ranks, owner, device
         )
+        # Weak: the registry must not keep a module alive (see layer_stats). A
+        # layer object without weak references stays unknown to the balancer.
+        try:
+            state.module = weakref.ref(layer)
+        except TypeError:
+            state.module = None
+        state.rank = rank
         self._layers[key] = state
         self._order.append(state)
         return state
@@ -596,7 +616,7 @@ class EplbStats:
         Never blocks on the device: the copies are non-blocking and a snapshot is
         written only once its event reports completion.
         """
-        if not self._order:
+        if not self._order or self.directory is None:
             return
         if self._pending is not None:
             event = self._pending[0]
@@ -637,7 +657,7 @@ class EplbStats:
 
     def close(self) -> None:
         """Write a final snapshot (blocking)."""
-        if not self._order:
+        if not self._order or self.directory is None:
             return
         if self._pending is not None:
             event = self._pending[0]
@@ -712,6 +732,7 @@ class EplbStats:
             arrays["hist_calls"] = state[:, off.hist_calls]
             arrays["hist_rows"] = state[:, off.hist_rows : off.hist_rows + h]
         if self._path is None:
+            assert self.directory is not None  # tick and close return early
             self._path = os.path.join(
                 self.directory, f"eplb_stats-rank{self._rank}-pid{os.getpid()}.npz"
             )
