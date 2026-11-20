@@ -15,7 +15,8 @@ tensors are ``.hi2_*`` is rdna_hint_flex, one with ``.weight`` stays dense), so 
 leftovers such as vision towers, embeddings and the head need no list.
 
 Runtime: on RDNA2 (gfx1030) the ``_rocm_C`` rdna_hint_flex kernels run the F16 compute
-mode (spec 6.1): GEMV for decode, dequant + GEMM for prefill. Elsewhere the
+mode (spec 6.1): GEMV for decode, dequant + GEMM for prefill (opt-in CPTC can
+decode inside the prefill tile instead). Elsewhere the
 weights are dequantized once at load and run through ``F.linear`` (correct,
 not compact), so the format never breaks another platform.
 """
@@ -72,9 +73,13 @@ DECODE_MAX_M = 48
 # wherever its (N, K, M) dispatch table measured it faster than rocBLAS, rocBLAS
 # everywhere else, and the 1..64 rows of a short tail M % 128 (the scheduler's
 # 1024 + a few decode tokens) apart from the whole tile rows; "hip-notail" = the
-# same kernel with the tail rows padded into one more tile row). The values are
-# the op's prefill_gemm modes (rdna_hint_flex_dense_gemm_rdna2.cuh). Takes effect
-# on the RDNA2 kernels only (gfx10x).
+# same kernel with the tail rows padded into one more tile row). "cptc-fused"
+# (5) is the CPTC-only tile that decodes 2/4-bit weights inside the GEMM and
+# never materializes a dense [R, K] fp16 scratch; a v3.2 checkpoint on the
+# kernel path is rejected rather than silently ignoring it. The dense values
+# are the op's prefill_gemm modes
+# (rdna_hint_flex_dense_gemm_rdna2.cuh); cptc-fused is the CPTC op's mode 5.
+# Takes effect on the RDNA2 kernels only (gfx10x).
 PREFILL_GEMM_MODES = {
     "": 0,
     "0": 0,
@@ -82,6 +87,7 @@ PREFILL_GEMM_MODES = {
     "rocblas": 0,
     "hip": 4,
     "hip-notail": 1,
+    "cptc-fused": 5,
 }
 _FIELD_PREFIX = "hi2_"
 
@@ -331,9 +337,23 @@ class RdnaHintFlexLinearMethod(LinearMethodBase):
                 raise RuntimeError(
                     "rdna_hint_flex CPTC requires a rebuilt _rocm_C extension"
                 )
+        requested = os.environ.get("RDNA_HINT_FLEX_PREFILL_GEMM", "").strip().lower()
+        if requested == "cptc-fused":
+            if cptc is None:
+                raise ValueError(
+                    "RDNA_HINT_FLEX_PREFILL_GEMM=cptc-fused requires a CPTC "
+                    "(version 3.3) checkpoint"
+                )
+            if not self.use_kernels:
+                raise ValueError(
+                    "RDNA_HINT_FLEX_PREFILL_GEMM=cptc-fused requires the native "
+                    "RDNA2 CPTC kernels"
+                )
         self.prefill_gemm = _prefill_gemm_from_env() if self.use_kernels else 0
-        if self.prefill_gemm and not hasattr(
-            torch.ops._rocm_C, "rdna_hint_flex_dense_gemm_rdna2"
+        if (
+            self.prefill_gemm
+            and self.prefill_gemm != PREFILL_GEMM_MODES["cptc-fused"]
+            and not hasattr(torch.ops._rocm_C, "rdna_hint_flex_dense_gemm_rdna2")
         ):
             logger.warning_once(
                 "RDNA_HINT_FLEX_PREFILL_GEMM=hip: this _rocm_C build has no "

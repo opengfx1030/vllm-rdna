@@ -60,17 +60,26 @@ The metadata table scale is canonicalized to fp16 before the mirror-int8
 tables are expanded and rounded to fp16 once at load.
 Reconstruction rounds the product of that fp16 table value and the
 block's fp16 scale to fp16, including zero and subnormal scales.
-On gfx1030, compressed GEMV decodes weights directly; prefill temporarily
-dequantizes for the existing dense GEMM path. It does not retain a dense
-weight cache. Non-RDNA backends use the portable dequantization path.
-CPTC rejects I8 compute modes and quantized MoE rather than silently using
-an incompatible decoder.
+On gfx1030, compressed GEMV decodes weights directly. The default prefill
+still dequantizes into a transient `[R, K]` fp16 scratch for the dense GEMM
+path; `RDNA_HINT_FLEX_PREFILL_GEMM=cptc-fused` (mode 5) instead decodes the
+2/4-bit weights inside the GEMM tile and never allocates that scratch. Mode 5
+is accepted only for native CPTC on the supported gfx10x backend and errors
+rather than falling back to dequant + GEMM. The decode GEMV keeps its existing
+kernel for unset/`v1`/`auto`; `RDNA_HINT_FLEX_GEMV=v2` selects the cooperative
+split-K variant, which reduces through shared memory and uses no global
+scratch. Neither path retains a dense weight cache. Non-RDNA backends use the
+portable dequantization path. CPTC rejects I8 compute modes and quantized MoE
+rather than silently using an incompatible decoder.
 
-The producer fixture, TP column slices, 18 native tests, composite SiLU
-activation transform and changed-input graph replay pass. A fresh two-GPU
-Tiny Llama checkpoint from the post-review HI2 producer also loads through
-the real TP2 model path with `FULL_AND_PIECEWISE`: both ranks use the native
-CPTC op, checkpoint QKV slices match an independent reference at M=1/3/49,
+The producer fixture, TP column slices, composite SiLU activation transform
+and changed-input graph replay pass. The CPTC test file also covers v1/v2 GEMV,
+prefill modes 4/5 (mode 4 is dequant + rocBLAS for these test shapes), mixed
+widths and blocks, M/R tails and zero/subnormal scales. A fresh two-GPU Tiny
+Llama checkpoint from the post-review HI2 producer
+also loads through the real TP2 model path with `FULL_AND_PIECEWISE`: both
+ranks use the native CPTC op, checkpoint QKV slices match an independent
+reference at M=1/3/49,
 and three rounds of two requests complete after graph replay. The updated
 zero/subnormal-scale case passes as well. This random-Tiny engineering
 proof does not establish Qwen3.5-4B quality, throughput or latency.
@@ -173,6 +182,22 @@ Routed experts follow the same mode (I8 for batches up to 48 tokens with
 * `rdna_hint_flex_linear_rdna2`: transform, then GEMV for M <= 48, otherwise
   dequant into scratch and a rocBLAS GEMM. Chosen inside the op at execution
   time, so torch.compile cannot fix it to the warmup shape.
+* `rdna_hint_flex_cptc_linear_rdna2` (CPTC): transform, then a decode GEMV for
+  M <= `decode_max_m`, otherwise prefill by mode. The GEMV is the existing
+  one-wave-per-row kernel for unset/`v1`/`auto` and, under
+  `RDNA_HINT_FLEX_GEMV=v2`, a cooperative split-K kernel (four waves per row
+  below 4096 rows, two from 4096 to 8191; at 8192 or more, reuse v1 to avoid
+  an unnecessary LDS reduction). There is no global scratch or atomic accumulation.
+  The CPTC op reads the switch once
+  per process, like the dense op; a captured graph keeps the variant it
+  captured. Mode 0 and 4 keep dequant +
+  dense GEMM; mode 5 (`cptc-fused`) is a 64 x 64 tile with 64-column K steps:
+  each thread decodes one 16-column group of one weight row per step into LDS,
+  and all 64 activation rows read that decoded tile with `v_dot2_f32_f16` 4 x 4
+  micro-tiles. No `[R, K]` fp16 weight tensor is allocated; M and R tails are
+  masked, and mode 5 errors instead of falling back when the backend or shape
+  cannot run it; the Python layer rejects `cptc-fused` up front for a non-CPTC
+  checkpoint or a non-native path.
 * `rdna_hint_flex_moe_rdna2` (routed experts, F16): experts stacked row-wise
   into one ragged tensor per stage with `[E, K]` / `[E, K/16]` transform tables;
   a transform per (token, expert) pair, a GEMV per pair for gate/up, SiLU and
@@ -310,6 +335,27 @@ TunableOp-tuned solution (+13 % over the heuristic), never slower, but below the
 biggest shapes, so nothing is wired. The same data show the rocBLAS heuristic is 8-18 % slower than TunableOp rows
 in 13 of the 25 cells of those shapes, and the shipped rows do not cover them. Measurements, the block-order and
 register-bank findings and the decision: `hi2-prefill-gemm-2026-11-15.md`.
+
+### CPTC opt-ins (source-level hypotheses, not measured here)
+
+The CPTC GEMV v2 and `cptc-fused` prefill add no measurements of their own yet.
+Mode 4 (`hip`) selects a dense HIP GEMM only for shapes in the dispatch table;
+the current table contains the five 27B TP2 shapes, not Qwen3.5-4B TP2.
+The 4B control therefore remains dequant + rocBLAS, not a measured HIP GEMM.
+Profiler receipts must identify the actual path, not just the requested knob.
+What the source implies:
+
+* Split-K v2 issues the same decode and dot2 instructions as v1, divides each
+  row's word range over four waves when the row count is small, and adds one
+  fp32 LDS reduction per row. It should help shapes where v1's row waves do not
+  fill the GPU (small `R`, `M <= 48`) and can only lose the reduction cost plus
+  a shorter per-wave loop where `R` already saturates it. `auto` stays v1 here
+  because the dense v2 activation layout does not apply to CPTC.
+* Mode 5 removes the `[R, K]` fp16 scratch write and read from prefill, at the
+  cost of decoding each weight per 64-row tile instead of once. The expected
+  win is where the scratch traffic dominates (small and medium M); against a
+  tuned rocBLAS at large M the 64 x 64 tile has less reuse and no multi-stage
+  prefetch, so a loss there is plausible. Both are hypotheses until measured.
 
 ### I8 for prefill (not worth it on gfx1030 with this activation grouping)
 
