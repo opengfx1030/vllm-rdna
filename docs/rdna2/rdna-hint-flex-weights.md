@@ -75,6 +75,11 @@ and three rounds of two requests complete after graph replay. The updated
 zero/subnormal-scale case passes as well. This random-Tiny engineering
 proof does not establish Qwen3.5-4B quality, throughput or latency.
 
+The scoreboard initializes HIP before validating its device-to-PCI mapping.
+AMD SMI can report zero devices before initialization even when HIP sees the
+leased GPUs; initialization makes the subsequent count use the runtime.
+Probe errors remain visible, and a PCI mismatch still refuses the launch.
+
 ## Decisions where the spec is open (for the spec to match)
 
 1. **Offsets.** `code_off` and `param_off` are **int32** (the spec table says

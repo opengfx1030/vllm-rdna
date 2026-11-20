@@ -69,7 +69,8 @@ build_running() {
 if [[ -n $BUSES ]]; then
     SITE=$VENV/lib/python3.12/site-packages
     export LD_LIBRARY_PATH=$SITE/_rocm_sdk_libraries/lib:$SITE/_rocm_sdk_core/lib/host-math/lib:$SITE/_rocm_sdk_core/lib/rocm_sysdeps/lib:$SITE/_rocm_sdk_core/lib:$SITE/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-    got=$(HIP_VISIBLE_DEVICES=$GPUS "$VENV/bin/python" -c "import torch; print(' '.join('%02x' % torch.cuda.get_device_properties(i).pci_bus_id for i in range(torch.cuda.device_count())))" 2> /dev/null | tail -1)
+    # AMD SMI can report zero devices before HIP initializes; query the runtime.
+    got=$(HIP_VISIBLE_DEVICES=$GPUS "$VENV/bin/python" -c "import torch; torch.cuda.init(); print(' '.join('%02x' % torch.cuda.get_device_properties(i).pci_bus_id for i in range(torch.cuda.device_count())))" | tail -1)
     if [[ $got != "$BUSES" ]]; then
         echo "scoreboard: HIP $GPUS -> PCI '$got', expected '$BUSES': REFUSING"
         exit 2
