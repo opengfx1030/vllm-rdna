@@ -1809,6 +1809,68 @@ def moe_mxfp4_gemm_rdna2(
     )
 
 
+def moe_nvfp4_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_globals: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_nvfp4_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_globals,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+def moe_mxfp8_gemm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_mxfp8_gemm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna2"):
 
     @register_fake("_rocm_C::moe_mxfp4_gemm_rdna2")
@@ -5183,3 +5245,44 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
             torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
             torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
         )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_nvfp4_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_nvfp4_gemm_rdna2")
+    def _moe_nvfp4_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_globals: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp8_gemm_rdna2"):
+
+    @register_fake("_rocm_C::moe_mxfp8_gemm_rdna2")
+    def _moe_mxfp8_gemm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return

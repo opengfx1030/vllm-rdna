@@ -1,0 +1,326 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Per-(layer, loop-pass) paged state of Inkling-2: attention KV and conv taps.
+
+Every decoder layer visit owns two cache owners registered in the static
+forward context, so the loop passes of layers 6-17 get independent caches
+(48 owners for 24 layers x 3 passes of the core):
+
+* :class:`Inkling2KVOwner`   - K|V of one attention visit
+  (``FullAttentionSpec`` or ``SlidingWindowSpec``), page ``[nb, H, bs, 2*D]``.
+* :class:`Inkling2ConvOwner` - raw conv inputs of the four short convolutions
+  (k, v, attn-output, mlp-output) packed head-major, one token per slot, as a
+  ``SlidingWindowSpec`` whose window is the kernel size (same scheme as
+  Inkling v1).  Storing raw *inputs* of the last ``k-1`` tokens (not a rolling
+  state) keeps the cache valid for chunked prefill and prefix-cache hits.
+
+Both owners share one metadata builder; model code reads the metadata with
+``attn_metadata[owner.prefix]``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import ClassVar
+
+import torch
+from torch import nn
+
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionMetadata,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    KVCacheSpec,
+    SlidingWindowSpec,
+)
+
+# Stream order inside the packed per-head conv width.
+STREAM_K, STREAM_V, STREAM_ATTN, STREAM_MLP = 0, 1, 2, 3
+
+
+@dataclass
+class Inkling2Metadata(AttentionMetadata):
+    block_table: torch.Tensor  # [R, max_blocks] int32
+    slot_mapping: torch.Tensor  # [T] int64, -1 => padding
+    seq_lens: torch.Tensor  # [R] int32 total context incl. this step
+    query_start_loc: torch.Tensor  # [R + 1] int32
+    seq_idx: torch.Tensor  # [T] int32 request of each token
+    num_actual_tokens: int
+    num_reqs: int
+    max_query_len: int
+    max_seq_len: int
+
+
+class Inkling2MetadataBuilder(AttentionMetadataBuilder[Inkling2Metadata]):
+    # Eager torch implementation: no graph capture yet.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> Inkling2Metadata:
+        c = common_attn_metadata
+        num_reqs = c.num_reqs
+        num_tokens = c.num_actual_tokens
+        qsl = c.query_start_loc[: num_reqs + 1]
+        q_lens = (qsl[1:] - qsl[:-1]).to(torch.int64)
+        seq_idx = torch.repeat_interleave(
+            torch.arange(num_reqs, device=qsl.device, dtype=torch.int32),
+            q_lens,
+            output_size=num_tokens,
+        )
+        return Inkling2Metadata(
+            block_table=c.block_table_tensor,
+            slot_mapping=c.slot_mapping[:num_tokens],
+            seq_lens=c.seq_lens[:num_reqs],
+            query_start_loc=qsl,
+            seq_idx=seq_idx,
+            num_actual_tokens=num_tokens,
+            num_reqs=num_reqs,
+            max_query_len=c.max_query_len,
+            max_seq_len=c.max_seq_len,
+        )
+
+
+class Inkling2Backend(AttentionBackend):
+    """Metadata-only backend: attention and conv run in the model."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "INKLING2_LOOP"
+
+    @staticmethod
+    def get_impl_cls():
+        raise NotImplementedError("Inkling-2 attention runs inside the model.")
+
+    @staticmethod
+    def get_builder_cls() -> type[Inkling2MetadataBuilder]:
+        return Inkling2MetadataBuilder
+
+
+def _register(owner: nn.Module, prefix: str, vllm_config: VllmConfig) -> None:
+    ctx = vllm_config.compilation_config.static_forward_context
+    if prefix in ctx:
+        raise ValueError(f"Duplicate layer name: {prefix}")
+    ctx[prefix] = owner
+
+
+class Inkling2KVOwner(nn.Module, AttentionLayerBase):
+    """K|V cache of one attention visit.  Page layout ``[nb, H, bs, 2*D]``."""
+
+    def __init__(
+        self,
+        *,
+        num_kv_heads: int,
+        head_dim: int,
+        sliding_window: int | None,
+        prefix: str,
+    ) -> None:
+        super().__init__()
+        self.prefix = prefix
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.sliding_window = sliding_window
+        vllm_config = get_current_vllm_config()
+        self._dtype = vllm_config.model_config.dtype
+        self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
+        _register(self, prefix, vllm_config)
+
+    def forward(self): ...
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return Inkling2Backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        block_size = vllm_config.cache_config.block_size
+        if self.sliding_window is not None:
+            return SlidingWindowSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_dim,
+                dtype=self._dtype,
+                sliding_window=self.sliding_window,
+            )
+        return FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            dtype=self._dtype,
+        )
+
+    @property
+    def block_size(self) -> int:
+        return self.kv_cache.shape[2]
+
+    def views(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """K and V as ``[nb, bs, H, D]`` views of the bound page."""
+        k, v = self.kv_cache.transpose(1, 2).split(self.head_dim, dim=-1)
+        return k, v
+
+
+class Inkling2ConvOwner(nn.Module, AttentionLayerBase):
+    """Conv-input taps of one layer visit, packed head-major per token slot.
+
+    ``H = num_kv_heads`` heads of width ``D``; each of the four streams owns a
+    sub-range of ``D`` across all heads (a stream of ``C`` channels is viewed
+    ``[H, C/H]``).  ``D`` is padded to a power of two.  fp32 so that the
+    attention / mlp output taps are not rounded twice.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_kv_heads: int,
+        stream_channels: tuple[int, int, int, int],
+        kernel_size: int,
+        prefix: str,
+    ) -> None:
+        super().__init__()
+        self.prefix = prefix
+        self.num_kv_heads = num_kv_heads
+        self.kernel_size = kernel_size
+        widths = []
+        for c in stream_channels:
+            assert c % num_kv_heads == 0, (c, num_kv_heads)
+            widths.append(c // num_kv_heads)
+        offs = [0]
+        for w in widths[:-1]:
+            offs.append(offs[-1] + w)
+        self.stream_ranges = tuple(zip(offs, widths))
+        raw = sum(widths)
+        self.head_size = 1 << (raw - 1).bit_length()
+        self.kv_cache = torch.tensor([])
+        vllm_config = get_current_vllm_config()
+        _register(self, prefix, vllm_config)
+
+    def forward(self): ...
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return Inkling2Backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        return SlidingWindowSpec(
+            block_size=self.kernel_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_size,
+            head_size_v=0,  # all streams packed into head_size
+            dtype=torch.float32,
+            sliding_window=self.kernel_size,
+        )
+
+    @property
+    def block_size(self) -> int:
+        return self.kv_cache.shape[2]
+
+
+def _slots(
+    block_table: torch.Tensor,
+    req: torch.Tensor,
+    pos: torch.Tensor,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(physical block, in-block offset) of ``pos`` for request ``req``."""
+    blk = block_table[req.long(), (pos // block_size).clamp(min=0)].long()
+    return blk, pos % block_size
+
+
+def conv_taps(
+    owner: Inkling2ConvOwner,
+    stream: int,
+    x: torch.Tensor,
+    positions: torch.Tensor,
+    md: Inkling2Metadata,
+) -> torch.Tensor:
+    """Previous ``k-1`` inputs of every token and the cache write of ``x``.
+
+    ``x`` is ``[T, C]`` fp32 (this step's raw conv inputs).  Returns
+    ``taps [k, T, C]`` with ``taps[lag]`` = input ``lag`` tokens back (``lag=0``
+    is ``x``); positions before the sequence start are zero.
+    """
+    T, C = x.shape
+    k = owner.kernel_size
+    H = owner.num_kv_heads
+    o0, w = owner.stream_ranges[stream]
+    cache = owner.kv_cache  # [nb, H, bs, D]
+    bs = cache.shape[2]
+    seq_idx = md.seq_idx.long()
+    first = md.query_start_loc[:-1].long()[seq_idx]  # [T] first row of the request
+    row = torch.arange(T, device=x.device)
+    p0 = positions[first]  # position of the request's first token this step
+    taps = [x]
+    for lag in range(1, k):
+        src_pos = positions - lag
+        in_chunk = src_pos >= p0
+        valid = src_pos >= 0
+        blk, off = _slots(md.block_table, seq_idx, src_pos, bs)
+        # In-chunk history comes from x, older history from the cache.
+        hist_cache = cache[blk, :, off, o0 : o0 + w].reshape(T, C)
+        hist_x = x[(row - lag).clamp(min=0)]
+        t = torch.where(in_chunk[:, None], hist_x, hist_cache)
+        taps.append(torch.where(valid[:, None], t, torch.zeros_like(t)))
+    # Write this step's inputs (after the reads above; slots do not overlap).
+    slot = md.slot_mapping
+    ok = slot >= 0
+    s = slot.clamp(min=0)
+    blk_w, off_w = s // bs, s % bs
+    cur = cache[blk_w, :, off_w, o0 : o0 + w]
+    cache[blk_w, :, off_w, o0 : o0 + w] = torch.where(
+        ok[:, None, None], x.view(T, H, w), cur
+    )
+    return torch.stack(taps, dim=0)
+
+
+def kv_write(
+    owner: Inkling2KVOwner,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    md: Inkling2Metadata,
+) -> None:
+    """Scatter this step's K/V ``[T, H, D]`` into the paged cache."""
+    cache = owner.kv_cache  # [nb, H, bs, 2D]
+    bs = cache.shape[2]
+    D = owner.head_dim
+    slot = md.slot_mapping
+    ok = slot >= 0
+    s = slot.clamp(min=0)
+    blk, off = s // bs, s % bs
+    old = cache[blk, :, off]
+    new = torch.cat([k, v], dim=-1).to(cache.dtype)
+    cache[blk, :, off] = torch.where(ok[:, None, None], new, old)
+    del D
+
+
+def kv_read(
+    owner: Inkling2KVOwner,
+    md: Inkling2Metadata,
+    req: int,
+    lo: int,
+    hi: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """K and V of positions ``[lo, hi)`` of request ``req``: ``[n, H, D]``."""
+    cache = owner.kv_cache
+    bs = cache.shape[2]
+    D = owner.head_dim
+    pos = torch.arange(lo, hi, device=cache.device)
+    blk = md.block_table[req, pos // bs].long()
+    kv = cache[blk, :, pos % bs]  # [n, H, 2D]
+    return kv[..., :D], kv[..., D:]

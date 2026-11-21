@@ -583,6 +583,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk) -> ()");
   rocm_ops.impl("moe_mxfp4_gemm_rdna2", torch::kCUDA, &moe_mxfp4_gemm_rdna2);
 
+  // Inkling-2-Mini expert formats on RDNA2 (gfx1030): modelopt NVFP4
+  // (E2M1 + E4M3 block scales + per-expert amax/2688) and MXFP8
+  // (E4M3 + UE8M0).  fp16 activations, on-the-fly dequant into V_DOT2.
+  rocm_ops.def(
+      "moe_nvfp4_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_globals, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_nvfp4_gemm_rdna2", torch::kCUDA, &moe_nvfp4_gemm_rdna2);
+
+  rocm_ops.def(
+      "moe_mxfp8_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_mxfp8_gemm_rdna2", torch::kCUDA, &moe_mxfp8_gemm_rdna2);
+
   // W4A4 MXFP4 dense (non-MoE) GEMM kernel for RDNA2 (gfx1030).
   // Used for MXFP4 attention and shared experts.
   rocm_ops.def(

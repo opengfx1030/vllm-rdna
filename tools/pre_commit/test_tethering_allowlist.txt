@@ -67,6 +67,16 @@ tests/distributed/test_rdna_p2p.py  # fork-only RDNA P2P topology, CPU unit test
 tests/distributed/test_rdna_gather_allreduce.py  # fork-only P2P-less gather replacements, CPU gloo oracle; not in CI
 tests/models/qwen4_exp/test_offload_policy_sweep_tp4.py  # fork-only expert-offload TP4 sweep rank map, CPU unit test; not in CI
 tests/models/qwen4_exp/test_qualify_expert_copy_ranks.py  # fork-only expert-copy qualifier rank check, CPU unit test; not in CI
+tests/models/inkling2_loop/test_attention.py  # fork-only Inkling-2 dense-state attention vs transformers reference, CPU unit test; not in CI
+tests/models/inkling2_loop/test_blocks.py  # fork-only Inkling-2 blocks (attn-residual, gates, softcaps) vs reference, CPU unit test; not in CI
+tests/models/inkling2_loop/test_configs.py  # fork-only Inkling-2 config classes (the pinned transformers lacks inkling2_loop), CPU unit test; not in CI
+tests/models/inkling2_loop/test_loader.py  # fork-only Inkling-2 expert-format loader, CPU unit test; not in CI
+tests/models/inkling2_loop/test_moe.py  # fork-only Inkling-2 NVFP4/MXFP8 MoE vs fp32 reference; GPU cases need gfx1030 and the moe_*_rdna2 ops, not in CI
+tests/models/inkling2_loop/test_paged_model.py  # fork-only Inkling-2 paged model vs transformers reference on tiny checkpoints, CPU unit test; not in CI
+tests/models/inkling2_loop/test_paged_state.py  # fork-only Inkling-2 paged conv/KV state vs dense oracle, CPU unit test; not in CI
+tests/models/test_inkling2_loop_blocks.py  # fork-only Inkling-2 block parity against the transformers reference, CPU unit test; not in CI
+tests/models/test_inkling2_loop_moe.py  # fork-only Inkling-2 MoE routing/experts parity, GPU cases need gfx1030; not in CI
+tests/models/test_inkling2_tiny_harness.py  # fork-only Inkling-2 tiny checkpoint builder and reference harness, CPU unit test; not in CI
 tests/tools/rdna/test_rdna2_offload_ar_cli.py  # fork-only offload AR checker CLI, CPU unit test; not in CI
 tests/tools/rdna/test_serve_offload_topology.py  # fork-only offload launcher topology contract, CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_devices.py  # fork-only qualification-driver device pin, CPU unit test; not in CI

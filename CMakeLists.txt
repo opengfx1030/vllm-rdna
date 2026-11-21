@@ -1805,6 +1805,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/gdn_prefill_o_rdna2.cu"
       "csrc/rocm/mxfp4_dot2_moe.cu"
       "csrc/rocm/mxfp4_dot2_dense.cu"
+      "csrc/rocm/moe_lowp_dot2_rdna2.cu"
       "csrc/rocm/moe_w8a16_rdna2.cu"
       "csrc/rocm/moe_unquantized_rdna2.cu"
       "csrc/rocm/q_gemm_w8a16_fp8_rdna2.cu"

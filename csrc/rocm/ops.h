@@ -827,6 +827,27 @@ void moe_mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                           int64_t block_size_m, bool mul_topk_weight,
                           int64_t output_topk);
 
+// Inkling-2-Mini expert formats: modelopt NVFP4 (E2M1 + E4M3 block scales +
+// per-expert global) and MXFP8 (E4M3 + UE8M0).  Same MoE calling contract as
+// moe_mxfp4_gemm_rdna2; NVFP4 takes one extra per-expert global scale tensor.
+void moe_nvfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales,
+                          torch::Tensor b_globals, torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk);
+
+void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales,
+                          torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk);
+
 void moe_w8a16_fp8_gemm_rdna2(
     torch::Tensor a, torch::Tensor c, torch::Tensor b_q_weight,
     torch::Tensor b_scales, torch::Tensor b_qzeros, torch::Tensor topk_weights,
