@@ -74,6 +74,7 @@ tests/models/inkling2_loop/test_loader.py  # fork-only Inkling-2 expert-format l
 tests/models/inkling2_loop/test_moe.py  # fork-only Inkling-2 NVFP4/MXFP8 MoE vs fp32 reference; GPU cases need gfx1030 and the moe_*_rdna2 ops, not in CI
 tests/models/inkling2_loop/test_paged_model.py  # fork-only Inkling-2 paged model vs transformers reference on tiny checkpoints, CPU unit test; not in CI
 tests/models/inkling2_loop/test_paged_state.py  # fork-only Inkling-2 paged conv/KV state vs dense oracle, CPU unit test; not in CI
+tests/models/inkling2_loop/test_real_checkpoint_names.py  # fork-only Inkling-2 load_weights vs the real checkpoint header on the meta device (skipped without ~/hfcache/inkling2-mini) plus w13 gate/up layout, CPU unit test; not in CI
 tests/models/test_inkling2_loop_blocks.py  # fork-only Inkling-2 block parity against the transformers reference, CPU unit test; not in CI
 tests/models/test_inkling2_loop_moe.py  # fork-only Inkling-2 MoE routing/experts parity, GPU cases need gfx1030; not in CI
 tests/models/test_inkling2_tiny_harness.py  # fork-only Inkling-2 tiny checkpoint builder and reference harness, CPU unit test; not in CI

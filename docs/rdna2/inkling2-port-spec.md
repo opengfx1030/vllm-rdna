@@ -40,6 +40,34 @@ on-the-fly `V_DOT2` GEMM match an fp64 reference on the real checkpoint
 `w13` is `[E, 2304, 2304]` (gate+up fused), `w2` is `[E, 2304, 1152]`; dequantised
 both are bf16 48.8 GB for all layers.
 
+### `w13` row layout (2026-11-21)
+
+The real checkpoint stores the rows of `w13_weight` **and** `w13_weight_scale`
+interleaved: row `2i` is gate unit `i`, row `2i + 1` is up unit `i`
+(`[g0, u0, g1, u1, ...]`); `amax` is per expert and unaffected, `w2` is plain. The
+transformers reference de-interleaves with `Interleave(dim=1)`
+(`conversion_mapping.py`, `inkling2_loop`: `out[:, j * I + i] = in[:, 2 * i + j]`, i.e.
+`gate_up = [even rows; odd rows]`, then `gate, up = gate_up.chunk(2)`).
+
+Checked on the real weights (CPU, a few experts of layers 0, 3, 7, 12, 19, 20, 23,
+dequantised): mean |cos| of rows `(2i, 2i + 1)` is 0.206 / 0.196 / 0.155 / 0.118 /
+0.108 (NVFP4) and 0.088 / 0.088 (MXFP8); rows `(i, i + 1152)` and the off-by-one
+controls are ~0.019 (random level). Every row has unit norm, so row norms say
+nothing; which of the pair is gate comes from the reference conversion, not from the
+data. Anything that read `w13` verbatim treated gate and up as two halves, i.e. mixed
+units.
+
+Consequences: `Inkling2LoopForConditionalGeneration.load_weights` de-interleaves
+`w13_weight` / `w13_weight_scale` while copying (`copy_gate_up_deinterleaved`), so
+`Inkling2LoopMoE` and the kernels keep `[gate; up]` along N. The tiny checkpoints
+(`make_tiny_checkpoint.py`) now write the interleaved layout, and the reference
+oracles (`tiny_reference.dequant_experts`, `ref_checkpoint.expert_pair`) de-interleave;
+both fill the transformers model directly and do not run its conversion, so nothing is
+de-interleaved twice. The real-checkpoint oracle numbers below and the old
+`l<layer>.safetensors` expert caches predate this finding (read the raw order); the
+cache file is now `l<layer>.deint.safetensors`. Header-level proof that the real
+checkpoint loads: `tests/models/inkling2_loop/test_real_checkpoint_names.py`.
+
 ## Serving implications
 
 * **KV cache = 48 layer-equivalents, not 24.** Each loop pass keeps its own KV for

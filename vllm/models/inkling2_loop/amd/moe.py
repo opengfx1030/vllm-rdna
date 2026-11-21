@@ -13,14 +13,17 @@ block expose the same state-dict keys as the reference (``gate.weight``,
   weights, run by the gfx1030 kernels ``torch.ops._rocm_C.moe_nvfp4_gemm_rdna2``
   / ``moe_mxfp8_gemm_rdna2`` (fp16 activations, fp32 activation function).
 
-Weight layout (checkpoint == reference ``gate_up_proj``):
-    The checkpoint's ``w13`` is copied verbatim into the reference's
-    ``gate_up_proj`` (see ``ref_checkpoint.expert_pair``), so ``w13[e]`` is
-    ``[2I, H]`` with rows ``[0, I)`` = **gate** and rows ``[I, 2I)`` = **up**
-    (the reference does ``gate_up.chunk(2, dim=-1)`` -> ``gate, up``).  The
-    kernels' N axis is that same row order, so gate_up output columns
-    ``[:I]`` are gate and ``[I:]`` are up.  This is a contiguous split, NOT
-    the interleaved gate/up layout of the Inkling-1 checkpoint.
+Weight layout (model == reference ``gate_up_proj``):
+    ``w13[e]`` is ``[2I, H]`` with rows ``[0, I)`` = **gate** and rows ``[I, 2I)`` =
+    **up** (the reference does ``gate_up.chunk(2, dim=-1)`` -> ``gate, up``).  The
+    kernels' N axis is that same row order, so gate_up output columns ``[:I]`` are
+    gate and ``[I:]`` are up.  The *checkpoint* stores the rows interleaved
+    (``[g0, u0, g1, u1, ...]``, verified on the real Inkling-2-Mini weights: rows
+    ``2i`` / ``2i + 1`` are correlated, rows ``i`` / ``i + I`` are not); the
+    transformers conversion ``Interleave(dim=1)`` de-interleaves them, and so does
+    ``Inkling2LoopForConditionalGeneration.load_weights``
+    (``copy_gate_up_deinterleaved``).  :class:`Inkling2LoopMoE` and the helpers
+    below take the model layout, not the checkpoint layout.
 
 Activation: ``softcap(gate, 4) * sigmoid(gate) * softcap(up, 25)`` in fp32 with
 ``softcap(x, c) = tanh(x / c) * c`` (the sigmoid sees the *raw* gate).

@@ -23,6 +23,8 @@ Layout facts mirrored from the real checkpoint header (checked on the box):
 * MXFP8 experts (the last layer): ``w13_weight`` F8_E4M3 ``[E, 2I, H]``,
   ``w13_weight_scale`` U8 (UE8M0) ``[E, 2I, H/32]``, ``w2_weight``
   ``[E, H, I]`` / ``[E, H, I/32]``.  value = e4m3 * 2^(s - 127);
+* ``w13_weight`` and ``w13_weight_scale`` rows are interleaved gate/up
+  (``[g0, u0, g1, u1, ...]``) as in the real checkpoint; ``w2`` is plain;
 * full-attention layers (``layer_types == "hybrid"``) have three attention
   residual queries (``[3, H]``), ``{q,k,v}_input_norm`` instead of
   ``attn_norm`` and dynamic k/v short convs (``static_w`` ``[k, C]`` +
@@ -237,6 +239,16 @@ def quantise_mxfp8(w: torch.Tensor):
     return q.to(torch.float8_e4m3fn).reshape(e, n, k).contiguous(), scale.contiguous()
 
 
+def interleave_gate_up(w: torch.Tensor) -> torch.Tensor:
+    """``[E, 2I, ...]`` rows ``[gate; up]`` -> ``[g0, u0, g1, u1, ...]`` (the real
+    checkpoint's ``w13`` row order; inverse of transformers' ``Interleave(dim=1)``)."""
+    half = w.shape[1] // 2
+    out = torch.empty_like(w)
+    out[:, 0::2] = w[:, :half]
+    out[:, 1::2] = w[:, half:]
+    return out
+
+
 def build_tensors(spec: TinySpec, seed: int) -> dict[str, torch.Tensor]:
     """All checkpoint tensors, keyed like ``model.llm.*`` in the real file."""
     r = _Rng(seed)
@@ -330,7 +342,10 @@ def build_tensors(spec: TinySpec, seed: int) -> dict[str, torch.Tensor]:
         t[lp + "mlp.gate.bias"] = r.normal(n_exp, std=0.05)
 
         ex = lp + "mlp.experts."
-        w13 = r.normal(n_exp, 2 * inter, h, std=1.2 * h**-0.5)
+        # logical experts: rows [0, I) gate, [I, 2I) up.  The real checkpoint stores
+        # them interleaved; quantisation is per row (and amax per expert), so
+        # interleaving first gives exactly the interleaved quantised tensors.
+        w13 = interleave_gate_up(r.normal(n_exp, 2 * inter, h, std=1.2 * h**-0.5))
         w2 = r.normal(n_exp, h, inter, std=0.6 * inter**-0.5)
         if spec.is_nvfp4_layer(i):
             for nm, w in (("w13", w13), ("w2", w2)):

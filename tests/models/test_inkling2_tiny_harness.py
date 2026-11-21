@@ -276,6 +276,35 @@ def test_expert_dequant_equals_ref_checkpoint_bit_for_bit(tiny):
         assert up.isfinite().all() and up.abs().max() > 0
 
 
+def test_w13_rows_are_interleaved_in_the_checkpoint(tiny):
+    """Like the real checkpoint, ``w13`` (and its block scales) store gate/up rows
+    interleaved; the reference oracle de-interleaves them (transformers'
+    ``Interleave(dim=1)``: ``gate_up[:, j * I + i] = raw[:, 2 * i + j]``)."""
+    rc = ref.load_ref_checkpoint()
+    _, tensors = tiny
+    x = torch.randn(2, 8, 5)
+    assert torch.equal(make.interleave_gate_up(x)[:, 0::2], x[:, :4])
+    assert torch.equal(make.interleave_gate_up(x)[:, 1::2], x[:, 4:])
+    assert torch.equal(rc.deinterleave_gate_up(make.interleave_gate_up(x)), x)
+    for layer in (0, 5):  # NVFP4 and MXFP8
+        prefix = f"model.llm.layers.{layer}.mlp.experts"
+        w, s = tensors[f"{prefix}.w13_weight"], tensors[f"{prefix}.w13_weight_scale"]
+        if w.dtype == torch.uint8:
+            raw = ref.dequant_nvfp4(
+                w,
+                s,
+                tensors[f"{prefix}.w13_weight_amax"],
+                tensors[f"{prefix}.w13_weight_outer_scale_denominator"],
+            )
+        else:
+            raw = ref.dequant_mxfp8(w, s)
+        up, _ = ref.dequant_experts(tensors, prefix)
+        half = raw.shape[1] // 2
+        assert torch.equal(up[:, :half], raw[:, 0::2]), layer
+        assert torch.equal(up[:, half:], raw[:, 1::2]), layer
+        assert not torch.equal(up, raw)
+
+
 def test_name_map_adapter_reproduces_real_checkpoint_layout():
     rc = ref.load_ref_checkpoint()
     base = rc.build_name_map(24)

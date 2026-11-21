@@ -106,7 +106,8 @@ def dequant_mxfp8(w: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
 def dequant_experts(
     tensors: dict[str, torch.Tensor], prefix: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(gate_up [E, 2I, H], down [E, H, I])`` fp32 for ``<prefix>.mlp.experts``."""
+    """``(gate_up [E, 2I, H], down [E, H, I])`` fp32 for ``<prefix>.mlp.experts``;
+    ``gate_up`` rows are ``[gate; up]`` (the checkpoint's are interleaved)."""
     out = []
     for nm in ("w13", "w2"):
         w, s = tensors[f"{prefix}.{nm}_weight"], tensors[f"{prefix}.{nm}_weight_scale"]
@@ -121,7 +122,10 @@ def dequant_experts(
             )
         else:
             out.append(dequant_mxfp8(w, s))
-    return out[0], out[1]
+    # the checkpoint stores w13 rows as [g0, u0, g1, u1, ...]; the reference wants
+    # [gate rows; up rows] (transformers' Interleave(dim=1))
+    gate_up = load_ref_checkpoint().deinterleave_gate_up(out[0])
+    return gate_up, out[1]
 
 
 def read_checkpoint(ckpt_dir: Path) -> dict[str, torch.Tensor]:

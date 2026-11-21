@@ -17,6 +17,12 @@ Layout facts pinned against the checkpoint (single shard + separate MTP file):
   scales ``[E, N, K/16]``, per-expert ``amax``; global = ``amax / 2688``).
 * layers 20-23 store MXFP8 experts (``w13_weight`` F8_E4M3 ``[E, N, K]``, UE8M0
   block scales ``[E, N, K/32]``).
+* ``w13`` rows (and their block scales) are interleaved gate/up on disk
+  (``[g0, u0, g1, u1, ...]``; verified on the real weights, see
+  ``docs/rdna2/inkling2-port-spec.md``).  The reference's ``gate_up_proj`` is
+  ``[gate rows; up rows]`` (``chunk(2)``), so ``expert_pair`` de-interleaves, as
+  the transformers conversion ``Interleave(dim=1)`` does.  This module fills the
+  reference directly and never goes through that conversion.
 * ``attn_queries.{i}`` is the attention-residual query of layer ``i + 1``;
   full-attention layers (5, 11, 17, 23) carry three queries.
 * ``attn_res.output_query`` is the text model's ``final_input.query``.
@@ -91,15 +97,28 @@ def dequant_mxfp8_expert(w: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
     return (vals * scale.repeat_interleave(32, dim=-1)).to(torch.bfloat16)
 
 
+def deinterleave_gate_up(x: torch.Tensor) -> torch.Tensor:
+    """``[E, 2I, ...]`` rows ``[g0, u0, g1, u1, ...]`` -> ``[gate rows; up rows]``,
+    ``out[:, j * I + i] = x[:, 2 * i + j]`` (transformers' ``Interleave(dim=1)`` on
+    ``mlp.experts.w13_weight``)."""
+    e, n2 = x.shape[:2]
+    rest = tuple(x.shape[2:])
+    return x.reshape(e, n2 // 2, 2, *rest).transpose(1, 2).reshape(x.shape).contiguous()
+
+
 def expert_pair(
     ckpt: dict, layer: int, prefix: str, cache_dir: Path | None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(gate_up [E, 2I, H], down [E, H, I])`` for one layer.
 
-    ``cache_dir`` holds one ``l<layer>.safetensors`` per layer so a second run
-    does not pay the dequant again (~2 min per layer on CPU).
+    ``cache_dir`` holds one ``l<layer>.deint.safetensors`` per layer so a second run
+    does not pay the dequant again (~2 min per layer on CPU).  The ``.deint`` suffix
+    marks the gate/up row order of ``w13`` (caches written before the checkpoint's
+    interleaved layout was known hold the raw order and are never read).
     """
-    cached = cache_dir / f"l{layer}.safetensors" if cache_dir is not None else None
+    cached = (
+        cache_dir / f"l{layer}.deint.safetensors" if cache_dir is not None else None
+    )
     if cached is not None and cached.exists():
         from safetensors.torch import load_file
 
@@ -135,6 +154,7 @@ def expert_pair(
         else:
             up[e] = dequant_mxfp8_expert(w13[e], s13[e])
             down[e] = dequant_mxfp8_expert(w2[e], s2[e])
+    up = deinterleave_gate_up(up)
     if cached is not None:
         from safetensors.torch import save_file
 

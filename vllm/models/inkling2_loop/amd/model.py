@@ -311,6 +311,34 @@ _GATE_PARTS = (
     ("gain_weight", "message_gate_proj.weight"),
 )
 _LAYER_RE = re.compile(r"^model\.llm\.layers\.(\d+)\.(.+)$")
+_GATE_UP_RE = re.compile(r"^model\.layers\.\d+\.mlp\.w13_weight(_scale)?$")
+
+
+def copy_gate_up_deinterleaved(target: torch.Tensor, src: torch.Tensor) -> None:
+    """Copy a checkpoint ``w13_weight`` / ``w13_weight_scale`` (``[E, 2I, ...]``)
+    into ``target``, turning the on-disk row order into the model's.
+
+    The checkpoint interleaves the gate and up projections row by row
+    (``[g0, u0, g1, u1, ...]``); the model keeps ``[gate rows; up rows]`` so that
+    the kernels' output columns split as ``chunk(2)`` -> ``gate, up``.  This is the
+    transformers conversion ``Interleave(dim=1)`` of ``inkling2_loop`` (applied to
+    ``mlp.experts.w13_weight``): ``out[:, j * I + i] = in[:, 2 * i + j]``.  The
+    per-row block scales move with their rows; the per-expert ``amax`` is unaffected.
+    """
+    e, n2 = src.shape[:2]
+    rest = tuple(src.shape[2:])
+    rows = src.reshape(e, n2 // 2, 2, *rest).transpose(1, 2)  # [E, 2, I, ...]
+    target.view(e, 2, n2 // 2, *rest).copy_(rows)
+
+
+def _check_expert(name: str, src: torch.Tensor, target: torch.Tensor) -> None:
+    """Expert tensors are stored bit-exact (packed NVFP4 / MXFP8 bytes and their
+    scales), so a dtype or shape difference is a format mismatch, never a cast."""
+    if src.dtype != target.dtype or tuple(src.shape) != tuple(target.shape):
+        raise ValueError(
+            f"{name}: checkpoint {src.dtype} {tuple(src.shape)}, "
+            f"model {target.dtype} {tuple(target.shape)}"
+        )
 
 
 class Inkling2LoopForConditionalGeneration(nn.Module):
@@ -426,6 +454,12 @@ class Inkling2LoopForConditionalGeneration(nn.Module):
                 elif dst == "lm_head.weight":
                     # padded on disk; the reference head keeps the real ids only
                     target.copy_(tensor[: target.shape[0]].to(target.dtype))
+                elif _GATE_UP_RE.match(dst):
+                    _check_expert(name, tensor, target)
+                    copy_gate_up_deinterleaved(target, tensor)
+                elif ".mlp.w" in dst:
+                    _check_expert(name, tensor, target)
+                    target.copy_(tensor)
                 else:
                     target.copy_(tensor.to(target.dtype).view_as(target))
             loaded.add(dst)
