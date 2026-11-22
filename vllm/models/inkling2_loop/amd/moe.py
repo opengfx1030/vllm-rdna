@@ -44,6 +44,7 @@ This module only needs torch; the two vLLM helpers used by the kernel path
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 import torch
@@ -607,6 +608,34 @@ _BLOCK_M_BY_TOKENS = {
 _BLOCK_M_WIDE = 8
 
 
+#: Prefill expert GEMMs (``csrc/rocm/moe_prefill_bm_rdna2.cu``): 32-row work blocks
+#: grouped from the router's 8-padded layout, whole K, one dequantisation of every
+#: weight word per block (docs/rdna2/inkling2-moe-prefill-bm.md).  ON by default for
+#: chunks of at least ``VLLM_INKLING2_PREFILL_BM_MIN_TOKENS`` tokens (smaller ones keep
+#: the decode-shaped kernels above); ``VLLM_INKLING2_PREFILL_BM=0`` restores the
+#: decode-shaped kernels at every chunk size (A/B and rollback knob).
+#: ``VLLM_INKLING2_PREFILL_INT8=1`` (OFF by default, only where the dot2 prefill path is
+#: eligible) runs the NVFP4 layers as W4A8: int8 activations (one scale per row and
+#: 32 K), V_DOT4_I32_I8; the MXFP8 layers keep the fp16 dot2 kernel.  The numerics
+#: change: see the NLL table of the doc.
+def _prefill_switches(env) -> tuple[bool, bool, int]:
+    """(dot2 prefill kernels on, W4A8 on, token gate) from the environment."""
+    bm = env.get("VLLM_INKLING2_PREFILL_BM", "1") == "1"
+    int8 = bm and env.get("VLLM_INKLING2_PREFILL_INT8", "0") == "1"
+    return bm, int8, int(env.get("VLLM_INKLING2_PREFILL_BM_MIN_TOKENS", "128"))
+
+
+_PREFILL_BM, _PREFILL_INT8, _PREFILL_BM_MIN_TOKENS = _prefill_switches(os.environ)
+
+
+def _announce(message: str, *args: Any) -> None:
+    """One INFO line per process through the vLLM logger (imported lazily: this module
+    only needs torch)."""
+    from vllm.logger import init_logger
+
+    init_logger(__name__).info_once(message, *args)
+
+
 class Inkling2LoopMoE(_ExpertsKernel):
     """One Inkling-2-Mini MoE layer: fp32 sigmoid router + NVFP4 / MXFP8
     experts on the gfx1030 kernels.  ``forward`` takes flat ``[T, H]`` fp16.
@@ -755,6 +784,13 @@ class Inkling2LoopMoE(_ExpertsKernel):
         for name in self._expert_names:
             delattr(self, name)
         self._processed = True
+        _announce(
+            "Inkling-2 MoE prefill kernels: dot2 32-row %s, W4A8 %s, chunks of >= %d "
+            "tokens (VLLM_INKLING2_PREFILL_BM / _INT8 / _BM_MIN_TOKENS)",
+            "on" if _PREFILL_BM else "off",
+            "on" if _PREFILL_INT8 else "off",
+            _PREFILL_BM_MIN_TOKENS,
+        )
 
     # -- compute ----------------------------------------------------------
 
@@ -763,6 +799,14 @@ class Inkling2LoopMoE(_ExpertsKernel):
             if num_tokens <= limit:
                 return rows
         return _BLOCK_M_WIDE
+
+    def _prefill_supported(self) -> bool:
+        """Eligibility of the prefill kernels: K of both stages (hidden, this rank's
+        intermediate size) must be a multiple of 128 (NVFP4) / 32 (MXFP8).  TP > 1
+        shards the intermediate size (576 / 288): those layers keep the decode-shaped
+        kernels."""
+        align = 32 if self.quant_format == "mxfp8" else 128
+        return self.hidden_dim % align == 0 and self.intermediate_dim % align == 0
 
     def _gemm(
         self,
@@ -777,11 +821,58 @@ class Inkling2LoopMoE(_ExpertsKernel):
         block_size_m,
         mul_topk_weight,
         output_topk,
+        cta_info=None,
     ) -> None:
         from vllm import _custom_ops as ops
 
         qweight = getattr(self, f"{stage}_qweight")
         scales = getattr(self, f"{stage}_scales")
+        if cta_info is not None:
+            # prefill kernels: the work list replaces expert_ids and the padded count
+            if self.quant_format == "nvfp4" and _PREFILL_INT8:
+                a8, sa = ops.moe_prefill_act_quant_rdna2(a)
+                ops.moe_nvfp4_bm_i8_rdna2(
+                    a8,
+                    sa,
+                    c,
+                    qweight,
+                    scales,
+                    getattr(self, f"{stage}_globals"),
+                    topk_weights,
+                    sorted_token_ids,
+                    cta_info,
+                    top_k,
+                    mul_topk_weight,
+                    output_topk,
+                )
+            elif self.quant_format == "nvfp4":
+                ops.moe_nvfp4_bm_rdna2(
+                    a,
+                    c,
+                    qweight,
+                    scales,
+                    getattr(self, f"{stage}_globals"),
+                    topk_weights,
+                    sorted_token_ids,
+                    cta_info,
+                    top_k,
+                    mul_topk_weight,
+                    output_topk,
+                )
+            else:
+                ops.moe_mxfp8_bm_rdna2(
+                    a,
+                    c,
+                    qweight,
+                    scales,
+                    topk_weights,
+                    sorted_token_ids,
+                    cta_info,
+                    top_k,
+                    mul_topk_weight,
+                    output_topk,
+                )
+            return
         if self.quant_format == "nvfp4":
             ops.moe_nvfp4_gemm_rdna2(
                 a,
@@ -854,7 +945,8 @@ class Inkling2LoopMoE(_ExpertsKernel):
         ``x16``: fp16 ``[T, H]`` (the MoE input), ``out_all``: fp16 ``[T, H]``
         buffer that receives the output.  Chunks of at most ``ws.moe_chunk`` tokens
         share the scratch of ``ws`` (``Inkling2GlueWorkspace``): the router launch
-        zero-fills ``gate_up`` and the chunk's output, the GEMMs accumulate into them.
+        zero-fills ``gate_up`` (not on the prefill path, whose w13 kernel stores every
+        routed row) and the chunk's output, the GEMMs accumulate into them.
         """
         from vllm import _custom_ops as ops
 
@@ -865,7 +957,13 @@ class Inkling2LoopMoE(_ExpertsKernel):
         for s in range(0, T, step):
             e = min(s + step, T)
             tc = e - s
-            bm = self._default_block_size_m(tc, K)
+            prefill = (
+                _PREFILL_BM
+                and tc >= _PREFILL_BM_MIN_TOKENS
+                and self._prefill_supported()
+            )
+            # the prefill kernels group the router's 8-row blocks
+            bm = _BLOCK_M_WIDE if prefill else self._default_block_size_m(tc, K)
             m = ws.moe_views(tc, bm)
             x = x16 if tc == T else x16[s:e]
             out = out_all if tc == T else out_all[s:e]
@@ -882,9 +980,23 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 ws.route_counters,
                 bm,
                 scale,
-                zero1=m.gu,
+                # the prefill w13 kernel writes every routed row (plain stores)
+                zero1=None if prefill else m.gu,
                 zero2=out,
             )
+            cta = None
+            if prefill:
+                _announce(
+                    "Inkling-2 MoE prefill kernels ACTIVE: %s on a chunk of at least "
+                    "%d tokens",
+                    "W4A8 int8 NVFP4 + fp16 MXFP8"
+                    if _PREFILL_INT8
+                    else "fp16 dot2 32-row",
+                    _PREFILL_BM_MIN_TOKENS,
+                )
+                cta = ops.moe_prefill_cta_rdna2(
+                    m.expert_ids, ws.post_pad, self.num_experts, bm
+                )
             self._gemm(
                 "w13",
                 x,
@@ -897,6 +1009,7 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 bm,
                 False,
                 0,
+                cta_info=cta,
             )
             ops.inkling2_glue_swiglu(m.gu, m.act, self.gate_softcap, self.up_softcap)
             self._gemm(
@@ -911,5 +1024,6 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 bm,
                 True,
                 K,
+                cta_info=cta,
             )
         return out_all
