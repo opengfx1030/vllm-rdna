@@ -9,10 +9,11 @@ forward context, so the loop passes of layers 6-17 get independent caches
 * :class:`Inkling2KVOwner`   - K|V of one attention visit
   (``FullAttentionSpec`` or ``SlidingWindowSpec``), page ``[nb, H, bs, 2*D]``.
 * :class:`Inkling2ConvOwner` - raw conv inputs of the four short convolutions
-  (k, v, attn-output, mlp-output) packed head-major, one token per slot, as a
-  ``SlidingWindowSpec`` whose window is the kernel size (same scheme as
-  Inkling v1).  Storing raw *inputs* of the last ``k-1`` tokens (not a rolling
-  state) keeps the cache valid for chunked prefill and prefix-cache hits.
+  (k, v, attn-output, mlp-output) packed head-major as a position-addressed ring
+  of ``S`` rows per cache block (``Inkling2ConvSpec`` in :mod:`.conv_state`, one
+  state per block, model dtype).  Storing raw *inputs* of the last ``k-1`` tokens
+  (not a rolling state) keeps the cache valid for chunked prefill, prefix-cache
+  hits and rejected draft tokens.
 
 Both owners share one metadata builder; model code reads the metadata with
 ``attn_metadata[owner.prefix]``.
@@ -43,6 +44,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
+
+from .conv_state import Inkling2ConvSpec, conv_ring_rows
 
 # Stream order inside the packed per-head conv width.
 STREAM_K, STREAM_V, STREAM_ATTN, STREAM_MLP = 0, 1, 2, 3
@@ -215,6 +219,13 @@ class Inkling2Backend(AttentionBackend):
     def get_builder_cls() -> type[Inkling2MetadataBuilder]:
         return Inkling2MetadataBuilder
 
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # Block-outermost layouts let the planner pack the conv-state pages (a
+        # fraction of a KV page) next to the KV pages of a block instead of padding
+        # every page to the largest one.
+        return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
+
 
 def _register(owner: nn.Module, prefix: str, vllm_config: VllmConfig) -> None:
     ctx = vllm_config.compilation_config.static_forward_context
@@ -277,12 +288,14 @@ class Inkling2KVOwner(nn.Module, AttentionLayerBase):
 
 
 class Inkling2ConvOwner(nn.Module, AttentionLayerBase):
-    """Conv-input taps of one layer visit, packed head-major per token slot.
+    """Conv-input state of one layer visit: a ring of raw-input rows per block.
 
-    ``H = num_kv_heads`` heads of width ``D``; each of the four streams owns a
-    sub-range of ``D`` across all heads (a stream of ``C`` channels is viewed
-    ``[H, C/H]``).  ``D`` is padded to a power of two.  fp32 so that the
-    attention / mlp output taps are not rounded twice.
+    ``H = num_kv_heads`` heads; each of the four streams owns a column range of the
+    ``W = row_width`` columns of every head (a stream of ``C`` channels is viewed
+    ``[H, C/H]``).  ``state`` is the bound cache as ``[nb, H, S, W]`` in the model
+    dtype: the inputs of the conv are fp16 values on the serving path (GEMM outputs),
+    so the state is exact; position ``p`` of a request lives in the block
+    ``block_table[req, p // block_size]`` at ring row ``p % S``.
     """
 
     def __init__(
@@ -305,11 +318,33 @@ class Inkling2ConvOwner(nn.Module, AttentionLayerBase):
         for w in widths[:-1]:
             offs.append(offs[-1] + w)
         self.stream_ranges = tuple(zip(offs, widths))
-        raw = sum(widths)
-        self.head_size = 1 << (raw - 1).bit_length()
-        self.kv_cache = torch.tensor([])
+        self.row_width = sum(widths)
         vllm_config = get_current_vllm_config()
+        state_dtype = vllm_config.model_config.dtype
+        assert isinstance(state_dtype, torch.dtype), state_dtype  # config-resolved
+        self.state_dtype = state_dtype
+        self.block_size = vllm_config.cache_config.block_size
+        self.ring_rows = conv_ring_rows(vllm_config, kernel_size)
+        self.state = torch.tensor([])
+        self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
         _register(self, prefix, vllm_config)
+
+    @property
+    def kv_cache(self) -> torch.Tensor:
+        return self._kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, cache: torch.Tensor) -> None:
+        # The runner binds (and clears) the page view ``[nb, H, 1, S * W]``; the
+        # ops address the ring rows, so keep the ``[nb, H, S, W]`` view of it.
+        self._kv_cache = cache
+        self.state = (
+            cache
+            if cache.numel() == 0
+            else cache.view(
+                cache.shape[0], self.num_kv_heads, self.ring_rows, self.row_width
+            )
+        )
 
     def forward(self): ...
 
@@ -317,29 +352,32 @@ class Inkling2ConvOwner(nn.Module, AttentionLayerBase):
         return Inkling2Backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return SlidingWindowSpec(
-            block_size=self.kernel_size,
+        # the spec fixes the geometry the cache is bound with
+        self.block_size = block_size = vllm_config.cache_config.block_size
+        self.ring_rows = conv_ring_rows(vllm_config, self.kernel_size)
+        return Inkling2ConvSpec(
+            block_size=block_size,
             num_kv_heads=self.num_kv_heads,
-            head_size=self.head_size,
-            head_size_v=0,  # all streams packed into head_size
-            dtype=torch.float32,
+            head_size=self.row_width,
+            head_size_v=0,  # the page is one packed state per block
+            dtype=self.state_dtype,
             sliding_window=self.kernel_size,
+            tokens_per_state=block_size,
+            state_content_bytes=self.ring_rows
+            * self.row_width
+            * self.state_dtype.itemsize,
         )
 
-    @property
-    def block_size(self) -> int:
-        return self.kv_cache.shape[2]
 
-
-def _slots(
-    block_table: torch.Tensor,
+def _ring_rows(
+    owner: Inkling2ConvOwner,
+    md: Inkling2Metadata,
     req: torch.Tensor,
     pos: torch.Tensor,
-    block_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """(physical block, in-block offset) of ``pos`` for request ``req``."""
-    blk = block_table[req.long(), (pos // block_size).clamp(min=0)].long()
-    return blk, pos % block_size
+    """(physical block, ring row) of position ``pos`` of request ``req``."""
+    blk = md.block_table[req, (pos // owner.block_size).clamp(min=0)].long()
+    return blk, pos.clamp(min=0) % owner.ring_rows
 
 
 def conv_taps(
@@ -353,42 +391,56 @@ def conv_taps(
 
     ``x`` is ``[T, C]`` fp32 (this step's raw conv inputs).  Returns
     ``taps [k, T, C]`` with ``taps[lag]`` = input ``lag`` tokens back (``lag=0``
-    is ``x``); positions before the sequence start are zero.
+    is ``x``); positions before the sequence start are zero.  The history is read
+    before this step's inputs are written (:func:`conv_write`), as the HIP ops do.
     """
     T, C = x.shape
     k = owner.kernel_size
-    H = owner.num_kv_heads
     o0, w = owner.stream_ranges[stream]
-    cache = owner.kv_cache  # [nb, H, bs, D]
-    bs = cache.shape[2]
+    cache = owner.state  # [nb, H, S, W]
     seq_idx = md.seq_idx.long()
     first = md.query_start_loc[:-1].long()[seq_idx]  # [T] first row of the request
     row = torch.arange(T, device=x.device)
     p0 = positions[first]  # position of the request's first token this step
-    # Write this step's inputs before any read: a prefix-cache hit of this batch reads
-    # the history of its first tokens from blocks that another request of the batch only
-    # writes in this very step (the scheduler registers the blocks of the tokens it
-    # schedules before they are computed).  Slots of different positions never overlap.
-    slot = md.slot_mapping
-    ok = slot >= 0
-    s = slot.clamp(min=0)
-    blk_w, off_w = s // bs, s % bs
-    cur = cache[blk_w, :, off_w, o0 : o0 + w]
-    cache[blk_w, :, off_w, o0 : o0 + w] = torch.where(
-        ok[:, None, None], x.view(T, H, w), cur
-    )
     taps = [x]
     for lag in range(1, k):
         src_pos = positions - lag
         in_chunk = src_pos >= p0
         valid = src_pos >= 0
-        blk, off = _slots(md.block_table, seq_idx, src_pos, bs)
+        blk, r = _ring_rows(owner, md, seq_idx, src_pos)
         # In-chunk history comes from x, older history from the cache.
-        hist_cache = cache[blk, :, off, o0 : o0 + w].reshape(T, C)
+        hist_cache = cache[blk, :, r, o0 : o0 + w].reshape(T, C).to(x.dtype)
         hist_x = x[(row - lag).clamp(min=0)]
         t = torch.where(in_chunk[:, None], hist_x, hist_cache)
         taps.append(torch.where(valid[:, None], t, torch.zeros_like(t)))
+    conv_write(owner, stream, x, md)
     return torch.stack(taps, dim=0)
+
+
+def conv_write(
+    owner: Inkling2ConvOwner,
+    stream: int,
+    x: torch.Tensor,
+    md: Inkling2Metadata,
+) -> None:
+    """Write the raw inputs ``x [T, C]`` of ``stream`` into the ring: the last ``S``
+    positions of every (block, chunk) intersection (one writer per ring row)."""
+    T = x.shape[0]
+    H = owner.num_kv_heads
+    o0, w = owner.stream_ranges[stream]
+    cache = owner.state
+    B, S = owner.block_size, owner.ring_rows
+    seq_idx = md.seq_idx.long()
+    qs = md.query_start_loc[:-1].long()[seq_idx]
+    end = md.seq_lens.long()[seq_idx]  # context length after this step
+    pos = (
+        end
+        - (md.query_start_loc[1:].long()[seq_idx] - qs)
+        + (torch.arange(T, device=x.device) - qs)
+    )
+    keep = (pos + S >= torch.minimum(end, (pos // B + 1) * B)) & (md.seq_idx >= 0)
+    blk, r = _ring_rows(owner, md, seq_idx, pos)
+    cache[blk[keep], :, r[keep], o0 : o0 + w] = x[keep].view(-1, H, w).to(cache.dtype)
 
 
 def kv_write(

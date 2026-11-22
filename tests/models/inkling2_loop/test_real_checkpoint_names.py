@@ -248,18 +248,19 @@ def test_weights_fit_one_v620(real):
 
 @needs_real
 def test_kv_state_per_token(real):
-    """Per-token cost of the cache owners, from their ``get_kv_cache_spec``."""
+    """Cost of the cache owners, from their ``get_kv_cache_spec``."""
+    from vllm.models.inkling2_loop.amd.conv_state import Inkling2ConvSpec
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
         SlidingWindowSpec,
     )
 
     vllm_config = types.SimpleNamespace(
-        cache_config=types.SimpleNamespace(block_size=16)
+        cache_config=types.SimpleNamespace(block_size=16), speculative_config=None
     )
     full_per_token = 0
     swa_per_seq = 0
-    conv_per_seq = 0
+    conv_page = 0
     n_full = n_swa = n_conv = 0
     for layer in real.lm.model.layers:
         for owner in layer.kv_owners:
@@ -277,17 +278,19 @@ def test_kv_state_per_token(real):
                 full_per_token += spec.page_size_bytes // spec.block_size
         for owner in layer.conv_owners:
             spec = owner.get_kv_cache_spec(vllm_config)
+            assert isinstance(spec, Inkling2ConvSpec)
             n_conv += 1
-            conv_per_seq += (
-                spec.page_size_bytes // spec.block_size * spec.sliding_window
-            )
+            conv_page += spec.page_size_bytes
     print(
         f"[kv] full-attention owners {n_full}: {full_per_token} B/token; "
         f"sliding owners {n_swa}: {swa_per_seq / (1 << 20):.2f} MiB/sequence (window "
-        f"full); conv owners {n_conv}: {conv_per_seq / (1 << 20):.3f} MiB/sequence"
+        f"full); conv owners {n_conv}: {conv_page / 1024:.1f} KiB per cache block "
+        f"(a ring of 3 rows per kv head, whatever the block size)"
     )
     assert (n_full, n_swa, n_conv) == (8, 40, 48)
     assert full_per_token == 8 * 2 * 8 * 128 * 2  # K|V, 8 kv heads, D=128, fp16
+    # 8 kv heads x 3 rows x 832 channels (128 + 128 + 288 + 288) x fp16, 48 layers
+    assert conv_page == 48 * 8 * 3 * 832 * 2
 
 
 # ---------------------------------------------------------------------------

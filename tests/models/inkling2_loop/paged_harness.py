@@ -12,14 +12,19 @@ hands over, on torch CPU tensors:
   ``num_computed - window + 1`` are freed, and the forward block table shows them as the
   null block 0 (``BlockTables.gather_block_tables``);
 * cache pages in the engine's block-outermost ``[B, bs, H, C]`` layout seen as the
-  non-contiguous ``[B, H, bs, C]`` view the owners index;
+  non-contiguous ``[B, H, bs, C]`` view the owners index (the conv owners' ring pages
+  are ``[B, S, H, W]`` seen as ``[B, H, S, W]``);
 * NaN poison: caches start as NaN, pages are re-poisoned when they are allocated and
   when they are freed, and the null block must stay NaN forever.  Reading anything this
   request did not write turns the result into NaN; writing through another group's
   metadata hits the null-block check.
 * prefix-cache hits: ``PagedWorld.fork_prefix`` starts a request on blocks that
   another request computed (shared and reference counted; a windowed group keeps only
-  the blocks its window still needs, the blocks before are the null block).
+  the blocks its window still needs, the blocks before are the null block).  A hit never
+  reads blocks another request completes in the same step: ``Inkling2ConvStateManager``
+  defers it (``test_conv_state_manager.py``);
+* speculative rollback: ``PagedWorld.commit(work, accepted)`` keeps only the accepted
+  prefix of a verify step's tokens.
 """
 
 from __future__ import annotations
@@ -164,12 +169,14 @@ class PagedWorld:
                     self.device,
                 )
             else:
+                # the engine's cache block size is the owner's token span per block
+                owner.block_size = g.bs
                 owner.kv_cache = kv_cache(
                     num_blocks,
                     owner.num_kv_heads,
-                    g.bs,
-                    owner.head_size,
-                    torch.float32,
+                    owner.ring_rows,
+                    owner.row_width,
+                    kv_dtype,
                     self.device,
                 )
             g.owners.append(owner)
@@ -220,9 +227,13 @@ class PagedWorld:
                 out[owner.prefix] = md
         return out
 
-    def commit(self, work: list[tuple[int, int]]) -> None:
+    def commit(
+        self, work: list[tuple[int, int]], accepted: dict[int, int] | None = None
+    ) -> None:
+        """End of a step; ``accepted[r]`` of the ``n`` tokens of request ``r`` stay
+        computed (a verify step whose draft tokens were rejected), all by default."""
         for r, n in work:
-            self.computed[r] = self.computed.get(r, 0) + n
+            self.computed[r] = self.computed.get(r, 0) + (accepted or {}).get(r, n)
         for g in self.groups.values():  # nothing may ever be written to the null block
             for owner in g.owners:
                 assert torch.isnan(owner.kv_cache[0]).all(), (
@@ -242,24 +253,11 @@ class PagedWorld:
             g.finish(req)
         self.computed.pop(req, None)
 
-    def fork_prefix(
-        self, src: int, dst: int, num_tokens: int, in_flight: bool = False
-    ) -> None:
+    def fork_prefix(self, src: int, dst: int, num_tokens: int) -> None:
         """``dst`` is a prefix-cache hit of ``num_tokens`` tokens on the blocks of
-        ``src`` (call it before ``src`` frees them: its next ``metadata`` does).
-
-        ``in_flight``: the scheduler registers the blocks of the tokens it schedules
-        before they are computed, so a request of the same batch can hit blocks that
-        ``src`` only writes in the step both run in; ``src`` has allocated them and
-        computed nothing yet."""
+        ``src`` (call it before ``src`` frees them: its next ``metadata`` does)."""
         assert dst not in self.computed
-        if in_flight:
-            assert self.computed.get(src, 0) == 0
-            for g in self.groups.values():
-                g.tables.setdefault(src, [])
-                g.allocate(src, num_tokens)
-        else:
-            assert self.computed[src] >= num_tokens
+        assert self.computed[src] >= num_tokens
         for g in self.groups.values():
             g.share(src, dst, num_tokens)
         self.computed[dst] = num_tokens
@@ -276,13 +274,24 @@ def patched(obj, name, value):
 
 
 def fake_vllm_config(
-    model_dir, hf_config, dtype=torch.float16, max_num_batched_tokens: int = 1024
+    model_dir,
+    hf_config,
+    dtype=torch.float16,
+    max_num_batched_tokens: int = 1024,
+    block_size: int = 64,
+    num_speculative_tokens: int = 0,
 ):
     """The slice of ``VllmConfig`` that the owners and the model read."""
     return types.SimpleNamespace(
         model_config=types.SimpleNamespace(
             hf_config=hf_config, dtype=dtype, model=str(model_dir), revision=None
         ),
+        cache_config=types.SimpleNamespace(block_size=block_size),
+        speculative_config=types.SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens
+        )
+        if num_speculative_tokens
+        else None,
         compilation_config=types.SimpleNamespace(static_forward_context={}),
         scheduler_config=types.SimpleNamespace(
             max_num_batched_tokens=max_num_batched_tokens

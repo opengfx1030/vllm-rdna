@@ -24,8 +24,9 @@ Checks (a failed check makes the exit code 1):
 * ``--prefix-caching``: the engine's prefix cache is on, so ``decode`` / ``batch`` hit
   the blocks of the runs before them (the first decode step must equal the prefill-only
   run); ``prefix/*`` adds two identical requests in one batch on a cold cache (the
-  second hits blocks the first only writes in that very step), a warm repeat, and a new
-  tail after a shared prefix with and without the hit;
+  second would hit blocks the first only writes in that very step: the conv-state
+  manager defers it by one step), a warm repeat, and a new tail after a shared prefix
+  with and without the hit;
 * ``--path``: ``VLLM_INKLING2_PATH``: the torch reference or the native HIP kernels (the
   default on a GPU).  The HIP kernels need the attention shapes of
   ``make_tiny_checkpoint.py --head-dim 128 --d-rel 16 --num-heads 6 --num-kv-heads 2``;
@@ -363,8 +364,9 @@ def main() -> int:
     # ---- prefix caching: a hit must give the output of a cold run ------------
     if args.prefix_caching:
         longest = ids[-1]
-        # identical requests in one batch on a cold cache: the second one hits blocks
-        # the first one only writes in this very step
+        # identical requests in one batch on a cold cache: the second one would hit
+        # blocks the first one only writes in this very step, so the scheduler
+        # defers it (Inkling2ConvStateManager) and it hits them one step later
         llm.reset_prefix_cache()
         pair = generate([longest, longest], steps)
         worst = max(

@@ -1928,25 +1928,33 @@ def inkling2_sconv_static(
     out: torch.Tensor,
     conv_cache: torch.Tensor,
     block_table: torch.Tensor,
-    slot_mapping: torch.Tensor,
     seq_idx: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     stream_offset: int,
     num_kv_heads: int,
+    block_size: int,
+    write_state: bool,
 ) -> None:
+    """Static short conv over the paged conv state (``[blocks, H, S, W]`` fp16 ring).
+
+    ``write_state`` writes this step's raw inputs back from the same kernel and is
+    only valid when no request has more than one token; larger chunks follow this op
+    with ``inkling2_conv_state_write``.
+    """
     torch.ops._rocm_C.inkling2_sconv_static(
         x,
         weight,
         out,
         conv_cache,
         block_table,
-        slot_mapping,
         seq_idx,
         query_start_loc,
         seq_lens,
         stream_offset,
         num_kv_heads,
+        block_size,
+        write_state,
     )
 
 
@@ -1957,12 +1965,13 @@ def inkling2_sconv_dynamic(
     out: torch.Tensor,
     conv_cache: torch.Tensor,
     block_table: torch.Tensor,
-    slot_mapping: torch.Tensor,
     seq_idx: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     stream_offset: int,
     num_kv_heads: int,
+    block_size: int,
+    write_state: bool,
 ) -> None:
     torch.ops._rocm_C.inkling2_sconv_dynamic(
         x,
@@ -1971,12 +1980,40 @@ def inkling2_sconv_dynamic(
         out,
         conv_cache,
         block_table,
-        slot_mapping,
         seq_idx,
         query_start_loc,
         seq_lens,
         stream_offset,
         num_kv_heads,
+        block_size,
+        write_state,
+    )
+
+
+def inkling2_conv_state_write(
+    x: torch.Tensor,
+    conv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_idx: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    stream_offset: int,
+    num_kv_heads: int,
+    block_size: int,
+) -> None:
+    """Write the raw inputs of one stream into the conv state ring (the last
+    ``S`` positions of every (block, chunk) intersection), after the op that read
+    the history of this step."""
+    torch.ops._rocm_C.inkling2_conv_state_write(
+        x,
+        conv_cache,
+        block_table,
+        seq_idx,
+        query_start_loc,
+        seq_lens,
+        stream_offset,
+        num_kv_heads,
+        block_size,
     )
 
 
@@ -1989,7 +2026,6 @@ def inkling2_kv_prep(
     v_dyn: torch.Tensor | None,
     conv_cache: torch.Tensor,
     conv_block_table: torch.Tensor,
-    conv_slot_mapping: torch.Tensor,
     seq_idx: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -1997,6 +2033,8 @@ def inkling2_kv_prep(
     kv_slot_mapping: torch.Tensor,
     k_stream_offset: int,
     v_stream_offset: int,
+    conv_block_size: int,
+    write_state: bool,
     k_clip: float,
     rms_eps: float,
 ) -> None:
@@ -2009,7 +2047,6 @@ def inkling2_kv_prep(
         v_dyn,
         conv_cache,
         conv_block_table,
-        conv_slot_mapping,
         seq_idx,
         query_start_loc,
         seq_lens,
@@ -2017,6 +2054,8 @@ def inkling2_kv_prep(
         kv_slot_mapping,
         k_stream_offset,
         v_stream_offset,
+        conv_block_size,
+        write_state,
         k_clip,
         rms_eps,
     )
@@ -6243,12 +6282,13 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_attent
         out: torch.Tensor,
         conv_cache: torch.Tensor,
         block_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
         seq_idx: torch.Tensor,
         query_start_loc: torch.Tensor,
         seq_lens: torch.Tensor,
         stream_offset: int,
         num_kv_heads: int,
+        block_size: int,
+        write_state: bool,
     ) -> None:
         return
 
@@ -6260,12 +6300,27 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_attent
         out: torch.Tensor,
         conv_cache: torch.Tensor,
         block_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
         seq_idx: torch.Tensor,
         query_start_loc: torch.Tensor,
         seq_lens: torch.Tensor,
         stream_offset: int,
         num_kv_heads: int,
+        block_size: int,
+        write_state: bool,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_conv_state_write")
+    def _inkling2_conv_state_write_fake(
+        x: torch.Tensor,
+        conv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_idx: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        stream_offset: int,
+        num_kv_heads: int,
+        block_size: int,
     ) -> None:
         return
 
@@ -6279,7 +6334,6 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_attent
         v_dyn: torch.Tensor | None,
         conv_cache: torch.Tensor,
         conv_block_table: torch.Tensor,
-        conv_slot_mapping: torch.Tensor,
         seq_idx: torch.Tensor,
         query_start_loc: torch.Tensor,
         seq_lens: torch.Tensor,
@@ -6287,6 +6341,8 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_attent
         kv_slot_mapping: torch.Tensor,
         k_stream_offset: int,
         v_stream_offset: int,
+        conv_block_size: int,
+        write_state: bool,
         k_clip: float,
         rms_eps: float,
     ) -> None:

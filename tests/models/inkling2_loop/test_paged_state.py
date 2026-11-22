@@ -42,18 +42,24 @@ def _report(what: str, err: float) -> None:
     print(f"[paged-state] {what}: max|diff|={err:.3e}")
 
 
-@pytest.mark.parametrize("stream", [state_mod.STREAM_K, state_mod.STREAM_ATTN])
-@pytest.mark.parametrize("conv_bs", [4, 8])
-@pytest.mark.parametrize("seed", [0, 1])
-def test_conv_taps_matches_dense_short_conv(stream, conv_bs, seed):
+def _conv_fixture(stream: int, conv_bs: int, drafts: int, seed: int):
+    """A conv owner behind the engine emulation, the paged short conv of ``stream`` and
+    its dense oracle with the same random weights, and the stream width."""
     cfg = text_config()
     nkv, D, H, k = cfg.num_key_value_heads, cfg.head_dim, cfg.hidden_size, 4
     channels = (nkv * D, nkv * D, H, H)
-    fake = fake_vllm_config("none", None)
+    fake = fake_vllm_config(
+        "none",
+        None,
+        torch.float32,
+        block_size=conv_bs,
+        num_speculative_tokens=drafts,
+    )
     with patched(state_mod, "get_current_vllm_config", lambda: fake):
         owner = state_mod.Inkling2ConvOwner(
             num_kv_heads=nkv, stream_channels=channels, kernel_size=k, prefix="t.conv"
         )
+    assert owner.ring_rows == k - 1 + drafts
     world = PagedWorld(
         [(owner, "conv")], {"conv": (conv_bs, k)}, torch.float32, seed=seed
     )
@@ -64,6 +70,18 @@ def test_conv_taps_matches_dense_short_conv(stream, conv_bs, seed):
     with torch.no_grad():
         dense_conv.conv1d.weight.copy_(0.5 * torch.randn(C, 1, k, generator=gen))
         paged_conv.conv1d.weight.copy_(dense_conv.conv1d.weight)
+    return owner, world, paged_conv, dense_conv, C, gen
+
+
+@pytest.mark.parametrize("stream", [state_mod.STREAM_K, state_mod.STREAM_ATTN])
+@pytest.mark.parametrize("conv_bs", [4, 8, 16])
+@pytest.mark.parametrize("drafts", [0, 3])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_conv_taps_matches_dense_short_conv(stream, conv_bs, drafts, seed):
+    owner, world, paged_conv, dense_conv, C, gen = _conv_fixture(
+        stream, conv_bs, drafts, seed
+    )
+    k = owner.kernel_size
     lengths = [37, 11, 70]
     xs = [torch.randn(n, C, generator=gen) for n in lengths]
     with torch.no_grad():
@@ -91,50 +109,88 @@ def test_conv_taps_matches_dense_short_conv(stream, conv_bs, seed):
 
 @pytest.mark.parametrize("stream", [state_mod.STREAM_K, state_mod.STREAM_ATTN])
 @pytest.mark.parametrize("conv_bs", [4, 8])
-@pytest.mark.parametrize("hit_first", [False, True])
-def test_conv_taps_of_a_prefix_hit_on_blocks_written_in_the_same_step(
-    stream, conv_bs, hit_first
-):
-    """The scheduler registers the blocks of the tokens it schedules before they are
-    computed, so a request of the batch can hit blocks that another request writes in
-    this very step: the conv history of its first tokens is read from those blocks, so
-    ``conv_taps`` has to write the inputs of the step before it reads."""
-    cfg = text_config()
-    nkv, D, H, k = cfg.num_key_value_heads, cfg.head_dim, cfg.hidden_size, 4
-    channels = (nkv * D, nkv * D, H, H)
-    fake = fake_vllm_config("none", None)
-    with patched(state_mod, "get_current_vllm_config", lambda: fake):
-        owner = state_mod.Inkling2ConvOwner(
-            num_kv_heads=nkv, stream_channels=channels, kernel_size=k, prefix="t.conv"
-        )
-    world = PagedWorld([(owner, "conv")], {"conv": (conv_bs, k)}, torch.float32)
-    C = channels[stream]
-    gen = torch.Generator().manual_seed(0)
-    paged_conv = attn_mod.StaticSconv(C, k)
-    dense_conv = dense.ShortConvolution(C, k)
-    with torch.no_grad():
-        dense_conv.conv1d.weight.copy_(0.5 * torch.randn(C, 1, k, generator=gen))
-        paged_conv.conv1d.weight.copy_(dense_conv.conv1d.weight)
-    n, hit = 70, 64
+@pytest.mark.parametrize("hit_blocks", [1, 2, 5])
+def test_conv_taps_of_a_prefix_hit(stream, conv_bs, hit_blocks):
+    """A hit starts on blocks another request computed (a step earlier; the manager
+    defers same-step hits): its first tokens take the conv history from the ring rows
+    at the end of the last hit block, which the owner wrote when it computed them."""
+    owner, world, paged_conv, dense_conv, C, gen = _conv_fixture(stream, conv_bs, 0, 0)
+    n, hit = 70, hit_blocks * conv_bs
     x_all = torch.randn(n, C, generator=gen)
     with torch.no_grad():
         want = dense_conv(x_all)
-    world.fork_prefix(0, 1, hit, in_flight=True)
-    work = [(0, n), (1, n - hit)]
-    if hit_first:
-        work.reverse()
-    first = {0: 0, 1: hit}  # first position each request computes
+    cut = min(13, hit)
+    for a, b in ((0, cut), (cut, hit)):  # the owner computes the hit in two chunks
+        if b <= a:
+            continue
+        work = [(0, b - a)]
+        md = world.metadata(work)["t.conv"]
+        with torch.no_grad():
+            state_mod.conv_taps(owner, stream, x_all[a:b], world.positions(work), md)
+        world.commit(work)
+    world.fork_prefix(0, 1, hit)
+    work = [(1, n - hit)]
     md = world.metadata(work)["t.conv"]
-    x = torch.cat([x_all[first[r] :] for r, _ in work])
     with torch.no_grad():
-        taps = state_mod.conv_taps(owner, stream, x, world.positions(work), md)
+        taps = state_mod.conv_taps(
+            owner, stream, x_all[hit:], world.positions(work), md
+        )
         y = paged_conv.forward_taps(taps)
-    at = 0
-    for r, count in work:
-        err = float((y[at : at + count] - want[first[r] :]).abs().max())
-        _report(f"same-step hit stream={stream} bs={conv_bs} request {r}", err)
-        assert err < UNIT_TOL
-        at += count
+    err = float((y - want[hit:]).abs().max())
+    _report(f"prefix hit stream={stream} bs={conv_bs} blocks={hit_blocks}", err)
+    assert err < UNIT_TOL
+
+
+def _verify_steps(stream, conv_bs, drafts, ring_drafts, seed):
+    """Accepted-prefix semantics: prompt, then verify steps of ``1 + drafts`` tokens
+    of which a random prefix is accepted; the rejected tokens carry junk inputs and
+    are recomputed by the next step.  Returns the worst error of the accepted
+    outputs against the dense short conv of the accepted sequence."""
+    owner, world, paged_conv, dense_conv, C, gen = _conv_fixture(
+        stream, conv_bs, ring_drafts, seed
+    )
+    rng = random.Random(seed)
+    N = 90
+    truth = torch.randn(N, C, generator=gen)
+    with torch.no_grad():
+        want = dense_conv(truth)
+    worst, pos, first = 0.0, 0, True
+    while pos < N:
+        n_tok = 9 if first else 1 + drafts
+        accepted = n_tok if first else rng.randint(1, n_tok)
+        accepted = min(accepted, N - pos)
+        x = torch.cat(
+            [truth[pos : pos + accepted], 10 * torch.randn(n_tok - accepted, C)]
+        )
+        work = [(0, n_tok)]
+        md = world.metadata(work)["t.conv"]
+        with torch.no_grad():
+            taps = state_mod.conv_taps(owner, stream, x, world.positions(work), md)
+            y = paged_conv.forward_taps(taps)
+        err = float((y[:accepted] - want[pos : pos + accepted]).abs().max())
+        worst = max(worst, err)
+        world.commit(work, accepted={0: accepted})
+        pos += accepted
+        first = False
+    return worst
+
+
+@pytest.mark.parametrize("stream", [state_mod.STREAM_K, state_mod.STREAM_MLP])
+@pytest.mark.parametrize("conv_bs", [4, 16])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_conv_taps_after_rejected_draft_tokens(stream, conv_bs, seed):
+    worst = _verify_steps(stream, conv_bs, drafts=4, ring_drafts=4, seed=seed)
+    _report(f"rejected drafts stream={stream} bs={conv_bs}", worst)
+    assert worst < UNIT_TOL
+
+
+@pytest.mark.parametrize("conv_bs", [4, 16])
+def test_a_ring_without_rows_for_the_drafts_loses_the_history(conv_bs):
+    """Negative control: rows ``p % 3`` of a ring sized for no drafts are overwritten
+    by the rejected tokens, so the same scenario must break (``S = k - 1 + drafts``
+    is what keeps the accepted prefix intact)."""
+    worst = _verify_steps(state_mod.STREAM_K, conv_bs, drafts=4, ring_drafts=0, seed=0)
+    assert worst > 1e-2, worst
 
 
 @pytest.mark.parametrize("window", [None, 16])
@@ -189,7 +245,9 @@ def _build_attention(kind: str, kv_bs: int, seed: int, conv_bs: int | None = Non
         cfg, layer
     )
     _randomize(oracle, seed)
-    fake = fake_vllm_config("none", None, torch.float32)
+    fake = fake_vllm_config(
+        "none", None, torch.float32, block_size=conv_bs or cfg.sconv_kernel_size
+    )
     with patched(state_mod, "get_current_vllm_config", lambda: fake):
         paged = attn_mod.Inkling2Attention(cfg, layer)
         nkv, D, H = paged.num_kv_heads, paged.head_dim, cfg.hidden_size

@@ -37,7 +37,8 @@ D_REL = 16
 WINDOW = 1024
 REL_EXTENT = 1024
 KV_BLOCK = 64
-CONV_BLOCK = 4
+CONV_BLOCK = 64  # tokens per conv-state block (= the KV block size)
+CONV_RING = 3  # ring rows per block: k - 1 (no speculative tokens)
 Q_CLIP = 22.627416997969522
 REL_CLIP = 8.0
 CFG = types.SimpleNamespace(
@@ -48,7 +49,7 @@ CFG = types.SimpleNamespace(
     rms_norm_eps=1e-6,
 )
 STREAMS = ((0, D), (D, D), (2 * D, 288), (2 * D + 288, 288))  # TP=1 widths
-DPAD = 1024
+ROW_W = sum(width for _, width in STREAMS)  # conv-state columns per head
 
 
 def cdiv(a, b):
@@ -140,11 +141,11 @@ class World:
         self.kv_owner = types.SimpleNamespace(kv_cache=self.kv, head_dim=D)
         if not conv:
             return
-        # conv world (block size 4)
+        # conv state: fp16 ring pages [blocks, H, ring, W]
         cb = [cdiv(L, CONV_BLOCK) for L in seq_lens]
         conv_pages = sum(cb) + 1
         self.conv = engine_cache(
-            conv_pages, NKV, CONV_BLOCK, DPAD, torch.float32, "rand"
+            conv_pages, NKV, CONV_RING, ROW_W, torch.float16, "rand"
         )
         cperm = torch.randperm(conv_pages - 1, device="cuda", generator=g) + 1
         self.conv_table = torch.zeros(self.R, max(cb), dtype=torch.int32, device="cuda")
@@ -152,10 +153,9 @@ class World:
         for r in range(self.R):
             self.conv_table[r, : cb[r]] = cperm[i : i + cb[r]].int()
             i += cb[r]
-        self.conv_slot = slots(self.conv_table, CONV_BLOCK)
         self.md_conv = state_mod.Inkling2Metadata(
             block_table=self.conv_table,
-            slot_mapping=self.conv_slot,
+            slot_mapping=self.kv_slot,  # unused by the conv state
             seq_lens=self.seq_lens_t,
             query_start_loc=self.qsl,
             seq_idx=self.seq_idx,
@@ -166,9 +166,13 @@ class World:
         )
         self.conv_owner = types.SimpleNamespace(
             kv_cache=self.conv,
+            state=self.conv,
             kernel_size=4,
             num_kv_heads=NKV,
             stream_ranges=STREAMS,
+            block_size=CONV_BLOCK,
+            ring_rows=CONV_RING,
+            row_width=ROW_W,
         )
         self.xk = rnd(T, NKV * D, scale=2.0)
         self.xv = rnd(T, NKV * D, scale=2.0)
@@ -223,24 +227,42 @@ def kernel_attention(w: World, splits=None):
 
 
 def kernel_kv_prep(w: World, dynamic: bool):
+    """The serving sequence: ``inkling2_kv_prep``; a chunk of several tokens per
+    request writes its conv state afterwards (``inkling2_conv_state_write`` per
+    stream)."""
     wk = w.dyn_static_w if dynamic else w.kv_w
     dyn = w.dyn_w if dynamic else None
+    fused = max(w.q_lens) == 1
 
     def call():
         ops.inkling2_kv_prep(
-            w.xk, w.xv, wk, wk, dyn, dyn, w.conv, w.conv_table, w.conv_slot,
-            w.seq_idx, w.qsl, w.seq_lens_t, w.kv, w.kv_slot, 0, D, Q_CLIP, 1e-6,
+            w.xk, w.xv, wk, wk, dyn, dyn, w.conv, w.conv_table, w.seq_idx,
+            w.qsl, w.seq_lens_t, w.kv, w.kv_slot, 0, D, CONV_BLOCK, fused,
+            Q_CLIP, 1e-6,
         )  # fmt: skip
+        if not fused:
+            for x, off in ((w.xk, 0), (w.xv, D)):
+                ops.inkling2_conv_state_write(
+                    x, w.conv, w.conv_table, w.seq_idx, w.qsl, w.seq_lens_t,
+                    off, NKV, CONV_BLOCK,
+                )  # fmt: skip
 
     return call
 
 
 def kernel_sconv(w: World):
+    fused = max(w.q_lens) == 1
+
     def call():
         ops.inkling2_sconv_static(
-            w.x_post, w.conv_w, w.post_out, w.conv, w.conv_table, w.conv_slot,
-            w.seq_idx, w.qsl, w.seq_lens_t, STREAMS[2][0], NKV,
+            w.x_post, w.conv_w, w.post_out, w.conv, w.conv_table, w.seq_idx,
+            w.qsl, w.seq_lens_t, STREAMS[2][0], NKV, CONV_BLOCK, fused,
         )  # fmt: skip
+        if not fused:
+            ops.inkling2_conv_state_write(
+                w.x_post, w.conv, w.conv_table, w.seq_idx, w.qsl, w.seq_lens_t,
+                STREAMS[2][0], NKV, CONV_BLOCK,
+            )  # fmt: skip
 
     return call
 

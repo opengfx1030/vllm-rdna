@@ -3,8 +3,8 @@
 """fp64 reference tests for the Inkling-2-Mini gfx1030 attention core.
 
 Ops under test (``csrc/rocm/inkling2_attn_rdna2.cu``, ``torch.ops._rocm_C``):
-``inkling2_sconv_static``, ``inkling2_sconv_dynamic``, ``inkling2_kv_prep`` and
-``inkling2_attention``.
+``inkling2_sconv_static``, ``inkling2_sconv_dynamic``, ``inkling2_conv_state_write``,
+``inkling2_kv_prep`` and ``inkling2_attention``.
 
 The oracle is torch/CPU float64 written from the model semantics (the eager
 torch path in ``vllm/models/inkling2_loop/amd/attention.py``); the CPU tests
@@ -188,12 +188,28 @@ def test_conv_oracle_matches_repo_modules():
 # ---------------------------------------------------------------------------
 # conv worlds
 # ---------------------------------------------------------------------------
+def conv_keeps(p: int, p1: int, bs: int, ring: int) -> bool:
+    """Whether position ``p`` of a chunk that ends at ``p1`` writes its ring row: only
+    the last ``ring`` positions of the intersection of the chunk with a block (one
+    writer per row; the rows of earlier positions would be overwritten anyway)."""
+    return p + ring >= min(p1, (p // bs + 1) * bs)
+
+
 class ConvWorld:
-    """Paged conv-input cache world for one or more streams of one layer.
+    """Paged conv-state world for one or more streams of one layer.
 
     ``streams`` is a list of ``(offset, width, dtype)``; stream s has
-    ``C = nkv * width`` channels.  The cache holds only the (up to) three
-    history tokens of each request; everything else is NaN.
+    ``C = nkv * width`` channels and ``dtype`` is the dtype of the raw input ``x`` the
+    op gets.  The state is fp16 ``[pages, nkv, ring, W]`` (``W`` = the widest
+    ``offset + width``): the block ``p // bs`` of a request holds position ``p`` in ring
+    row ``p % ring``.  The cache
+    holds the (up to) ``k - 1`` history positions of each request -- the whole ring with
+    ``fill_ring`` -- everything else is NaN; blocks wholly below the history are the
+    null block, as the engine's forward block table shows them.
+
+    Raw inputs are fp16-representable (the serving path's conv inputs are fp16 GEMM
+    outputs); ``exact_fp32`` keeps fp32 streams at full precision: the history is then
+    read back rounded to fp16, the taps inside the chunk stay exact.
     """
 
     def __init__(
@@ -204,61 +220,70 @@ class ConvWorld:
         nkv,
         streams,
         bs,
+        ring=KSIZE - 1,
         seed=0,
         pad_tokens=0,
         md_short=0,
+        fill_ring=False,
+        exact_fp32=False,
     ):
         gen = torch.Generator().manual_seed(seed)
         self.q_lens, self.seq_lens = list(q_lens), list(seq_lens)
-        self.nkv, self.streams, self.bs = nkv, streams, bs
+        self.nkv, self.streams, self.bs, self.ring = nkv, streams, bs, ring
         self.R = len(q_lens)
         self.n_valid = sum(q_lens)
         self.T = self.n_valid + pad_tokens
         self.T_md = self.T - md_short  # tokens covered by the metadata tensors
         assert self.T_md >= self.n_valid
-        self.dpad = _ceil_div(max(o + w for o, w, _ in streams), 128) * 128
+        self.W = max(o + w for o, w, _ in streams)
         self.qsl = [0]
         for ql in q_lens:
             self.qsl.append(self.qsl[-1] + ql)
         nb = [_ceil_div(L, bs) for L in seq_lens]
-        self.num_pages = sum(nb) + 5
+        first = [max(0, L - ql - (KSIZE - 1)) // bs for L, ql in zip(seq_lens, q_lens)]
+        self.num_pages = sum(max(n - f, 0) for n, f in zip(nb, first)) + 5
         pool = PagePool(gen, self.num_pages)
         self.table = torch.zeros(self.R, max(nb) + 2, dtype=torch.int32)
         for r in range(self.R):
-            self.table[r, : nb[r]] = torch.tensor(pool.take(nb[r]), dtype=torch.int32)
-        # dense raw inputs per stream: [L, nkv * width] (fp16-representable
-        # values for fp16 streams); every third position is 4x louder, so the k
-        # L2 clip (threshold 22.6) engages on those conv outputs (norm ~ 50)
-        # and stays off on the others
+            if nb[r] > first[r]:
+                self.table[r, first[r] : nb[r]] = torch.tensor(
+                    pool.take(nb[r] - first[r]), dtype=torch.int32
+                )
+        # dense raw inputs per stream: [L, nkv * width]; every third position is 4x
+        # louder, so the k L2 clip (threshold 22.6) engages on those conv outputs
+        # (norm ~ 50) and stays off on the others
         loud = [
             1.0 + 3.0 * (torch.arange(L) % 3 == 0).float()[:, None] for L in seq_lens
         ]
         self.x_full = [
             [
-                (_randn(gen, L, nkv * width, scale=2.0) * loud[r]).to(dt).float()
+                (_randn(gen, L, nkv * width, scale=2.0) * loud[r])
+                .to(dt if exact_fp32 else torch.float16)
+                .float()
                 for r, L in enumerate(seq_lens)
             ]
             for _, width, dt in streams
         ]
+        # what the cache holds of a position: the input rounded to fp16
+        self.x_hist = [[x.half().float() for x in xs] for xs in self.x_full]
         self.cache0 = torch.full(
-            (self.num_pages, nkv, bs, self.dpad), float("nan"), dtype=torch.float32
+            (self.num_pages, nkv, ring, self.W), float("nan"), dtype=torch.float16
         )
+        depth = ring if fill_ring else KSIZE - 1
         for r in range(self.R):
             p0 = seq_lens[r] - q_lens[r]
-            for p in range(max(0, p0 - (KSIZE - 1)), p0):
+            for p in range(max(0, p0 - depth), p0):
                 page = int(self.table[r, p // bs])
+                if page == 0:
+                    continue  # below the window: the null block
                 for s, (off, width, _) in enumerate(streams):
-                    self.cache0[page, :, p % bs, off : off + width] = self.x_full[s][r][
-                        p
-                    ].view(nkv, width)
+                    self.cache0[page, :, p % ring, off : off + width] = self.x_hist[s][
+                        r
+                    ][p].view(nkv, width)
         self.seq_idx = torch.full((self.T_md,), -1, dtype=torch.int32)
-        self.slot = torch.full((self.T_md,), -1, dtype=torch.int64)
         for r in range(self.R):
-            p0 = seq_lens[r] - q_lens[r]
             for i in range(q_lens[r]):
-                t = self.qsl[r] + i
-                self.seq_idx[t] = r
-                self.slot[t] = int(self.table[r, (p0 + i) // bs]) * bs + (p0 + i) % bs
+                self.seq_idx[self.qsl[r] + i] = r
         self.qsl_t = torch.tensor(self.qsl, dtype=torch.int32)
         self.seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32)
         # chunk rows of the raw input (NaN rows for padding tokens)
@@ -284,17 +309,18 @@ class ConvWorld:
         ]
 
     def taps(self, s: int) -> torch.Tensor:
-        """[k, n_valid, C] float64 taps of stream s built from the dense inputs."""
+        """[k, n_valid, C] float64 taps of stream s from the dense inputs: the inputs of
+        this chunk exact, the history as the cache returns it (fp16)."""
         C = self.nkv * self.streams[s][1]
         taps = torch.zeros(KSIZE, self.n_valid, C, dtype=torch.float64)
         for r in range(self.R):
             p0 = self.seq_lens[r] - self.q_lens[r]
             for i in range(self.q_lens[r]):
                 for lag in range(KSIZE):
-                    if p0 + i - lag >= 0:
-                        taps[lag, self.qsl[r] + i] = self.x_full[s][r][
-                            p0 + i - lag
-                        ].double()
+                    q = p0 + i - lag
+                    if q >= 0:
+                        src = self.x_full if q >= p0 else self.x_hist
+                        taps[lag, self.qsl[r] + i] = src[s][r][q].double()
         return taps
 
     def oracle(self, s: int, dynamic: bool) -> torch.Tensor:
@@ -308,24 +334,26 @@ class ConvWorld:
         out[: self.n_valid] = ref
         return out
 
-    def expected_cache(self) -> torch.Tensor:
+    def expected_cache(self, streams=None) -> torch.Tensor:
+        """The cache after the chunks were written (``streams``: indices written)."""
         cache = self.cache0.clone()
         for r in range(self.R):
             p0 = self.seq_lens[r] - self.q_lens[r]
-            for i in range(self.q_lens[r]):
-                p = p0 + i
+            for p in range(p0, self.seq_lens[r]):
+                if not conv_keeps(p, self.seq_lens[r], self.bs, self.ring):
+                    continue
                 page = int(self.table[r, p // self.bs])
                 for s, (off, width, _) in enumerate(self.streams):
-                    cache[page, :, p % self.bs, off : off + width] = self.x_full[s][r][
-                        p
-                    ].view(self.nkv, width)
+                    if streams is None or s in streams:
+                        cache[page, :, p % self.ring, off : off + width] = self.x_hist[
+                            s
+                        ][r][p].view(self.nkv, width)
         return cache
 
     def meta(self):
         dev = "cuda"
         return (
             self.table.to(dev),
-            self.slot.to(dev),
             self.seq_idx.to(dev),
             self.qsl_t.to(dev),
             self.seq_lens_t.to(dev),
@@ -339,18 +367,26 @@ CONV_CASES = {
     "empty": ([2, 0, 1, 7], [9, 0, 33, 7]),
 }
 PADDINGS = [(0, 0), (5, 3)]  # (padding tokens, tokens missing from the metadata)
+# (conv block size, ring rows): the real model has 64 and 3 (10 with 7 draft tokens)
+GEOMETRIES = [(4, 3), (64, 3), (16, 10)]
+
+
+def _assert_cache(cache: torch.Tensor, want: torch.Tensor, what: str) -> None:
+    torch.testing.assert_close(
+        cache.cpu(), want, rtol=0, atol=0, equal_nan=True, msg=what
+    )
 
 
 @requires_kernels
 @pytest.mark.parametrize("case", list(CONV_CASES))
-@pytest.mark.parametrize("bs", [4, 8])
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
 @pytest.mark.parametrize(
     "nkv,width,dtype",
     [(8, 288, torch.float32), (4, 576, torch.float16), (2, 128, torch.float16)],
 )
 @pytest.mark.parametrize("padding", PADDINGS)
 @pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
-def test_sconv_static(case, bs, nkv, width, dtype, padding, token_major):
+def test_sconv_static(case, bs, ring, nkv, width, dtype, padding, token_major):
     ops = _ops()
     q_lens, seq_lens = CONV_CASES[case]
     offset = 128
@@ -360,36 +396,54 @@ def test_sconv_static(case, bs, nkv, width, dtype, padding, token_major):
         nkv=nkv,
         streams=[(offset, width, dtype)],
         bs=bs,
+        ring=ring,
+        fill_ring=ring > KSIZE - 1,
         pad_tokens=padding[0],
         md_short=padding[1],
         seed=3,
     )
-    table, slot, seq_idx, qsl, seq_lens_t = cw.meta()
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
+    x, wt = cw.x_rows[0].cuda(), cw.static_w[0].cuda()
+    ins = [x, wt, table, seq_idx, qsl, seq_lens_t]
+    snap = [t.clone() for t in ins]
+    want = cw.oracle(0, False)
+
+    # compute only: the state stays bit-identical; the write is a separate op
     cache = to_device_cache(cw.cache0, token_major)
     out = torch.full((cw.T, nkv * width), float("nan"), device="cuda")
-    x, wt = cw.x_rows[0].cuda(), cw.static_w[0].cuda()
-    ins = [x, wt, table, slot, seq_idx, qsl, seq_lens_t]
-    snap = [t.clone() for t in ins]
     ops.inkling2_sconv_static(
-        x, wt, out, cache, table, slot, seq_idx, qsl, seq_lens_t, offset, nkv
+        x, wt, out, cache, table, seq_idx, qsl, seq_lens_t, offset, nkv, bs, False
     )
     torch.accelerator.synchronize()
     assert_unchanged(ins, snap)
-    torch.testing.assert_close(
-        out.cpu().double(), cw.oracle(0, False), rtol=2e-5, atol=2e-5
+    torch.testing.assert_close(out.cpu().double(), want, rtol=2e-5, atol=2e-5)
+    _assert_cache(cache, cw.cache0, "compute-only call touched the state")
+    ops.inkling2_conv_state_write(
+        x, cache, table, seq_idx, qsl, seq_lens_t, offset, nkv, bs
     )
-    torch.testing.assert_close(
-        cache.cpu(), cw.expected_cache(), rtol=0, atol=0, equal_nan=True
-    )
+    torch.accelerator.synchronize()
+    assert_unchanged(ins, snap)
+    _assert_cache(cache, cw.expected_cache(), "state write")
+
+    if case == "decode":  # one token per request: the op reads, then writes, itself
+        cache = to_device_cache(cw.cache0, token_major)
+        out = torch.full((cw.T, nkv * width), float("nan"), device="cuda")
+        ops.inkling2_sconv_static(
+            x, wt, out, cache, table, seq_idx, qsl, seq_lens_t, offset, nkv, bs, True
+        )
+        torch.accelerator.synchronize()
+        assert_unchanged(ins, snap)
+        torch.testing.assert_close(out.cpu().double(), want, rtol=2e-5, atol=2e-5)
+        _assert_cache(cache, cw.expected_cache(), "fused write")
 
 
 @requires_kernels
 @pytest.mark.parametrize("case", list(CONV_CASES))
-@pytest.mark.parametrize("bs", [4, 8])
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
 @pytest.mark.parametrize("nkv", [8, 4, 2])
 @pytest.mark.parametrize("padding", PADDINGS)
 @pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
-def test_sconv_dynamic(case, bs, nkv, padding, token_major):
+def test_sconv_dynamic(case, bs, ring, nkv, padding, token_major):
     ops = _ops()
     q_lens, seq_lens = CONV_CASES[case]
     cw = ConvWorld(
@@ -398,26 +452,196 @@ def test_sconv_dynamic(case, bs, nkv, padding, token_major):
         nkv=nkv,
         streams=[(0, 128, torch.float16)],
         bs=bs,
+        ring=ring,
+        fill_ring=ring > KSIZE - 1,
         pad_tokens=padding[0],
         md_short=padding[1],
         seed=4,
     )
-    table, slot, seq_idx, qsl, seq_lens_t = cw.meta()
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
+    x, sw, dyn = cw.x_rows[0].cuda(), cw.dyn_static_w[0].cuda(), cw.dyn_w[0].cuda()
+    ins = [x, sw, dyn, table, seq_idx, qsl, seq_lens_t]
+    snap = [t.clone() for t in ins]
+    want = cw.oracle(0, True)
+
     cache = to_device_cache(cw.cache0, token_major)
     out = torch.full((cw.T, nkv * 128), float("nan"), device="cuda")
-    x, sw, dyn = cw.x_rows[0].cuda(), cw.dyn_static_w[0].cuda(), cw.dyn_w[0].cuda()
-    ins = [x, sw, dyn, table, slot, seq_idx, qsl, seq_lens_t]
-    snap = [t.clone() for t in ins]
     ops.inkling2_sconv_dynamic(
-        x, sw, dyn, out, cache, table, slot, seq_idx, qsl, seq_lens_t, 0, nkv
+        x, sw, dyn, out, cache, table, seq_idx, qsl, seq_lens_t, 0, nkv, bs, False
     )
     torch.accelerator.synchronize()
     assert_unchanged(ins, snap)
+    torch.testing.assert_close(out.cpu().double(), want, rtol=2e-5, atol=2e-5)
+    _assert_cache(cache, cw.cache0, "compute-only call touched the state")
+    ops.inkling2_conv_state_write(x, cache, table, seq_idx, qsl, seq_lens_t, 0, nkv, bs)
+    torch.accelerator.synchronize()
+    _assert_cache(cache, cw.expected_cache(), "state write")
+
+    if case == "decode":
+        cache = to_device_cache(cw.cache0, token_major)
+        out = torch.full((cw.T, nkv * 128), float("nan"), device="cuda")
+        ops.inkling2_sconv_dynamic(
+            x, sw, dyn, out, cache, table, seq_idx, qsl, seq_lens_t, 0, nkv, bs, True
+        )
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(out.cpu().double(), want, rtol=2e-5, atol=2e-5)
+        _assert_cache(cache, cw.expected_cache(), "fused write")
+
+
+# ---------------------------------------------------------------------------
+# conv state write
+# ---------------------------------------------------------------------------
+@requires_kernels
+@pytest.mark.parametrize("case", list(CONV_CASES))
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+@pytest.mark.parametrize("padding", PADDINGS)
+@pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
+@pytest.mark.parametrize("layers", [1, 5], ids=["page", "block5"])
+def test_conv_state_write(case, bs, ring, padding, token_major, layers):
+    """Two streams of different dtype and width into one page: each write touches only
+    its own columns and the rows the rule keeps, whatever the strides of the cache
+    (``block5``: the page sits between the pages of four other layers)."""
+    ops = _ops()
+    q_lens, seq_lens = CONV_CASES[case]
+    nkv = 4
+    cw = ConvWorld(
+        q_lens,
+        seq_lens,
+        nkv=nkv,
+        streams=[(0, 128, torch.float16), (128, 288, torch.float32)],
+        bs=bs,
+        ring=ring,
+        fill_ring=True,
+        pad_tokens=padding[0],
+        md_short=padding[1],
+        seed=7,
+    )
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
+    cache = to_device_cache(cw.cache0, token_major, layers)
+    xs = [cw.x_rows[0].cuda(), cw.x_rows[1].cuda()]
+    ins = [*xs, table, seq_idx, qsl, seq_lens_t]
+    snap = [t.clone() for t in ins]
+    ops.inkling2_conv_state_write(
+        xs[0], cache, table, seq_idx, qsl, seq_lens_t, 0, nkv, bs
+    )
+    torch.accelerator.synchronize()
+    _assert_cache(cache, cw.expected_cache(streams=[0]), "first stream")
+    ops.inkling2_conv_state_write(
+        xs[1], cache, table, seq_idx, qsl, seq_lens_t, 128, nkv, bs
+    )
+    torch.accelerator.synchronize()
+    assert_unchanged(ins, snap)
+    _assert_cache(cache, cw.expected_cache(), "both streams")
+
+
+@requires_kernels
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+def test_conv_state_rounds_fp32_inputs_to_fp16(bs, ring):
+    """An fp32 ``x`` that is not fp16-representable (nothing on the serving path
+    produces one) is stored rounded to nearest even; the taps inside the chunk are
+    exact, the history comes back rounded."""
+    ops = _ops()
+    q_lens, seq_lens = [37, 5, 1], [90, 5, 41]
+    nkv, width = 2, 128
+    cw = ConvWorld(
+        q_lens,
+        seq_lens,
+        nkv=nkv,
+        streams=[(0, width, torch.float32)],
+        bs=bs,
+        ring=ring,
+        exact_fp32=True,
+        seed=11,
+    )
+    assert not torch.equal(cw.x_full[0][0], cw.x_hist[0][0])
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
+    cache = to_device_cache(cw.cache0, False)
+    out = torch.full((cw.T, nkv * width), float("nan"), device="cuda")
+    x, wt = cw.x_rows[0].cuda(), cw.static_w[0].cuda()
+    ops.inkling2_sconv_static(
+        x, wt, out, cache, table, seq_idx, qsl, seq_lens_t, 0, nkv, bs, False
+    )
+    ops.inkling2_conv_state_write(x, cache, table, seq_idx, qsl, seq_lens_t, 0, nkv, bs)
+    torch.accelerator.synchronize()
     torch.testing.assert_close(
-        out.cpu().double(), cw.oracle(0, True), rtol=2e-5, atol=2e-5
+        out.cpu().double(), cw.oracle(0, False), rtol=2e-5, atol=2e-5
+    )
+    _assert_cache(cache, cw.expected_cache(), "rounded state")
+
+
+@requires_kernels
+@pytest.mark.parametrize("bs,drafts", [(4, 4), (16, 7), (64, 7)])
+@pytest.mark.parametrize("accepted", [1, 2, 4, 8])
+@pytest.mark.parametrize("fused_decode", [False, True], ids=["chunk", "decode"])
+def test_rejected_draft_tokens_keep_the_history_of_the_accepted_prefix(
+    bs, drafts, accepted, fused_decode
+):
+    """Verify step of ``1 + drafts`` tokens, of which ``accepted`` stay; the junk rows
+    of the rejected tokens are in the ring, then the next step reads its history from
+    it.  ``ring = k - 1 + drafts`` rows keep every accepted position readable, the
+    rejected rows are overwritten by the next step's own writes.  ``fused_decode``:
+    the same run with one-token steps (the ops write their own state)."""
+    accepted = min(accepted, 1 + drafts)
+    ops = _ops()
+    ring, nkv, width, p0, after = KSIZE - 1 + drafts, 2, 128, 37, 6
+    C = nkv * width
+    gen = torch.Generator().manual_seed(bs + accepted)
+    n_all = p0 + accepted + after
+    truth = (_randn(gen, n_all, C, scale=2.0)).half().float()
+    wt = _randn(gen, C, 1, KSIZE, scale=0.5).cuda()
+    nblk = _ceil_div(p0 + 1 + drafts, bs) + 2
+    pages = torch.randperm(nblk + 4, generator=gen)[:nblk] + 1  # never the null block
+    table = torch.zeros(1, nblk + 2, dtype=torch.int32)
+    table[0, :nblk] = pages.to(torch.int32)
+    cache = torch.full((nblk + 6, nkv, ring, width), float("nan"), dtype=torch.float16)
+    for p in range(max(0, p0 - ring), p0):  # the history of the first verify step
+        cache[int(table[0, p // bs]), :, p % ring, :] = truth[p].view(nkv, width).half()
+    cache_d, table_d = cache.cuda(), table.cuda()
+
+    def step(first, rows, count):
+        """Run ``count`` tokens starting at position ``first`` (inputs ``rows``)."""
+        x = rows.cuda().contiguous()
+        out = torch.full((count, C), float("nan"), device="cuda")
+        seq_idx = torch.zeros(count, dtype=torch.int32, device="cuda")
+        qsl = torch.tensor([0, count], dtype=torch.int32, device="cuda")
+        lens = torch.tensor([first + count], dtype=torch.int32, device="cuda")
+        write = fused_decode and count == 1
+        ops.inkling2_sconv_static(
+            x, wt, out, cache_d, table_d, seq_idx, qsl, lens, 0, nkv, bs, write
+        )
+        if not write:
+            ops.inkling2_conv_state_write(
+                x, cache_d, table_d, seq_idx, qsl, lens, 0, nkv, bs
+            )
+        torch.accelerator.synchronize()
+        return out.cpu().double()
+
+    junk = _randn(gen, 1 + drafts - accepted, C, scale=40.0).half().float()
+    verify = torch.cat([truth[p0 : p0 + accepted], junk])
+    if fused_decode:  # one-token steps: accept the first ``accepted``, then junk ones
+        outs = [step(p0 + i, verify[i : i + 1], 1) for i in range(1 + drafts)]
+        got_verify = torch.cat(outs[:accepted])
+        # rolling back one-token steps: the junk steps wrote ring rows of positions
+        # p0 + accepted ..; the next step recomputes position p0 + accepted
+    else:
+        got_verify = step(p0, verify, 1 + drafts)[:accepted]
+    got_next = step(p0 + accepted, truth[p0 + accepted :], after)
+    taps_x = truth.double()
+    wd = wt.cpu().squeeze(1).double()
+
+    def want(lo, hi):
+        taps = torch.zeros(KSIZE, hi - lo, C, dtype=torch.float64)
+        for i, p in enumerate(range(lo, hi)):
+            for lag in range(KSIZE):
+                if p - lag >= 0:
+                    taps[lag, i] = taps_x[p - lag]
+        return conv_static_oracle(taps, wd)
+
+    torch.testing.assert_close(
+        got_verify, want(p0, p0 + accepted), rtol=2e-5, atol=2e-5
     )
     torch.testing.assert_close(
-        cache.cpu(), cw.expected_cache(), rtol=0, atol=0, equal_nan=True
+        got_next, want(p0 + accepted, n_all), rtol=2e-5, atol=2e-5
     )
 
 
@@ -426,11 +650,12 @@ def test_sconv_dynamic(case, bs, nkv, padding, token_major):
 # ---------------------------------------------------------------------------
 @requires_kernels
 @pytest.mark.parametrize("case", list(CONV_CASES))
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
 @pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
 @pytest.mark.parametrize("nkv", [8, 2])
 @pytest.mark.parametrize("padding", PADDINGS)
 @pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
-def test_kv_prep(case, dynamic, nkv, padding, token_major):
+def test_kv_prep(case, bs, ring, dynamic, nkv, padding, token_major):
     ops = _ops()
     q_lens, seq_lens = CONV_CASES[case]
     ko, vo = 0, 128
@@ -439,7 +664,9 @@ def test_kv_prep(case, dynamic, nkv, padding, token_major):
         seq_lens,
         nkv=nkv,
         streams=[(ko, 128, torch.float16), (vo, 128, torch.float16)],
-        bs=4,
+        bs=bs,
+        ring=ring,
+        fill_ring=ring > KSIZE - 1,
         pad_tokens=padding[0],
         md_short=padding[1],
         seed=5,
@@ -459,9 +686,7 @@ def test_kv_prep(case, dynamic, nkv, padding, token_major):
             kv_slot[cw.qsl[r] + i] = (
                 kv_table[r][p // KV_BLOCK] * KV_BLOCK + p % KV_BLOCK
             )
-    table, slot, seq_idx, qsl, seq_lens_t = cw.meta()
-    cache = to_device_cache(cw.cache0, token_major)
-    kv_cache = to_device_cache(kv_cache0, token_major)
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
     if dynamic:
         k_w, v_w = cw.dyn_static_w[0], cw.dyn_static_w[1]
         k_dyn, v_dyn = cw.dyn_w[0].cuda(), cw.dyn_w[1].cuda()
@@ -470,15 +695,8 @@ def test_kv_prep(case, dynamic, nkv, padding, token_major):
         k_dyn = v_dyn = None
     xk, xv, kw, vw = (t.cuda() for t in (cw.x_rows[0], cw.x_rows[1], k_w, v_w))
     kv_slot_d = kv_slot.cuda()
-    ins = [xk, xv, kw, vw, k_dyn, v_dyn, table, slot, seq_idx, qsl, seq_lens_t]
-    ins.append(kv_slot_d)
+    ins = [xk, xv, kw, vw, k_dyn, v_dyn, table, seq_idx, qsl, seq_lens_t, kv_slot_d]
     snap = [None if t is None else t.clone() for t in ins]
-    ops.inkling2_kv_prep(
-        xk, xv, kw, vw, k_dyn, v_dyn, cache, table, slot, seq_idx, qsl, seq_lens_t,
-        kv_cache, kv_slot_d, ko, vo, Q_CLIP, RMS_EPS,
-    )  # fmt: skip
-    torch.accelerator.synchronize()
-    assert_unchanged(ins, snap)
 
     n = cw.n_valid
     k = cw.oracle(0, dynamic)[:n].view(n, nkv, HEAD_DIM)
@@ -495,17 +713,35 @@ def test_kv_prep(case, dynamic, nkv, padding, token_major):
             expected[kv_table[r][p // KV_BLOCK], :, p % KV_BLOCK, :] = rows[
                 cw.qsl[r] + i
             ]
-    got = kv_cache.cpu()
-    # slots that were not written must still be NaN, written ones match to
-    # fp16 rounding
-    assert torch.equal(torch.isnan(got), torch.isnan(expected))
-    keep = ~torch.isnan(expected)
-    torch.testing.assert_close(
-        got[keep].double(), expected[keep].double(), rtol=2e-3, atol=2e-3
-    )
-    torch.testing.assert_close(
-        cache.cpu(), cw.expected_cache(), rtol=0, atol=0, equal_nan=True
-    )
+
+    def run(write_state: bool):
+        cache = to_device_cache(cw.cache0, token_major)
+        kvc = to_device_cache(kv_cache0, token_major)
+        ops.inkling2_kv_prep(
+            xk, xv, kw, vw, k_dyn, v_dyn, cache, table, seq_idx, qsl, seq_lens_t,
+            kvc, kv_slot_d, ko, vo, bs, write_state, Q_CLIP, RMS_EPS,
+        )  # fmt: skip
+        if not write_state:
+            _assert_cache(cache, cw.cache0, "compute-only call touched the state")
+            for x, off in ((xk, ko), (xv, vo)):
+                ops.inkling2_conv_state_write(
+                    x, cache, table, seq_idx, qsl, seq_lens_t, off, nkv, bs
+                )
+        torch.accelerator.synchronize()
+        assert_unchanged(ins, snap)
+        got = kvc.cpu()
+        # slots that were not written must still be NaN, written ones match to
+        # fp16 rounding
+        assert torch.equal(torch.isnan(got), torch.isnan(expected))
+        keep = ~torch.isnan(expected)
+        torch.testing.assert_close(
+            got[keep].double(), expected[keep].double(), rtol=2e-3, atol=2e-3
+        )
+        _assert_cache(cache, cw.expected_cache(), "conv state")
+
+    run(False)
+    if case == "decode":  # one token per request: kv_prep writes the state itself
+        run(True)
 
 
 # ---------------------------------------------------------------------------
@@ -968,21 +1204,25 @@ def test_ops_trace_under_fake_tensors():
         out = fake(w.T, w.nh * HEAD_DIM, dtype=torch.float16)
         ws = fake(ops.inkling2_attention_workspace_numel(w.R, w.T, w.nh, 4, 2))
         launch_attention(w, a, out, ws, splits=(4, 2), max_query_len=max(w.q_lens))
-        meta = [fake(2, 4, dtype=i32), fake(T, dtype=i64), fake(T, dtype=i32)]
-        meta += [fake(3, dtype=i32), fake(2, dtype=i32)]
-        conv = fake(4, nkv, 4, C)
+        meta = [fake(2, 4, dtype=i32), fake(T, dtype=i32)]  # block table, seq_idx
+        meta += [fake(3, dtype=i32), fake(2, dtype=i32)]  # query_start_loc, seq_lens
+        conv = fake(4, nkv, 3, C, dtype=torch.float16)
         ops.inkling2_sconv_static(
-            fake(T, C), fake(C, 1, 4), fake(T, C), conv, *meta, 0, nkv
+            fake(T, C), fake(C, 1, 4), fake(T, C), conv, *meta, 0, nkv, 64, False
         )
         ops.inkling2_sconv_dynamic(
             fake(T, C), fake(4, C), fake(T, nkv * 4, dtype=torch.float16),
-            fake(T, C), conv, *meta, 0, nkv,
+            fake(T, C), conv, *meta, 0, nkv, 64, False,
         )  # fmt: skip
+        ops.inkling2_conv_state_write(
+            fake(T, C, dtype=torch.float16), conv, *meta, 0, nkv, 64
+        )
         kv = fake(4, nkv, 64, 2 * HEAD_DIM, dtype=torch.float16)
         ops.inkling2_kv_prep(
             fake(T, C, dtype=torch.float16), fake(T, C, dtype=torch.float16),
             fake(C, 1, 4), fake(C, 1, 4), None, None, conv, meta[0], meta[1],
-            meta[2], meta[3], meta[4], kv, fake(T, dtype=i64), 0, 128, Q_CLIP, RMS_EPS,
+            meta[2], meta[3], kv, fake(T, dtype=i64), 0, 128, 64, False, Q_CLIP,
+            RMS_EPS,
         )  # fmt: skip
 
 

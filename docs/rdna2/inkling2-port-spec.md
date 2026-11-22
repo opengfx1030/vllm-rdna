@@ -463,7 +463,10 @@ enabled (part B).  Kernel schemas and wiring recipes are in `inkling2-attn-kerne
    (`conv_passes = lambda md: 1`) all 8 `test_prefix_cache_hit_on_blocks_written_in_the_same_step`
    cases fail.  Residual corner: a batch of single-token chunks only where a one-token
    tail hit shares the step with the owner that completes that block; a csrc write /
-   read-phase split would remove it and the double launch.
+   read-phase split would remove it and the double launch.  **Superseded** (2026-11-22,
+   conv ring section below): the ops have `write_state` and the separate
+   `inkling2_conv_state_write`, `conv_passes` is gone, and a request that would hit blocks
+   written in the same step is deferred by the scheduler's conv-state manager.
 6. **Vision.** The served class is `Inkling2LoopForConditionalGeneration(Inkling2MultiModalMixin,
    Inkling2LoopTextForCausalLM, SupportsMultiModal)`; with `--limit-mm-per-prompt
    image=0` the tower is not built (the real run boots that way).  The vision kernels
@@ -609,9 +612,9 @@ Real checkpoint, first-step top-8 after the chat template, torch path -> HIP pat
   graphs with `1 + num_speculative_tokens`).  Padded requests need `seq_lens = 0`, padded
   tokens `slot_mapping = -1` (the attention doc also asks `seq_idx = -1`; the scratch reads
   padded tokens as request 0, harmless in eager where T is the real token count).
-* Decide `conv_passes` (twice-launched `kv_prep` / `sconv_static` for multi-token steps):
-  inside a graph it doubles those nodes; the clean fix is the csrc write / read-phase
-  split (item 5).
+* ~~Decide `conv_passes`~~ **Done** (2026-11-22 conv ring section): the conv ops no longer
+  need two passes; `write_state` is a launch constant (fused for `max_query_len == 1`
+  graphs, `inkling2_conv_state_write` after the conv for verify / mixed graphs).
 * The V2 runner must capture FULL graphs around `forward` only: `embed_input_ids`,
   `compute_logits` and `greedy_token_ids` allocate; `ws.bind(T)` views have to be created
   per captured size before capture.  `greedy_token_ids` is not wired into the sampler yet
@@ -626,3 +629,280 @@ Real checkpoint, first-step top-8 after the chat template, torch path -> HIP pat
 * Speed: the step is GPU-bound (93.9% busy); [INFERENCE] a graph gains at most ~6% of a
   batch-1 decode step, so the next gains are kernel time (attention input GEMV 27.6%,
   expert GEMMs 31%, `lm_head` 9.5%).
+
+## 2026-11-22 — conv and KV memory: a position-addressed conv ring, and the long-context budget (branch `feat/inkling2-conv`)
+
+Question: which cache layout holds Inkling-2-Mini's per-request state in the least memory
+on a V620 (29.98 GiB usable, 18.08 GiB of weights at TP=1), keeps prefix caching,
+speculative decoding and the tensor-parallel split, and what `max_model_len` does that buy
+per GPU?  Every planner number below is the engine's own planner
+(`vllm.v1.core.kv_cache_planning`) run on the real checkpoint config with the real cache
+owners (`tools/rdna/inkling2/kv_plan.py`: meta-device model, no weights, no GPU).  "One
+max-length request" is the memory the planner demands before it accepts a length (all
+groups; the pool block is 2 MiB at TP=1, 1 MiB at TP=2, 0.5 MiB at TP=4).  `max_num_seqs`
+2, layout `BLNHC`.  The planner holds `F` = 2 x `max_num_batched_tokens` ("mnbt") in-flight
+tokens per request (async scheduling), so mnbt appears in every table.
+
+### The problem in part A (HEAD 62b10cdd29)
+
+The conv owner was a `SlidingWindowSpec(window 4)` of per-token slots: fp32 rows
+`[H = 8, 1024]` per token (the four stream widths 128 / 128 / 288 / 288 padded to a power of
+two), i.e. 48 layers x 8 x 1024 x 4 B = **1.5 MiB per token**, in 8-token blocks of 2 MiB
+(6 groups of 8 layers).  The planner holds `window - 1 + F` tokens of it per request: 6 x
+513 blocks at `max_model_len` 4096 and 6 x 1025 blocks (12.0 GiB) from 8192 up, whatever the
+length:
+
+| max_model_len | TP = 1 | TP = 2 | TP = 4 |
+| ---: | ---: | ---: | ---: |
+| 4096 | 3467 blocks = 6.771 GiB | 3.386 GiB | 1.693 GiB |
+| 262,144 | 10,977 blocks = 21.439 GiB | 10.720 GiB | 5.360 GiB |
+| 1,048,576 | 23,265 blocks = 45.439 GiB | 22.720 GiB | 11.360 GiB |
+
+(mnbt 4096, 12 groups: five sliding-window KV groups of 8 layers, six conv groups, one
+full-attention group.)  The engine leaves 7.3 GiB for KV at TP=1 (see below), so the old
+layout could not serve a request of 8192 tokens (the conv groups alone are 12.0 GiB), and
+TP=2 needed 22.7 GiB at the model's maximum length.
+
+### The layout
+
+* **State per cache block, addressed by position.**  Position `p` of a request lives in the
+  cache block `block_table[req, p // 64]` at ring row `p % S` of a `[H, S, W]` fp16 page
+  (`W` = 832 = 128 + 128 + 288 + 288 per kv head, no padding): 8 x 3 x 832 x 2 B =
+  **39,936 B** per layer and block at TP=1, 48 layers = 1,916,928 B in one cache group (one
+  2 MiB pool block).  Only the raw inputs of the last `k - 1 = 3` tokens are conv state, so
+  a ring of 3 rows per block is enough, and because every block keeps its own tail a prefix
+  cache hit on any block resumes the conv exactly (the conv group is a window of 4 tokens,
+  so outside the in-flight tokens the hybrid allocator keeps only the newest block of a
+  request for it).
+* **`S = 3 + num_speculative_tokens`** (10 with 7 drafts).  A verify step computes `1 + k`
+  tokens and keeps a prefix; the rejected tokens' inputs also go into ring rows, so the ring
+  needs `k` rows more than the history or a rejection would overwrite history the next step
+  reads.  The ops are tested with rings of 3 and 10 rows; the model-level rollback tests run
+  4 drafts (a 7-row ring) at block sizes 4 / 16 / 64, and their negative control, a 3-row ring
+  under the same 5-token verify steps, fails the same check (mean |dlogp| 3.17 in that run
+  against about 0.03).  Cost: the page grows to 133,120 B at 7 drafts and the conv group
+  splits into 4 groups of 12 layers (the pool block does not change).
+* **fp16 state.**  The conv inputs of the serving path are fp16 GEMM outputs, so fp16 is
+  exact at half the bytes of fp32.  An fp32 input that is not fp16-representable (for
+  example a TP fp32 all-reduce result passed to the conv) is stored rounded to nearest even:
+  only its history taps carry the rounding.
+* **Writer rule.**  A step writes the raw input of every token that is among the last `S`
+  positions of the intersection of its chunk with its block (`p + S >= min(seq_len,
+  block_end(p))`): one writer per ring row, and exactly the rows the next reader needs (the
+  history of the next chunk and the tail of every completed block).  The conv ops read the
+  history first.  One-token steps write in the same launch (a thread reads its three history
+  rows, then writes its own); multi-token steps follow with `inkling2_conv_state_write` per
+  stream, because a long chunk would otherwise overwrite a row another thread of the same
+  launch has still to read.  This removed `conv_passes` (the twice-launched `kv_prep` /
+  `sconv_static` of part A).
+* **Layout `BLNHC` / `BLHNC`.**  Mixed page sizes (256 KiB x 8 layers of KV, 39.9 KiB x 48
+  layers of conv) only share pool blocks in the block-outermost layouts;
+  `Inkling2Backend.supported_kv_cache_layouts` lists them and the engine logs "Using BLNHC
+  KV cache layout".
+* **Same-step prefix hits are deferred.**  The scheduler registers the blocks of the tokens it
+  schedules before they are computed, so a request of the same batch can hit a block whose
+  tail rows the owner writes in that very step, and its conv history would be read before it
+  was written.  `Inkling2ConvStateManager` (a `SlidingWindowManager` registered for
+  `Inkling2ConvSpec`, as `MambaManager` is for state specs) reports "does not fit" for such a
+  request, so it is scheduled one step later and hits finished blocks.
+  `test_conv_state_manager.py` drives the real `KVCacheManager` (the plain sliding-window
+  manager is the control: it serves the hit in the same step).  Cost: one step of latency
+  for requests that arrive together with an identical prefix.
+* **Rejected.**  A per-request slot (Mamba style) cannot resume at a block boundary, i.e. it
+  loses prefix caching; a per-block tail of exactly 3 rows needs a copy-back for draft
+  rejection; fp32 or power-of-two padded rows cost 2x / 1.23x (79,872 / 49,152 B per page).
+
+### Planner numbers after the change
+
+mnbt 4096, `max_num_seqs` 2 (`F` = 8192), one max-length request:
+
+| max_model_len | TP | k = 0 | k = 7 (ring 10) | old |
+| ---: | ---: | ---: | ---: | ---: |
+| 4096 | 1 | 454 blocks = 0.887 GiB | 649 blocks = 1.268 GiB | 6.771 GiB |
+| 4096 | 2 / 4 | 0.443 / 0.222 GiB | 0.634 / 0.317 GiB | 3.386 / 1.693 GiB |
+| 262,144 | 1 | 4951 blocks = 9.670 GiB | 5341 blocks = 10.432 GiB | 21.439 GiB |
+| 262,144 | 2 / 4 | 4.835 / 2.417 GiB | 5.216 / 2.608 GiB | 10.720 / 5.360 GiB |
+| 1,048,576 | 1 | 17,239 blocks = 33.670 GiB | 17,629 blocks = 34.432 GiB | 45.439 GiB |
+| 1,048,576 | 2 / 4 | 16.835 / 8.417 GiB | 17.216 / 8.608 GiB | 22.720 / 11.360 GiB |
+
+Seven groups at k = 0 (ten at k = 7): five sliding-window KV groups of 8 layers with
+`cdiv(min(1023 + F, L), 64) + 1` blocks (145 from L = 9216 up), one conv group of all 48
+layers with `cdiv(min(3 + F, L), 64) + 1` blocks (130), one full-attention group of 8 layers
+with `L / 64` blocks.  The formulas reproduce the planner's block counts (454 at 4096, 4951
+at 262,144, 17,239 at 1,048,576).  What remains is inherent: full-attention KV costs **32
+KiB per token** at TP=1 (8 layers x 4 KiB), and the five sliding groups hold 725 blocks
+(1.42 GiB) whatever the length.  The conv state is 0.25 GiB at any length of 8192 or more
+(was 12.0 GiB).  mnbt is the other lever: mnbt 1024 (`F` = 2048) needs 49 blocks per sliding
+group and 34 for the conv group, and a request of 1,048,576 needs 16,663 blocks (32.545 GiB
+at TP=1, 16.272 / 8.136 GiB at TP=2 / 4; k = 7: 32.744 / 16.372 / 8.186 GiB).  mnbt 256
+needs 16,519 blocks (TP=2: 16.132 GiB; k = 7: 16.161 GiB).
+
+### What the engine leaves for KV (measured boots, real checkpoint, TP = 1)
+
+The extensible KV cache sizes itself after warmup (`measure_kv_cache_bytes` in
+`vllm/v1/worker/extensible_kv_cache.py`): KV = (free memory + committed KV) - margin -
+transient activations, with the margin `max(3 GiB on ROCm, 0.75 x transient)`.
+`gpu_memory_utilization` is not the binding term at 0.92 or above (the TP port's boots give
+the same 7.31 GiB at 0.92 and 0.99).  HIP 3, one V620, util 0.92, eager, k = 0,
+`--max-model-len -1` (the engine fits the length twice: before warmup from the available
+memory, and again after warmup from what is really left; only the second counts):
+
+| | mnbt 4096 | mnbt 1024 |
+| --- | ---: | ---: |
+| "Model loading took" (weights + the T-sized glue workspace) | 19.48 GiB | 18.68 GiB |
+| glue workspace (`Inkling2GlueWorkspace.nbytes()`, meta-device sum) | 1.030 GiB | 0.303 GiB |
+| available KV memory before warmup | 7.29 GiB | 8.11 GiB |
+| first auto-fit length (before warmup) | 184,064 | 247,680 |
+| free + committed after warmup | 8.76 + 0.89 GiB | 10.23 + 0.23 GiB |
+| kept for transient activations | 0.77 GiB | 0.77 GiB |
+| KV cache after warmup | 3012 blocks = 5.88 GiB | 3430 blocks = 6.70 GiB |
+| **final auto-fit `max_model_len`** | **137,984** | **201,600** |
+| engine "GPU KV cache size" | 138,029 tokens | 201,658 tokens |
+
+The planner gives the same lengths from the same budgets (`kv_plan.py --budget-gib`): 5.88
+GiB hold 137,920 tokens at mnbt 4096 (engine: 137,984), 6.70 GiB hold 201,664 at mnbt 1024
+(engine: 201,600), 7.29 / 8.11 GiB hold 184,128 / 247,872 (engine: 184,064 / 247,680).  The
+3 GiB margin is the largest slice that could still go to KV; it is an engine constant, not
+part of this change.  The part-A layout could not have booted at either length.
+
+### TP = 1: the needle run at the longest length that boots (HIP 3, mnbt 1024)
+
+`tools/rdna/inkling2/long_context_check.py` boots the checkpoint with `--max-model-len
+201600` (explicit; util 0.92, eager, prefix caching, k = 0, `max_num_seqs` 2) and sends a chat
+prompt of 181,434 tokens, 90% of it: numbered filler facts with one passphrase
+(`maple-quartz-47`, "Fact 6519") at depth 0.5.  The run is cold (`reset_prefix_cache`), then
+warm, then a 96-token decode on the warm cache:
+
+| Phase | Result |
+| --- | --- |
+| boot at 201,600 | OK in 40.4 s; device VRAM used 26.24 GiB of 29.98 GiB |
+| cold prefill, chunks of 1024 | 382.2 s = **475 tok/s** (181,434 tokens) |
+| warm prefill (hit on all but the last block) | 0.29 s |
+| decode at 181,434 tokens of context | **35.6 ms per token** (96 tokens in 3.7 s, minus the 0.29 s warm one-token run) |
+| needle | FOUND: the answer quotes "Fact 6519: the secret passphrase is maple-quartz-47" |
+| control, same needle in 4088 tokens (8.0 s with 96 decoded tokens) | FOUND |
+| peak device VRAM during the cold prefill / during the decode | 26.24 / 26.24 GiB (sysfs `mem_info_vram_used`, polled every 0.5 s) |
+
+Part A measured 1000 tokens of prefill in 1262 ms (792 tok/s) and 23.7 ms per decode step
+at a short context, so the 181k-deep run is at 60% of the prefill rate and +11.9 ms per
+decode step [INFERENCE: the attention benchmark gives 1.2 ms per full-attention layer visit
+at 131,072 tokens at TP=1, about 1.7 ms at 181k, x 8 visits = 13 ms, which is the order of
+the difference].  The device peak equals the post-boot level: of the 3.74 GiB the engine
+keeps free (the 3 GiB margin floor plus 0.77 GiB of transients) the run touched none that
+the 0.5 s polling could see.  Each GiB of KV is 32,768 tokens of full-attention context at
+TP=1 (32 KiB per token), so the margin floor is the lever for the TP=1 length and for TP=2
+at 1,048,576.
+
+**Experiment, not a shipped change: a 1 GiB margin.**  `long_context_check.py
+--kv-margin-gib 1.0` replaces `KV_CACHE_MARGIN_FLOOR_BYTES` in-process (the engine then runs
+inside the tool's process) and nothing else: util 0.92, mnbt 1024, k = 0.  After warmup the
+KV is 3884 blocks = 7.59 GiB, now bounded by the 27.59 GiB that util 0.92 requests (the
+margin would allow 10.46 - 1.0 - 0.77 = 8.69 GiB); the engine's auto-fit is **230,656**
+(planner for 7.59 GiB: 230,848) and the boot at that length is OK.  The needle run at 90%,
+207,586 tokens:
+
+| Phase | Result |
+| --- | --- |
+| cold prefill, chunks of 1024 | 459.8 s = 451 tok/s |
+| warm prefill | 0.23 s |
+| decode at 207,586 tokens of context | 37.4 ms per token |
+| needle / control (4088 tokens) | FOUND / FOUND |
+| device VRAM after boot / peak during prefill / peak during decode | 27.14 / 27.14 / 27.14 GiB (2.84 GiB of the card untouched) |
+
+With util 0.99 as well the same arithmetic leaves 8.69 GiB, i.e. 266,880 tokens at mnbt 1024
+[INFERENCE: planner only, that boot was not run].
+
+### TP = 2 / TP = 4: 1,048,576 tokens per GPU
+
+A rank holds `8 / tp` kv heads of every KV and conv cache, so the TP=1 numbers scale by
+`1 / tp` (16 KiB per token at TP=2, 8 KiB at TP=4, plus the fixed sliding and conv groups).
+Per-rank weights and budgets are the real-checkpoint boots of `Inkling2TP`
+(`runs/real/tp{2,4}_real_rdna.log`, `tp2_kv99_c256.log`; util 0.92, old conv layout, which
+changes neither the weights nor the activations); the table applies the planner of this
+branch:
+
+| TP | weights / rank | KV after warmup (engine sizing) | one max-length request at 1,048,576 (k = 0 / 7) | `max_model_len` that budget holds (k = 0 / 7) |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 (mnbt 1024) | 5.49 GiB | 17.34 - 17.38 GiB | 8.14 / 8.19 GiB | 1,048,576 with 9.2 GiB to spare |
+| 2 (mnbt 1024) | 9.69 GiB | 12.22 GiB | 16.27 / 16.37 GiB | 782,976 / 776,448 |
+| 2 (mnbt 256) | 9.45 GiB | 15.33 GiB (15.56 GiB in the lean run) | 16.13 / 16.16 GiB | 995,968 / 994,048 (1,011,072 / 1,009,152) |
+| 1 (mnbt 1024) | 18.08 GiB | 6.70 GiB | 32.54 / 32.74 GiB | 201,600 |
+
+* **TP = 4 holds the model's 1,048,576 tokens per GPU** with the engine's own sizing at mnbt
+  1024 (the TP boots' setting), with or without drafts.  mnbt 4096 needs 8.42 / 8.61 GiB,
+  also inside the 17.3 GiB [INFERENCE: that boot was not run].  Full-attention decode at
+  1,048,576 tokens is 2.5 ms per layer visit at TP=4 (kernel benchmark in
+  `inkling2-attn-kernels.md`), i.e. about 20 ms per token for the 8 visits [INFERENCE:
+  kernel time only, on top of the 23.7 ms part-A step].
+* **TP = 2 does not reach 1,048,576 with the current engine sizing**: it needs 16.27 GiB
+  (mnbt 1024) and gets 12.22 GiB; at mnbt 256 it needs 16.13 GiB and gets 15.33 GiB.  The
+  headroom after warmup is 17.14 GiB at mnbt 1024 (15.53 free + 1.61 committed) and 18.81
+  GiB at mnbt 256, of which the 3 GiB ROCm margin and the 1.91 / 0.48 GiB of transients are
+  taken first.  Even a zero margin cannot fit it at mnbt 1024 (17.14 - 1.91 = 15.23 GiB <
+  16.27); at mnbt 256 it fits if the margin is at most 2.2 GiB (18.81 - 0.48 - 16.13)
+  [INFERENCE: not booted at that length; it needs a smaller `KV_CACHE_MARGIN_FLOOR_BYTES`
+  on ROCm, a shared engine constant, and mnbt 256].  With the shipped margin the TP=2 length
+  is 995,968 (mnbt 256) or 782,976 (mnbt 1024).
+* **TP = 1 cannot**: 1,048,576 needs 32.5 - 34.4 GiB of KV per GPU on a 29.98 GiB card that
+  holds 18 GiB of weights; the 201,600 measured above is the length.
+
+### Validation
+
+Box `par1-cs25`, GPU runs on HIP 3 (one V620), other agents' jobs sharing the machine (the
+latencies are indicative).
+
+| Check | Result |
+| --- | --- |
+| CPU `tests/models/inkling2_loop` (`HIP_VISIBLE_DEVICES=` empty, the GPU files skip) | 491 passed, 54 skipped, 0 failed in 371 s (544 tests collected; 507 at HEAD: +34 ring cases in `test_paged_state.py`, +5 in the new `test_conv_state_manager.py`, -2 in `test_paged_model.py`, where the same-step prefix-hit cases became hits on blocks the owner completed inside a chunk) |
+| kernels `tests/kernels/attention/test_inkling2_attn_rdna2.py` | 668 passed in 327 s (604 conv-state cases over (block size, ring rows) = (4, 3), (64, 3), (16, 10), padded rows, one-token and multi-token chunks, fp16 and fp32 inputs, both page layouts; a fake-tensor trace of the four ops) |
+| GPU `test_serving_path_gpu.py` | 122 passed in 160 s (tiny HIP-shaped models at TP=1: prefill, chunked prefill, decode, prefix hits, draft rollback with a 7-row ring, and a negative control that fails the rollback check with a 3-row ring) |
+| engine, tiny checkpoints (`tiny_vllm_check.py`) | default, prefix caching, chunked, chunked + prefix: RESULT PASS; 8-expert prefix run RESULT PASS (two identical 70-token requests in one batch on a cold cache: ids equal the single run, max abs dlogp 0.091 against 0.243 run-to-run noise; warm-cache hit 0.0; hit against cold 0.061) |
+| engine, real checkpoint (`real_check.py --prefix-caching`) | PREFIX HIT PASS: first-step top-8 equal to part A (`<\|message_model\|>` 0.0, 䁱 -21.08, user -21.17, `<\|content_thinking\|>` -21.22), 1510-token prompt cold 1.98 s / warm 0.12 s, hit and cold runs generate the same ids; the log shows "Using BLNHC KV cache layout" and seven groups of 64-token blocks |
+| six-arch compile | gfx1030 gfx1100 gfx90a gfx942 gfx950 gfx1200: exit 0 and `llvm-objdump --offloading` lists all six code objects; gfx1030 conv kernels: `i2_sconv_kernel` 33-41 VGPR, `i2_state_write_kernel` 8-10, `i2_kv_prep_kernel` 61-74, no scratch, no LDS |
+| mutation checks | 13 of 13 conv mutants fail the conv tests: 8 ring mutants (keep rule, history / write ring row, history block, write before read, stream offset, head stride, hard-coded 3-row ring) and 5 re-applied tap-math mutants (`inkling2-attn-kernels.md` section 8) |
+| `uvx pre-commit run --files <changed files>` | clean, run twice |
+
+Conv op cost (CUDA-graph replay, microseconds, new / part A): `kv_prep` static q=1 4.9 / 4.4,
+q=1024 with its two state writes 24.7 / 35.1; `sconv_static` after the conv q=1 4.2 / 3.8,
+q=1024 with its write 23.7 / 39.5.  Ring addressing costs about 0.5 us on a decode launch; a
+prefill chunk gets cheaper because only the last rows of each block are written.
+
+### Risks and open items
+
+* TP=2 at 1,048,576 tokens needs an engine change outside this branch (the 3 GiB ROCm margin
+  floor in `extensible_kv_cache.py`, and mnbt 256); the numbers above say by how much, the TP=2
+  boot at that length is the next measurement.
+* An fp32 conv input (the TP all-reduce result) is stored rounded to fp16, history taps only
+  (relative 2^-11); a TP=1 against TP=2 logits comparison on the TP branch should expect it.
+* `Inkling2ConvStateManager` makes a request whose prefix is computed in the same batch wait
+  one scheduler step.
+* Graph capture: the conv ops read only `seq_idx`, `seq_lens`, `query_start_loc` and the conv
+  block table (no conv slot mapping); padded requests need `seq_idx = -1`; `write_state` is a
+  launch constant, fused for `max_query_len == 1` graphs and replaced by an
+  `inkling2_conv_state_write` launch after the conv in verify and mixed graphs
+  (`conv_writes_in_op(md)`).
+* `UniformTypeKVCacheSpecs.from_specs` would fold a conv spec into a plain
+  `SlidingWindowSpec` of window 4 if one existed; the real model has only window 1024.
+* `tools/pre_commit/test_tethering_allowlist.txt` (shared file) got the new
+  `test_conv_state_manager.py` entry.
+* Beyond 201,600 tokens only kernel tests cover the lengths (decode and verify kernels up to
+  1,048,576 tokens at TP=2 / 4 shapes); TP=2 / 4 serving at those lengths has not been booted.
+
+### Reproduction
+
+```bash
+# planner: groups, pool block, one max-length request, and the length a budget holds
+python tools/rdna/inkling2/kv_plan.py --ckpt ~/hfcache/inkling2-mini \
+    --max-model-len 262144 1048576 --max-num-batched-tokens 1024 --tp 1 2 4 \
+    --drafts 0 7 --budget-gib 6.7 12.22 17.34
+# TP=1 boot with the auto-fitted length, then the needle prompt at 90% of it
+HIP_VISIBLE_DEVICES=3 python tools/rdna/inkling2/long_context_check.py \
+    --ckpt ~/hfcache/inkling2-mini --chat-template-file \
+    ~/hfcache/inkling2-mini/chat_template.jinja --max-num-batched-tokens 1024 \
+    --max-model-len -1 --boot-only        # read "--max-model-len auto reduced ... to Y"
+HIP_VISIBLE_DEVICES=3 python tools/rdna/inkling2/long_context_check.py \
+    --ckpt ~/hfcache/inkling2-mini --chat-template-file \
+    ~/hfcache/inkling2-mini/chat_template.jinja --max-num-batched-tokens 1024 \
+    --max-model-len Y --frac 0.9 \
+    --vram-file /sys/bus/pci/devices/0000:dc:00.0/mem_info_vram_used
+```

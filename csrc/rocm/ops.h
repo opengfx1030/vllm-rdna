@@ -853,30 +853,37 @@ void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
 // See docs/rdna2/inkling2-attn-kernels.md.
 void inkling2_sconv_static(torch::Tensor x, torch::Tensor weight,
                            torch::Tensor out, torch::Tensor conv_cache,
-                           torch::Tensor block_table,
-                           torch::Tensor slot_mapping, torch::Tensor seq_idx,
+                           torch::Tensor block_table, torch::Tensor seq_idx,
                            torch::Tensor query_start_loc,
                            torch::Tensor seq_lens, int64_t stream_offset,
-                           int64_t num_kv_heads);
+                           int64_t num_kv_heads, int64_t block_size,
+                           bool write_state);
 
 void inkling2_sconv_dynamic(torch::Tensor x, torch::Tensor static_weight,
                             torch::Tensor dyn, torch::Tensor out,
                             torch::Tensor conv_cache, torch::Tensor block_table,
-                            torch::Tensor slot_mapping, torch::Tensor seq_idx,
+                            torch::Tensor seq_idx,
                             torch::Tensor query_start_loc,
                             torch::Tensor seq_lens, int64_t stream_offset,
-                            int64_t num_kv_heads);
+                            int64_t num_kv_heads, int64_t block_size,
+                            bool write_state);
+
+void inkling2_conv_state_write(torch::Tensor x, torch::Tensor conv_cache,
+                               torch::Tensor block_table, torch::Tensor seq_idx,
+                               torch::Tensor query_start_loc,
+                               torch::Tensor seq_lens, int64_t stream_offset,
+                               int64_t num_kv_heads, int64_t block_size);
 
 void inkling2_kv_prep(torch::Tensor xk, torch::Tensor xv,
                       torch::Tensor k_weight, torch::Tensor v_weight,
                       std::optional<torch::Tensor> k_dyn,
                       std::optional<torch::Tensor> v_dyn,
                       torch::Tensor conv_cache, torch::Tensor conv_block_table,
-                      torch::Tensor conv_slot_mapping, torch::Tensor seq_idx,
-                      torch::Tensor query_start_loc, torch::Tensor seq_lens,
-                      torch::Tensor kv_cache, torch::Tensor kv_slot_mapping,
-                      int64_t k_stream_offset, int64_t v_stream_offset,
-                      double k_clip, double rms_eps);
+                      torch::Tensor seq_idx, torch::Tensor query_start_loc,
+                      torch::Tensor seq_lens, torch::Tensor kv_cache,
+                      torch::Tensor kv_slot_mapping, int64_t k_stream_offset,
+                      int64_t v_stream_offset, int64_t conv_block_size,
+                      bool write_state, double k_clip, double rms_eps);
 
 void inkling2_attention(torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
                         std::optional<torch::Tensor> gate,

@@ -267,6 +267,7 @@ def install_labels_hip(model: torch.nn.Module) -> None:
         "inkling2_attention": "I2:attn.attention",
         "inkling2_kv_prep": "I2:attn.kv_prep",
         "inkling2_sconv_static": "I2:attn.sconv",
+        "inkling2_conv_state_write": "I2:attn.conv_write",
         "inkling2_glue_attn_res": "I2:glue.attn_res",
         "inkling2_glue_msg_gate_down": "I2:glue.msg_gate",
         "inkling2_glue_msg_gate_mix": "I2:glue.msg_gate",

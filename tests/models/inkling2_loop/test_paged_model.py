@@ -107,13 +107,16 @@ class PagedModel:
         device="cpu",
         experts: str = "exact",
         path: str = "reference",
+        num_speculative_tokens: int = 0,
     ) -> None:
         assert experts in ("exact", "kernel") and path in ("reference", "hip")
         assert path == "reference" or experts == "kernel"
         self.device = torch.device(device)
         self.path = path
         hf_config = Inkling2LoopConfig.from_pretrained(str(ckpt))
-        fake = fake_vllm_config(ckpt, hf_config)
+        fake = fake_vllm_config(
+            ckpt, hf_config, num_speculative_tokens=num_speculative_tokens
+        )
         self.max_tokens = fake.scheduler_config.max_num_batched_tokens
         old = torch.get_default_dtype()
         torch.set_default_dtype(dtype)  # the engine builds the model under its dtype
@@ -186,10 +189,15 @@ class PagedModel:
 
     @torch.no_grad()
     def step(
-        self, work: list[tuple[int, list[int]]], metadata: bool = True
+        self,
+        work: list[tuple[int, list[int]]],
+        metadata: bool = True,
+        accepted: dict[int, int] | None = None,
     ) -> dict[int, torch.Tensor]:
         """One engine step.  ``work = [(request, new_token_ids)]``; returns the
-        logits ``[n, vocab]`` of every new token of every request."""
+        logits ``[n, vocab]`` of every new token of every request.  ``accepted[r]``:
+        only that many of the tokens of request ``r`` stay computed (a verify step
+        whose draft tokens were rejected)."""
         spec = [(r, len(t)) for r, t in work]
         input_ids = torch.tensor(
             [x for _, t in work for x in t], dtype=torch.long, device=self.device
@@ -208,7 +216,7 @@ class PagedModel:
         logits_ = self.lm.compute_logits(hidden)
         assert logits_ is not None
         logits = logits_.float().cpu()
-        self.world.commit(spec)
+        self.world.commit(spec, accepted)
         out, at = {}, 0
         for r, n in spec:
             out[r] = logits[at : at + n]
@@ -665,20 +673,29 @@ def test_prefix_cache_hit_outlives_the_owner(variant):
         )
 
 
-@pytest.mark.parametrize("kv_bs", [4, 64])
-@pytest.mark.parametrize("hit_first", [False, True])
-def test_prefix_cache_hit_on_blocks_written_in_the_same_step(variant, kv_bs, hit_first):
-    """The scheduler registers the blocks of the tokens it schedules before they are
-    computed, so a request of the same batch can hit blocks that the owner only writes
-    in this very step: the cache reads of the hit (K/V of its window, the conv history
-    of its first tokens) must see those writes, whatever the order in the batch."""
+@pytest.mark.parametrize("kv_bs", [4, 16, 64])
+def test_prefix_cache_hit_on_blocks_the_owner_completed_inside_a_chunk(variant, kv_bs):
+    """The owner computes all 70 tokens in one step, so the blocks below ``HIT`` end in
+    the middle of its chunk: the conv state a hit resumes from (the last three
+    positions of the last block it reuses) is what the owner's block-end rows wrote.
+    A request that would hit blocks written in the very same step is deferred to the
+    next step by ``Inkling2ConvStateManager`` (``test_conv_state_manager.py``: the
+    conv history of its first tokens would be read before the owner writes it), so the
+    hit is scheduled one step later; it computes the rest and decodes like a request
+    that computed everything itself."""
     ids = _prompts()[2]
     pm = _model(variant, kv_block_size=kv_bs)
+    seqs = {0: list(ids), 1: list(ids)}
+    got = {0: [pm.step([(0, ids)])[0]], 1: []}
     assert pm.world is not None
-    pm.world.fork_prefix(0, 1, HIT, in_flight=True)
-    work = [(0, ids), (1, ids[HIT:])]
-    out = pm.step(work[::-1] if hit_first else work)
+    pm.world.fork_prefix(0, 1, HIT)
+    got[1].append(pm.step([(1, ids[HIT:])])[1])
+    for tokens in ((11, 13), (12, 14)):  # decode, both requests in one batch
+        out = pm.step([(r, [tokens[r]]) for r in (0, 1)])
+        for r in (0, 1):
+            seqs[r].append(tokens[r])
+            got[r].append(out[r])
     for r, first in ((0, 0), (1, HIT)):
-        want = _want(variant, ids)[first:]
-        what = f"same-step hit kv_bs {kv_bs} request {r}"
-        assert _err(variant, what, out[r], want) < FP32_TOL
+        want = _want(variant, seqs[r])[first:]
+        what = f"deferred hit kv_bs {kv_bs} request {r}"
+        assert _err(variant, what, torch.cat(got[r]), want) < FP32_TOL

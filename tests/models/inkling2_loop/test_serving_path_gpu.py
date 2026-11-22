@@ -22,7 +22,7 @@ rounding.  The free-routing checkpoints only print statistics.
   replayed on the HIP layer from the recorded inputs (block states, messages, partial
   block), so errors cannot compound; the router choices are compared as well;
 * model level: single prefill, chunked prefill, decode, batches, random schedules,
-  windows, prefix-cache hits (also on blocks the owner writes in the same step),
+  windows, prefix-cache hits, rejected draft tokens (the conv ring of a verify step),
   DSpark taps, ``inputs_embeds``, greedy argmax, no metadata, no allocation / host sync.
 
     HIP_VISIBLE_DEVICES=2 PYTHONPATH=$TREE:$TFM_MAIN pytest \
@@ -106,17 +106,21 @@ def hv_free(request, tmp_path_factory):
     return _variant(request.param, tmp_path_factory, 1.0)
 
 
-def _pm(v, path: str, **world) -> PagedModel:
-    if path not in v.models:
-        v.models[path] = PagedModel(
+def _pm(v, path: str, drafts: int = 0, **world) -> PagedModel:
+    """The model of ``path`` (weights loaded once); ``drafts``: speculative tokens the
+    conv ring of its owners has rows for."""
+    key = path if not drafts else f"{path}+{drafts}"
+    if key not in v.models:
+        v.models[key] = PagedModel(
             v.path,
             v.tensors,
             torch.float16,
             device="cuda",
             experts="kernel",
             path=path,
+            num_speculative_tokens=drafts,
         )
-    return v.models[path].reset(**world)
+    return v.models[key].reset(**world)
 
 
 # -- teacher-forced layer parity -------------------------------------------------------
@@ -394,30 +398,72 @@ def test_prefix_cache_hit_outlives_the_owner(hv):
         )
 
 
-@pytest.mark.parametrize("kv_bs", KV_BS)
-@pytest.mark.parametrize("hit_first", [False, True])
-def test_prefix_cache_hit_on_blocks_written_in_the_same_step(hv, kv_bs, hit_first):
-    """The scheduler registers the blocks of the tokens it schedules before they are
-    computed, so a request of the same batch can hit blocks the owner only writes in
-    this very step.  The conv / K / V history reads of the hit's first tokens race with
-    those writes inside one kernel launch; the serving path launches those ops twice
-    (``conv_passes``) and the second launch must see all of them, in either batch
-    order.  Run repeatedly: the CTA order of a launch is not deterministic."""
+def _rollback_check(hv, what: str, got, ids, first: int) -> None:
+    """``_fp16_check`` over every position of a step: the mean error bounds the logits
+    (a wrong conv history moves them by O(1)) and the top-1 must match wherever the
+    reference has a clear winner (a random tiny model is near-tied at some positions,
+    where fp16 rounding picks either; the measured run-to-run noise of the HIP path is
+    0.2 logits, so a margin of 0.6 cannot flip)."""
+    want = _want(hv, ids)[first : first + len(got)]
+    assert torch.isfinite(got).all()
+    d = _dlogp(got, want)
+    top2 = want.topk(2, dim=-1).values
+    clear = top2[:, 0] - top2[:, 1] > 0.6
+    print(
+        f"[paged] {hv.name} fp16 {what}: mean|dlogp| {float(d.abs().mean()):.3e}, "
+        f"top-1 compared at {int(clear.sum())} of {len(got)} positions"
+    )
+    assert float(d.abs().mean()) < 0.05
+    assert torch.equal(got.argmax(-1)[clear], want.argmax(-1)[clear])
+
+
+@pytest.mark.parametrize("conv_bs", [4, 16, 64])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_rejected_draft_tokens_keep_the_conv_state_of_the_accepted_prefix(
+    hv, conv_bs, seed
+):
+    """A verify step computes ``1 + k`` tokens and keeps a prefix of them; the next
+    step recomputes the rest.  The conv ring has ``k - 1 + k`` rows, so the junk rows
+    of the rejected tokens never replace history the next step reads: the logits of
+    the accepted sequence equal the reference's."""
+    d = 4
     ids = _prompts()[2]
-    pm = _pm(hv, "hip", kv_block_size=kv_bs)
+    junk = random.Random(seed)
+    pm = _pm(hv, "hip", drafts=d, conv_block_size=conv_bs, seed=seed)
     assert pm.world is not None
-    work = [(0, ids), (1, ids[HIT:])]
-    for rep in range(8):
-        pm.reset(kv_block_size=kv_bs, seed=rep)
-        assert pm.world is not None
-        pm.world.fork_prefix(0, 1, HIT, in_flight=True)
-        out = pm.step(work[::-1] if hit_first else work)
-        _fp16_check(hv, f"hip same-step hit kv_bs {kv_bs} request 0", out[0], ids)
-        _fp16_check(
-            hv, f"hip same-step hit kv_bs {kv_bs} request 1", out[1], ids, first=HIT
-        )
-        # the hit and its owner compute the same tokens from the same state
-        assert torch.allclose(out[1], out[0][HIT:], atol=5e-3, rtol=0), rep
+    out = pm.step([(0, ids[:11])])[0]
+    _rollback_check(hv, f"hip rollback bs={conv_bs} prompt", out, ids, 0)
+    pos = 11
+    while pos < len(ids):
+        keep = min(junk.randint(1, 1 + d), len(ids) - pos)
+        toks = ids[pos : pos + keep] + [
+            junk.randrange(500) for _ in range(1 + d - keep)
+        ]
+        out = pm.step([(0, toks)], accepted={0: keep})[0]
+        _rollback_check(hv, f"hip rollback bs={conv_bs} at {pos}", out[:keep], ids, pos)
+        pos += keep
+
+
+def test_a_ring_without_rows_for_the_drafts_fails_the_rollback_check(hv):
+    """Negative control of the test above: with the ``k - 1`` rows of a model without a
+    draft model the junk rows of the rejected tokens replace accepted history, and the
+    same check fires."""
+    d = 4
+    ids = _prompts()[2]
+    junk = random.Random(0)
+    pm = _pm(hv, "hip", conv_block_size=16)
+    assert pm.world is not None
+    pm.step([(0, ids[:11])])
+    pos = 11
+    with pytest.raises(AssertionError):
+        while pos < len(ids):
+            keep = min(junk.randint(1, 1 + d), len(ids) - pos)
+            toks = ids[pos : pos + keep] + [
+                junk.randrange(500) for _ in range(1 + d - keep)
+            ]
+            out = pm.step([(0, toks)], accepted={0: keep})[0]
+            _rollback_check(hv, f"hip no-draft ring at {pos}", out[:keep], ids, pos)
+            pos += keep
 
 
 # -- everything else around the layers -------------------------------------------

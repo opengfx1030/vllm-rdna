@@ -6,11 +6,13 @@
 // Three op families (all fp16 activations, fp32 accumulation, native HIP):
 //
 //  1. inkling2_sconv_static / inkling2_sconv_dynamic
-//       depthwise causal short convolution (k = 4) over the paged conv-input
-//       cache.  The previous k-1 raw inputs of a token come from the
-//       activations when they are in the same query chunk and from the cache
-//       otherwise (positions < 0 read as zero); this step's raw inputs are
-//       written back.  Output is fp32.
+//       depthwise causal short convolution (k = 4) over the paged conv state.
+//       The previous k-1 raw inputs of a token come from the activations when
+//       they are in the same query chunk and from the conv state otherwise
+//       (positions < 0 read as zero).  With write_state (at most one token per
+//       request) the same kernel then writes this step's raw input back;
+//       larger chunks write it with inkling2_conv_state_write once the
+//       history has been read.  Output is fp32.
 //         static : out = (sum_lag x[t-lag] * w[c, k-1-lag] + x[t]) / sqrt(k+1)
 //         dynamic: out = (sum_lag x[t-lag] * (sw[lag, c] + dw[t, h, lag])
 //                         + x[t]) / sqrt(2k+1)
@@ -35,8 +37,9 @@
 //           applies the gate.
 //
 // KV cache page: [num_blocks, H_kv, block_size, 2 * 128] fp16, K at [0, 128),
-// V at [128, 256).  Conv cache page: [num_blocks, H_kv, block_size, Dpad]
-// fp32; a stream of C channels occupies [offset, offset + C / H_kv).
+// V at [128, 256).  Conv state page: [num_blocks, H_kv, S, W] fp16, a ring of S
+// rows per cache block (row = position % S, see I2ConvMeta); a stream of C
+// channels occupies the columns [offset, offset + C / H_kv) of every row.
 //
 // All kernels are graph-capture safe: no host reads of device data, no
 // allocation (the split-K partials live in a caller-provided workspace), grid
@@ -111,16 +114,25 @@ __device__ __forceinline__ float i2_xor(float v, int m) {
 // ---------------------------------------------------------------------------
 // short convolution
 // ---------------------------------------------------------------------------
+// Conv state.  The raw inputs of the previous k - 1 = 3 tokens of a request are
+// kept position addressed: position p lives in the block block_table[r, p >>
+// blk_shift] at ring row p % ring of a [H, ring, W] fp16 page.  A step writes
+// the last `ring` positions of every (block, chunk) intersection
+// (i2_ring_keeps), so every ring row has one writer, the rows a following step
+// reads (history of the next chunk, tail of a completed block a prefix hit
+// resumes from) are always among them, and ring >= k - 1 + the speculative
+// draft length keeps the rows of the accepted prefix intact after a rejection.
 struct I2ConvMeta {
   const int* block_table;  // [R, bt_stride]
   const int* seq_idx;      // [T_md]
   const int* qsl;          // [R + 1]
   const int* seq_lens;     // [R]
-  float* cache;
-  int64_t cs0, cs1, cs2;  // block / head / slot strides, in floats
+  _Float16* cache;
+  int64_t cs0, cs1, cs2;  // block / head / ring-row strides, in halfs
   int bt_stride;
-  int bs_shift;
-  int T_md;  // tokens covered by seq_idx / slot_mapping
+  int blk_shift;  // log2 of the tokens per cache block
+  int ring;       // ring rows per block
+  int T_md;       // tokens covered by seq_idx
 };
 
 template <typename XT>
@@ -141,49 +153,64 @@ struct I2Load4<_Float16> {
   }
 };
 
+struct I2TokPos {
+  int qs;  // first token row of the request
+  int p;   // position of this token
+  int p1;  // context length after this step
+};
+
+__device__ __forceinline__ I2TokPos i2_tok_pos(const I2ConvMeta& m, int t,
+                                               int r) {
+  const int qs = m.qsl[r];
+  const int p1 = m.seq_lens[r];
+  return {qs, p1 - (m.qsl[r + 1] - qs) + (t - qs), p1};
+}
+
 // tap[lag] = raw input `lag` tokens back for channels [c, c + 4) of token t.
 template <typename XT>
 __device__ __forceinline__ void i2_gather_taps(float4 (&tap)[4],
                                                const I2ConvMeta& m,
+                                               const I2TokPos& tp,
                                                const XT* __restrict__ x,
                                                int64_t x_stride, int t, int r,
                                                int c, int h, int jch, int o0) {
-  const int qs = m.qsl[r];
-  const int len = m.qsl[r + 1] - qs;
-  const int p = m.seq_lens[r] - len + (t - qs);
-  const int mask = (1 << m.bs_shift) - 1;
   tap[0] = I2Load4<XT>::get(x + (int64_t)t * x_stride + c);
   #pragma unroll
   for (int lag = 1; lag < 4; ++lag) {
     float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
     const int sr = t - lag;
-    if (sr >= qs) {
+    if (sr >= tp.qs) {
       v = I2Load4<XT>::get(x + (int64_t)sr * x_stride + c);
     } else {
-      const int sp = p - lag;
+      const int sp = tp.p - lag;
       if (sp >= 0) {
         const int blk =
-            m.block_table[(int64_t)r * m.bt_stride + (sp >> m.bs_shift)];
-        v = *reinterpret_cast<const float4*>(
-            m.cache + (int64_t)blk * m.cs0 + (int64_t)h * m.cs1 +
-            (int64_t)(sp & mask) * m.cs2 + o0 + jch);
+            m.block_table[(int64_t)r * m.bt_stride + (sp >> m.blk_shift)];
+        v = I2Load4<_Float16>::get(m.cache + (int64_t)blk * m.cs0 +
+                                   (int64_t)h * m.cs1 +
+                                   (int64_t)(sp % m.ring) * m.cs2 + o0 + jch);
       }
     }
     tap[lag] = v;
   }
 }
 
-__device__ __forceinline__ void i2_write_cur(const I2ConvMeta& m,
-                                             const int64_t* __restrict__ slots,
-                                             int t, int h, int jch, int o0,
-                                             float4 cur) {
-  const int64_t slot = slots[t];
-  if (slot >= 0) {
-    const int mask = (1 << m.bs_shift) - 1;
-    *reinterpret_cast<float4*>(m.cache + (slot >> m.bs_shift) * m.cs0 +
-                               (int64_t)h * m.cs1 +
-                               (int64_t)(slot & mask) * m.cs2 + o0 + jch) = cur;
-  }
+// Whether position p of a request that ends this step at context length p1 is
+// one of the last `ring` positions of its block inside the chunk.
+__device__ __forceinline__ bool i2_ring_keeps(const I2ConvMeta& m, int p,
+                                              int p1) {
+  const int blk_end = ((p >> m.blk_shift) + 1) << m.blk_shift;
+  return p + m.ring >= min(p1, blk_end);
+}
+
+__device__ __forceinline__ void i2_write_ring(const I2ConvMeta& m, int r, int p,
+                                              int h, int jch, int o0,
+                                              float4 cur) {
+  const int blk = m.block_table[(int64_t)r * m.bt_stride + (p >> m.blk_shift)];
+  _Float16* dst = m.cache + (int64_t)blk * m.cs0 + (int64_t)h * m.cs1 +
+                  (int64_t)(p % m.ring) * m.cs2 + o0 + jch;
+  *reinterpret_cast<uint2*>(dst) =
+      make_uint2(i2_pack(cur.x, cur.y), i2_pack(cur.z, cur.w));
 }
 
 // static taps: w is [C, 4] (conv1d.weight [C, 1, 4]); w[c, 3 - lag] weights
@@ -235,12 +262,15 @@ i2_conv4_dynamic(const float4 (&tap)[4], const float* __restrict__ swc,
 }
 
 // grid (T, ceil(C / 512)), block 128: one thread = 4 channels of one token.
-template <typename XT, bool DYN>
+// WR writes the raw input of the token into the conv state after reading the
+// history; it is only valid when no request has more than one token (the row a
+// token writes can be a row the first tokens of another chunk position read).
+template <typename XT, bool DYN, bool WR>
 __global__ __launch_bounds__(128) void i2_sconv_kernel(
     I2ConvMeta m, const XT* __restrict__ x, int64_t x_stride,
     const float* __restrict__ w, const _Float16* __restrict__ dyn,
-    int64_t dyn_stride, float* __restrict__ out, int64_t out_stride,
-    const int64_t* __restrict__ slots, int C, int width, int o0, float inv) {
+    int64_t dyn_stride, float* __restrict__ out, int64_t out_stride, int C,
+    int width, int o0, float inv) {
   const int t = blockIdx.x;
   const int c = (blockIdx.y * 128 + threadIdx.x) * 4;
   if (c >= C) return;
@@ -250,8 +280,9 @@ __global__ __launch_bounds__(128) void i2_sconv_kernel(
     if (r >= 0) {
       const int h = c / width;
       const int jch = c - h * width;
+      const I2TokPos tp = i2_tok_pos(m, t, r);
       float4 tap[4];
-      i2_gather_taps<XT>(tap, m, x, x_stride, t, r, c, h, jch, o0);
+      i2_gather_taps<XT>(tap, m, tp, x, x_stride, t, r, c, h, jch, o0);
       if constexpr (DYN) {
         const uint2 dw = *reinterpret_cast<const uint2*>(
             dyn + (int64_t)t * dyn_stride + h * 4);
@@ -259,24 +290,44 @@ __global__ __launch_bounds__(128) void i2_sconv_kernel(
       } else {
         res = i2_conv4_static(tap, w + (int64_t)c * 4, inv);
       }
-      i2_write_cur(m, slots, t, h, jch, o0, tap[0]);
+      if constexpr (WR) {
+        if (i2_ring_keeps(m, tp.p, tp.p1))
+          i2_write_ring(m, r, tp.p, h, jch, o0, tap[0]);
+      }
     }
   }
   *reinterpret_cast<float4*>(out + (int64_t)t * out_stride + c) = res;
 }
 
+// grid (T, ceil(C / 512)), block 128: write the raw input of every token that
+// is among the last `ring` positions of its block inside the chunk.
+template <typename XT>
+__global__ __launch_bounds__(128) void i2_state_write_kernel(
+    I2ConvMeta m, const XT* __restrict__ x, int64_t x_stride, int C, int width,
+    int o0) {
+  const int t = blockIdx.x;
+  const int c = (blockIdx.y * 128 + threadIdx.x) * 4;
+  if (c >= C || t >= m.T_md) return;
+  const int r = m.seq_idx[t];
+  if (r < 0) return;
+  const I2TokPos tp = i2_tok_pos(m, t, r);
+  if (!i2_ring_keeps(m, tp.p, tp.p1)) return;
+  const int h = c / width;
+  i2_write_ring(m, r, tp.p, h, c - h * width, o0,
+                I2Load4<XT>::get(x + (int64_t)t * x_stride + c));
+}
+
 // grid (T, ceil(H_kv / 4)), block 128: one wave = one (token, kv head); the
 // 32 lanes own 4 channels each of the 128-wide head, K stream then V stream.
-template <bool DYN>
+template <bool DYN, bool WR>
 __global__ __launch_bounds__(128) void i2_kv_prep_kernel(
     I2ConvMeta m, const _Float16* __restrict__ xk, int64_t xk_stride,
     const _Float16* __restrict__ xv, int64_t xv_stride,
     const float* __restrict__ kw, const float* __restrict__ vw,
     const _Float16* __restrict__ kdyn, const _Float16* __restrict__ vdyn,
-    int64_t dyn_stride, const int64_t* __restrict__ conv_slots,
-    _Float16* __restrict__ kv, int64_t kv_s0, int64_t kv_s1, int64_t kv_s2,
-    int kv_shift, const int64_t* __restrict__ kv_slots, int C, int H, int ko0,
-    int vo0, float inv, float k_clip, float rms_eps) {
+    int64_t dyn_stride, _Float16* __restrict__ kv, int64_t kv_s0, int64_t kv_s1,
+    int64_t kv_s2, int kv_shift, const int64_t* __restrict__ kv_slots, int C,
+    int H, int ko0, int vo0, float inv, float k_clip, float rms_eps) {
   const int t = blockIdx.x;
   const int wave = threadIdx.x >> 5;
   const int lane = threadIdx.x & 31;
@@ -286,10 +337,12 @@ __global__ __launch_bounds__(128) void i2_kv_prep_kernel(
   if (r < 0) return;
   const int jch = lane * 4;
   const int c = h * kI2D + jch;
+  const I2TokPos tp = i2_tok_pos(m, t, r);
+  const bool keep = WR && i2_ring_keeps(m, tp.p, tp.p1);
 
   float4 tap[4];
   float4 ko, vo;
-  i2_gather_taps<_Float16>(tap, m, xk, xk_stride, t, r, c, h, jch, ko0);
+  i2_gather_taps<_Float16>(tap, m, tp, xk, xk_stride, t, r, c, h, jch, ko0);
   if constexpr (DYN) {
     const uint2 dw =
         *reinterpret_cast<const uint2*>(kdyn + (int64_t)t * dyn_stride + h * 4);
@@ -297,9 +350,9 @@ __global__ __launch_bounds__(128) void i2_kv_prep_kernel(
   } else {
     ko = i2_conv4_static(tap, kw + (int64_t)c * 4, inv);
   }
-  i2_write_cur(m, conv_slots, t, h, jch, ko0, tap[0]);
+  if (keep) i2_write_ring(m, r, tp.p, h, jch, ko0, tap[0]);
 
-  i2_gather_taps<_Float16>(tap, m, xv, xv_stride, t, r, c, h, jch, vo0);
+  i2_gather_taps<_Float16>(tap, m, tp, xv, xv_stride, t, r, c, h, jch, vo0);
   if constexpr (DYN) {
     const uint2 dw =
         *reinterpret_cast<const uint2*>(vdyn + (int64_t)t * dyn_stride + h * 4);
@@ -307,7 +360,7 @@ __global__ __launch_bounds__(128) void i2_kv_prep_kernel(
   } else {
     vo = i2_conv4_static(tap, vw + (int64_t)c * 4, inv);
   }
-  i2_write_cur(m, conv_slots, t, h, jch, vo0, tap[0]);
+  if (keep) i2_write_ring(m, r, tp.p, h, jch, vo0, tap[0]);
 
   float kss = ko.x * ko.x + ko.y * ko.y + ko.z * ko.z + ko.w * ko.w;
   float vss = vo.x * vo.x + vo.y * vo.y + vo.z * vo.z + vo.w * vo.w;
@@ -1237,43 +1290,46 @@ static I2ConvMeta i2_conv_meta(const torch::Tensor& conv_cache,
                                const torch::Tensor& block_table,
                                const torch::Tensor& seq_idx,
                                const torch::Tensor& qsl,
-                               const torch::Tensor& seq_lens) {
+                               const torch::Tensor& seq_lens,
+                               int64_t block_size) {
   i2_check_cuda(conv_cache, "conv_cache");
-  TORCH_CHECK(conv_cache.scalar_type() == torch::kFloat32 &&
+  TORCH_CHECK(conv_cache.scalar_type() == torch::kHalf &&
                   conv_cache.dim() == 4 && conv_cache.stride(3) == 1,
-              "conv_cache must be fp32 [blocks, H, block_size, Dpad]");
+              "conv_cache must be fp16 [blocks, H, ring_rows, W]");
+  TORCH_CHECK(conv_cache.size(2) >= 3,
+              "the conv state keeps at least k - 1 = 3 ring rows per block");
   i2_check_i32(block_table, "block_table");
   i2_check_i32(seq_idx, "seq_idx");
   i2_check_i32(qsl, "query_start_loc");
   i2_check_i32(seq_lens, "seq_lens");
   TORCH_CHECK(block_table.dim() == 2, "block_table must be [R, max_blocks]");
-  TORCH_CHECK(
-      conv_cache.stride(0) % 4 == 0 && conv_cache.stride(1) % 4 == 0 &&
-          conv_cache.stride(2) % 4 == 0 &&
-          (reinterpret_cast<uintptr_t>(conv_cache.data_ptr()) & 15) == 0,
-      "conv_cache must be 16-byte aligned");
+  TORCH_CHECK(conv_cache.stride(0) % 4 == 0 && conv_cache.stride(1) % 4 == 0 &&
+                  conv_cache.stride(2) % 4 == 0 &&
+                  (reinterpret_cast<uintptr_t>(conv_cache.data_ptr()) & 7) == 0,
+              "conv_cache must be 8-byte aligned");
   I2ConvMeta m;
   m.block_table = block_table.data_ptr<int32_t>();
   m.seq_idx = seq_idx.data_ptr<int32_t>();
   m.qsl = qsl.data_ptr<int32_t>();
   m.seq_lens = seq_lens.data_ptr<int32_t>();
-  m.cache = conv_cache.data_ptr<float>();
+  m.cache = reinterpret_cast<_Float16*>(conv_cache.data_ptr());
   m.cs0 = conv_cache.stride(0);
   m.cs1 = conv_cache.stride(1);
   m.cs2 = conv_cache.stride(2);
   m.bt_stride = (int)block_table.stride(0);
-  m.bs_shift = i2_log2_exact(conv_cache.size(2), 1, "conv block size");
+  m.blk_shift = i2_log2_exact(block_size, 1, "conv block size");
+  m.ring = (int)conv_cache.size(2);
   m.T_md = (int)seq_idx.size(0);
   return m;
 }
 
-template <typename XT, bool DYN>
+template <typename XT, bool DYN, bool WR>
 static void i2_sconv_launch(torch::Tensor x, torch::Tensor w,
                             std::optional<torch::Tensor> dyn, torch::Tensor out,
                             torch::Tensor conv_cache, torch::Tensor block_table,
-                            torch::Tensor slot_mapping, torch::Tensor seq_idx,
-                            torch::Tensor qsl, torch::Tensor seq_lens,
-                            int64_t stream_offset, int64_t num_kv_heads) {
+                            torch::Tensor seq_idx, torch::Tensor qsl,
+                            torch::Tensor seq_lens, int64_t stream_offset,
+                            int64_t num_kv_heads, int64_t block_size) {
   const int T = (int)x.size(0);
   const int C = (int)x.size(1);
   TORCH_CHECK(num_kv_heads > 0 && C % num_kv_heads == 0,
@@ -1289,12 +1345,8 @@ static void i2_sconv_launch(torch::Tensor x, torch::Tensor w,
                   out.stride(0) % 4 == 0 &&
                   (reinterpret_cast<uintptr_t>(out.data_ptr()) & 15) == 0,
               "out must be fp32 [T, C]");
-  i2_check_cuda(slot_mapping, "slot_mapping");
-  TORCH_CHECK(slot_mapping.scalar_type() == torch::kInt64 &&
-                  slot_mapping.is_contiguous() &&
-                  slot_mapping.size(0) >= seq_idx.size(0),
-              "slot_mapping must be a contiguous int64 [T] tensor");
-  I2ConvMeta m = i2_conv_meta(conv_cache, block_table, seq_idx, qsl, seq_lens);
+  I2ConvMeta m =
+      i2_conv_meta(conv_cache, block_table, seq_idx, qsl, seq_lens, block_size);
   m.T_md = std::min<int>(m.T_md, T);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -1322,71 +1374,133 @@ static void i2_sconv_launch(torch::Tensor x, torch::Tensor w,
                 "conv weight must be a contiguous fp32 [C, 1, 4] tensor");
     inv = (float)(1.0 / std::sqrt(5.0));
   }
-  i2_sconv_kernel<XT, DYN><<<grid, 128, 0, stream>>>(
+  i2_sconv_kernel<XT, DYN, WR><<<grid, 128, 0, stream>>>(
       m, reinterpret_cast<const XT*>(x.data_ptr()), x.stride(0),
       w.data_ptr<float>(), dyn_ptr, dyn_stride, out.data_ptr<float>(),
-      out.stride(0), slot_mapping.data_ptr<int64_t>(), C, width,
-      (int)stream_offset, inv);
+      out.stride(0), C, width, (int)stream_offset, inv);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-static void i2_sconv_dispatch(bool dynamic, torch::Tensor x, torch::Tensor w,
-                              std::optional<torch::Tensor> dyn,
-                              torch::Tensor out, torch::Tensor conv_cache,
-                              torch::Tensor block_table,
-                              torch::Tensor slot_mapping, torch::Tensor seq_idx,
-                              torch::Tensor qsl, torch::Tensor seq_lens,
-                              int64_t stream_offset, int64_t num_kv_heads) {
+template <typename XT>
+static void i2_sconv_modes(bool dynamic, bool write_state, torch::Tensor x,
+                           torch::Tensor w, std::optional<torch::Tensor> dyn,
+                           torch::Tensor out, torch::Tensor conv_cache,
+                           torch::Tensor block_table, torch::Tensor seq_idx,
+                           torch::Tensor qsl, torch::Tensor seq_lens,
+                           int64_t stream_offset, int64_t num_kv_heads,
+                           int64_t block_size) {
+  #define I2_SCONV_MODE(DYN, WR)                                          \
+    i2_sconv_launch<XT, DYN, WR>(x, w, dyn, out, conv_cache, block_table, \
+                                 seq_idx, qsl, seq_lens, stream_offset,   \
+                                 num_kv_heads, block_size)
+  if (dynamic) {
+    if (write_state)
+      I2_SCONV_MODE(true, true);
+    else
+      I2_SCONV_MODE(true, false);
+  } else {
+    if (write_state)
+      I2_SCONV_MODE(false, true);
+    else
+      I2_SCONV_MODE(false, false);
+  }
+  #undef I2_SCONV_MODE
+}
+
+static void i2_check_conv_x(const torch::Tensor& x) {
   i2_check_cuda(x, "x");
   TORCH_CHECK(x.dim() == 2 && x.stride(1) == 1 &&
                   (reinterpret_cast<uintptr_t>(x.data_ptr()) & 15) == 0,
               "x must be [T, C] with unit column stride");
   if (x.scalar_type() == torch::kHalf) {
     TORCH_CHECK(x.stride(0) % 8 == 0, "fp16 x rows must be 16-byte aligned");
-    if (dynamic)
-      i2_sconv_launch<_Float16, true>(x, w, dyn, out, conv_cache, block_table,
-                                      slot_mapping, seq_idx, qsl, seq_lens,
-                                      stream_offset, num_kv_heads);
-    else
-      i2_sconv_launch<_Float16, false>(x, w, dyn, out, conv_cache, block_table,
-                                       slot_mapping, seq_idx, qsl, seq_lens,
-                                       stream_offset, num_kv_heads);
   } else {
     TORCH_CHECK(x.scalar_type() == torch::kFloat32 && x.stride(0) % 4 == 0,
                 "x must be fp16 or fp32");
-    if (dynamic)
-      i2_sconv_launch<float, true>(x, w, dyn, out, conv_cache, block_table,
-                                   slot_mapping, seq_idx, qsl, seq_lens,
-                                   stream_offset, num_kv_heads);
-    else
-      i2_sconv_launch<float, false>(x, w, dyn, out, conv_cache, block_table,
-                                    slot_mapping, seq_idx, qsl, seq_lens,
-                                    stream_offset, num_kv_heads);
   }
+}
+
+static void i2_sconv_dispatch(bool dynamic, torch::Tensor x, torch::Tensor w,
+                              std::optional<torch::Tensor> dyn,
+                              torch::Tensor out, torch::Tensor conv_cache,
+                              torch::Tensor block_table, torch::Tensor seq_idx,
+                              torch::Tensor qsl, torch::Tensor seq_lens,
+                              int64_t stream_offset, int64_t num_kv_heads,
+                              int64_t block_size, bool write_state) {
+  i2_check_conv_x(x);
+  if (x.scalar_type() == torch::kHalf)
+    i2_sconv_modes<_Float16>(dynamic, write_state, x, w, dyn, out, conv_cache,
+                             block_table, seq_idx, qsl, seq_lens, stream_offset,
+                             num_kv_heads, block_size);
+  else
+    i2_sconv_modes<float>(dynamic, write_state, x, w, dyn, out, conv_cache,
+                          block_table, seq_idx, qsl, seq_lens, stream_offset,
+                          num_kv_heads, block_size);
 }
 
 void inkling2_sconv_static(torch::Tensor x, torch::Tensor weight,
                            torch::Tensor out, torch::Tensor conv_cache,
-                           torch::Tensor block_table,
-                           torch::Tensor slot_mapping, torch::Tensor seq_idx,
+                           torch::Tensor block_table, torch::Tensor seq_idx,
                            torch::Tensor query_start_loc,
                            torch::Tensor seq_lens, int64_t stream_offset,
-                           int64_t num_kv_heads) {
+                           int64_t num_kv_heads, int64_t block_size,
+                           bool write_state) {
   i2_sconv_dispatch(false, x, weight, std::nullopt, out, conv_cache,
-                    block_table, slot_mapping, seq_idx, query_start_loc,
-                    seq_lens, stream_offset, num_kv_heads);
+                    block_table, seq_idx, query_start_loc, seq_lens,
+                    stream_offset, num_kv_heads, block_size, write_state);
 }
 
 void inkling2_sconv_dynamic(torch::Tensor x, torch::Tensor static_weight,
                             torch::Tensor dyn, torch::Tensor out,
                             torch::Tensor conv_cache, torch::Tensor block_table,
-                            torch::Tensor slot_mapping, torch::Tensor seq_idx,
+                            torch::Tensor seq_idx,
                             torch::Tensor query_start_loc,
                             torch::Tensor seq_lens, int64_t stream_offset,
-                            int64_t num_kv_heads) {
+                            int64_t num_kv_heads, int64_t block_size,
+                            bool write_state) {
   i2_sconv_dispatch(true, x, static_weight, dyn, out, conv_cache, block_table,
-                    slot_mapping, seq_idx, query_start_loc, seq_lens,
-                    stream_offset, num_kv_heads);
+                    seq_idx, query_start_loc, seq_lens, stream_offset,
+                    num_kv_heads, block_size, write_state);
+}
+
+template <typename XT>
+static void i2_state_write_launch(const torch::Tensor& x, const I2ConvMeta& m,
+                                  int T, int C, int width,
+                                  int64_t stream_offset) {
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  const dim3 grid(T, (C / 4 + 127) / 128);
+  i2_state_write_kernel<XT>
+      <<<grid, 128, 0, stream>>>(m, reinterpret_cast<const XT*>(x.data_ptr()),
+                                 x.stride(0), C, width, (int)stream_offset);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// Writes the raw inputs of one stream into the conv state (chunks of more than
+// one token per request: call it after the op that reads the history).
+void inkling2_conv_state_write(torch::Tensor x, torch::Tensor conv_cache,
+                               torch::Tensor block_table, torch::Tensor seq_idx,
+                               torch::Tensor query_start_loc,
+                               torch::Tensor seq_lens, int64_t stream_offset,
+                               int64_t num_kv_heads, int64_t block_size) {
+  i2_check_conv_x(x);
+  const int T = (int)x.size(0);
+  const int C = (int)x.size(1);
+  TORCH_CHECK(num_kv_heads > 0 && C % num_kv_heads == 0,
+              "channels must be divisible by num_kv_heads");
+  const int width = C / (int)num_kv_heads;
+  TORCH_CHECK(width % 4 == 0 && stream_offset % 4 == 0,
+              "stream width and offset must be multiples of 4");
+  TORCH_CHECK(conv_cache.dim() == 4 && conv_cache.size(1) == num_kv_heads &&
+                  stream_offset + width <= conv_cache.size(3),
+              "conv_cache heads / width do not hold this stream");
+  I2ConvMeta m = i2_conv_meta(conv_cache, block_table, seq_idx, query_start_loc,
+                              seq_lens, block_size);
+  m.T_md = std::min<int>(m.T_md, T);
+  if (x.scalar_type() == torch::kHalf)
+    i2_state_write_launch<_Float16>(x, m, T, C, width, stream_offset);
+  else
+    i2_state_write_launch<float>(x, m, T, C, width, stream_offset);
 }
 
 static void i2_check_kv_cache(const torch::Tensor& kv, int& shift) {
@@ -1406,11 +1520,11 @@ void inkling2_kv_prep(torch::Tensor xk, torch::Tensor xv,
                       std::optional<torch::Tensor> k_dyn,
                       std::optional<torch::Tensor> v_dyn,
                       torch::Tensor conv_cache, torch::Tensor conv_block_table,
-                      torch::Tensor conv_slot_mapping, torch::Tensor seq_idx,
-                      torch::Tensor query_start_loc, torch::Tensor seq_lens,
-                      torch::Tensor kv_cache, torch::Tensor kv_slot_mapping,
-                      int64_t k_stream_offset, int64_t v_stream_offset,
-                      double k_clip, double rms_eps) {
+                      torch::Tensor seq_idx, torch::Tensor query_start_loc,
+                      torch::Tensor seq_lens, torch::Tensor kv_cache,
+                      torch::Tensor kv_slot_mapping, int64_t k_stream_offset,
+                      int64_t v_stream_offset, int64_t conv_block_size,
+                      bool write_state, double k_clip, double rms_eps) {
   int kv_shift;
   i2_check_kv_cache(kv_cache, kv_shift);
   const int H = (int)kv_cache.size(1);
@@ -1433,17 +1547,13 @@ void inkling2_kv_prep(torch::Tensor xk, torch::Tensor xv,
     TORCH_CHECK(w->scalar_type() == torch::kFloat32 && w->is_contiguous() &&
                     w->numel() == 4 * (int64_t)C,
                 "k / v conv weights must be contiguous fp32 with 4 * C values");
-  i2_check_cuda(conv_slot_mapping, "conv_slot_mapping");
   i2_check_cuda(kv_slot_mapping, "kv_slot_mapping");
-  TORCH_CHECK(conv_slot_mapping.scalar_type() == torch::kInt64 &&
-                  kv_slot_mapping.scalar_type() == torch::kInt64 &&
-                  conv_slot_mapping.is_contiguous() &&
+  TORCH_CHECK(kv_slot_mapping.scalar_type() == torch::kInt64 &&
                   kv_slot_mapping.is_contiguous() &&
-                  conv_slot_mapping.size(0) >= seq_idx.size(0) &&
                   kv_slot_mapping.size(0) >= seq_idx.size(0),
-              "slot mappings must be contiguous int64 [T] tensors");
+              "kv_slot_mapping must be a contiguous int64 [T] tensor");
   I2ConvMeta m = i2_conv_meta(conv_cache, conv_block_table, seq_idx,
-                              query_start_loc, seq_lens);
+                              query_start_loc, seq_lens, conv_block_size);
   m.T_md = std::min<int>(m.T_md, T);
   const _Float16* kd = nullptr;
   const _Float16* vd = nullptr;
@@ -1469,18 +1579,25 @@ void inkling2_kv_prep(torch::Tensor xk, torch::Tensor xv,
   auto* kvp = reinterpret_cast<_Float16*>(kv_cache.data_ptr());
   const _Float16* xkp = reinterpret_cast<const _Float16*>(xk.data_ptr());
   const _Float16* xvp = reinterpret_cast<const _Float16*>(xv.data_ptr());
-  #define I2_KV_PREP(DYN)                                                    \
-    i2_kv_prep_kernel<DYN><<<grid, 128, 0, stream>>>(                        \
-        m, xkp, xk.stride(0), xvp, xv.stride(0), k_weight.data_ptr<float>(), \
-        v_weight.data_ptr<float>(), kd, vd, dyn_stride,                      \
-        conv_slot_mapping.data_ptr<int64_t>(), kvp, kv_cache.stride(0),      \
-        kv_cache.stride(1), kv_cache.stride(2), kv_shift,                    \
-        kv_slot_mapping.data_ptr<int64_t>(), C, H, (int)k_stream_offset,     \
+  #define I2_KV_PREP(DYN, WR)                                                 \
+    i2_kv_prep_kernel<DYN, WR><<<grid, 128, 0, stream>>>(                     \
+        m, xkp, xk.stride(0), xvp, xv.stride(0), k_weight.data_ptr<float>(),  \
+        v_weight.data_ptr<float>(), kd, vd, dyn_stride, kvp,                  \
+        kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2), kv_shift, \
+        kv_slot_mapping.data_ptr<int64_t>(), C, H, (int)k_stream_offset,      \
         (int)v_stream_offset, inv, (float)k_clip, (float)rms_eps)
   if (dynamic) {
-    I2_KV_PREP(true);
+    if (write_state) {
+      I2_KV_PREP(true, true);
+    } else {
+      I2_KV_PREP(true, false);
+    }
   } else {
-    I2_KV_PREP(false);
+    if (write_state) {
+      I2_KV_PREP(false, true);
+    } else {
+      I2_KV_PREP(false, false);
+    }
   }
   #undef I2_KV_PREP
   C10_CUDA_KERNEL_LAUNCH_CHECK();

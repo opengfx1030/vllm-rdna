@@ -92,11 +92,10 @@ def test_path_selection(monkeypatch):
         state_mod.use_hip_ops("cuda")
 
 
-def test_conv_ops_run_twice_only_when_a_chunk_can_read_same_step_history():
-    one = SimpleNamespace(max_query_len=1)
-    assert attention_mod.conv_passes(one) == 1  # decode: history is a previous step's
-    for max_q in (2, 3, 16, 4096):
-        assert attention_mod.conv_passes(SimpleNamespace(max_query_len=max_q)) == 2
+def test_conv_ops_write_the_state_themselves_only_for_one_token_per_request():
+    assert attention_mod.conv_writes_in_op(SimpleNamespace(max_query_len=1))
+    for max_q in (2, 3, 16, 4096):  # a chunk: ``inkling2_conv_state_write`` after
+        assert not attention_mod.conv_writes_in_op(SimpleNamespace(max_query_len=max_q))
 
 
 # -- the split-K workspace bound ----------------------------------------------------

@@ -608,25 +608,35 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // K/V prep and attention with learned relative bias + sink logit.
   rocm_ops.def(
       "inkling2_sconv_static(Tensor x, Tensor weight, Tensor! out, "
-      "Tensor! conv_cache, Tensor block_table, Tensor slot_mapping, "
-      "Tensor seq_idx, Tensor query_start_loc, Tensor seq_lens, "
-      "int stream_offset, int num_kv_heads) -> ()");
+      "Tensor! conv_cache, Tensor block_table, Tensor seq_idx, "
+      "Tensor query_start_loc, Tensor seq_lens, int stream_offset, "
+      "int num_kv_heads, int block_size, bool write_state) -> ()");
   rocm_ops.impl("inkling2_sconv_static", torch::kCUDA, &inkling2_sconv_static);
 
   rocm_ops.def(
       "inkling2_sconv_dynamic(Tensor x, Tensor static_weight, Tensor dyn, "
       "Tensor! out, Tensor! conv_cache, Tensor block_table, "
-      "Tensor slot_mapping, Tensor seq_idx, Tensor query_start_loc, "
-      "Tensor seq_lens, int stream_offset, int num_kv_heads) -> ()");
+      "Tensor seq_idx, Tensor query_start_loc, Tensor seq_lens, "
+      "int stream_offset, int num_kv_heads, int block_size, "
+      "bool write_state) -> ()");
   rocm_ops.impl("inkling2_sconv_dynamic", torch::kCUDA,
                 &inkling2_sconv_dynamic);
 
   rocm_ops.def(
+      "inkling2_conv_state_write(Tensor x, Tensor! conv_cache, "
+      "Tensor block_table, Tensor seq_idx, Tensor query_start_loc, "
+      "Tensor seq_lens, int stream_offset, int num_kv_heads, "
+      "int block_size) -> ()");
+  rocm_ops.impl("inkling2_conv_state_write", torch::kCUDA,
+                &inkling2_conv_state_write);
+
+  rocm_ops.def(
       "inkling2_kv_prep(Tensor xk, Tensor xv, Tensor k_weight, "
       "Tensor v_weight, Tensor? k_dyn, Tensor? v_dyn, Tensor! conv_cache, "
-      "Tensor conv_block_table, Tensor conv_slot_mapping, Tensor seq_idx, "
+      "Tensor conv_block_table, Tensor seq_idx, "
       "Tensor query_start_loc, Tensor seq_lens, Tensor! kv_cache, "
       "Tensor kv_slot_mapping, int k_stream_offset, int v_stream_offset, "
+      "int conv_block_size, bool write_state, "
       "float k_clip, float rms_eps) -> ()");
   rocm_ops.impl("inkling2_kv_prep", torch::kCUDA, &inkling2_kv_prep);
 

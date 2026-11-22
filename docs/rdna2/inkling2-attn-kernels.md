@@ -14,7 +14,7 @@ rocBLAS, hipBLAS or CK in the serving path.
 | --- | --- |
 | Kernels | `csrc/rocm/inkling2_attn_rdna2.cu` |
 | Registration | `csrc/rocm/ops.h`, `csrc/rocm/torch_bindings.cpp`, `CMakeLists.txt` |
-| Python ops | `vllm/_custom_ops.py` (`inkling2_attention*`, `inkling2_sconv_*`, `inkling2_kv_prep`) |
+| Python ops | `vllm/_custom_ops.py` (`inkling2_attention*`, `inkling2_sconv_*`, `inkling2_conv_state_write`, `inkling2_kv_prep`) |
 | Tests | `tests/kernels/attention/test_inkling2_attn_rdna2.py` |
 | Benchmark | `tools/rdna/inkling2/bench_attn.py` |
 
@@ -22,9 +22,10 @@ rocBLAS, hipBLAS or CK in the serving path.
 
 | Op | Replaces (repo torch path) | Computes |
 | --- | --- | --- |
-| `inkling2_sconv_static` | `conv_taps` + `StaticSconv.forward_taps` | `out = (sum_lag x[t-lag] w[c, 3-lag] + x[t]) / sqrt(5)` per channel, fp32; reads the previous 3 raw inputs from the fp32 conv cache and writes this step's inputs back |
+| `inkling2_sconv_static` | `conv_taps` + `StaticSconv.forward_taps` | `out = (sum_lag x[t-lag] w[c, 3-lag] + x[t]) / sqrt(5)` per channel, fp32; reads the previous 3 raw inputs from the fp16 conv state ring; writes this step's inputs back only when asked (`write_state`, at most one token per request) |
 | `inkling2_sconv_dynamic` | `conv_taps` + `DynamicSconv.forward_taps` | `out = (sum_lag x[t-lag] (sw[lag, c] + dw[t, h, lag]) + x[t]) / sqrt(9)` with the per-token, per-kv-head taps `dw` precomputed by the caller |
-| `inkling2_kv_prep` | k / v conv + `l2_clip(k)` + `v * rsqrt(mean(v^2) + eps)` + `kv_write` | both short convs, the k L2 clip, the v RMS norm, the fp16 scatter into the paged K\|V cache and the conv-cache write, in one launch |
+| `inkling2_conv_state_write` | the write half of `conv_taps` | stores the raw inputs of one stream into the conv state ring (the last `ring` positions of every block of the chunk), after the conv has read its history |
+| `inkling2_kv_prep` | k / v conv + `l2_clip(k)` + `v * rsqrt(mean(v^2) + eps)` + `kv_write` | both short convs, the k L2 clip, the v RMS norm and the fp16 scatter into the paged K\|V cache in one launch; the conv-state write only with `write_state` |
 | `inkling2_attention` | `_scaled_clip` (q and rel) + `rel_logits` + `_attend` + gate | scaled L2 clip (+ log scale on full layers) of q and of the relative features, `softmax(q.k / sqrt(128) + bias, sink)` over the paged cache with the sliding window or full causal range, `P.V`, `* sigmoid(gate)` |
 
 Attention semantics (all per query token `t` of a request with `L` keys in the
@@ -96,10 +97,11 @@ every TP degree (24/8, 12/4, 6/2).
 ```text
 inkling2_kv_prep(Tensor xk, Tensor xv, Tensor k_weight, Tensor v_weight,
                  Tensor? k_dyn, Tensor? v_dyn, Tensor! conv_cache,
-                 Tensor conv_block_table, Tensor conv_slot_mapping,
-                 Tensor seq_idx, Tensor query_start_loc, Tensor seq_lens,
+                 Tensor conv_block_table, Tensor seq_idx,
+                 Tensor query_start_loc, Tensor seq_lens,
                  Tensor! kv_cache, Tensor kv_slot_mapping,
                  int k_stream_offset, int v_stream_offset,
+                 int conv_block_size, bool write_state,
                  float k_clip, float rms_eps) -> ()
 ```
 
@@ -108,38 +110,56 @@ inkling2_kv_prep(Tensor xk, Tensor xv, Tensor k_weight, Tensor v_weight,
 | `xk`, `xv` | fp16 `[T, H_kv * 128]` raw `k_proj` / `v_proj` outputs (conv inputs); unit column stride, row stride a multiple of 8, 16-byte aligned. |
 | `k_weight`, `v_weight` | fp32 contiguous. Static layers: the conv weights `[H_kv * 128, 1, 4]`. Dynamic layers: `static_weight [4, H_kv * 128]`. |
 | `k_dyn`, `v_dyn` | `None` (static conv) or fp16 `[T, H_kv * 4]` outputs of `weight_proj` (the per-token, per-head dynamic taps; both given or both `None`, same row stride). |
-| `conv_cache` | fp32 `[num_conv_blocks, H_kv, conv_block_size, Dpad]` (`conv_block_size` is a power of two `>= 1`: the kernel size 4). Stream `s` of a head occupies `[offset, offset + 128)` of the last dim. |
-| `conv_block_table` | int32 `[R, max_conv_blocks]`; `conv_slot_mapping` int64 `[>= T]` (conv cache slot of each token, `-1` = padding). |
+| `conv_cache` | fp16 `[num_conv_blocks, H_kv, ring, W]` (section 3): `ring >= 3` rows per block, `W` columns per head; stream `s` of a head occupies `[offset, offset + 128)` of the last dim. Any strides whose block / head / row steps are multiples of 4 halfs and a base that is 8-byte aligned. |
+| `conv_block_table`, `conv_block_size` | int32 `[R, max_conv_blocks]` and the tokens per conv block (a power of two; the engine's cache block size, 64). Position `p` of request `r` lives in block `conv_block_table[r, p / conv_block_size]`, ring row `p % ring`. |
 | `seq_idx` | int32 `[T_md]`: request index of each token (`-1` = padding); `T_md <= T`, tokens `>= T_md` are padding. |
 | `query_start_loc`, `seq_lens` | as for `inkling2_attention`. |
 | `kv_cache`, `kv_slot_mapping` | the K\|V page array of section 2.1 and int64 `[>= T]` slots (`-1` = padding); K = `l2_clip(conv_k, k_clip)`, V = `conv_v * rsqrt(mean(conv_v^2) + rms_eps)`, both rounded to fp16. |
-| `k_stream_offset`, `v_stream_offset` | stream offsets inside `Dpad` (`0` and `128` of the model: `Inkling2ConvOwner.stream_ranges`). |
+| `k_stream_offset`, `v_stream_offset` | stream offsets inside `W` (`0` and `128` of the model: `Inkling2ConvOwner.stream_ranges`). |
+| `write_state` | store the raw k / v inputs in the ring after reading the history. Only valid when no request has more than one token this step; otherwise run `inkling2_conv_state_write` per stream afterwards. |
 | `k_clip`, `rms_eps` | `22.627416997969522`, `1e-6`. |
 
 The previous `k - 1 = 3` raw inputs of a token come from `x` when they belong to
-the same request chunk (position `>= p0`) and from the conv cache otherwise;
-positions below 0 read as 0. The kernel reads the cache before it writes this
-step's inputs back, so one chunk may span several conv blocks.
+the same request chunk (position `>= p0`) and from the conv state otherwise;
+positions below 0 read as 0. The kernel reads the state only; the write is the
+separate op (or `write_state` for one-token requests, where each thread reads its
+history rows and then writes its own row, and no other thread touches them).
 
-### 2.3 `inkling2_sconv_static` / `inkling2_sconv_dynamic`
+### 2.3 `inkling2_sconv_static` / `inkling2_sconv_dynamic` / `inkling2_conv_state_write`
 
 ```text
 inkling2_sconv_static(Tensor x, Tensor weight, Tensor! out, Tensor! conv_cache,
-                      Tensor block_table, Tensor slot_mapping, Tensor seq_idx,
+                      Tensor block_table, Tensor seq_idx,
                       Tensor query_start_loc, Tensor seq_lens,
-                      int stream_offset, int num_kv_heads) -> ()
+                      int stream_offset, int num_kv_heads, int block_size,
+                      bool write_state) -> ()
 inkling2_sconv_dynamic(Tensor x, Tensor static_weight, Tensor dyn,
                        Tensor! out, Tensor! conv_cache, Tensor block_table,
-                       Tensor slot_mapping, Tensor seq_idx,
-                       Tensor query_start_loc, Tensor seq_lens,
-                       int stream_offset, int num_kv_heads) -> ()
+                       Tensor seq_idx, Tensor query_start_loc, Tensor seq_lens,
+                       int stream_offset, int num_kv_heads, int block_size,
+                       bool write_state) -> ()
+inkling2_conv_state_write(Tensor x, Tensor! conv_cache, Tensor block_table,
+                          Tensor seq_idx, Tensor query_start_loc,
+                          Tensor seq_lens, int stream_offset,
+                          int num_kv_heads, int block_size) -> ()
 ```
 
 Generic single-stream versions (used for the attention-output and MLP-output
 convs of the block, and for any k / v stream not fused in `inkling2_kv_prep`):
-`x` is fp16 or fp32 `[T, C]` (`C = H_kv * width`, `width % 4 == 0`), `out` fp32
-`[T, C]`; the other arguments are as in section 2.2. Tokens with `seq_idx < 0`
-or `slot_mapping < 0` get a zero output row and write nothing.
+`x` is fp16 or fp32 `[T, C]` (`C = H_kv * width`, `width % 4 == 0`, `stream_offset
+% 4 == 0`), `out` fp32 `[T, C]`; the other arguments are as in section 2.2. Tokens
+with `seq_idx < 0` get a zero output row and write nothing.
+
+`inkling2_conv_state_write` stores the raw inputs of `x` (rounded to fp16 with
+round-to-nearest-even; the serving path's conv inputs are fp16 GEMM outputs, so the
+state is exact) at their ring rows, for every token that is one of the **last `ring`
+positions of the intersection of its chunk with its block**: `p + ring >=
+min(seq_len, block_end(p))`. That rule gives every ring row one writer per step,
+leaves the rows of earlier chunk positions alone (they would be overwritten anyway)
+and always stores what the next reader needs: the 3 history positions of the next
+chunk and the last 3 positions of every completed block (what a prefix-cache hit on
+that block resumes from). It must run after the conv of the same stream (which reads
+the history rows it may overwrite) and, like the conv, once per stream.
 
 ### 2.4 Helpers (pure Python, `vllm/_custom_ops.py`)
 
@@ -168,11 +188,21 @@ inkling2_attention_splits(num_reqs, num_kv_heads, window, max_seq_len,
   (`_DEFAULT_LAYOUT_PREFERENCE`: `LBNHC`, `LBHNC`, `BLNHC`, `BLHNC`, ...) puts the
   token-major `LBNHC` first, which is the benchmark's default `--layout bhc`;
   `--layout hbc` is the head-major `LBHNC` (measured 5% slower at 128k, section 9).
-* **Conv page** `[nb, H_kv, conv_bs, Dpad]` fp32, `Dpad` = power of two covering the
-  four stream widths (`1024` at TP=1: widths 128 / 128 / 288 / 288), offsets from
-  `Inkling2ConvOwner.stream_ranges`.
-* Slot mappings are int64 and follow vLLM's convention `slot = block * block_size +
-  offset`, `-1` for padding.
+* **Conv page** `[nb, H_kv, ring, W]` fp16 (`Inkling2ConvOwner.state`, one page per
+  cache block of `bs = 64` tokens, `W` = the four stream widths back to back: 128 / 128
+  / 288 / 288 = 832 at TP=1, offsets from `Inkling2ConvOwner.stream_ranges`, no power
+  of two padding). Token position `p` lives in block `block_table[r, p / bs]` at ring
+  row `p % ring`; `ring = 3 + num_speculative_tokens` (3 without a draft model: the
+  `k - 1` history rows; with `k` draft tokens the rows of the accepted prefix of a
+  step survive the rejection of the drafts behind it). The page is `H_kv * ring * W * 2`
+  bytes: 39,936 B at TP=1 without drafts, 133,120 B with 7 draft tokens (ring 10). The
+  engine allocates it with the block-outermost layouts (`BLNHC` / `BLHNC`), so the 48
+  conv layers pack into one KV cache group next to the sliding-window and
+  full-attention groups of 2 MiB pages (`docs/rdna2/inkling2-port-spec.md`, "Conv and
+  KV memory").
+* Slot mappings of the K\|V cache are int64 and follow vLLM's convention `slot = block
+    * block_size + offset`,`-1` for padding. The conv ops take the block table and
+  `seq_idx`instead (`-1` = padding) and derive the block and the row themselves.
 
 ## 4. Caller-side preparation (what the lead has to wire)
 
@@ -196,9 +226,16 @@ gate = o_proj.gate_proj(hq)               # [T, nh*128]
 xk, xv = k_proj.linear(hk), v_proj.linear(hv)
 k_dyn = v_dyn = None                      # full layers: weight_proj(hk) / weight_proj(hv)
 ops.inkling2_kv_prep(xk, xv, conv_w_k, conv_w_v, k_dyn, v_dyn, conv_cache,
-                     conv_md.block_table, conv_md.slot_mapping, conv_md.seq_idx,
+                     conv_md.block_table, conv_md.seq_idx,
                      conv_md.query_start_loc, conv_md.seq_lens, kv_cache,
-                     kv_md.slot_mapping, 0, 128, qk_l2_clip_threshold, rms_norm_eps)
+                     kv_md.slot_mapping, 0, 128, conv_block_size,
+                     write_state,         # == (max_query_len == 1)
+                     qk_l2_clip_threshold, rms_norm_eps)
+if not write_state:                       # chunked prefill / drafts: after the reads
+    ops.inkling2_conv_state_write(xk, conv_cache, conv_md.block_table, conv_md.seq_idx,
+                                  conv_md.query_start_loc, conv_md.seq_lens, 0, H_kv, conv_block_size)
+    ops.inkling2_conv_state_write(xv, conv_cache, conv_md.block_table, conv_md.seq_idx,
+                                  conv_md.query_start_loc, conv_md.seq_lens, 128, H_kv, conv_block_size)
 ops.inkling2_attention(q, rel, sink, gate, q_scale, rel_scale, rel_proj_t,
                        positions, kv_cache, kv_md.block_table, kv_md.seq_lens,
                        kv_md.query_start_loc, attn_out, workspace,
@@ -209,7 +246,9 @@ out = o_proj.linear(attn_out)
 ```
 
 `inkling2_kv_prep` must run before `inkling2_attention` of the same layer visit on
-the same stream (the attention reads this step's keys from the cache).
+the same stream (the attention reads this step's keys from the cache). The conv state
+write of a multi-token step must come after the conv that reads the same stream (the
+same ring rows hold the history and, for a long chunk, its tail).
 
 ## 5. Split-K, workspace and graph capture
 
@@ -261,7 +300,7 @@ the same stream (the attention reads this step's keys from the cache).
 | Scaled clip of q / rel | fp32 clip, round to fp16, (log scale: fp32 multiply, round to fp16) | the same two roundings | the oracle's prologue is bit-identical to `Inkling2Attention._scaled_clip` (CPU test `test_scaled_clip_matches_repo`); the kernel is checked against the oracle within the tolerance below |
 | `rel_logits` | fp32 einsum of the fp16 rel features and `proj.float()` (`proj` is an fp16 parameter in serving) | the same fp16 `proj` values (`rel_proj_t`), fp32 `V_DOT2` accumulate | summation order only |
 | Output | `(attn.float() * sigmoid(gate.float())).to(fp16)` | the same, per element | identical rounding point |
-| conv taps | fp32 `x` (from `linear(h).float()`) | fp16 `x` is widened to fp32 | exact (the fp16 GEMM output is the same value) |
+| conv taps | fp32 `x` (from `linear(h).float()`); the reference ring state is fp16 as well | fp16 `x` is widened to fp32; the state is an fp16 ring | exact for fp16 GEMM outputs (the serving path); an fp32 `x` that is not fp16-representable is stored rounded to fp16, so only its history taps carry the rounding (relative `2^-11`), the taps inside the chunk are exact |
 | `k` | fp32 `l2_clip(conv)` rounded to fp16 on the cache write | the same | |
 | `v` | `v * rsqrt(mean(v^2) + eps)` in fp32 | `rsqrtf` (hardware, `~1 ulp`) | below the fp16 rounding |
 
@@ -293,8 +332,11 @@ python tools/rdna/inkling2/bench_attn.py --sweep-splits --only attn --ctx 16384 
 
 ## 8. Verification
 
-`tests/kernels/attention/test_inkling2_attn_rdna2.py`: 321 tests, all passing on the
-real registered-ops build (no dev aliasing) on a V620 (HIP 3: `321 passed in 195 s`).
+`tests/kernels/attention/test_inkling2_attn_rdna2.py`: 668 tests (604 of them on the
+conv ops, 64 on attention), all passing on the real registered-ops build (no dev
+aliasing) on a V620 (HIP 3: `668 passed in 327 s`; the first full run after the
+conv-ring change had one failure, the fake-tensor trace test still calling the old
+op signatures, fixed).
 Every GPU case compares against an fp64 CPU oracle built from the dense K / V (the
 oracle's prologue is bit-identical to `Inkling2Attention._scaled_clip`) and checks the
 poisoned memory: unused cache pages, padding rows and the split workspace are filled
@@ -303,7 +345,8 @@ with NaN, so a read of anything the kernel must not read fails the case.
 | Group | Cases |
 | --- | --- |
 | CPU | oracle vs the repo modules (`_scaled_clip`, conv), split policy properties, workspace formula |
-| `sconv_static`, `sconv_dynamic`, `kv_prep` | 3 request mixes x block sizes x widths / dtypes x padded token / short-metadata cases x both page layouts; the conv cache is compared bit for bit (NaN pages stay NaN), no input argument may change, every third conv input is 4x louder so the k L2 clip engages on some rows and not on others |
+| `sconv_static`, `sconv_dynamic`, `conv_state_write`, `kv_prep` | ring geometries `(block 4, ring 3)`, `(64, 3)`, `(16, 10)` x 4 request mixes (decode, prefill, chunked with history in earlier blocks, one with an empty request; blocks wholly below the history are the null block) x widths / dtypes / kv head counts x padded token / short-metadata cases x both page layouts; after every call the **whole** conv cache is compared bit for bit with the expected ring (the rule's rows written, everything else, NaN pages included, untouched), no input argument may change, every third conv input is 4x louder so the k L2 clip engages on some rows and not on others; each compute op is first run with `write_state = False` (the state must stay bit-identical), then followed by `inkling2_conv_state_write`, and for the one-token-per-request mix also with the fused `write_state = True`; `conv_state_write` puts two streams of different dtype and width into one page and runs with the page between four other layers' pages (`block5`) |
+| ring rollback | a `1 + drafts` token verify step of which 1 / 2 / 4 / 8 stay (`drafts` 4 / 7, block 4 / 16 / 64), the junk rows of the rejected tokens in the ring, then the next step reads its history from it: with `3 + drafts` rows the outputs equal the oracle, for a multi-token step and for one-token fused steps; fp32 inputs that are not fp16-representable are stored rounded (`conv_state_rounds_fp32_inputs_to_fp16`) |
 | `attention` decode / prefill / mixed | `q_len` 1, 2..1024, mixed batches with explicit splits, `g = 1..4`, gate / no gate, strided (fused-projection) inputs, int32 positions, small `rel_extent`, window 0 / 1024 |
 | long context | TP=4 full layer with 1,048,576 tokens (three split settings) |
 | cache layouts | head-major, token-major, and both interleaved with two other layers' NaN pages (block stride = 3 pages) |
@@ -333,7 +376,7 @@ the output by `1e-2` and more (below).
 
 **Mutation checks** (run by hand: each mutant is the kernel source with one exact-string
 change, built as its own op library, and the attention tests run with `-x`; every
-mutant must fail). 24 of 24 mutants fail:
+mutant must fail). 24 of 24 mutants failed on the part-A source:
 
 | Mutant | Change | First failing test |
 | --- | --- | --- |
@@ -365,6 +408,40 @@ mutant must fail). 24 of 24 mutants fail:
 The first run of the m15 mutant survived all 256 conv tests (the random conv outputs
 never exceeded the clip threshold of the k L2 clip). The conv world now makes every
 third input row 4x louder, and the mutant fails (after 192 passing cases).
+
+**Conv ring mutants.** The ring rewrite replaced the conv kernels, so the conv rows above
+(m9, m10, m11, m14, m15, m16) were measured on the part-A source and the ring was mutated
+again, with the same method (one exact-string change per mutant, its own op library, the
+conv tests `-k "test_sconv_static or test_sconv_dynamic or test_conv_state_write or
+test_kv_prep or test_rejected or test_conv_state_rounds"` with `-x`). All 8 ring mutants
+fail:
+
+| Mutant | Change | First failing test |
+| --- | --- | --- |
+| c1 | keep rule `p + ring >= min(p1, block_end)` -> `p + ring - 1 >= ...` (the oldest kept row is never written) | `sconv_static[hbc-padding0-8-288-dtype0-4-3-prefill]` |
+| c2 | history ring row `sp % ring` -> `(sp + 1) % ring` | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
+| c3 | state-write ring row `p % ring` -> `(p + 1) % ring` | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
+| c4 | history block `sp >> blk_shift` -> `tp.p >> blk_shift` (history taken from the block of the current token) | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
+| c5 | fused one-token write placed before the history read | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
+| c6 | state write ignores the stream offset (`o0` -> 0) | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
+| c7 | history head stride `cs1` -> `cs2` | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
+| c8 | history row hard-coded to a 3-row ring (`sp % 3`) | `sconv_static[hbc-padding0-8-288-dtype0-16-10-decode]` after 8 passing cases: only the ring-10 geometry sees it |
+
+The five mutation classes of the tap math (m9, m11, m14, m15, m16) were applied to the ring
+source too, by the same method; all 5 fail:
+
+| Mutant | Change | First failing test |
+| --- | --- | --- |
+| m9r | static tap order of channel 0 reversed | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
+| m11r | v RMS norm with the sum instead of the mean | `kv_prep[hbc-padding0-8-static-4-3-decode]` (after 411 passing cases) |
+| m14r | dynamic conv lag 0 uses the lag-1 dynamic tap | `sconv_dynamic[hbc-padding0-8-4-3-decode]` (after 144 passing cases) |
+| m15r | `kv_prep` drops the k L2 clip | `kv_prep[hbc-padding0-8-static-4-3-decode]` (after 411 passing cases) |
+| m16r | dynamic conv reads static weight row 2 for lag 1 | `sconv_dynamic[hbc-padding0-8-4-3-decode]` (after 144 passing cases) |
+
+So 13 of 13 conv mutants fail on the ring source (the part-A m10, "conv history read at
+position 0 dropped", is covered by c2, c3, c4 and c7).  The other 16 rows of the part-A
+table mutate the attention decode, prefill and split-combine kernels, which this change
+did not touch; they were not re-run.
 
 ## 9. Performance
 
@@ -412,15 +489,15 @@ TP=1 (24 q heads / 8 kv heads), `python tools/rdna/inkling2/bench_attn.py --md -
 | attn prefill full q=1024 | 32/1 | 597.0 | - | - | - | 10.80 | 5636 | 9x |
 | attn chunk full q=1024 ctx=16384 | 32/1 | 14379.1 | - | - | - | 13.89 | - | - |
 | attn chunk full q=1024 ctx=131072 | 32/1 | 124469.0 | - | - | - | 13.20 | - | - |
-| kv_prep static(sliding) B=1 q=1 | - | 4.4 | - | - | - | - | 2099 | 473x |
-| kv_prep static(sliding) B=4 q=1 | - | 4.6 | - | - | - | - | 2107 | 458x |
-| kv_prep static(sliding) B=1 q=1024 | - | 35.1 | - | - | - | - | 2122 | 60x |
-| kv_prep dynamic(full) B=1 q=1 | - | 4.5 | - | - | - | - | 2342 | 518x |
-| kv_prep dynamic(full) B=4 q=1 | - | 4.6 | - | - | - | - | 2317 | 507x |
-| kv_prep dynamic(full) B=1 q=1024 | - | 34.0 | - | - | - | - | 2349 | 69x |
-| sconv_static post-conv C=2304 B=1 q=1 | - | 3.8 | - | - | - | - | 915 | 239x |
-| sconv_static post-conv C=2304 B=4 q=1 | - | 3.8 | - | - | - | - | 916 | 238x |
-| sconv_static post-conv C=2304 B=1 q=1024 | - | 39.5 | - | - | - | - | 1127 | 29x |
+| kv_prep static(sliding) B=1 q=1 | - | 4.9 | - | - | - | - | 3101 | 629x |
+| kv_prep static(sliding) B=4 q=1 | - | 4.9 | - | - | - | - | 3149 | 637x |
+| kv_prep static(sliding) B=1 q=1024 + 2 state writes | - | 24.7 | - | - | - | - | 3169 | 128x |
+| kv_prep dynamic(full) B=1 q=1 | - | 4.9 | - | - | - | - | 3343 | 678x |
+| kv_prep dynamic(full) B=4 q=1 | - | 5.0 | - | - | - | - | 3375 | 676x |
+| kv_prep dynamic(full) B=1 q=1024 + 2 state writes | - | 23.8 | - | - | - | - | 3415 | 143x |
+| sconv_static post-conv C=2304 B=1 q=1 | - | 4.2 | - | - | - | - | 1431 | 341x |
+| sconv_static post-conv C=2304 B=4 q=1 | - | 4.2 | - | - | - | - | 1475 | 350x |
+| sconv_static post-conv C=2304 B=1 q=1024 + 1 state write | - | 23.7 | - | - | - | - | 1508 | 64x |
 
 Reading the table:
 
@@ -434,8 +511,18 @@ Reading the table:
   `q <= 4` would remove most of that [INFERENCE: ~3-4x less tile compute].
 * **Prefill** runs at 11-13 TFLOP/s, 13.2 TFLOP/s for a 1024-token chunk at 128k depth
   (124 ms per full-layer visit at TP=1).
-* `kv_prep` / `sconv` replace 0.9-2.3 ms of torch gather / conv / scatter work with
-  3.8-4.6 us (decode) and 34-40 us (1024 tokens).
+* `kv_prep` / `sconv` replace 1.4-3.4 ms of torch gather / conv / scatter work with
+  4.2-5.0 us (decode, state write fused) and 24-25 us (1024 tokens, including the
+  separate `inkling2_conv_state_write` launches). The conv rows were re-measured with
+  the ring state (block 64, 3 rows, fp16; `--only kv sconv`, HIP 3): the decode rows are
+  0.4-0.5 us slower than with the previous per-token fp32 slots (4.4-4.6 / 3.8 us;
+  [INFERENCE] the ring-row arithmetic and the block-table lookup per history tap), the
+  1024-token rows 30-40% faster (35 / 34 / 40 us before), because only the last three
+  positions of every block of the chunk are written instead of every token. The torch
+  column is the reference path with the same ring semantics, so it is not comparable to
+  the older
+  table. The bench's attention-stream `x_post` is still fp32 (the serving path passes
+  fp16), which only affects that row's load width.
 
 TP=2 / TP=4 (`--tp 2` / `--tp 4`, 12 / 6 q heads), `kernel us / cold us` (kernel only):
 
@@ -493,6 +580,20 @@ Other measurements on the same kernel:
   `Inkling2MetadataBuilder._cudagraph_support` is `NEVER` in the repo and has to
   change for FULL graphs; padded requests must carry `seq_lens = 0`, padded tokens
   `slot_mapping = -1` / `seq_idx = -1` (they produce zero rows and write nothing).
+  The conv ops read neither a conv `slot_mapping` nor anything else per token than
+  `seq_idx`; `write_state` is a launch constant, so a captured one-token-per-request
+  decode graph uses the fused form and a verify / mixed graph the two-launch form
+  (`conv_writes_in_op(md)` = `md.max_query_len == 1`).
+* **Conv state**: fp16 ring rows addressed by position (`p % ring`, block
+  `p / block_size`); the ring needs `3 + num_speculative_tokens` rows so that a
+  rejection of draft tokens cannot replace history the next step reads, and the
+  block table the ops are given must hold, for every position of the step and the
+  three before it, a block that belongs to the request (the engine's forward table
+  shows blocks below the window as the null block, which is only read for positions
+  below the history and never written). Two requests may not write the same block in
+  one step: a request that would prefix-hit blocks another request writes in the same
+  step has to wait a step (`Inkling2ConvStateManager`). fp32 inputs are stored rounded
+  to fp16.
 * **TP > 1**: pass each rank's slice of `q_scale` `[nh_local, 128]`,
   `rel_scale` `[nh_local, 16]`; `rel_proj_t` is replicated (it is shared by the heads).
 * **Deviations** (section 6): fp16 probabilities in the tiled kernel (about `5e-4`

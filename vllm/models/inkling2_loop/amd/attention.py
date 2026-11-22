@@ -399,27 +399,43 @@ class Inkling2Attention(nn.Module):
         named = dict(zip(self._attn_in.names, outs))
         k_off = conv_owner.stream_ranges[STREAM_K][0]
         v_off = conv_owner.stream_ranges[STREAM_V][0]
-        for _ in range(conv_passes(conv_md)):
-            ops.inkling2_kv_prep(
-                named["k"],
-                named["v"],
-                self._k_weight,
-                self._v_weight,
-                named.get("dyn_k"),
-                named.get("dyn_v"),
-                conv_owner.kv_cache,
-                conv_md.block_table,
-                conv_md.slot_mapping,
-                conv_md.seq_idx,
-                conv_md.query_start_loc,
-                conv_md.seq_lens,
-                kv_owner.kv_cache,
-                kv_md.slot_mapping,
-                k_off,
-                v_off,
-                self._q_clip,
-                self._rms_eps,
-            )
+        # one token per request: the op writes the state itself; a chunk of several
+        # tokens (prefill, verify) writes it after its history was read
+        write_state = conv_writes_in_op(conv_md)
+        ops.inkling2_kv_prep(
+            named["k"],
+            named["v"],
+            self._k_weight,
+            self._v_weight,
+            named.get("dyn_k"),
+            named.get("dyn_v"),
+            conv_owner.state,
+            conv_md.block_table,
+            conv_md.seq_idx,
+            conv_md.query_start_loc,
+            conv_md.seq_lens,
+            kv_owner.kv_cache,
+            kv_md.slot_mapping,
+            k_off,
+            v_off,
+            conv_owner.block_size,
+            write_state,
+            self._q_clip,
+            self._rms_eps,
+        )
+        if not write_state:
+            for stream, off in ((named["k"], k_off), (named["v"], v_off)):
+                ops.inkling2_conv_state_write(
+                    stream,
+                    conv_owner.state,
+                    conv_md.block_table,
+                    conv_md.seq_idx,
+                    conv_md.query_start_loc,
+                    conv_md.seq_lens,
+                    off,
+                    conv_owner.num_kv_heads,
+                    conv_owner.block_size,
+                )
         splits = kv_md.splits.get((self.num_kv_heads, self._window))
         if splits is None:
             splits = kv_md.splits[(self.num_kv_heads, self._window)] = (
@@ -462,24 +478,13 @@ class Inkling2Attention(nn.Module):
         return o_out
 
 
-def conv_passes(md: Inkling2Metadata) -> int:
-    """Launches of each op that reads conv history from the cache and writes this step's
-    conv inputs into it in one kernel (``inkling2_sconv_static``, ``inkling2_kv_prep``).
-
-    The first ``k - 1`` tokens of a request chunk take their history from the cache.
-    The scheduler registers the blocks of the tokens it schedules in the prefix cache
-    before they are computed, so a prefix-cache hit of the same batch can read history
-    that another request only writes in this very step.  The reference path writes all
-    inputs before it reads any (``conv_taps``); one launch cannot order the CTAs, a
-    second launch can: the conv inputs the first one wrote do not depend on history, so
-    the second finds them all in the cache and recomputes what the first derived from
-    stale history.  A batch of single-token chunks reads the cache only at positions the
-    previous step wrote, except when a request with a one-token prefix-cache tail
-    shares a step with the owner that completes that block with its own decode token:
-    that corner needs a write-phase / read-phase split inside the kernels
-    (``docs/rdna2/inkling2-port-spec.md``, integration part A).
-    """
-    return 2 if md.max_query_len > 1 else 1
+def conv_writes_in_op(md: Inkling2Metadata) -> bool:
+    """Whether the conv ops write the state themselves: with one token per request
+    every history row they read belongs to an earlier step, so reading and writing
+    in one thread is race free; for longer chunks the writes of a chunk could
+    overwrite history rows its later tokens still read, so ``inkling2_conv_state_write``
+    runs after the conv."""
+    return md.max_query_len == 1
 
 
 def static_conv_hip(
@@ -490,23 +495,43 @@ def static_conv_hip(
     md: Inkling2Metadata,
     stream: int,
 ) -> None:
-    """Static depthwise short conv of one stream: fp16 ``x [T, C]`` -> fp32 ``out``."""
+    """Static depthwise short conv of one stream: fp16 ``x [T, C]`` -> fp32 ``out``.
+
+    The first ``k - 1`` tokens of a request chunk read their history from the conv
+    state, so a chunk of several tokens writes its inputs after the conv has run
+    (``inkling2_conv_state_write``); a batch of single tokens lets the conv write
+    its own input.  A prefix-cache hit never reads a block that the same step
+    completes: ``Inkling2ConvStateManager`` defers such a request.
+    """
     from vllm import _custom_ops as ops
 
     offset = owner.stream_ranges[stream][0]
-    for _ in range(conv_passes(md)):
-        ops.inkling2_sconv_static(
+    write_state = conv_writes_in_op(md)
+    ops.inkling2_sconv_static(
+        x,
+        conv.conv1d.weight,
+        out,
+        owner.state,
+        md.block_table,
+        md.seq_idx,
+        md.query_start_loc,
+        md.seq_lens,
+        offset,
+        owner.num_kv_heads,
+        owner.block_size,
+        write_state,
+    )
+    if not write_state:
+        ops.inkling2_conv_state_write(
             x,
-            conv.conv1d.weight,
-            out,
-            owner.kv_cache,
+            owner.state,
             md.block_table,
-            md.slot_mapping,
             md.seq_idx,
             md.query_start_loc,
             md.seq_lens,
             offset,
             owner.num_kv_heads,
+            owner.block_size,
         )
 
 
