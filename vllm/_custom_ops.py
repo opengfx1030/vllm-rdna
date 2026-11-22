@@ -1871,6 +1871,952 @@ def moe_mxfp8_gemm_rdna2(
     )
 
 
+_INKLING2_MAX_SPLITS = 256  # kI2MaxSplits of csrc/rocm/inkling2_attn_rdna2.cu
+
+
+def inkling2_attention_workspace_numel(
+    num_reqs: int,
+    num_tokens: int,
+    num_q_heads: int,
+    splits_decode: int,
+    splits_tile: int,
+) -> int:
+    """fp32 elements of the split-K workspace used by `inkling2_attention`.
+
+    A decode request (one query token) keeps `splits_decode` partials, every
+    token of a multi-token request keeps `splits_tile` partials; a partial is a
+    128-wide fp32 accumulator plus the (max, sum) softmax state per q head.
+    """
+    rows = splits_decode * num_reqs + splits_tile * num_tokens
+    return rows * num_q_heads * (128 + 2)
+
+
+def inkling2_attention_splits(
+    num_reqs: int,
+    num_kv_heads: int,
+    window: int,
+    max_seq_len: int,
+    max_query_len: int,
+) -> tuple[int, int]:
+    """Split-K factors `(splits_decode, splits_tile)` for `inkling2_attention`.
+
+    Upper bounds: the kernels split every request into at most that many
+    partials and use fewer when the context is short, so a CUDA graph captured
+    with the bounds for `max_seq_len` serves every shorter sequence.  Decode
+    waves stream 16-key super-tiles (512 B per key and kv head); ~256 waves
+    saturate DRAM on a V620 and keep the latency chain of a short window at
+    two super-tiles per wave (measured sweeps: docs/rdna2/inkling2-attn-kernels.md).
+    A tile CTA owns 16 query tokens of one kv head and the GPU wants ~144 CTAs.
+    """
+    cap = _INKLING2_MAX_SPLITS
+    # keys a request can attend: the window (+ super-tile slack) or the context
+    keys = window + 16 if window > 0 else max_seq_len
+    groups = max(num_reqs * num_kv_heads, 1)
+    splits_decode = min(max(-(-256 // groups), 1), max(-(-keys // 16) // 2, 1), cap)
+    tiles = -(-max_query_len // 16)
+    ctas = tiles * groups
+    splits_tile = 1
+    if max_query_len > 1 and ctas < 144:
+        key_tiles = -(-(keys + 16) // 64)
+        splits_tile = min(max(-(-144 // ctas), 1), max(key_tiles // 4, 1), 16)
+    return splits_decode, splits_tile
+
+
+def inkling2_sconv_static(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    conv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    seq_idx: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    stream_offset: int,
+    num_kv_heads: int,
+) -> None:
+    torch.ops._rocm_C.inkling2_sconv_static(
+        x,
+        weight,
+        out,
+        conv_cache,
+        block_table,
+        slot_mapping,
+        seq_idx,
+        query_start_loc,
+        seq_lens,
+        stream_offset,
+        num_kv_heads,
+    )
+
+
+def inkling2_sconv_dynamic(
+    x: torch.Tensor,
+    static_weight: torch.Tensor,
+    dyn: torch.Tensor,
+    out: torch.Tensor,
+    conv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    seq_idx: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    stream_offset: int,
+    num_kv_heads: int,
+) -> None:
+    torch.ops._rocm_C.inkling2_sconv_dynamic(
+        x,
+        static_weight,
+        dyn,
+        out,
+        conv_cache,
+        block_table,
+        slot_mapping,
+        seq_idx,
+        query_start_loc,
+        seq_lens,
+        stream_offset,
+        num_kv_heads,
+    )
+
+
+def inkling2_kv_prep(
+    xk: torch.Tensor,
+    xv: torch.Tensor,
+    k_weight: torch.Tensor,
+    v_weight: torch.Tensor,
+    k_dyn: torch.Tensor | None,
+    v_dyn: torch.Tensor | None,
+    conv_cache: torch.Tensor,
+    conv_block_table: torch.Tensor,
+    conv_slot_mapping: torch.Tensor,
+    seq_idx: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    kv_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    k_stream_offset: int,
+    v_stream_offset: int,
+    k_clip: float,
+    rms_eps: float,
+) -> None:
+    torch.ops._rocm_C.inkling2_kv_prep(
+        xk,
+        xv,
+        k_weight,
+        v_weight,
+        k_dyn,
+        v_dyn,
+        conv_cache,
+        conv_block_table,
+        conv_slot_mapping,
+        seq_idx,
+        query_start_loc,
+        seq_lens,
+        kv_cache,
+        kv_slot_mapping,
+        k_stream_offset,
+        v_stream_offset,
+        k_clip,
+        rms_eps,
+    )
+
+
+def inkling2_attention(
+    q: torch.Tensor,
+    rel: torch.Tensor,
+    sink: torch.Tensor,
+    gate: torch.Tensor | None,
+    q_scale: torch.Tensor,
+    rel_scale: torch.Tensor,
+    rel_proj_t: torch.Tensor,
+    positions: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    out: torch.Tensor,
+    workspace: torch.Tensor,
+    window: int,
+    rel_extent: int,
+    log_scale: bool,
+    log_alpha: float,
+    log_n_floor: float,
+    q_clip: float,
+    rel_clip: float,
+    max_query_len: int,
+    splits_decode: int,
+    splits_tile: int,
+) -> None:
+    torch.ops._rocm_C.inkling2_attention(
+        q,
+        rel,
+        sink,
+        gate,
+        q_scale,
+        rel_scale,
+        rel_proj_t,
+        positions,
+        kv_cache,
+        block_table,
+        seq_lens,
+        query_start_loc,
+        out,
+        workspace,
+        window,
+        rel_extent,
+        log_scale,
+        log_alpha,
+        log_n_floor,
+        q_clip,
+        rel_clip,
+        max_query_len,
+        splits_decode,
+        splits_tile,
+    )
+
+
+def inkling2_dspark_store_taps(
+    srcs: list[torch.Tensor], dst: torch.Tensor, num_rows: int
+) -> None:
+    """dst[row, t * H:(t + 1) * H] = bf16(srcs[t][row]) for up to 4 taps.
+
+    The sources are fp32 / fp16 / bf16 [rows, H] tensors of one dtype; dst is a
+    bf16 [rows, taps * H] buffer.
+    """
+    torch.ops._rocm_C.inkling2_dspark_store_taps(srcs, dst, num_rows)
+
+
+def inkling2_dspark_mix_rms(
+    taps: torch.Tensor,
+    fuse_weight: torch.Tensor,
+    norm_w: torch.Tensor,
+    out: torch.Tensor,
+    qsl: torch.Tensor | None,
+    num_rejected: torch.Tensor | None,
+    num_rows: int,
+    alpha_row0: int,
+    eps: float,
+) -> None:
+    """DFlare mix + RMSNorm: out[l, i] = rmsnorm(sum_t softmax(fuse_weight[row0
+    + l])[t] * tap_t[src(i)]) * norm_w[l] with fp32 math, fp16 output.
+
+    With qsl / num_rejected, src(i) = qsl[i + 1] - num_rejected[i] - 1 (the last
+    committed row of request i); otherwise src(i) = i.
+    """
+    torch.ops._rocm_C.inkling2_dspark_mix_rms(
+        taps, fuse_weight, norm_w, out, qsl, num_rejected, num_rows, alpha_row0, eps
+    )
+
+
+def inkling2_dspark_embed_block(
+    ids: torch.Tensor,
+    embed: torch.Tensor,
+    embed_norm_w: torch.Tensor,
+    mask_embed: torch.Tensor,
+    in_norm_w: torch.Tensor,
+    resid: torch.Tensor,
+    xn: torch.Tensor,
+    num_rows: int,
+    block: int,
+    eps: float,
+) -> None:
+    """Draft block input: row % block == 0 -> embed_norm(embed[id]), else
+    mask_embed; resid (fp32) = row, xn (fp16) = rmsnorm(row) * in_norm_w."""
+    torch.ops._rocm_C.inkling2_dspark_embed_block(
+        ids, embed, embed_norm_w, mask_embed, in_norm_w, resid, xn, num_rows, block, eps
+    )
+
+
+def inkling2_dspark_add_rmsnorm(
+    resid: torch.Tensor,
+    delta: torch.Tensor,
+    norm_w: torch.Tensor,
+    out: torch.Tensor,
+    num_rows: int,
+    splits: int,
+    eps: float,
+) -> None:
+    """Resid += delta; out = rmsnorm(resid) * norm_w. delta is fp16 [rows, H]
+    (splits == 0) or fp32 split-K partials [splits, rows, H]."""
+    torch.ops._rocm_C.inkling2_dspark_add_rmsnorm(
+        resid, delta, norm_w, out, num_rows, splits, eps
+    )
+
+
+def inkling2_dspark_silu_mul(
+    gu: torch.Tensor, out: torch.Tensor, num_rows: int
+) -> None:
+    """out[t, j] = silu(gu[t, 2j]) * gu[t, 2j + 1] (gate / up interleaved)."""
+    torch.ops._rocm_C.inkling2_dspark_silu_mul(gu, out, num_rows)
+
+
+def inkling2_dspark_gather_rows(
+    src: torch.Tensor, idx: torch.Tensor, dst: torch.Tensor, num_rows: int
+) -> None:
+    """dst[i] = src[idx[i]] for fp16 rows (idx is int64)."""
+    torch.ops._rocm_C.inkling2_dspark_gather_rows(src, idx, dst, num_rows)
+
+
+def inkling2_dspark_gemv(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    out: torch.Tensor,
+    x_index: torch.Tensor | None,
+    num_rows: int,
+    splits: int = 0,
+    variant: int = 0,
+) -> None:
+    """Skinny fp16 GEMM out = x @ w.T for num_rows <= 32 (fp32 accumulation).
+
+    splits == 0 writes fp16 out [rows, N]; splits > 0 writes the fp32 partial
+    sums over K / splits into out [splits, rows, N] (the consumer adds them).
+    x_index (int64) gathers the activation rows; variant forces rows per wave.
+    """
+    torch.ops._rocm_C.inkling2_dspark_gemv(
+        x, w, out, x_index, num_rows, splits, variant
+    )
+
+
+def inkling2_dspark_gemm(
+    x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, num_rows: int, design: int
+) -> None:
+    """Dense fp16 GEMM out = x @ w.T on rdna_hint_flex design 0..5 (no rocBLAS)."""
+    torch.ops._rocm_C.inkling2_dspark_gemm(x, w, out, num_rows, design)
+
+
+def inkling2_dspark_qkv_prep(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    slots: torch.Tensor,
+    q_norm_w: torch.Tensor,
+    k_norm_w: torch.Tensor,
+    inv_freq: torch.Tensor,
+    q_out: torch.Tensor | None,
+    kv_cache: torch.Tensor,
+    num_tokens: int,
+    q_heads: int,
+    kv_heads: int,
+    eps: float,
+) -> None:
+    """Per-head Q/K RMSNorm + neox RoPE (float64 angles) + paged KV write."""
+    torch.ops._rocm_C.inkling2_dspark_qkv_prep(
+        qkv,
+        positions,
+        slots,
+        q_norm_w,
+        k_norm_w,
+        inv_freq,
+        q_out,
+        kv_cache,
+        num_tokens,
+        q_heads,
+        kv_heads,
+        eps,
+    )
+
+
+def inkling2_dspark_attention_part_numel(
+    num_reqs: int, kv_heads: int, num_splits: int
+) -> int:
+    """fp32 elements of the split scratch used by `inkling2_dspark_attention`."""
+    return num_reqs * kv_heads * num_splits * 24 * 130
+
+
+def inkling2_dspark_attention(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    out: torch.Tensor,
+    part: torch.Tensor,
+    num_reqs: int,
+    window: int,
+    splits: int,
+) -> None:
+    """Bidirectional attention of 8-row draft blocks over the paged cache."""
+    torch.ops._rocm_C.inkling2_dspark_attention(
+        q, kv_cache, block_table, seq_lens, out, part, num_reqs, window, splits
+    )
+
+
+def inkling2_dspark_markov_step(
+    prev: torch.Tensor,
+    prev_stride: int,
+    state: torch.Tensor,
+    w1: torch.Tensor,
+    wt: torch.Tensor,
+    bias: torch.Tensor,
+    ctx_h: torch.Tensor,
+    ctx_f: torch.Tensor,
+    latent: torch.Tensor,
+    num_reqs: int,
+    step: int,
+    nsteps: int,
+    first: bool,
+) -> None:
+    """One Markov recurrence step: updates state (fp32), writes latent (fp16)."""
+    torch.ops._rocm_C.inkling2_dspark_markov_step(
+        prev,
+        prev_stride,
+        state,
+        w1,
+        wt,
+        bias,
+        ctx_h,
+        ctx_f,
+        latent,
+        num_reqs,
+        step,
+        nsteps,
+        first,
+    )
+
+
+def inkling2_dspark_head_logits(
+    base: torch.Tensor,
+    latent: torch.Tensor,
+    fold_w: torch.Tensor,
+    fold_b: torch.Tensor,
+    logits: torch.Tensor,
+    num_reqs: int,
+    step: int,
+    nsteps: int,
+    softcap: float,
+) -> None:
+    """Logits = softcap * tanh((base + fold_b + fold_w @ latent) / softcap)."""
+    torch.ops._rocm_C.inkling2_dspark_head_logits(
+        base, latent, fold_w, fold_b, logits, num_reqs, step, nsteps, softcap
+    )
+
+
+def inkling2_dspark_fold_bias(
+    head: torch.Tensor, b: torch.Tensor, out: torch.Tensor
+) -> None:
+    """out[v] = head[v] . b in fp32 (the bias of the folded hidden_out)."""
+    torch.ops._rocm_C.inkling2_dspark_fold_bias(head, b, out)
+
+
+def inkling2_dspark_argmax(
+    logits: torch.Tensor, out: torch.Tensor, num_rows: int, vocab: int
+) -> None:
+    """out[r] = argmax(logits[r, :vocab]) for fp16 rows (NaN as -inf, lowest index
+    on ties); out is an int64 vector, possibly a strided column of a token table."""
+    torch.ops._rocm_C.inkling2_dspark_argmax(logits, out, num_rows, vocab)
+
+
+def inkling2_dspark_prepare_inputs(
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    is_padding: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_slot_mapping: torch.Tensor,
+    context_positions: torch.Tensor,
+    context_slot_mapping: torch.Tensor,
+    sample_indices: torch.Tensor,
+    sample_pos: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    out_temperature: torch.Tensor,
+    out_seeds: torch.Tensor,
+    target_positions: torch.Tensor,
+    target_query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    parallel_drafting_token_id: int,
+    num_query_per_req: int,
+    num_speculative_steps: int,
+    max_num_reqs: int,
+    max_num_tokens: int,
+    max_model_len: int,
+    num_reqs: int,
+    max_tokens_per_req: int,
+    sample_from_anchor: bool,
+) -> None:
+    """HIP port of the runner's ``prepare_dflash_inputs`` (single-rank context): the
+    query block, context positions / slots and sample rows of every request from the
+    target batch, and the inert padding of all buffers up to their maxima."""
+    torch.ops._rocm_C.inkling2_dspark_prepare_inputs(
+        input_ids,
+        positions,
+        is_padding,
+        query_start_loc,
+        seq_lens,
+        query_slot_mapping,
+        context_positions,
+        context_slot_mapping,
+        sample_indices,
+        sample_pos,
+        sample_idx_mapping,
+        out_temperature,
+        out_seeds,
+        target_positions,
+        target_query_start_loc,
+        idx_mapping,
+        last_sampled,
+        next_prefill_tokens,
+        num_sampled,
+        num_rejected,
+        temperature,
+        seeds,
+        block_table,
+        block_size,
+        parallel_drafting_token_id,
+        num_query_per_req,
+        num_speculative_steps,
+        max_num_reqs,
+        max_num_tokens,
+        max_model_len,
+        num_reqs,
+        max_tokens_per_req,
+        sample_from_anchor,
+    )
+
+
+def inkling2_vit_gather_patches(
+    raw: torch.Tensor, out: torch.Tensor, mode: int
+) -> None:
+    """Raw 40x40x3 cells [cells, 40, 40, 3] (fp16/bf16, 0..255, -1 padding) ->
+    fp16 patch rows out [4 cells, kpad] (columns >= 1200 zeroed).  mode 0:
+    2 raw / 255 - 1 (the transformers processor); mode 1: CLIP normalisation
+    rounded to bf16 and mapped back to [-1, 1] (the NVIDIA vLLM reference)."""
+    torch.ops._rocm_C.inkling2_vit_gather_patches(raw, out, mode)
+
+
+def inkling2_vit_gemm(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    out: torch.Tensor,
+    bias: torch.Tensor | None,
+    epilogue: int,
+) -> None:
+    """Out = epilogue(a @ w.T) for fp16 a [M, K], w [N, K] (fp32 accumulation).
+
+    Epilogue 0 plain fp16, 1 + fp32 bias, 2 exact GELU(+ bias), 3 exact GELU, 4 plain
+    fp32 out."""
+    torch.ops._rocm_C.inkling2_vit_gemm(a, w, out, bias, epilogue)
+
+
+def inkling2_vit_gemm_residual(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    bias: torch.Tensor,
+    gamma: torch.Tensor,
+    res: torch.Tensor,
+) -> None:
+    """Res (fp32 [M, N]) += gamma * (a @ w.T + bias), in place."""
+    torch.ops._rocm_C.inkling2_vit_gemm_residual(a, w, bias, gamma, res)
+
+
+def inkling2_vit_embed(
+    emb: torch.Tensor,
+    pos: torch.Tensor,
+    cls: torch.Tensor,
+    ln_w: torch.Tensor,
+    ln_b: torch.Tensor,
+    meta: torch.Tensor,
+    h: torch.Tensor,
+    eps: float,
+) -> None:
+    """Patch-embedding rows + bilinear position embedding (or the CLS row) per token,
+    then LayerNorm: h [T, D] fp32; meta is the int32 [n_img, 4] image table."""
+    torch.ops._rocm_C.inkling2_vit_embed(emb, pos, cls, ln_w, ln_b, meta, h, eps)
+
+
+def inkling2_vit_layernorm(
+    h: torch.Tensor, w: torch.Tensor, b: torch.Tensor, out: torch.Tensor, eps: float
+) -> None:
+    """LayerNorm of fp32 rows h [T, D] into fp16 out."""
+    torch.ops._rocm_C.inkling2_vit_layernorm(h, w, b, out, eps)
+
+
+def inkling2_vit_rope_tables(
+    meta: torch.Tensor, inv_freq: torch.Tensor, cs: torch.Tensor
+) -> None:
+    """Axial 2-D RoPE (cos, sin) per token and pair: cs [T, 32, 2] fp32."""
+    torch.ops._rocm_C.inkling2_vit_rope_tables(meta, inv_freq, cs)
+
+
+def inkling2_vit_rope_qk(qkv: torch.Tensor, cs: torch.Tensor) -> None:
+    """Rotate q and k of the fused qkv rows [T, 3 D] (fp16) in place."""
+    torch.ops._rocm_C.inkling2_vit_rope_qk(qkv, cs)
+
+
+def inkling2_vit_attention(
+    qkv: torch.Tensor,
+    out: torch.Tensor,
+    meta: torch.Tensor,
+    blk_prefix: torch.Tensor,
+    num_qblocks: int,
+) -> None:
+    """Bidirectional attention per image (head_dim 64, scale 1/8) over packed qkv
+    rows; blk_prefix [n_img + 1] counts the 64-row query blocks."""
+    torch.ops._rocm_C.inkling2_vit_attention(qkv, out, meta, blk_prefix, num_qblocks)
+
+
+def inkling2_vit_pool(h: torch.Tensor, meta: torch.Tensor, out: torch.Tensor) -> None:
+    """Non-CLS rows of the fp32 hidden h [T, D] -> fp16 out [T - n_img, D]."""
+    torch.ops._rocm_C.inkling2_vit_pool(h, meta, out)
+
+
+def inkling2_linear_grouped(
+    xs: list[torch.Tensor],
+    w: torch.Tensor,
+    outs: list[torch.Tensor],
+    seg_x: list[int],
+    seg_n: list[int],
+    seg_act: list[int] | None = None,
+    seg_p: list[float] | None = None,
+    seg_valid: list[int] | None = None,
+    variant: int = -1,
+) -> None:
+    """Segmented fp16 linear on gfx1030: outs[i] = act(xs[seg_x[i]] @ W_i^T).
+
+    W_i are consecutive row blocks of w [N, K] with seg_n[i] rows. xs are fp16
+    [M, K] (unit column stride, row stride a multiple of 8); outs[i] is fp16 or
+    fp32 [M, seg_n[i]]. seg_act: 0 none, 1 sigmoid, 2 tanh, 3 softcap(seg_p);
+    columns >= seg_valid[i] are written as -inf. See
+    docs/rdna2/inkling2-linear-kernels.md.
+    """
+    torch.ops._rocm_C.inkling2_linear_grouped(
+        xs,
+        w,
+        outs,
+        seg_x,
+        seg_n,
+        seg_act or [],
+        seg_p or [],
+        seg_valid or [],
+        variant,
+    )
+
+
+def inkling2_linear_f32w(
+    xs: list[torch.Tensor],
+    w: torch.Tensor,
+    outs: list[torch.Tensor],
+    seg_x: list[int],
+    seg_n: list[int],
+    seg_act: list[int] | None = None,
+    variant: int = -1,
+) -> None:
+    """Segmented fp32-weight linear (router, controller gates): fp16 xs, fp32
+    w [N, K] and outs [M, seg_n[i]], fp32 FMA accumulation."""
+    torch.ops._rocm_C.inkling2_linear_f32w(
+        xs, w, outs, seg_x, seg_n, seg_act or [], variant
+    )
+
+
+def inkling2_linear_lm_head(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    logits: torch.Tensor | None,
+    part_val: torch.Tensor | None,
+    part_idx: torch.Tensor | None,
+    softcap: float,
+    n_valid: int = -1,
+    col_base: int = 0,
+    variant: int = -1,
+) -> None:
+    """logits[M, N] fp32 = softcap * tanh(x @ w^T / softcap), columns >= n_valid
+    -inf; optional per-block argmax partials part_val fp32 / part_idx int32
+    [M, P] (indices offset by col_base). M <= 16 with partials writes no logits
+    when logits is None."""
+    torch.ops._rocm_C.inkling2_linear_lm_head(
+        x, w, logits, part_val, part_idx, softcap, n_valid, col_base, variant
+    )
+
+
+def inkling2_linear_argmax_partial(
+    logits: torch.Tensor,
+    part_val: torch.Tensor,
+    part_idx: torch.Tensor,
+    n: int,
+    col_base: int = 0,
+) -> None:
+    torch.ops._rocm_C.inkling2_linear_argmax_partial(
+        logits, part_val, part_idx, n, col_base
+    )
+
+
+def inkling2_linear_argmax_reduce(
+    part_val: torch.Tensor, part_idx: torch.Tensor, out: torch.Tensor
+) -> None:
+    torch.ops._rocm_C.inkling2_linear_argmax_reduce(part_val, part_idx, out)
+
+
+def inkling2_glue_attn_res(
+    blocks: torch.Tensor,
+    n_blocks: int,
+    x0: torch.Tensor,
+    query: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    x1: torch.Tensor | None = None,
+    partial_out: torch.Tensor | None = None,
+    append: torch.Tensor | None = None,
+    norm_w: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+) -> None:
+    """Block / message attention residual of Inkling-2-Mini (one CTA per token).
+
+    Stack = ``blocks[:, :n_blocks]``, then ``append`` (if given), then the
+    partial state ``x0 (+ x1)``.  Every state is RMS-normalised without a
+    weight; ``out[:, q] = sum_j softmax_j(query[q] . s_j * H**-0.5) * s_j``
+    over the normalised states.  ``append`` is also copied into
+    ``blocks[:, n_blocks]`` and ``partial_out`` receives ``x0 (+ x1)``.
+
+    Args:
+        blocks: ``[T, S, H]`` fp32 block states (written at slot ``n_blocks``
+            when ``append`` is given; an empty tensor when unused).
+        n_blocks: number of stored states that take part (``S >= n_blocks``).
+        x0: ``[T, H]`` fp32 partial state (row stride a multiple of 4).
+        query: ``[Q, H]`` fp32 learned queries, ``Q`` in {1, 3, 4}.
+        out: ``[T, Q, H]``: fp32 (raw result) or fp16 (with ``norm_w``).
+        x1: optional ``[T, H]`` fp32 added to ``x0`` (lazy residual add).
+        partial_out: optional ``[T, H]`` fp32 receiving ``x0 + x1``.
+        append: optional ``[T, H]`` fp32 state inserted before the partial.
+        norm_w: optional ``[1 or Q, H]`` fp16 / fp32 RMSNorm weight; the
+            result is then normalised per query and written as fp16.
+        eps: epsilon of the unweighted state norm.
+        norm_eps: epsilon of the weighted output norm.
+
+    """
+    torch.ops._rocm_C.inkling2_glue_attn_res(
+        blocks,
+        n_blocks,
+        x0,
+        x1,
+        partial_out,
+        append,
+        query,
+        norm_w,
+        out,
+        eps,
+        norm_eps,
+    )
+
+
+def inkling2_glue_msg_gate_down(
+    h: torch.Tensor,
+    m: torch.Tensor,
+    wd: torch.Tensor,
+    d: torch.Tensor,
+    eps: float = 1e-6,
+) -> None:
+    """MessageGate step 1 for ``G`` gate streams: ``d = fp16(down([nh, nm]))``.
+
+    ``nh`` / ``nm`` are the unweighted RMS norms of ``h`` and ``m``, rounded
+    to fp16; the fp16 projection accumulates in fp32 (V_DOT2) and rounds to
+    fp16.
+
+    Args:
+        h: ``[T, G or 1, H]`` fp32 hidden (``G == 1`` broadcasts to all gates).
+        m: ``[T, G, H]`` fp32 messages.
+        wd: ``[G, R, 2H]`` contiguous fp16 down projection weights.
+        d: ``[G, T, R]`` contiguous fp16 output.
+        eps: epsilon of the unweighted norms.
+
+    """
+    torch.ops._rocm_C.inkling2_glue_msg_gate_down(h, m, wd, d, eps)
+
+
+def inkling2_glue_msg_gate_mix(
+    h: torch.Tensor,
+    m: torch.Tensor,
+    d: torch.Tensor,
+    wf: torch.Tensor,
+    wg: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    norm_w: torch.Tensor | None = None,
+    scratch: torch.Tensor | None = None,
+    partials: torch.Tensor | None = None,
+    counters: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+) -> None:
+    """MessageGate step 2: ``out = (1 - tanh(Wf d)) * h + tanh(Wg d) * m``.
+
+    With an fp16 ``out`` the result is also RMS-normalised with ``norm_w``
+    (weighted, fp16 output); the cross-CTA reduction needs ``scratch``,
+    ``partials`` and ``counters`` (zero on entry, left zero on exit).
+
+    Args:
+        h: ``[T, G or 1, H]`` fp32 hidden.
+        m: ``[T, G, H]`` fp32 messages.
+        d: ``[G, T, R]`` fp16 output of ``inkling2_glue_msg_gate_down``.
+        wf: forget weights, r-major: fp32 ``[G, R, H]`` or fp16 pair-interleaved
+            ``[G, R/2, H, 2]`` (``w.view(H, R // 2, 2).permute(1, 0, 2)``).
+        wg: gain weights in the same layout as ``wf``.
+        out: ``[G, T, H]`` fp32 (plain mix) or fp16 (mix + norm).
+        norm_w: ``[1 or G, H]`` RMSNorm weight (required for fp16 ``out``).
+        scratch: fp32 ``[>= G*T*H]`` scratch (fp16 ``out`` only).
+        partials: fp32 ``[>= G*T*ceil(H/128)]`` scratch (fp16 ``out`` only).
+        counters: int32 ``[>= G*ceil(T/TB)]``, zero-initialised once
+            (``G*T`` always suffices).
+        norm_eps: epsilon of the weighted output norm.
+
+    """
+    torch.ops._rocm_C.inkling2_glue_msg_gate_mix(
+        h, m, d, wf, wg, norm_w, out, scratch, partials, counters, norm_eps
+    )
+
+
+def inkling2_glue_rms_norm(
+    x: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    weight: torch.Tensor | None = None,
+    x1: torch.Tensor | None = None,
+    sum_out: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    round_fp16: bool = False,
+) -> None:
+    """``out = weight * rms_norm(x + x1)`` (fp32 math, no weight: plain norm).
+
+    Args:
+        x: ``[T, H]`` fp16 / fp32.
+        out: ``[T, H]`` fp16 / fp32.
+        weight: optional ``[H]`` fp16 / fp32 weight (applied after the norm).
+        x1: optional ``[T, H]`` fp32 addend (the lazy residual add).
+        sum_out: optional ``[T, H]`` fp32 receiving ``x + x1``.
+        eps: norm epsilon.
+        round_fp16: round the result to fp16 even when ``out`` is fp32.
+
+    """
+    torch.ops._rocm_C.inkling2_glue_rms_norm(
+        x, x1, weight, out, sum_out, eps, round_fp16
+    )
+
+
+def inkling2_glue_embed_norm(
+    ids: torch.Tensor,
+    table: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    eps: float = 1e-6,
+) -> None:
+    """``out[t] = fp16(weight * rms_norm(table[ids[t]]))`` (ids clamped)."""
+    torch.ops._rocm_C.inkling2_glue_embed_norm(ids, table, weight, out, eps)
+
+
+def inkling2_glue_moe_route_sizes(
+    num_tokens: int, num_experts: int, top_k: int, block_size_m: int
+) -> tuple[int, int, int]:
+    """Exact sizes of ``sorted_ids``, ``expert_ids`` and ``counters``.
+
+    Same as ``moe_align_block_size``: ``numel + E * (BM - 1)`` padded rows
+    (``min(numel * BM, ...)`` when ``numel < E``), one expert id per block,
+    and ``num_tokens + 1`` int32 counters (zero-initialised once).
+    """
+    numel = num_tokens * top_k
+    max_padded = numel + num_experts * (block_size_m - 1)
+    if numel < num_experts:
+        max_padded = min(numel * block_size_m, max_padded)
+    return max_padded, -(-max_padded // block_size_m), num_tokens + 1
+
+
+def inkling2_glue_moe_route(
+    x: torch.Tensor,
+    gate_w: torch.Tensor,
+    bias: torch.Tensor,
+    logits: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    post_pad: torch.Tensor,
+    counters: torch.Tensor,
+    block_size_m: int,
+    route_scale: float,
+    *,
+    zero1: torch.Tensor | None = None,
+    zero2: torch.Tensor | None = None,
+) -> None:
+    """Router GEMV + sigmoid + biased top-k + weight normalisation + align.
+
+    ``scores = sigmoid(x @ gate_w^T)``; the top-k experts of ``scores + bias``
+    (lowest id wins ties) are selected, their ``scores`` are normalised to sum
+    to one and multiplied by ``route_scale``.  The routed rows are laid out
+    in expert blocks exactly like ``moe_align_block_size`` (stable order
+    inside an expert, ``numel`` as pad id, ``-1`` for unused blocks).
+    ``zero1`` / ``zero2`` (fp16) are zero-filled by the same launch.
+
+    Args:
+        x: ``[T, H]`` fp16.
+        gate_w: ``[E, H]`` fp32 (FMA) or fp16 (V_DOT2), contiguous.
+        bias: ``[E]`` fp32 selection bias.
+        logits: ``[T, E]`` fp32 output (pre-sigmoid).
+        topk_weights: ``[T, K]`` fp32 output.
+        topk_ids: ``[T, K]`` int32 output.
+        sorted_ids: int32 output, ``inkling2_glue_moe_route_sizes()[0]`` long.
+        expert_ids: int32 output, ``inkling2_glue_moe_route_sizes()[1]`` long.
+        post_pad: int32 ``[1]`` output (padded row count).
+        counters: int32 ``[>= T + 1]``, zero on entry and on exit.
+        block_size_m: 1, 2, 4 or 8.
+        route_scale: routed scaling factor.
+        zero1: optional fp16 buffer to zero (``numel % 8 == 0``).
+        zero2: optional second fp16 buffer to zero.
+
+    """
+    torch.ops._rocm_C.inkling2_glue_moe_route(
+        x,
+        gate_w,
+        bias,
+        logits,
+        topk_weights,
+        topk_ids,
+        sorted_ids,
+        expert_ids,
+        post_pad,
+        counters,
+        zero1,
+        zero2,
+        block_size_m,
+        route_scale,
+    )
+
+
+def inkling2_glue_swiglu(
+    gate_up: torch.Tensor, out: torch.Tensor, gate_cap: float, up_cap: float
+) -> None:
+    """``out = tanh(g/gc)*gc * sigmoid(g) * (tanh(u/uc)*uc)`` for ``[g | u]``.
+
+    Args:
+        gate_up: ``[R, 2I]`` contiguous fp16 (gate columns first).
+        out: ``[R, I]`` contiguous fp16.
+        gate_cap: softcap of the gate branch.
+        up_cap: softcap of the up branch.
+
+    """
+    torch.ops._rocm_C.inkling2_glue_swiglu(gate_up, out, gate_cap, up_cap)
+
+
+def inkling2_glue_copy_states(src: torch.Tensor, dst: torch.Tensor) -> None:
+    """Copy a persistent fp32 state ``[T, H]`` / ``[T, P, H]`` into ``dst``.
+
+    Snapshots rows that a later layer overwrites while an even later layer still
+    reads them (the previous pass's block states of the loop core).
+
+    Args:
+        src: fp32 ``[T, H]`` or ``[T, P, H]``, unit stride on ``H``, other
+            strides and the base pointer 16-byte aligned (multiples of 4
+            elements).
+        dst: fp32 tensor of the same shape (own strides), must not alias
+            ``src``.
+
+    """
+    torch.ops._rocm_C.inkling2_glue_copy_states(src, dst)
+
+
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna2"):
 
     @register_fake("_rocm_C::moe_mxfp4_gemm_rdna2")
@@ -5285,4 +6231,451 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp8_gemm_
         mul_topk_weight: bool,
         output_topk: int,
     ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_attention"):
+
+    @register_fake("_rocm_C::inkling2_sconv_static")
+    def _inkling2_sconv_static_fake(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        out: torch.Tensor,
+        conv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        seq_idx: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        stream_offset: int,
+        num_kv_heads: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_sconv_dynamic")
+    def _inkling2_sconv_dynamic_fake(
+        x: torch.Tensor,
+        static_weight: torch.Tensor,
+        dyn: torch.Tensor,
+        out: torch.Tensor,
+        conv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        seq_idx: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        stream_offset: int,
+        num_kv_heads: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_kv_prep")
+    def _inkling2_kv_prep_fake(
+        xk: torch.Tensor,
+        xv: torch.Tensor,
+        k_weight: torch.Tensor,
+        v_weight: torch.Tensor,
+        k_dyn: torch.Tensor | None,
+        v_dyn: torch.Tensor | None,
+        conv_cache: torch.Tensor,
+        conv_block_table: torch.Tensor,
+        conv_slot_mapping: torch.Tensor,
+        seq_idx: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        kv_cache: torch.Tensor,
+        kv_slot_mapping: torch.Tensor,
+        k_stream_offset: int,
+        v_stream_offset: int,
+        k_clip: float,
+        rms_eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_attention")
+    def _inkling2_attention_fake(
+        q: torch.Tensor,
+        rel: torch.Tensor,
+        sink: torch.Tensor,
+        gate: torch.Tensor | None,
+        q_scale: torch.Tensor,
+        rel_scale: torch.Tensor,
+        rel_proj_t: torch.Tensor,
+        positions: torch.Tensor,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        out: torch.Tensor,
+        workspace: torch.Tensor,
+        window: int,
+        rel_extent: int,
+        log_scale: bool,
+        log_alpha: float,
+        log_n_floor: float,
+        q_clip: float,
+        rel_clip: float,
+        max_query_len: int,
+        splits_decode: int,
+        splits_tile: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "inkling2_dspark_argmax"
+):
+
+    @register_fake("_rocm_C::inkling2_dspark_store_taps")
+    def _inkling2_dspark_store_taps_fake(
+        srcs: list[torch.Tensor], dst: torch.Tensor, num_rows: int
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_mix_rms")
+    def _inkling2_dspark_mix_rms_fake(
+        taps: torch.Tensor,
+        fuse_weight: torch.Tensor,
+        norm_w: torch.Tensor,
+        out: torch.Tensor,
+        qsl: torch.Tensor | None,
+        num_rejected: torch.Tensor | None,
+        num_rows: int,
+        alpha_row0: int,
+        eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_embed_block")
+    def _inkling2_dspark_embed_block_fake(
+        ids: torch.Tensor,
+        embed: torch.Tensor,
+        embed_norm_w: torch.Tensor,
+        mask_embed: torch.Tensor,
+        in_norm_w: torch.Tensor,
+        resid: torch.Tensor,
+        xn: torch.Tensor,
+        num_rows: int,
+        block: int,
+        eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_add_rmsnorm")
+    def _inkling2_dspark_add_rmsnorm_fake(
+        resid: torch.Tensor,
+        delta: torch.Tensor,
+        norm_w: torch.Tensor,
+        out: torch.Tensor,
+        num_rows: int,
+        splits: int,
+        eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_silu_mul")
+    def _inkling2_dspark_silu_mul_fake(
+        gu: torch.Tensor, out: torch.Tensor, num_rows: int
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_gather_rows")
+    def _inkling2_dspark_gather_rows_fake(
+        src: torch.Tensor, idx: torch.Tensor, dst: torch.Tensor, num_rows: int
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_gemv")
+    def _inkling2_dspark_gemv_fake(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        out: torch.Tensor,
+        x_index: torch.Tensor | None,
+        num_rows: int,
+        splits: int,
+        variant: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_gemm")
+    def _inkling2_dspark_gemm_fake(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        out: torch.Tensor,
+        num_rows: int,
+        design: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_qkv_prep")
+    def _inkling2_dspark_qkv_prep_fake(
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        slots: torch.Tensor,
+        q_norm_w: torch.Tensor,
+        k_norm_w: torch.Tensor,
+        inv_freq: torch.Tensor,
+        q_out: torch.Tensor | None,
+        kv_cache: torch.Tensor,
+        num_tokens: int,
+        q_heads: int,
+        kv_heads: int,
+        eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_attention")
+    def _inkling2_dspark_attention_fake(
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        out: torch.Tensor,
+        part: torch.Tensor,
+        num_reqs: int,
+        window: int,
+        splits: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_markov_step")
+    def _inkling2_dspark_markov_step_fake(
+        prev: torch.Tensor,
+        prev_stride: int,
+        state: torch.Tensor,
+        w1: torch.Tensor,
+        wt: torch.Tensor,
+        bias: torch.Tensor,
+        ctx_h: torch.Tensor,
+        ctx_f: torch.Tensor,
+        latent: torch.Tensor,
+        num_reqs: int,
+        step: int,
+        nsteps: int,
+        first: bool,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_head_logits")
+    def _inkling2_dspark_head_logits_fake(
+        base: torch.Tensor,
+        latent: torch.Tensor,
+        fold_w: torch.Tensor,
+        fold_b: torch.Tensor,
+        logits: torch.Tensor,
+        num_reqs: int,
+        step: int,
+        nsteps: int,
+        softcap: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_fold_bias")
+    def _inkling2_dspark_fold_bias_fake(
+        head: torch.Tensor, b: torch.Tensor, out: torch.Tensor
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_argmax")
+    def _inkling2_dspark_argmax_fake(
+        logits: torch.Tensor, out: torch.Tensor, num_rows: int, vocab: int
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_dspark_prepare_inputs")
+    def _inkling2_dspark_prepare_inputs_fake(
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        is_padding: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        query_slot_mapping: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor,
+        sample_indices: torch.Tensor,
+        sample_pos: torch.Tensor,
+        sample_idx_mapping: torch.Tensor,
+        out_temperature: torch.Tensor,
+        out_seeds: torch.Tensor,
+        target_positions: torch.Tensor,
+        target_query_start_loc: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        parallel_drafting_token_id: int,
+        num_query_per_req: int,
+        num_speculative_steps: int,
+        max_num_reqs: int,
+        max_num_tokens: int,
+        max_model_len: int,
+        num_reqs: int,
+        max_tokens_per_req: int,
+        sample_from_anchor: bool,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "inkling2_linear_argmax_reduce"
+):
+
+    @register_fake("_rocm_C::inkling2_linear_grouped")
+    def _inkling2_linear_grouped_fake(
+        xs: list[torch.Tensor],
+        w: torch.Tensor,
+        outs: list[torch.Tensor],
+        seg_x: list[int],
+        seg_n: list[int],
+        seg_act: list[int],
+        seg_p: list[float],
+        seg_valid: list[int],
+        variant: int = -1,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_linear_f32w")
+    def _inkling2_linear_f32w_fake(
+        xs: list[torch.Tensor],
+        w: torch.Tensor,
+        outs: list[torch.Tensor],
+        seg_x: list[int],
+        seg_n: list[int],
+        seg_act: list[int],
+        variant: int = -1,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_linear_lm_head")
+    def _inkling2_linear_lm_head_fake(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        logits: torch.Tensor | None,
+        part_val: torch.Tensor | None,
+        part_idx: torch.Tensor | None,
+        softcap: float,
+        n_valid: int,
+        col_base: int,
+        variant: int = -1,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_linear_argmax_partial")
+    def _inkling2_linear_argmax_partial_fake(
+        logits: torch.Tensor,
+        part_val: torch.Tensor,
+        part_idx: torch.Tensor,
+        n: int,
+        col_base: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_linear_argmax_reduce")
+    def _inkling2_linear_argmax_reduce_fake(
+        part_val: torch.Tensor, part_idx: torch.Tensor, out: torch.Tensor
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_glue_swiglu"):
+
+    @register_fake("_rocm_C::inkling2_glue_attn_res")
+    def _inkling2_glue_attn_res_fake(
+        blocks: torch.Tensor,
+        n_blocks: int,
+        x0: torch.Tensor,
+        x1: torch.Tensor | None,
+        partial_out: torch.Tensor | None,
+        append: torch.Tensor | None,
+        query: torch.Tensor,
+        norm_w: torch.Tensor | None,
+        out: torch.Tensor,
+        eps: float,
+        norm_eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_msg_gate_down")
+    def _inkling2_glue_msg_gate_down_fake(
+        h: torch.Tensor,
+        m: torch.Tensor,
+        wd: torch.Tensor,
+        d: torch.Tensor,
+        eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_msg_gate_mix")
+    def _inkling2_glue_msg_gate_mix_fake(
+        h: torch.Tensor,
+        m: torch.Tensor,
+        d: torch.Tensor,
+        wf: torch.Tensor,
+        wg: torch.Tensor,
+        norm_w: torch.Tensor | None,
+        out: torch.Tensor,
+        scratch: torch.Tensor | None,
+        partials: torch.Tensor | None,
+        counters: torch.Tensor | None,
+        norm_eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_rms_norm")
+    def _inkling2_glue_rms_norm_fake(
+        x: torch.Tensor,
+        x1: torch.Tensor | None,
+        weight: torch.Tensor | None,
+        out: torch.Tensor,
+        sum_out: torch.Tensor | None,
+        eps: float,
+        round_fp16: bool,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_embed_norm")
+    def _inkling2_glue_embed_norm_fake(
+        ids: torch.Tensor,
+        table: torch.Tensor,
+        weight: torch.Tensor,
+        out: torch.Tensor,
+        eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_moe_route")
+    def _inkling2_glue_moe_route_fake(
+        x: torch.Tensor,
+        gate_w: torch.Tensor,
+        bias: torch.Tensor,
+        logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        sorted_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        post_pad: torch.Tensor,
+        counters: torch.Tensor,
+        zero1: torch.Tensor | None,
+        zero2: torch.Tensor | None,
+        block_size_m: int,
+        route_scale: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_swiglu")
+    def _inkling2_glue_swiglu_fake(
+        gate_up: torch.Tensor,
+        out: torch.Tensor,
+        gate_cap: float,
+        up_cap: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_copy_states")
+    def _inkling2_glue_copy_states_fake(src: torch.Tensor, dst: torch.Tensor) -> None:
         return

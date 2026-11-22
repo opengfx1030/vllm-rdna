@@ -70,11 +70,22 @@ tests/models/qwen4_exp/test_qualify_expert_copy_ranks.py  # fork-only expert-cop
 tests/models/inkling2_loop/test_attention.py  # fork-only Inkling-2 dense-state attention vs transformers reference, CPU unit test; not in CI
 tests/models/inkling2_loop/test_blocks.py  # fork-only Inkling-2 blocks (attn-residual, gates, softcaps) vs reference, CPU unit test; not in CI
 tests/models/inkling2_loop/test_configs.py  # fork-only Inkling-2 config classes (the pinned transformers lacks inkling2_loop), CPU unit test; not in CI
+tests/models/inkling2_loop/test_dspark_model.py  # fork-only Inkling-2 DSpark draft vs the fp64 oracle on gfx1030 (random + real mtp.safetensors weights, HIP graph replay), CPU parts also run off-GPU; not in CI
+tests/models/inkling2_loop/test_dspark_oracle.py  # fork-only Inkling-2 DSpark fp64 oracle (loader names, attention window, Markov head, fp16 report), CPU unit test; not in CI
+tests/models/inkling2_loop/test_dspark_verifier.py  # fork-only exact-probability enumeration gate for the DSpark rejection path on a tiny vocabulary (CPU oracle + HIP rejection sampler on gfx1030); not in CI
+tests/models/inkling2_loop/test_dspark_target_taps.py  # fork-only Inkling-2 target tap hook (entry block states of the selected layer visits + final output) on the tiny checkpoints, CPU unit test; not in CI
+tests/models/inkling2_loop/test_serving_path_cpu.py  # fork-only Inkling-2 native-path selection, kernel shape gate, conv-pass rule, attention-workspace bound sweep and MoE scratch (no GPU needed); not in CI
+tests/models/inkling2_loop/test_serving_path_gpu.py  # fork-only Inkling-2 native HIP serving path vs its torch reference path on gfx1030 (layer-by-layer teacher forced, paged scenarios, prefix cache, no-allocation forward); skipped off-GPU, not in CI
 tests/models/inkling2_loop/test_loader.py  # fork-only Inkling-2 expert-format loader, CPU unit test; not in CI
 tests/models/inkling2_loop/test_moe.py  # fork-only Inkling-2 NVFP4/MXFP8 MoE vs fp32 reference; GPU cases need gfx1030 and the moe_*_rdna2 ops, not in CI
 tests/models/inkling2_loop/test_paged_model.py  # fork-only Inkling-2 paged model vs transformers reference on tiny checkpoints, CPU unit test; not in CI
 tests/models/inkling2_loop/test_paged_state.py  # fork-only Inkling-2 paged conv/KV state vs dense oracle, CPU unit test; not in CI
 tests/models/inkling2_loop/test_real_checkpoint_names.py  # fork-only Inkling-2 load_weights vs the real checkpoint header on the meta device (skipped without ~/hfcache/inkling2-mini) plus w13 gate/up layout, CPU unit test; not in CI
+tests/models/inkling2_loop/test_vision_encoder.py  # fork-only Inkling-2 vision encoder vs the fp32 oracle / transformers on gfx1030 (tiny, real shapes, real checkpoint + images; skipped off-RDNA2), not in CI
+tests/models/inkling2_loop/test_vision_loader.py  # fork-only Inkling-2 vision batch geometry, chunking and model.visual.* weight loading (incl. the real checkpoint header on the meta device), CPU unit test; not in CI
+tests/models/inkling2_loop/test_vision_mixin.py  # fork-only Inkling-2 multimodal mixin: embed_multimodal contract, embedding merge, weight routing, tower switch, CPU unit test; not in CI
+tests/models/inkling2_loop/test_vision_processing.py  # fork-only Inkling-2 image preprocessing, placeholder expansion and golden token ids vs the real template / transformers processor (skipped without them), CPU unit test; not in CI
+tests/models/inkling2_loop/test_vision_text_stack.py  # fork-only Inkling-2 multimodal mixin composed with the real text stack on the tiny checkpoint (weights, embed_norm merge, hidden size), CPU unit test; not in CI
 tests/models/test_inkling2_loop_blocks.py  # fork-only Inkling-2 block parity against the transformers reference, CPU unit test; not in CI
 tests/models/test_inkling2_loop_moe.py  # fork-only Inkling-2 MoE routing/experts parity, GPU cases need gfx1030; not in CI
 tests/models/test_inkling2_tiny_harness.py  # fork-only Inkling-2 tiny checkpoint builder and reference harness, CPU unit test; not in CI
