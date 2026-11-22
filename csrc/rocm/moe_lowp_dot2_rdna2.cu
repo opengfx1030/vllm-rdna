@@ -224,11 +224,15 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
 
 #else  // non-RDNA2: empty stubs for symbol parity
 
+namespace lowp_dot2 {
+
 template <typename T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_nvfp4_kernel_rdna2(
     const T*, T*, const uint32_t*, const uint8_t*, const float*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const bool, const int) {}
+
+}  // namespace lowp_dot2
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
@@ -453,11 +457,15 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
 
 #else  // non-RDNA2 stubs
 
+namespace lowp_dot2 {
+
 template <typename T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_mxfp8_kernel_rdna2(
     const T*, T*, const uint32_t*, const uint8_t*, const float*, const int32_t*,
     const int32_t*, const int32_t*, const int, const int, const int, const int,
     const int, const int, const bool, const int) {}
+
+}  // namespace lowp_dot2
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
