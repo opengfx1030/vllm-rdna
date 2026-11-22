@@ -257,3 +257,149 @@ def test_unsupported_block_size_is_rejected(ops):
             False,
             0,
         )
+
+
+# ---------------------------------------------------------------------------
+# SwiGLU fused into the activation load of the down projection
+# (moe_{nvfp4,mxfp8}_gemm_swiglu_rdna2)
+# ---------------------------------------------------------------------------
+GATE_CAP, UP_CAP = 4.0, 25.0
+
+
+def _ref_swiglu(gate_up: torch.Tensor, gc: float, uc: float) -> torch.Tensor:
+    gate, up = gate_up.double().chunk(2, dim=-1)
+    return (
+        (torch.tanh(gate / gc) * gc) * torch.sigmoid(gate) * (torch.tanh(up / uc) * uc)
+    )
+
+
+def _swiglu_gemm(ops, fmt):
+    name = f"moe_{fmt}_gemm_swiglu_rdna2"
+    if not hasattr(ops, name):
+        pytest.skip(f"the build has no {name}")
+    return getattr(ops, name)
+
+
+@pytest.mark.parametrize("tokens", [1, 3, 8, 40])
+@pytest.mark.parametrize("block_m", [1, 2, 4, 8])
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_moe_swiglu_gemm_matches_fp64(ops, fmt, block_m, tokens):
+    """The down projection reads the first GEMM's [gate | up] rows: the softcapped
+    SwiGLU, rounded to fp16, is the activation of the fp64 reference."""
+    fused = _swiglu_gemm(ops, fmt)
+    seed = 2000 + 17 * tokens + block_m
+    if fmt == "nvfp4":
+        q, scales, glob = _nvfp4_weights(seed)
+        w = _nvfp4_dequant(q, scales, glob)
+    else:
+        q, scales, raw = _mxfp8_weights(seed)
+        glob, w = None, _mxfp8_dequant(raw, scales)
+    g = torch.Generator().manual_seed(seed)
+    ids = _routing(tokens, seed)
+    pairs = tokens * TOP_K_ROUTE
+    sorted_ids, expert_ids, ntpp = _align(ids, block_m)
+    gu = (3.0 * torch.randn(pairs, 2 * K, generator=g)).half()
+    act = _ref_swiglu(gu, GATE_CAP, UP_CAP).half().double()
+    weights = torch.rand(pairs, generator=g)
+    per_pair = _per_pair(act, ids.reshape(-1).long(), w)
+    ref = (
+        (per_pair * weights.double()[:, None]).reshape(tokens, TOP_K_ROUTE, N).sum(1)
+    )
+    out = torch.zeros(tokens, N, dtype=torch.float16, device=DEV)
+    args = (gu.to(DEV), out, q.to(DEV), scales.to(DEV))
+    if fmt == "nvfp4":
+        args += (glob.to(DEV),)
+    args += (weights.to(DEV), sorted_ids, expert_ids, ntpp, 1, block_m, True)
+    fused(*args, TOP_K_ROUTE, GATE_CAP, UP_CAP)
+    _check(out.double().cpu(), ref, f"swiglu/{fmt}/M{block_m}/T{tokens}")
+
+
+@pytest.mark.parametrize("block_m", [1, 2, 4, 8])
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_moe_swiglu_gemm_is_bit_identical_to_swiglu_then_gemm(ops, fmt, block_m):
+    """One K slice and one add per output element (no accumulation-order noise): the
+    fused load must reproduce inkling2_glue_swiglu + the plain GEMM bit for bit."""
+    from vllm import _custom_ops as vops
+
+    fused = _swiglu_gemm(ops, fmt)
+    plain = ops.moe_nvfp4_gemm_rdna2 if fmt == "nvfp4" else ops.moe_mxfp8_gemm_rdna2
+    seed = 3000 + block_m
+    k = 256
+    if fmt == "nvfp4":
+        q, scales, glob = _nvfp4_weights(seed, k=k)
+    else:
+        q, scales, _ = _mxfp8_weights(seed, k=k)
+        glob = None
+    g = torch.Generator().manual_seed(seed)
+    tokens = 6
+    ids = _routing(tokens, seed)
+    pairs = tokens * TOP_K_ROUTE
+    sorted_ids, expert_ids, ntpp = _align(ids, block_m)
+    # a few large magnitudes: saturation of both softcaps, and exact zeros
+    gu = (6.0 * torch.randn(pairs, 2 * k, generator=g)).half()
+    gu[0, :8] = 0
+    gu[1, :8] = 60000.0
+    gu = gu.to(DEV)
+    act = torch.empty(pairs, k, dtype=torch.float16, device=DEV)
+    vops.inkling2_glue_swiglu(gu, act, GATE_CAP, UP_CAP)
+    tw = torch.empty(0, dtype=torch.float32, device=DEV)
+    tail = (tw, sorted_ids, expert_ids, ntpp, 1, block_m, False, 0)
+    head = (q.to(DEV), scales.to(DEV)) + ((glob.to(DEV),) if fmt == "nvfp4" else ())
+    out_ref = torch.zeros(pairs, N, dtype=torch.float16, device=DEV)
+    plain(act, out_ref, *head, *tail)
+    out_fused = torch.zeros(pairs, N, dtype=torch.float16, device=DEV)
+    fused(gu, out_fused, *head, *tail, GATE_CAP, UP_CAP)
+    torch.accelerator.synchronize()
+    assert out_ref.abs().max().item() > 0
+    assert torch.equal(out_fused, out_ref)
+
+
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_moe_swiglu_gemm_rejects_bad_arguments(ops, fmt):
+    fused = _swiglu_gemm(ops, fmt)
+    if fmt == "nvfp4":
+        q, scales, glob = _nvfp4_weights(1)
+    else:
+        q, scales, _ = _mxfp8_weights(1)
+        glob = None
+    ids = _routing(2, 1)
+    sorted_ids, expert_ids, ntpp = _align(ids, 1)
+    out = torch.zeros(2, N, dtype=torch.float16, device=DEV)
+    tw = torch.empty(0, dtype=torch.float32, device=DEV)
+    head = (q.to(DEV), scales.to(DEV)) + ((glob.to(DEV),) if fmt == "nvfp4" else ())
+    tail = (tw, sorted_ids, expert_ids, ntpp, 1, 1, False, TOP_K_ROUTE)
+    gu = torch.zeros(2 * TOP_K_ROUTE, 2 * K, dtype=torch.float16, device=DEV)
+    with pytest.raises(RuntimeError, match="softcaps"):
+        fused(gu, out, *head, *tail, 0.0, UP_CAP)
+    with pytest.raises(RuntimeError, match="softcaps"):
+        fused(gu, out, *head, *tail, GATE_CAP, -1.0)
+    with pytest.raises(RuntimeError):  # K from the weights is 288, rows are 2 * 256 wide
+        fused(gu[:, : 2 * K - 64], out, *head, *tail, GATE_CAP, UP_CAP)
+
+
+_BLOCK_M_OFF = {
+    "nvfp4": {1: 1, 2: 1, 3: 1, 4: 1, 5: 2, 12: 2, 13: 4, 64: 4, 65: 8, 1000: 8},
+    "mxfp8": {1: 1, 4: 1, 5: 2, 48: 2, 49: 8, 1000: 8},
+}
+_BLOCK_M_ON = {
+    "nvfp4": {1: 1, 2: 2, 3: 2, 4: 2, 5: 2, 12: 2, 13: 4, 64: 4, 65: 8, 1000: 8},
+    "mxfp8": _BLOCK_M_OFF["mxfp8"],
+}
+
+
+@pytest.mark.parametrize("fuse", [False, True])
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_block_m_tables(monkeypatch, fmt, fuse):
+    """Rows per expert block by token count.  Without ``VLLM_INKLING2_FUSE_GLUE`` the tuned
+    uniform-routing table is untouched; with it the real routing of verify steps (adjacent rows
+    share ~44% of their experts) uses two-row NVFP4 blocks from 2 tokens on, one row stays
+    single."""
+    import types
+
+    from vllm.models.inkling2_loop.amd import moe as moe_mod
+
+    monkeypatch.setattr(moe_mod, "FUSE_GLUE", fuse)
+    probe = types.SimpleNamespace(quant_format=fmt)
+    expect = (_BLOCK_M_ON if fuse else _BLOCK_M_OFF)[fmt]
+    for tokens, rows in expect.items():
+        assert moe_mod.Inkling2LoopMoE._default_block_size_m(probe, tokens, 8) == rows, (fmt, fuse, tokens)

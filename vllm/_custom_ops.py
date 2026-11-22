@@ -1974,6 +1974,82 @@ def moe_nvfp4_bm_i8_rdna2(
     )
 
 
+def moe_nvfp4_gemm_swiglu_rdna2(
+    gate_up: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_globals: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+    gate_cap: float,
+    up_cap: float,
+) -> None:
+    """`moe_nvfp4_gemm_rdna2` on the activations ``swiglu(gate_up)``: ``gate_up`` is the
+    ``[rows, 2K]`` ``[gate | up]`` output of the first GEMM and the softcapped SwiGLU
+    (the arithmetic of ``inkling2_glue_swiglu``, rounded to fp16) is applied while the
+    kernel loads its activation tile."""
+    torch.ops._rocm_C.moe_nvfp4_gemm_swiglu_rdna2(
+        gate_up,
+        c,
+        b_q_weight,
+        b_scales,
+        b_globals,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        gate_cap,
+        up_cap,
+    )
+
+
+def moe_mxfp8_gemm_swiglu_rdna2(
+    gate_up: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+    gate_cap: float,
+    up_cap: float,
+) -> None:
+    """`moe_mxfp8_gemm_rdna2` on ``swiglu(gate_up)`` (see
+    `moe_nvfp4_gemm_swiglu_rdna2`)."""
+    torch.ops._rocm_C.moe_mxfp8_gemm_swiglu_rdna2(
+        gate_up,
+        c,
+        b_q_weight,
+        b_scales,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        gate_cap,
+        up_cap,
+    )
+
+
 _INKLING2_MAX_SPLITS = 256  # kI2MaxSplits of csrc/rocm/inkling2_attn_rdna2.cu
 
 

@@ -884,6 +884,25 @@ void moe_nvfp4_bm_i8_rdna2(torch::Tensor a8, torch::Tensor sa, torch::Tensor c,
                            torch::Tensor cta_info, int64_t top_k,
                            bool mul_topk_weight, int64_t output_topk);
 
+// The second expert GEMM with the softcapped SwiGLU of the first GEMM's
+// [rows, 2K] [gate | up] output fused into its activation load (bit-identical
+// activations to inkling2_glue_swiglu followed by the plain GEMM).
+void moe_nvfp4_gemm_swiglu_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor b_globals,
+    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
+    int64_t output_topk, double gate_cap, double up_cap);
+
+void moe_mxfp8_gemm_swiglu_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
+    bool mul_topk_weight, int64_t output_topk, double gate_cap,
+    double up_cap);
+
 // Inkling-2-Mini attention core on RDNA2 (gfx1030): paged short convolutions,
 // K/V prep and paged attention with learned relative bias and sink logit.
 // See docs/rdna2/inkling2-attn-kernels.md.

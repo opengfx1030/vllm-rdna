@@ -51,6 +51,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .glue import FUSE_GLUE
+
 __all__ = [
     "ExpertsMxfp8",
     "ExpertsNvfp4",
@@ -607,6 +609,23 @@ _BLOCK_M_BY_TOKENS = {
 }
 _BLOCK_M_WIDE = 8
 
+#: ``VLLM_INKLING2_FUSE_GLUE``: with the real routing of speculative verify steps (adjacent
+#: rows share ~44% of their experts: 12.4 / 16.3 / 19.7 / 22.3 distinct experts for 2 / 3 / 4 /
+#: 5 rows, against 15.5 / 22.5 / 29.1 / 35.3 for uniform routing) two-row blocks stream a shared
+#: expert once and are faster than one-row blocks from 2 rows on (NVFP4 w13 + w2 per layer
+#: visit, ``docs/rdna2/inkling2-decode-glue.md``: 2 rows 174 vs 181 us, 3 rows 225 vs 238 us,
+#: 4 rows 268 vs 302 us, 5 rows 313 vs 362 us); a single row stays in one-row blocks.
+_BLOCK_M_BY_TOKENS_SPEC = {
+    "nvfp4": ((1, 1), (12, 2), (64, 4)),
+    "mxfp8": ((4, 1), (48, 2)),
+}
+
+#: ``VLLM_INKLING2_FUSE_GLUE``: chunks of at most this many tokens run the SwiGLU inside the w2 GEMM
+#: (``moe_*_gemm_swiglu_rdna2``).  The fused load recomputes the activation once per N tile, which saves
+#: a launch and an activation round trip at decode / verify sizes (-4.1 us per layer visit at 1 row) but
+#: costs +1.1% at 64 tokens, +5.5% at 256 and +7.1% at 1000 tokens per NVFP4 w2 launch (``moe_lab_big``).
+_FUSE_SWIGLU_MAX_TOKENS = 16
+
 
 #: Prefill expert GEMMs (``csrc/rocm/moe_prefill_bm_rdna2.cu``): 32-row work blocks
 #: grouped from the router's 8-padded layout, whole K, one dequantisation of every
@@ -795,7 +814,8 @@ class Inkling2LoopMoE(_ExpertsKernel):
     # -- compute ----------------------------------------------------------
 
     def _default_block_size_m(self, num_tokens: int, top_k: int) -> int:
-        for limit, rows in _BLOCK_M_BY_TOKENS[self.quant_format]:
+        table = _BLOCK_M_BY_TOKENS_SPEC if FUSE_GLUE else _BLOCK_M_BY_TOKENS
+        for limit, rows in table[self.quant_format]:
             if num_tokens <= limit:
                 return rows
         return _BLOCK_M_WIDE
@@ -905,6 +925,61 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 output_topk,
             )
 
+    def _gemm_swiglu(
+        self,
+        gate_up,
+        c,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    ) -> None:
+        """The w2 GEMM on ``swiglu(gate_up)`` (``gate_up``: ``[rows, 2 * I]``, the
+        ``[gate | up]`` output of the w13 GEMM): the softcapped SwiGLU is applied in
+        the kernel's activation load, the ``[rows, I]`` activation matrix is never
+        written."""
+        from vllm import _custom_ops as ops
+
+        if self.quant_format == "nvfp4":
+            ops.moe_nvfp4_gemm_swiglu_rdna2(
+                gate_up,
+                c,
+                self.w2_qweight,
+                self.w2_scales,
+                self.w2_globals,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                mul_topk_weight,
+                output_topk,
+                self.gate_softcap,
+                self.up_softcap,
+            )
+        else:
+            ops.moe_mxfp8_gemm_swiglu_rdna2(
+                gate_up,
+                c,
+                self.w2_qweight,
+                self.w2_scales,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                mul_topk_weight,
+                output_topk,
+                self.gate_softcap,
+                self.up_softcap,
+            )
+
     def forward(  # type: ignore[override]
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
@@ -1011,6 +1086,20 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 0,
                 cta_info=cta,
             )
+            if FUSE_GLUE and tc <= _FUSE_SWIGLU_MAX_TOKENS:  # the SwiGLU runs in the w2 GEMM's activation load
+                self._gemm_swiglu(
+                    m.gu,
+                    out,
+                    m.topk_w_flat,
+                    m.sorted_ids,
+                    m.expert_ids,
+                    ws.post_pad,
+                    1,
+                    bm,
+                    True,
+                    K,
+                )
+                continue
             ops.inkling2_glue_swiglu(m.gu, m.act, self.gate_softcap, self.up_softcap)
             self._gemm(
                 "w2",

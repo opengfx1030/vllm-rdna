@@ -96,20 +96,42 @@ __device__ __forceinline__ void write_out(
   }
 }
 
+// softcapped SwiGLU of one (gate, up) pair: the arithmetic of
+// inkling2_glue_swiglu (inkling2_glue_rdna2.cu), operation for operation.
+__device__ __forceinline__ float swiglu_act(float g, float u, float gate_cap,
+                                            float up_cap) {
+  const float sig = 1.0f / (1.0f + expf(-g));
+  return ((tanhf(g / gate_cap) * gate_cap) * sig) *
+         (tanhf(u / up_cap) * up_cap);
+}
+
 // Loads the activation tile, returns false when the thread has no columns.
+// gate_cap > 0: the rows of ``a`` are the [gate | up] output of the first GEMM
+// (``2 * size_k`` columns) and the tile is the fp16-rounded softcapped SwiGLU of
+// them, i.e. the activations the unfused inkling2_glue_swiglu would have stored.
 template <typename T, int BLOCK_SIZE_M>
 __device__ __forceinline__ void load_activations(
     const T* __restrict__ a, T (&block_a)[BLOCK_SIZE_M][BLOCK_KN_SIZE + 8],
     const int32_t* __restrict__ sorted_token_ids, int offset_m_base,
-    int offset_k, int end_k, int t, int size_m, int size_k, int top_k) {
+    int offset_k, int end_k, int t, int size_m, int size_k, int top_k,
+    float gate_cap, float up_cap) {
   if (offset_k + t < end_k) {
   #pragma unroll
     for (int m = 0; m < BLOCK_SIZE_M; ++m) {
       const int32_t token_id = sorted_token_ids[offset_m_base + m];
       const int token_row = token_id / top_k;
-      block_a[m][t] = (token_row < size_m)
-                          ? a[(int64_t)token_row * size_k + offset_k + t]
-                          : tzero<T>();
+      T v = tzero<T>();
+      if (token_row < size_m) {
+        if (gate_cap > 0.0f) {
+          const T* row = a + (int64_t)token_row * 2 * size_k + offset_k + t;
+          v = __float2half_rn(swiglu_act(__half2float(row[0]),
+                                         __half2float(row[size_k]), gate_cap,
+                                         up_cap));
+        } else {
+          v = a[(int64_t)token_row * size_k + offset_k + t];
+        }
+      }
+      block_a[m][t] = v;
     }
   }
 }
@@ -129,7 +151,8 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
     const int32_t* __restrict__ num_tokens_post_padded, const int size_m,
     const int size_n, const int size_k, const int top_k,
     const int expert_weight_stride, const int expert_scales_stride,
-    const bool mul_topk_weight, const int output_topk) {
+    const bool mul_topk_weight, const int output_topk, const float gate_cap,
+    const float up_cap) {
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
   const int offset_n = blockIdx.y * BLOCK_KN_SIZE * 4;
@@ -150,7 +173,8 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
   __shared__ T block_a[BLOCK_SIZE_M][BLOCK_KN_SIZE + 8];
   const int offset_m_base = token_block * BLOCK_SIZE_M;
   load_activations<T, BLOCK_SIZE_M>(a, block_a, sorted_token_ids, offset_m_base,
-                                    offset_k, end_k, t, size_m, size_k, top_k);
+                                    offset_k, end_k, t, size_m, size_k, top_k,
+                                    gate_cap, up_cap);
   __syncthreads();
   if (n >= size_n) return;
 
@@ -230,7 +254,8 @@ template <typename T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_nvfp4_kernel_rdna2(
     const T*, T*, const uint32_t*, const uint8_t*, const float*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
-    const int, const int, const int, const int, const bool, const int) {}
+    const int, const int, const int, const int, const bool, const int,
+    const float, const float) {}
 
 }  // namespace lowp_dot2
 
@@ -250,7 +275,8 @@ void launch_moe_nvfp4(const T* a, T* c, const uint32_t* b_q_weight,
                       int num_token_blocks, int size_m, int size_n, int size_k,
                       int top_k, int expert_weight_stride,
                       int expert_scales_stride, bool mul_topk_weight,
-                      int output_topk, hipStream_t stream) {
+                      int output_topk, float gate_cap, float up_cap,
+                      hipStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid(num_token_blocks,
             (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
@@ -260,7 +286,7 @@ void launch_moe_nvfp4(const T* a, T* c, const uint32_t* b_q_weight,
           a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, size_m, size_n, size_k, top_k,
           expert_weight_stride, expert_scales_stride, mul_topk_weight,
-          output_topk);
+          output_topk, gate_cap, up_cap);
 }
 
 template <typename T>
@@ -271,13 +297,13 @@ void dispatch_moe_nvfp4(
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
     int size_n, int size_k, int top_k, int block_size_m,
     int expert_weight_stride, int expert_scales_stride, bool mul_topk_weight,
-    int output_topk, hipStream_t stream) {
+    int output_topk, float gate_cap, float up_cap, hipStream_t stream) {
 #define LAUNCH(BM)                                                           \
   launch_moe_nvfp4<T, BM>(                                                   \
       a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids, \
       expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,  \
       size_k, top_k, expert_weight_stride, expert_scales_stride,             \
-      mul_topk_weight, output_topk, stream)
+      mul_topk_weight, output_topk, gate_cap, up_cap, stream)
   switch (block_size_m) {
     case 1:
       LAUNCH(1);
@@ -301,16 +327,22 @@ void dispatch_moe_nvfp4(
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point (NVFP4)
+// Public entry points (NVFP4)
 // ---------------------------------------------------------------------------
-void moe_nvfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
-                          torch::Tensor b_q_weight, torch::Tensor b_scales,
-                          torch::Tensor b_globals, torch::Tensor topk_weights,
-                          torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids,
-                          torch::Tensor num_tokens_post_padded, int64_t top_k,
-                          int64_t block_size_m, bool mul_topk_weight,
-                          int64_t output_topk) {
+// gate_cap > 0: ``a`` is the [rows, 2 * K] output of the first GEMM and the
+// kernel applies the softcapped SwiGLU while it loads the activations (see
+// load_activations); gate_cap == 0: ``a`` is the [rows, K] activation matrix.
+static void moe_nvfp4_gemm_impl(torch::Tensor a, torch::Tensor c,
+                                torch::Tensor b_q_weight,
+                                torch::Tensor b_scales,
+                                torch::Tensor b_globals,
+                                torch::Tensor topk_weights,
+                                torch::Tensor sorted_token_ids,
+                                torch::Tensor expert_ids,
+                                torch::Tensor num_tokens_post_padded,
+                                int64_t top_k, int64_t block_size_m,
+                                bool mul_topk_weight, int64_t output_topk,
+                                float gate_cap, float up_cap) {
   TORCH_CHECK(a.is_cuda() && c.is_cuda(), "a and c must be GPU tensors");
   TORCH_CHECK(a.dim() == 2 && c.dim() == 2, "a and c must be 2D");
   TORCH_CHECK(a.scalar_type() == torch::kHalf, "a must be fp16");
@@ -322,7 +354,10 @@ void moe_nvfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   const int size_m = (int)a.size(0);
-  const int size_k = (int)a.size(1);
+  const int size_k = (int)a.size(1) / (gate_cap > 0.0f ? 2 : 1);
+  TORCH_CHECK(gate_cap == 0.0f || (a.size(1) % 2 == 0 && a.is_contiguous() &&
+                                   gate_cap > 0.0f && up_cap > 0.0f),
+              "swiglu: a must be a contiguous [rows, 2 * K] tensor, caps > 0");
   const int size_n = (int)b_q_weight.size(2);
   TORCH_CHECK((int)b_q_weight.size(1) * 8 == size_k,
               "b_q_weight K-dim * 8 must equal a.size(1)");
@@ -348,7 +383,39 @@ void moe_nvfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       expert_ids.data_ptr<int32_t>(),
       num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks, size_m,
       size_n, size_k, (int)top_k, (int)block_size_m, expert_weight_stride,
-      expert_scales_stride, mul_topk_weight, (int)output_topk, stream);
+      expert_scales_stride, mul_topk_weight, (int)output_topk, gate_cap,
+      up_cap, stream);
+}
+
+void moe_nvfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales,
+                          torch::Tensor b_globals, torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk) {
+  moe_nvfp4_gemm_impl(a, c, b_q_weight, b_scales, b_globals, topk_weights,
+                      sorted_token_ids, expert_ids, num_tokens_post_padded,
+                      top_k, block_size_m, mul_topk_weight, output_topk, 0.0f,
+                      0.0f);
+}
+
+// The second GEMM of the expert MLP with the softcapped SwiGLU of the first
+// GEMM's [gate | up] output fused into the activation load.
+void moe_nvfp4_gemm_swiglu_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor b_globals,
+    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
+    int64_t output_topk, double gate_cap, double up_cap) {
+  TORCH_CHECK(gate_cap > 0.0 && up_cap > 0.0, "softcaps must be > 0");
+  moe_nvfp4_gemm_impl(gate_up, c, b_q_weight, b_scales, b_globals,
+                      topk_weights, sorted_token_ids, expert_ids,
+                      num_tokens_post_padded, top_k, block_size_m,
+                      mul_topk_weight, output_topk, (float)gate_cap,
+                      (float)up_cap);
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +483,8 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
     const int32_t* __restrict__ num_tokens_post_padded, const int size_m,
     const int size_n, const int size_k, const int top_k,
     const int expert_weight_stride, const int expert_scales_stride,
-    const bool mul_topk_weight, const int output_topk) {
+    const bool mul_topk_weight, const int output_topk, const float gate_cap,
+    const float up_cap) {
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
   const int offset_n = blockIdx.y * BLOCK_KN_SIZE * 4;
@@ -438,7 +506,8 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
       __attribute__((aligned(16))) T block_a[BLOCK_SIZE_M][BLOCK_KN_SIZE + 8];
   const int offset_m_base = token_block * BLOCK_SIZE_M;
   load_activations<T, BLOCK_SIZE_M>(a, block_a, sorted_token_ids, offset_m_base,
-                                    offset_k, end_k, t, size_m, size_k, top_k);
+                                    offset_k, end_k, t, size_m, size_k, top_k,
+                                    gate_cap, up_cap);
   __syncthreads();
   if (n >= size_n) return;
 
@@ -507,7 +576,7 @@ template <typename T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_mxfp8_kernel_rdna2(
     const T*, T*, const uint32_t*, const uint8_t*, const float*, const int32_t*,
     const int32_t*, const int32_t*, const int, const int, const int, const int,
-    const int, const int, const bool, const int) {}
+    const int, const int, const bool, const int, const float, const float) {}
 
 }  // namespace lowp_dot2
 
@@ -525,7 +594,8 @@ void launch_moe_mxfp8(const T* a, T* c, const uint32_t* b_q_weight,
                       int num_token_blocks, int size_m, int size_n, int size_k,
                       int top_k, int expert_weight_stride,
                       int expert_scales_stride, bool mul_topk_weight,
-                      int output_topk, hipStream_t stream) {
+                      int output_topk, float gate_cap, float up_cap,
+                      hipStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid(num_token_blocks,
             (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
@@ -535,7 +605,7 @@ void launch_moe_mxfp8(const T* a, T* c, const uint32_t* b_q_weight,
           a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, size_m, size_n, size_k, top_k,
           expert_weight_stride, expert_scales_stride, mul_topk_weight,
-          output_topk);
+          output_topk, gate_cap, up_cap);
 }
 
 template <typename T>
@@ -545,13 +615,14 @@ void dispatch_moe_mxfp8(
     const int32_t* expert_ids, const int32_t* num_tokens_post_padded,
     int num_token_blocks, int size_m, int size_n, int size_k, int top_k,
     int block_size_m, int expert_weight_stride, int expert_scales_stride,
-    bool mul_topk_weight, int output_topk, hipStream_t stream) {
+    bool mul_topk_weight, int output_topk, float gate_cap, float up_cap,
+    hipStream_t stream) {
 #define LAUNCH_MX8(BM)                                                         \
   launch_moe_mxfp8<T, BM>(                                                     \
       a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids, expert_ids,  \
       num_tokens_post_padded, num_token_blocks, size_m, size_n, size_k, top_k, \
       expert_weight_stride, expert_scales_stride, mul_topk_weight,             \
-      output_topk, stream)
+      output_topk, gate_cap, up_cap, stream)
   switch (block_size_m) {
     case 1:
       LAUNCH_MX8(1);
@@ -574,14 +645,19 @@ void dispatch_moe_mxfp8(
 #undef LAUNCH_MX8
 }
 
-void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
-                          torch::Tensor b_q_weight, torch::Tensor b_scales,
-                          torch::Tensor topk_weights,
-                          torch::Tensor sorted_token_ids,
-                          torch::Tensor expert_ids,
-                          torch::Tensor num_tokens_post_padded, int64_t top_k,
-                          int64_t block_size_m, bool mul_topk_weight,
-                          int64_t output_topk) {
+// gate_cap > 0: ``a`` is the [rows, 2 * K] output of the first GEMM and the
+// kernel applies the softcapped SwiGLU while it loads the activations (see
+// load_activations); gate_cap == 0: ``a`` is the [rows, K] activation matrix.
+static void moe_mxfp8_gemm_impl(torch::Tensor a, torch::Tensor c,
+                                torch::Tensor b_q_weight,
+                                torch::Tensor b_scales,
+                                torch::Tensor topk_weights,
+                                torch::Tensor sorted_token_ids,
+                                torch::Tensor expert_ids,
+                                torch::Tensor num_tokens_post_padded,
+                                int64_t top_k, int64_t block_size_m,
+                                bool mul_topk_weight, int64_t output_topk,
+                                float gate_cap, float up_cap) {
   TORCH_CHECK(a.is_cuda() && c.is_cuda(), "a and c must be GPU tensors");
   TORCH_CHECK(a.dim() == 2 && c.dim() == 2, "a and c must be 2D");
   TORCH_CHECK(a.scalar_type() == torch::kHalf, "a must be fp16");
@@ -593,7 +669,10 @@ void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   const int size_m = (int)a.size(0);
-  const int size_k = (int)a.size(1);
+  const int size_k = (int)a.size(1) / (gate_cap > 0.0f ? 2 : 1);
+  TORCH_CHECK(gate_cap == 0.0f || (a.size(1) % 2 == 0 && a.is_contiguous() &&
+                                   gate_cap > 0.0f && up_cap > 0.0f),
+              "swiglu: a must be a contiguous [rows, 2 * K] tensor, caps > 0");
   const int size_n = (int)b_q_weight.size(2);
   TORCH_CHECK((int)b_q_weight.size(1) * 4 == size_k,
               "b_q_weight K-dim * 4 must equal a.size(1)");
@@ -616,5 +695,36 @@ void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
       sorted_token_ids.data_ptr<int32_t>(), expert_ids.data_ptr<int32_t>(),
       num_tokens_post_padded.data_ptr<int32_t>(), num_token_blocks, size_m,
       size_n, size_k, (int)top_k, (int)block_size_m, expert_weight_stride,
-      expert_scales_stride, mul_topk_weight, (int)output_topk, stream);
+      expert_scales_stride, mul_topk_weight, (int)output_topk, gate_cap,
+      up_cap, stream);
+}
+
+void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales,
+                          torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk) {
+  moe_mxfp8_gemm_impl(a, c, b_q_weight, b_scales, topk_weights,
+                      sorted_token_ids, expert_ids, num_tokens_post_padded,
+                      top_k, block_size_m, mul_topk_weight, output_topk, 0.0f,
+                      0.0f);
+}
+
+// The second GEMM of the expert MLP with the softcapped SwiGLU of the first
+// GEMM's [gate | up] output fused into the activation load.
+void moe_mxfp8_gemm_swiglu_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
+    bool mul_topk_weight, int64_t output_topk, double gate_cap,
+    double up_cap) {
+  TORCH_CHECK(gate_cap > 0.0 && up_cap > 0.0, "softcaps must be > 0");
+  moe_mxfp8_gemm_impl(gate_up, c, b_q_weight, b_scales, topk_weights,
+                      sorted_token_ids, expert_ids, num_tokens_post_padded,
+                      top_k, block_size_m, mul_topk_weight, output_topk,
+                      (float)gate_cap, (float)up_cap);
 }

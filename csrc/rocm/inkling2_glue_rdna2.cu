@@ -47,6 +47,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -80,6 +81,8 @@ constexpr int kGateWaves = 4;  // output rows of the down projection per CTA
 constexpr int kMinCtas = 216;  // CTAs kept in flight (3 per CU of a 72 CU V620)
 constexpr int kMaxZeroCtas = 32;  // router zero-fill CTAs (each reserves LDS)
 constexpr int kStageV = 32;       // float4 per lane of a staged row: H <= 4096
+constexpr int kMixWaves = 8;      // waves of a split gate_mix CTA
+constexpr int kMixRpw = 8;        // rows of the gate rank per wave: R = 64
 
 // ---------------------------------------------------------------------------
 // Small helpers (arch independent)
@@ -710,6 +713,162 @@ __device__ __forceinline__ void gate_mix_body(const GateMixArgs& a) {
   if (tid == 0) *counter = 0;
 }
 
+// gate_mix for a handful of tokens (decode, speculative verification) with fp32
+// weights.  The R rows of the projections are split over the kMixWaves waves of
+// the CTA, so every wave has 2 * RPW float4 weight loads in flight at once: the
+// one-wave kernel above walks all R rows in dependent groups of 8 loads and is
+// latency bound (54 waves on a 72 CU GPU at T = 1).  The partial sums of the
+// waves are added in wave order through LDS, so the result differs from the
+// sequential kernel only in the order of the fp32 additions.  The last-arriving
+// CTA of a (gate, token tile) normalises, with its waves split over the tokens
+// and the columns.
+template <int TB, int RPW, bool NORM>
+__device__ __forceinline__ void gate_mix_split_body(const GateMixArgs& a) {
+  constexpr int NW = kMixWaves;
+  constexpr int WPT = NW / TB;  // waves per token of the normalisation
+  __shared__ int s_last;
+  __shared__ float4 s_part[NW][TB][2][kWave];
+  const int tid = threadIdx.x;
+  const int lane = tid & (kWave - 1);
+  const int wave = tid / kWave;
+  const int s = blockIdx.y;
+  const int tile = blockIdx.z;
+  const int t0 = tile * TB;
+  const int cc = blockIdx.x;  // 128-column chunk
+  const int c = cc * 128 + lane * 4;
+  const bool active = c < a.H;
+  const int H = a.H, R = a.R, T = a.T;
+  const int r0 = wave * RPW;
+
+  // every load of the CTA is in flight before the first one is used
+  float4 fv[RPW], gv[RPW];
+  if (active) {
+    const float* wf =
+        reinterpret_cast<const float*>(a.wf) + (int64_t)s * R * H + c;
+    const float* wg =
+        reinterpret_cast<const float*>(a.wg) + (int64_t)s * R * H + c;
+  #pragma unroll
+    for (int i = 0; i < RPW; ++i) {
+      fv[i] = load4(wf + (int64_t)(r0 + i) * H);
+      gv[i] = load4(wg + (int64_t)(r0 + i) * H);
+    }
+  }
+  float dd[TB][RPW];
+  #pragma unroll
+  for (int tb = 0; tb < TB; ++tb) {
+    const int tc = min(t0 + tb, T - 1);
+  #pragma unroll
+    for (int i = 0; i < RPW; ++i)
+      dd[tb][i] = __half2float(a.d[((int64_t)s * T + tc) * R + r0 + i]);
+  }
+  float4 hv = make_float4(0.f, 0.f, 0.f, 0.f), mv = hv;
+  if (wave < TB && active && t0 + wave < T) {  // token `wave` of the epilogue
+    hv = load4(a.h + (t0 + wave) * a.h_t + (int64_t)s * a.h_s + c);
+    mv = load4(a.m + (t0 + wave) * a.m_t + (int64_t)s * a.m_s + c);
+  }
+
+  float accf[TB][4], accg[TB][4];
+  #pragma unroll
+  for (int tb = 0; tb < TB; ++tb)
+  #pragma unroll
+    for (int j = 0; j < 4; ++j) accf[tb][j] = accg[tb][j] = 0.f;
+  if (active) {
+  #pragma unroll
+    for (int i = 0; i < RPW; ++i) {
+  #pragma unroll
+      for (int tb = 0; tb < TB; ++tb) {
+        const float dr = dd[tb][i];
+        accf[tb][0] = fmaf(dr, fv[i].x, accf[tb][0]);
+        accf[tb][1] = fmaf(dr, fv[i].y, accf[tb][1]);
+        accf[tb][2] = fmaf(dr, fv[i].z, accf[tb][2]);
+        accf[tb][3] = fmaf(dr, fv[i].w, accf[tb][3]);
+        accg[tb][0] = fmaf(dr, gv[i].x, accg[tb][0]);
+        accg[tb][1] = fmaf(dr, gv[i].y, accg[tb][1]);
+        accg[tb][2] = fmaf(dr, gv[i].z, accg[tb][2]);
+        accg[tb][3] = fmaf(dr, gv[i].w, accg[tb][3]);
+      }
+    }
+  }
+  #pragma unroll
+  for (int tb = 0; tb < TB; ++tb) {
+    s_part[wave][tb][0][lane] =
+        make_float4(accf[tb][0], accf[tb][1], accf[tb][2], accf[tb][3]);
+    s_part[wave][tb][1][lane] =
+        make_float4(accg[tb][0], accg[tb][1], accg[tb][2], accg[tb][3]);
+  }
+  __syncthreads();
+
+  // mix of token `wave`: out = (1 - tanh(f)) * h + tanh(g) * m
+  if (wave < TB) {
+    const int t = t0 + wave;
+    float4 f = make_float4(0.f, 0.f, 0.f, 0.f), g = f;
+  #pragma unroll
+    for (int w = 0; w < NW; ++w) {
+      const float4 pf = s_part[w][wave][0][lane];
+      const float4 pg = s_part[w][wave][1][lane];
+      f.x += pf.x;
+      f.y += pf.y;
+      f.z += pf.z;
+      f.w += pf.w;
+      g.x += pg.x;
+      g.y += pg.y;
+      g.z += pg.z;
+      g.w += pg.w;
+    }
+    float ss = 0.f;
+    if (active && t < T) {
+      float4 o;
+      o.x = (1.0f - tanhf(f.x)) * hv.x + tanhf(g.x) * mv.x;
+      o.y = (1.0f - tanhf(f.y)) * hv.y + tanhf(g.y) * mv.y;
+      o.z = (1.0f - tanhf(f.z)) * hv.z + tanhf(g.z) * mv.z;
+      o.w = (1.0f - tanhf(f.w)) * hv.w + tanhf(g.w) * mv.w;
+      store4(a.out32 + ((int64_t)s * T + t) * H + c, o);
+      ss = dot4(o, o);
+    }
+    if constexpr (NORM) {
+      const float tot = wave_sum(ss);
+      if (lane == 0 && t < T && cc < a.C)
+        a.part[((int64_t)s * T + t) * a.C + cc] = tot;
+    }
+  }
+  if constexpr (!NORM) return;
+
+  __threadfence();
+  __syncthreads();
+  const int ntiles = gridDim.z;
+  int* counter = a.counters + (int64_t)s * ntiles + tile;
+  if (tid == 0) {
+    const int old = atomicAdd(counter, 1);
+    s_last = (old == (int)gridDim.x - 1);
+  }
+  __syncthreads();
+  if (!s_last) return;
+  __threadfence();
+
+  {
+    const int tb = wave / WPT, sw = wave - tb * WPT;
+    const int t = t0 + tb;
+    if (t < T) {
+      const float* pp = a.part + ((int64_t)s * T + t) * a.C;
+      float tot = 0.f;
+      for (int i = lane; i < a.C; i += kWave) tot += pp[i];
+      tot = wave_sum(tot);
+      const float rs = rsqrtf(tot * a.inv_h + a.norm_eps);
+      const int64_t row = ((int64_t)s * T + t) * H;
+      const int64_t wrow = (a.nw_rows == 1 ? 0 : s) * a.nw_s;
+      for (int c4 = sw * kWave + lane; c4 < (H >> 2); c4 += WPT * kWave) {
+        const float4 v = load4(a.out32 + row + 4 * c4);
+        const float4 w = load4_dyn(a.nw, wrow + 4 * c4, a.nw_f16);
+        store4(a.out16 + row + 4 * c4,
+               make_float4(w.x * (v.x * rs), w.y * (v.y * rs), w.z * (v.z * rs),
+                           w.w * (v.w * rs)));
+      }
+    }
+  }
+  __syncthreads();
+  if (tid == 0) *counter = 0;
+}
+
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
 template <typename WT, int TB, bool NORM>
@@ -717,6 +876,14 @@ __global__ void __launch_bounds__(2 * kWave)
     gate_mix_kernel(const GateMixArgs a) {
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
   gate_mix_body<WT, TB, NORM>(a);
+#endif
+}
+
+template <int TB, int RPW, bool NORM>
+__global__ void __launch_bounds__(kMixWaves* kWave)
+    gate_mix_split_kernel(const GateMixArgs a) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  gate_mix_split_body<TB, RPW, NORM>(a);
 #endif
 }
 
@@ -1299,6 +1466,16 @@ void row_launch_shape(int64_t H, const char* who, int& iter, int& block) {
   block = (int)(((V + iter - 1) / iter + kWave - 1) / kWave * kWave);
 }
 
+// VLLM_INKLING2_FUSE_GLUE (default on, ``0`` or empty turns it off): the decode-latency variant of
+// the glue kernels (split-R gate_mix for a few tokens with fp32 weights).  Read once.
+bool fuse_glue() {
+  static const bool on = [] {
+    const char* e = std::getenv("VLLM_INKLING2_FUSE_GLUE");
+    return e == nullptr || (e[0] != '\0' && e[0] != '0');
+  }();
+  return on;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -1543,6 +1720,26 @@ void inkling2_glue_msg_gate_down(const at::Tensor& h, const at::Tensor& m,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <bool NORM>
+static void launch_gate_mix_split(int tb, dim3 grid, dim3 block,
+                                  const GateMixArgs& a, hipStream_t stream) {
+  switch (tb) {
+    case 1:
+      inkling2_glue::gate_mix_split_kernel<1, kMixRpw, NORM>
+          <<<grid, block, 0, stream>>>(a);
+      break;
+    case 2:
+      inkling2_glue::gate_mix_split_kernel<2, kMixRpw, NORM>
+          <<<grid, block, 0, stream>>>(a);
+      break;
+    default:
+      inkling2_glue::gate_mix_split_kernel<4, kMixRpw, NORM>
+          <<<grid, block, 0, stream>>>(a);
+      break;
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 template <typename WT, bool NORM>
 static void launch_gate_mix(int tb, dim3 grid, dim3 block, const GateMixArgs& a,
                             hipStream_t stream) {
@@ -1646,7 +1843,10 @@ void inkling2_glue_msg_gate_mix(const at::Tensor& h, const at::Tensor& m,
   a.norm_eps = (float)norm_eps;
   a.inv_h = 1.0f / (float)H;
 
-  const int tb = gate_mix_tb(T, G * a.C, w16 ? 16 : 8);
+  // a handful of tokens with fp32 weights: the R-split kernel (opt-in)
+  const bool split =
+      fuse_glue() && !w16 && T <= 4 && R == kMixWaves * kMixRpw;
+  const int tb = split ? gate_tb(T, 4) : gate_mix_tb(T, G * a.C, w16 ? 16 : 8);
   const int64_t ntiles = (T + tb - 1) / tb;
   if (norm) {
     TORCH_CHECK(norm_w.has_value() && norm_w->defined(), who,
@@ -1686,6 +1886,14 @@ void inkling2_glue_msg_gate_mix(const at::Tensor& h, const at::Tensor& m,
   const hipStream_t stream = at::cuda::getCurrentCUDAStream();
   if (T == 0) return;
   const dim3 grid((unsigned)a.C, (unsigned)G, (unsigned)ntiles);
+  if (split) {
+    const dim3 sblock(kMixWaves * kWave);
+    if (norm)
+      launch_gate_mix_split<true>(tb, grid, sblock, a, stream);
+    else
+      launch_gate_mix_split<false>(tb, grid, sblock, a, stream);
+    return;
+  }
   const dim3 block(kWave);
   if (w16) {
     if (norm)

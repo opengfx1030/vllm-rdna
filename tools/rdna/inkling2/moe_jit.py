@@ -41,10 +41,26 @@ void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                           torch::Tensor num_tokens_post_padded, int64_t top_k,
                           int64_t block_size_m, bool mul_topk_weight,
                           int64_t output_topk);
+void moe_nvfp4_gemm_swiglu_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor b_globals,
+    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
+    int64_t output_topk, double gate_cap, double up_cap);
+void moe_mxfp8_gemm_swiglu_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
+    bool mul_topk_weight, int64_t output_topk, double gate_cap,
+    double up_cap);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_nvfp4_gemm_rdna2", &moe_nvfp4_gemm_rdna2);
   m.def("moe_mxfp8_gemm_rdna2", &moe_mxfp8_gemm_rdna2);
+  m.def("moe_nvfp4_gemm_swiglu_rdna2", &moe_nvfp4_gemm_swiglu_rdna2);
+  m.def("moe_mxfp8_gemm_swiglu_rdna2", &moe_mxfp8_gemm_swiglu_rdna2);
 }
 """
 

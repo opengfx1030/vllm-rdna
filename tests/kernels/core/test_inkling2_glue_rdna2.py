@@ -28,7 +28,7 @@ import zlib
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _custom_ops as _vllm_ops
 from vllm.models.inkling2_loop.amd import blocks
 from vllm.platforms.rocm import on_gfx10x
 
@@ -39,6 +39,92 @@ pytestmark = pytest.mark.skipif(
         and hasattr(torch.ops._rocm_C, "inkling2_glue_attn_res")
     ),
     reason="needs gfx1030 and a build with csrc/rocm/inkling2_glue_rdna2.cu",
+)
+
+
+class _JitGlueOps:
+    """``I2_GLUE_JIT=<path to a .cu>``: the ops the decode-latency variants change
+    (gate_down, gate_mix, moe_route) run from a JIT build of that source -- this is how
+    the mutants of the kernels are checked (``tools/rdna/inkling2/glue_jit.py``); every
+    other attribute is the installed build's.  ``VLLM_INKLING2_FUSE_GLUE`` selects the
+    variants inside the build."""
+
+    def __init__(self, source: str):
+        import hashlib
+        import pathlib
+        import sys
+
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools"))
+        from rdna.inkling2 import glue_jit
+
+        tag = hashlib.md5(pathlib.Path(source).read_bytes()).hexdigest()[:10]
+        self._mod = glue_jit.build("i2_glue_test_" + tag, source)
+
+    def inkling2_glue_msg_gate_down(self, h, m, wd, d, eps=1e-6):
+        self._mod.msg_gate_down(h, m, wd, d, eps)
+
+    def inkling2_glue_msg_gate_mix(
+        self,
+        h,
+        m,
+        d,
+        wf,
+        wg,
+        out,
+        *,
+        norm_w=None,
+        scratch=None,
+        partials=None,
+        counters=None,
+        norm_eps=1e-6,
+    ):
+        self._mod.msg_gate_mix(
+            h, m, d, wf, wg, norm_w, out, scratch, partials, counters, norm_eps
+        )
+
+    def inkling2_glue_moe_route(
+        self,
+        x,
+        gate_w,
+        bias,
+        logits,
+        topk_weights,
+        topk_ids,
+        sorted_ids,
+        expert_ids,
+        post_pad,
+        counters,
+        block_size_m,
+        route_scale,
+        *,
+        zero1=None,
+        zero2=None,
+    ):
+        self._mod.moe_route(
+            x,
+            gate_w,
+            bias,
+            logits,
+            topk_weights,
+            topk_ids,
+            sorted_ids,
+            expert_ids,
+            post_pad,
+            counters,
+            zero1,
+            zero2,
+            block_size_m,
+            route_scale,
+        )
+
+    def __getattr__(self, name):
+        return getattr(_vllm_ops, name)
+
+
+ops = (
+    _JitGlueOps(os.environ["I2_GLUE_JIT"])
+    if os.environ.get("I2_GLUE_JIT")
+    else _vllm_ops
 )
 
 DEV = "cuda"
@@ -420,6 +506,17 @@ GATE_CASES = {
     "mlp_t1": _gate_case(G=1, SH=1, rows=1),
     "qkv_full_t3": _gate_case(T=3),
     "qkv_full_t3_f32w": _gate_case(T=3, w16=False),
+    "qkv_full_t2_f32w": _gate_case(T=2, w16=False),
+    "qkv_full_t4_f32w": _gate_case(T=4, w16=False),
+    "qkv_sliding_t4_f32w": _gate_case(T=4, SH=1, rows=1, w16=False),
+    "mlp_t1_f32w": _gate_case(G=1, SH=1, rows=1, w16=False),
+    "mlp_t4_f32w": _gate_case(T=4, G=1, SH=1, rows=1, w16=False),
+    "raw_fp32_out_t3_f32w": _gate_case(T=3, norm=False, w16=False),
+    "raw_fp32_out_t1_f32w": _gate_case(T=1, norm=False, w16=False),
+    "qkv_full_t5_f32w": _gate_case(T=5, w16=False),
+    "qkv_full_t4_f32w_huge": _gate_case(T=4, w16=False, mag=1e8),
+    "qkv_full_t4_f32w_tiny": _gate_case(T=4, w16=False, mag=1e-3),
+    "mlp_t1_f32w_tiny": _gate_case(G=1, SH=1, rows=1, w16=False, mag=1e-3),
     "qkv_sliding_t17": _gate_case(T=17, SH=1, rows=1),
     "qkv_full_t17_f32w": _gate_case(T=17, w16=False),
     "mlp_t17": _gate_case(T=17, G=1, SH=1, rows=1),
@@ -839,6 +936,10 @@ ROUTE_CASES = {
     "decode_t1_f32w": _route_case(w16=False),
     "t2": _route_case(T=2, BM=2),
     "t3_f32w": _route_case(T=3, BM=2, w16=False),
+    "t4_f32w_bm1": _route_case(T=4, BM=1, w16=False),
+    "t2_f32w_bm1": _route_case(T=2, BM=1, w16=False),
+    "e255_k16_f32w": _route_case(T=33, E=255, K=16, H=512, BM=8, w16=False),
+    "h2304_e128_t1_f32w_hot": _route_case(T=1, BM=1, w16=False, hot=True),
     "t4": _route_case(T=4, BM=4),
     "t17": _route_case(T=17, BM=4),
     "t17_f32w": _route_case(T=17, BM=8, w16=False),
