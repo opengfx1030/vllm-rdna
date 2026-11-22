@@ -179,7 +179,7 @@ def build_llm(args):
         skip_tokenizer_init=True,
         max_logprobs=8,
         enable_prefix_caching=not args.no_prefix_caching,
-        limit_mm_per_prompt={"image": 0},
+        limit_mm_per_prompt={"image": args.limit_images},
         tensor_parallel_size=args.tensor_parallel_size,
         seed=0,
         disable_log_stats=not args.spec_k,
@@ -505,6 +505,13 @@ def main() -> int:
     ap.add_argument("--max-model-len", type=int, default=4096)
     ap.add_argument("--max-num-batched-tokens", type=int, default=1024)
     ap.add_argument("--max-num-seqs", type=int, default=8)
+    ap.add_argument(
+        "--limit-images",
+        type=int,
+        default=0,
+        help="images per prompt the engine admits (1 also loads the vision tower, "
+        "as the recipes do)",
+    )
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.92)
     ap.add_argument("--no-prefix-caching", action="store_true")
     ap.add_argument(
