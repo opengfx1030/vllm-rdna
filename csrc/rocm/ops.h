@@ -1285,6 +1285,27 @@ void inkling2_linear_argmax_partial(torch::Tensor logits,
 void inkling2_linear_argmax_reduce(torch::Tensor part_val,
                                    torch::Tensor part_idx, torch::Tensor out);
 
+// Weight-only quantized (int8 / int4, fp16 group scales) decode GEMV of the
+// dense linears, up to 4 activation rows: the attention input pack, o_proj and
+// the lm_head with softcap and argmax partials.  See
+// docs/rdna2/inkling2-qlinear-kernels.md.
+void inkling2_qlinear_grouped(
+    const std::vector<torch::Tensor>& xs, torch::Tensor w, torch::Tensor sc,
+    const std::vector<torch::Tensor>& outs, const std::vector<int64_t>& seg_x,
+    const std::vector<int64_t>& seg_n, const std::vector<int64_t>& seg_act,
+    const std::vector<double>& seg_p, const std::vector<int64_t>& seg_valid,
+    int64_t bits, int64_t group, int64_t rows_per_tile, int64_t cpi,
+    int64_t waves);
+
+void inkling2_qlinear_lm_head(torch::Tensor x, torch::Tensor w,
+                              torch::Tensor sc,
+                              const std::optional<torch::Tensor>& logits,
+                              const std::optional<torch::Tensor>& part_val,
+                              const std::optional<torch::Tensor>& part_idx,
+                              double softcap, int64_t n_rows, int64_t n_valid,
+                              int64_t col_base, int64_t bits, int64_t group,
+                              int64_t cpi);
+
 // Inkling-2-Mini glue kernels on RDNA2 (gfx1030): block / message attention
 // residual, message gates, RMS norms, router + align and SwiGLU.  Everything
 // between the GEMMs, attention and short convolutions of a layer visit.

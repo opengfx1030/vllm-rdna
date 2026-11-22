@@ -1056,6 +1056,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("inkling2_linear_argmax_reduce", torch::kCUDA,
                 &inkling2_linear_argmax_reduce);
 
+  // Inkling-2-Mini weight-only quantized decode linears
+  // (csrc/rocm/inkling2_qlinear_rdna2.cu).
+  rocm_ops.def(
+      "inkling2_qlinear_grouped(Tensor[] xs, Tensor w, Tensor sc, "
+      "Tensor(a!)[] outs, int[] seg_x, int[] seg_n, int[] seg_act, "
+      "float[] seg_p, int[] seg_valid, int bits, int group, "
+      "int rows_per_tile, int cpi, int waves) -> ()");
+  rocm_ops.impl("inkling2_qlinear_grouped", torch::kCUDA,
+                &inkling2_qlinear_grouped);
+  rocm_ops.def(
+      "inkling2_qlinear_lm_head(Tensor x, Tensor w, Tensor sc, "
+      "Tensor!? logits, Tensor!? part_val, Tensor!? part_idx, float softcap, "
+      "int n_rows, int n_valid, int col_base, int bits, int group, "
+      "int cpi) -> ()");
+  rocm_ops.impl("inkling2_qlinear_lm_head", torch::kCUDA,
+                &inkling2_qlinear_lm_head);
+
   // Inkling-2-Mini glue kernels (csrc/rocm/inkling2_glue_rdna2.cu).
   rocm_ops.def(
       "inkling2_glue_attn_res(Tensor! blocks, int n_blocks, Tensor x0, "

@@ -332,6 +332,7 @@ class Inkling2Attention(nn.Module):
         relative-position basis, the conv weights and the shared output buffers.
         """
         from . import linear_pack as lp
+        from . import qlinear_pack as qp
 
         cfg = self.config
         q, rb = self.q_proj, self.relative_position_bias
@@ -356,6 +357,13 @@ class Inkling2Attention(nn.Module):
             self.o_proj.linear.weight,
             out_dtype=torch.float32 if self.tp.enabled else torch.float16,
         )
+        # decode-only weight-only quantized copies (off unless
+        # VLLM_INKLING2_ATTN_IN_QUANT / O_PROJ_QUANT / ATTN_QUANT is set; ignored under
+        # tensor parallelism): the fp16 packs keep serving more than
+        # qlinear_pack.MAX_ROWS rows and the prefill
+        if not self.tp.enabled:
+            self._attn_in = qp.maybe_quantize_attn_in(self._attn_in, self.layer_idx)
+            self._o_pack = qp.maybe_quantize_o_proj(self._o_pack, self.layer_idx)
         self._rel_proj_t = rb.proj.detach().t().contiguous().half()
         self._q_scale = q.norm.scale.detach().float().contiguous()
         self._rel_scale = rb.norm.scale.detach().float().contiguous()

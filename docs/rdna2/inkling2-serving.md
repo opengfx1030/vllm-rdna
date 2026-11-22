@@ -229,6 +229,47 @@ is replicated at TP > 1) and graph memory that grows with SEQS (0.68 GiB at SEQS
 TP=1, against 0.70 GiB without the draft). A window on the draft's full-attention layer would give the
 full context back at TP=2; it is not built (`docs/rdna2/inkling2-dspark.md`).
 
+## Decode byte levers (opt-in, TP=1)
+
+A b=1 decode step reads 5.3 GB at TP=1, 3.5 GB of it the fp16 attention input packs, `o_proj` and the
+`lm_head`; the dense kernels stream those at 410 - 440 GB/s, so bytes are time. Four environment switches
+(all OFF by default, not in the recipes) replace them, for steps of up to 4 token rows, by weight-only
+int8 (group 64) or int4 (group 32) copies read by native HIP kernels (`inkling2_qlinear_*`, design,
+oracles, mutants and measurements in `docs/rdna2/inkling2-qlinear-kernels.md`). The prefill, chunks of
+more than 4 rows and TP > 1 keep the fp16 kernels (the flags are ignored at TP > 1).
+
+| Key | Values | Replaces |
+| --- | --- | --- |
+| `VLLM_INKLING2_ATTN_IN_QUANT` | `w8`, `w4` (`w4g64`, `w8g64` spelled out) | the attention input pack, 24 layers |
+| `VLLM_INKLING2_O_PROJ_QUANT` | same | `o_proj`, 24 layers |
+| `VLLM_INKLING2_ATTN_QUANT` | same | default of the two above |
+| `VLLM_INKLING2_LM_HEAD_QUANT` | same | the `lm_head` (logits and the fused greedy argmax) |
+| `VLLM_INKLING2_QUANT_FILE` | path | GPTQ integers and scales for the attention packs (`tools/rdna/inkling2/gptq_quant.py`) instead of round to nearest |
+
+Measured at TP=1 with graphs (`tools/rdna/inkling2/decode_gate.py`: `max_num_batched_tokens` 4, ms per
+generated token of one request; the lever-free engine measures 19.05 and 19.10; the gate is the
+teacher-forced mean `|dlogp|` against the TP=1 eager dump, limit 0.1027, the lever-free engine scores
+0.040):
+
+| Levers | b=1 ms/token | tok/s | NLL gate | Extra weights |
+| --- | ---: | ---: | --- | ---: |
+| `LM_HEAD_QUANT=w8` | 18.09 | 55.3 | 0.042 pass | +0.44 GiB |
+| `LM_HEAD_QUANT=w4` | 17.63 | 56.7 | 0.076 pass | +0.24 GiB |
+| `ATTN_QUANT=w8` | 16.27 | 61.5 | 0.056 pass | +0.63 GiB |
+| `ATTN_QUANT=w8 LM_HEAD_QUANT=w8` | 15.28 | 65.5 | 0.056 pass | +1.07 GiB |
+| `ATTN_QUANT=w8 LM_HEAD_QUANT=w4` | 14.78 | 67.7 | 0.078 pass | +0.87 GiB [derived] |
+| `ATTN_QUANT=w4 LM_HEAD_QUANT=w4` (round to nearest) | 13.49 | 74.2 | 0.170 FAIL | +0.59 GiB |
+| the same with an offline GPTQ attention file (`VLLM_INKLING2_QUANT_FILE`) | 13.39 | 74.7 | 0.142 FAIL | +0.59 GiB |
+
+These are PROTOTYPES that quantize the weights AT LOAD from the native bf16 -> fp16 weights (about a
+second, no per-token cost); the native weights stay the default and are loaded untouched. They are not
+a shipping path: a quantized tier has to be an offline checkpoint. The quantized copy lives next to the
+fp16 weights, so each lever takes KV cache: all-int8 holds about 35k tokens less context at TP=1
+(32 KiB per token) [derived]. Over 3999 teacher-forced positions the all-int8 build shifts the mean
+log-probability by -0.0007 +- 0.0016 (lever-free engine against itself +0.0003 +- 0.0014): no
+measurable cost. int4 attention does not pass the gate, with round to nearest or with GPTQ (rows in
+`docs/rdna2/inkling2-qlinear-kernels.md`, section 7).
+
 ## Known limits
 
 - **Speculative decoding (DSpark) is opt-in and not in the recipe defaults.** It speeds one or two requests

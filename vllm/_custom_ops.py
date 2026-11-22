@@ -2602,6 +2602,81 @@ def inkling2_linear_argmax_reduce(
     torch.ops._rocm_C.inkling2_linear_argmax_reduce(part_val, part_idx, out)
 
 
+def inkling2_qlinear_grouped(
+    xs: list[torch.Tensor],
+    w: torch.Tensor,
+    sc: torch.Tensor,
+    outs: list[torch.Tensor],
+    seg_x: list[int],
+    seg_n: list[int],
+    seg_act: list[int] | None,
+    seg_p: list[float] | None,
+    seg_valid: list[int] | None,
+    bits: int,
+    group: int,
+    rows_per_tile: int,
+    cpi: int,
+    waves: int,
+) -> None:
+    """Segmented weight-only quantized linear on gfx1030 (decode, 1..4 rows):
+    outs[i] = act(xs[seg_x[i]] @ dequant(W_i)^T) with int8 / int4 weights and one
+    fp16 scale per ``group`` of K in the tile layout of
+    ``vllm.models.inkling2_loop.amd.qlinear_pack`` (w uint8, sc fp16). See
+    docs/rdna2/inkling2-qlinear-kernels.md."""
+    torch.ops._rocm_C.inkling2_qlinear_grouped(
+        xs,
+        w,
+        sc,
+        outs,
+        seg_x,
+        seg_n,
+        seg_act or [],
+        seg_p or [],
+        seg_valid or [],
+        bits,
+        group,
+        rows_per_tile,
+        cpi,
+        waves,
+    )
+
+
+def inkling2_qlinear_lm_head(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    sc: torch.Tensor,
+    logits: torch.Tensor | None,
+    part_val: torch.Tensor | None,
+    part_idx: torch.Tensor | None,
+    softcap: float,
+    n_rows: int,
+    n_valid: int,
+    col_base: int,
+    bits: int,
+    group: int,
+    cpi: int,
+) -> None:
+    """Quantized lm_head (1..4 rows): ``logits[M, n_rows]`` fp32 = softcap *
+    tanh(x @ dequant(w)^T / softcap) with columns >= n_valid -inf, and/or the per-block
+    argmax partials part_val fp32 / part_idx int32 [M, P] (indices offset by
+    col_base)."""
+    torch.ops._rocm_C.inkling2_qlinear_lm_head(
+        x,
+        w,
+        sc,
+        logits,
+        part_val,
+        part_idx,
+        softcap,
+        n_rows,
+        n_valid,
+        col_base,
+        bits,
+        group,
+        cpi,
+    )
+
+
 def inkling2_glue_attn_res(
     blocks: torch.Tensor,
     n_blocks: int,
@@ -6672,6 +6747,48 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
     @register_fake("_rocm_C::inkling2_linear_argmax_reduce")
     def _inkling2_linear_argmax_reduce_fake(
         part_val: torch.Tensor, part_idx: torch.Tensor, out: torch.Tensor
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "inkling2_qlinear_grouped"
+):
+
+    @register_fake("_rocm_C::inkling2_qlinear_grouped")
+    def _inkling2_qlinear_grouped_fake(
+        xs: list[torch.Tensor],
+        w: torch.Tensor,
+        sc: torch.Tensor,
+        outs: list[torch.Tensor],
+        seg_x: list[int],
+        seg_n: list[int],
+        seg_act: list[int],
+        seg_p: list[float],
+        seg_valid: list[int],
+        bits: int,
+        group: int,
+        rows_per_tile: int,
+        cpi: int,
+        waves: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_qlinear_lm_head")
+    def _inkling2_qlinear_lm_head_fake(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        sc: torch.Tensor,
+        logits: torch.Tensor | None,
+        part_val: torch.Tensor | None,
+        part_idx: torch.Tensor | None,
+        softcap: float,
+        n_rows: int,
+        n_valid: int,
+        col_base: int,
+        bits: int,
+        group: int,
+        cpi: int,
     ) -> None:
         return
 

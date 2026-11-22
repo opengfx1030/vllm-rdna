@@ -946,7 +946,7 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         after loading: attention input / o_proj / router / message-gate / layer-norm
         packs per layer, the lm_head pack (a view of ``lm_head.weight``) and the
         persistent workspace."""
-        from . import glue, linear_pack
+        from . import glue, linear_pack, qlinear_pack
 
         glue.check_kernel_shapes(self.config)
         device = self.lm_head.weight.device
@@ -965,6 +965,8 @@ class Inkling2LoopTextForCausalLM(nn.Module):
             self._head = linear_pack.inkling2_linear_pack_lm_head(
                 self.lm_head.weight, self.config.vocab_size
             )
+            # decode-only int8 / int4 copy (off unless VLLM_INKLING2_LM_HEAD_QUANT)
+            self._head = qlinear_pack.maybe_quantize_lm_head(self._head)
         self._argmax_parts = (
             8 * torch.cuda.get_device_properties(device).multi_processor_count
         )
