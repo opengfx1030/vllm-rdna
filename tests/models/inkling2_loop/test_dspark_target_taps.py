@@ -90,3 +90,39 @@ def test_plain_forward_is_unchanged_without_taps(variant):  # noqa: F811
     again = pm.step([(0, prompt)])[0]  # the hook was removed: tensors out again
     assert torch.equal(plain, again)
     assert len(seen["taps"]) == 2 and entries
+
+
+def test_the_served_classes_satisfy_the_runners_eagle3_interface():
+    """The runner asks ``supports_eagle3`` (a runtime-checkable protocol that needs
+    every member, the ``SupportsEagleBase`` flags included) before it taps the
+    target."""
+    from vllm.model_executor.models.interfaces import supports_eagle3
+    from vllm.models.inkling2_loop.amd import model as model_mod
+
+    assert supports_eagle3(model_mod.Inkling2LoopTextForCausalLM)
+    assert supports_eagle3(model_mod.Inkling2LoopForConditionalGeneration)
+
+
+def test_the_unquantized_draft_does_not_inherit_the_targets_quantization():
+    """``mtp.safetensors`` is bf16 next to an NVFP4 target: a draft config that took
+    the target's ``modelopt_fp4`` would try to parse a ModelOpt config for it."""
+    from types import SimpleNamespace
+
+    from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+
+    def spec(model_type: str, text_model_type: str):
+        target = SimpleNamespace(
+            model="ckpt",
+            quantization="modelopt_fp4",
+            hf_config=SimpleNamespace(model_type=model_type),
+            hf_text_config=SimpleNamespace(model_type=text_model_type),
+        )
+        return SimpleNamespace(quantization=None, target_model_config=target)
+
+    inkling = spec("inkling2_loop", "inkling2_loop_text")
+    assert DSparkSpeculatorConfig.default_model(inkling) == "ckpt"
+    assert inkling.quantization is None
+    # a DSpark draft that ships inside the quantized target checkpoint still inherits
+    other = spec("deepseek_v4", "deepseek_v4")
+    assert DSparkSpeculatorConfig.default_model(other) == "ckpt"
+    assert other.quantization == "modelopt_fp4"

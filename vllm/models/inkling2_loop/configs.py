@@ -246,7 +246,10 @@ class Inkling2DSparkConfig(PreTrainedConfig):
         # partial block) is tapped; the last id, the target's number of layer
         # visits, is its final-norm output.
         self.target_layer_ids = list(target_layer_ids or [])
-        self.eagle_aux_hidden_state_layer_ids = self.target_layer_ids
+        # What the runner asks the target to tap (``SupportsEagle3``): the entry
+        # states only; the target model always appends its final output itself, and a
+        # visit id equal to the number of visits is not a layer.
+        self.eagle_aux_hidden_state_layer_ids = self.target_layer_ids[:-1]
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads

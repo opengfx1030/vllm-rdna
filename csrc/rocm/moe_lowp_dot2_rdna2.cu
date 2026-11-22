@@ -358,12 +358,50 @@ void moe_nvfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
 
 namespace lowp_dot2 {
 
-// 4 E4M3 bytes -> 2 half2, scaled by a power of two (exact in fp16).
-__device__ __forceinline__ void deq_e4m3_4(uint32_t w, float sc, half2* dq) {
-  dq[0] = __halves2half2(__float2half_rn(e4m3_to_f32((w >> 0) & 0xFFu) * sc),
-                         __float2half_rn(e4m3_to_f32((w >> 8) & 0xFFu) * sc));
-  dq[1] = __halves2half2(__float2half_rn(e4m3_to_f32((w >> 16) & 0xFFu) * sc),
-                         __float2half_rn(e4m3_to_f32((w >> 24) & 0xFFu) * sc));
+// E4M3 (e4m3fn) bytes -> fp16 on the 16-bit integer pipe.  The 7 magnitude bits
+// of a byte (e e e e m m m) moved to fp16 bits 13..7 are the fp16 encoding of
+// value * 2^-8: the exponent field e (bias 15 against 7) for the normals and
+// the mantissa field m << 7 (m * 2^-17 against m * 2^-9) for the subnormals.
+// One half2 multiply by 2^(scale - 119) then gives value * 2^(scale - 127),
+// rounded to fp16 once: the number the float path (e4m3_to_f32 * 2^(scale -
+// 127) -> __float2half_rn) produced, bit for bit, as long as 2^(scale - 119) is
+// an fp16 number: scale bytes 95..134 (the loader refuses others; the
+// checkpoint's are 113..118).  0x7F / 0xFF are ordinary values (+-480) like in
+// e4m3_to_f32.
+//
+// The scale factor of one 32-K block of one column as half2.
+__device__ __forceinline__ half2 e4m3_block_factor(unsigned int ue8m0) {
+  return __half2half2(__float2half_rn(ue8m0_to_f32(ue8m0) * 256.0f));
+}
+
+// Two bytes of ``w`` (byte lanes picked by ``sel``, see v_perm_b32) widened to
+// the two 16-bit lanes of a word, then to fp16 bits of value * 2^-8.
+template <unsigned int SEL>
+__device__ __forceinline__ half2 e4m3x2_bits(uint32_t w) {
+  const uint32_t lanes = __builtin_amdgcn_perm(0u, w, SEL);
+  const uint32_t h =
+      ((lanes << 8) & 0x80008000u) | ((lanes << 7) & 0x3F803F80u);
+  return __builtin_bit_cast(half2, h);
+}
+
+// 4 E4M3 bytes -> 2 half2 scaled by the block factor.
+__device__ __forceinline__ void deq_e4m3_4(uint32_t w, half2 factor,
+                                           half2* dq) {
+  dq[0] = __hmul2(e4m3x2_bits<0x0C010C00u>(w), factor);  // bytes 0, 1
+  dq[1] = __hmul2(e4m3x2_bits<0x0C030C02u>(w), factor);  // bytes 2, 3
+}
+
+// 8 K positions of one row against the 4 half2 of one column; the same four
+// V_DOT2 calls (and order) as dot22_8_f, with the activations already in
+// registers.
+__device__ __forceinline__ float dot2_8_regs(const half2 (&dq)[4],
+                                             const uint4& a) {
+  float r = 0.0f;
+  r = __builtin_amdgcn_fdot2(dq[0], __builtin_bit_cast(half2, a.x), r, false);
+  r = __builtin_amdgcn_fdot2(dq[1], __builtin_bit_cast(half2, a.y), r, false);
+  r = __builtin_amdgcn_fdot2(dq[2], __builtin_bit_cast(half2, a.z), r, false);
+  r = __builtin_amdgcn_fdot2(dq[3], __builtin_bit_cast(half2, a.w), r, false);
+  return r;
 }
 
 // One thread per 32 K elements of one N row: 8 words per column, 1 scale byte.
@@ -395,7 +433,9 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
   const uint8_t* expert_scales =
       b_scales + (int64_t)expert_id * expert_scales_stride;
 
-  __shared__ T block_a[BLOCK_SIZE_M][BLOCK_KN_SIZE + 8];
+  // 16-byte aligned: the activations of a group are read as one uint4 per row
+  __shared__
+      __attribute__((aligned(16))) T block_a[BLOCK_SIZE_M][BLOCK_KN_SIZE + 8];
   const int offset_m_base = token_block * BLOCK_SIZE_M;
   load_activations<T, BLOCK_SIZE_M>(a, block_a, sorted_token_ids, offset_m_base,
                                     offset_k, end_k, t, size_m, size_k, top_k);
@@ -413,9 +453,9 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
 
   int k = offset_k;
   while (k < end_k) {
-    float sc[4];
+    half2 factor[4];
   #pragma unroll
-    for (int j = 0; j < 4; ++j) sc[j] = ue8m0_to_f32(s_ptr[j]);
+    for (int j = 0; j < 4; ++j) factor[j] = e4m3_block_factor(s_ptr[j]);
     s_ptr += size_n;
 
     // K-major packing [E, K/4, N]: 8 words per column per 32 K, i.e. two
@@ -434,15 +474,19 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
   #pragma unroll
     for (int g = 0; g < 4; ++g) {  // 8 K per group
       const int a_off = (k - offset_k) + 8 * g;
+      // the group's activations of every row: one LDS read for the four columns
+      uint4 av[BLOCK_SIZE_M];
+  #pragma unroll
+      for (int m = 0; m < BLOCK_SIZE_M; ++m)
+        av[m] = *reinterpret_cast<const uint4*>(&block_a[m][a_off]);
   #pragma unroll
       for (int j = 0; j < 4; ++j) {
         half2 dq[4];
-        deq_e4m3_4(w[2 * g + 0][j], sc[j], dq + 0);
-        deq_e4m3_4(w[2 * g + 1][j], sc[j], dq + 2);
+        deq_e4m3_4(w[2 * g + 0][j], factor[j], dq + 0);
+        deq_e4m3_4(w[2 * g + 1][j], factor[j], dq + 2);
   #pragma unroll
         for (int m = 0; m < BLOCK_SIZE_M; ++m)
-          block_c[m][j] +=
-              dot22_8_f(dq, reinterpret_cast<const half*>(&block_a[m][a_off]));
+          block_c[m][j] += dot2_8_regs(dq, av[m]);
       }
     }
     k += 32;

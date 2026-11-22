@@ -20,7 +20,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.forward_context import get_forward_context
+from vllm.compilation.breakable_cudagraph import eager_break_during_piecewise_capture
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context, is_forward_context_available
 
 from ..configs import Inkling2LoopTextConfig
 from . import blocks
@@ -455,44 +457,8 @@ class Inkling2Attention(nn.Module):
                     conv_owner.num_kv_heads,
                     conv_owner.block_size,
                 )
-        splits = kv_md.splits.get((self.num_kv_heads, self._window))
-        if splits is None:
-            splits = kv_md.splits[(self.num_kv_heads, self._window)] = (
-                ops.inkling2_attention_splits(
-                    kv_md.num_reqs,
-                    self.num_kv_heads,
-                    self._window,
-                    kv_md.max_seq_len,
-                    kv_md.max_query_len,
-                )
-            )
         attn = self._attn_out[:T]
-        ops.inkling2_attention(
-            named["q"],
-            named["rel"],
-            named["sink"],
-            named["gate"],
-            self._q_scale,
-            self._rel_scale,
-            self._rel_proj_t,
-            positions,
-            kv_owner.kv_cache,
-            kv_md.block_table,
-            kv_md.seq_lens,
-            kv_md.query_start_loc,
-            attn,
-            self._attn_ws,
-            self._window,
-            self.rel_extent,
-            self._log_scale,
-            self._log_alpha,
-            self._log_n_floor,
-            self._q_clip,
-            self._rel_clip,
-            kv_md.max_query_len,
-            splits[0],
-            splits[1],
-        )
+        attend_hip(self, named, positions, kv_owner, attn, kv_md)
         self._o_pack([attn], [o_out])
         return o_out
 
@@ -502,8 +468,85 @@ def conv_writes_in_op(md: Inkling2Metadata) -> bool:
     every history row they read belongs to an earlier step, so reading and writing
     in one thread is race free; for longer chunks the writes of a chunk could
     overwrite history rows its later tokens still read, so ``inkling2_conv_state_write``
-    runs after the conv."""
-    return md.max_query_len == 1
+    runs after the conv.
+
+    This is the only place that decides it: the choice is a launch constant frozen into
+    a CUDA graph.  A FULL graph replays batches of the query length it was captured with
+    (``md`` is the capture-time metadata: 1 for decode, ``1 + k`` for verification).  A
+    PIECEWISE graph replays any mixed / prefill batch whatever dummy batch it was
+    captured with, so it always takes the separate write (which is also correct for
+    single tokens)."""
+    return md.max_query_len == 1 and not _tracing_piecewise_graph()
+
+
+def _tracing_piecewise_graph() -> bool:
+    return (
+        is_forward_context_available()
+        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+    )
+
+
+@eager_break_during_piecewise_capture
+def attend_hip(
+    layer: Inkling2Attention,
+    named: dict[str, torch.Tensor],
+    positions: torch.Tensor,
+    kv_owner: Inkling2KVOwner,
+    out: torch.Tensor,
+    captured_md: Inkling2Metadata,
+) -> None:
+    """Paged attention of one layer visit into ``out`` (the input of ``o_proj``).
+
+    The only op of the serving forward whose launch parameters depend on the batch
+    (request count, longest query and the split-K factors derived from them), so it is
+    the one break point of the PIECEWISE graphs: it runs eagerly between two graph
+    segments, and when a segment list is replayed ``captured_md`` is the dummy batch
+    the graph was captured with, so the metadata of the step that replays it is looked
+    up in the forward context.  Inside a FULL graph the op is recorded inline: the
+    graph was captured for the padded request count, the uniform query length and
+    ``max_seq_len = max_model_len``, which bound every batch it replays
+    (``docs/rdna2/inkling2-attn-kernels.md``).  Rows of ``out`` past the last request
+    (padded tokens) are not written.
+    """
+    from vllm import _custom_ops as ops
+
+    kv_md = live_metadata(kv_owner.prefix, captured_md)
+    key = (layer.num_kv_heads, layer._window)
+    splits = kv_md.splits.get(key)
+    if splits is None:
+        splits = kv_md.splits[key] = ops.inkling2_attention_splits(
+            kv_md.num_reqs,
+            layer.num_kv_heads,
+            layer._window,
+            kv_md.max_seq_len,
+            kv_md.max_query_len,
+        )
+    ops.inkling2_attention(
+        named["q"],
+        named["rel"],
+        named["sink"],
+        named["gate"],
+        layer._q_scale,
+        layer._rel_scale,
+        layer._rel_proj_t,
+        positions,
+        kv_owner.kv_cache,
+        kv_md.block_table,
+        kv_md.seq_lens,
+        kv_md.query_start_loc,
+        out,
+        layer._attn_ws,
+        layer._window,
+        layer.rel_extent,
+        layer._log_scale,
+        layer._log_alpha,
+        layer._log_n_floor,
+        layer._q_clip,
+        layer._rel_clip,
+        kv_md.max_query_len,
+        splits[0],
+        splits[1],
+    )
 
 
 def static_conv_hip(
@@ -565,3 +608,16 @@ def get_metadata(prefix: str) -> Inkling2Metadata | None:
     md = attn_metadata[prefix]
     assert isinstance(md, Inkling2Metadata)
     return md
+
+
+def live_metadata(prefix: str, captured: Inkling2Metadata) -> Inkling2Metadata:
+    """The metadata of the step that is running an op: the forward context's when there
+    is one, else ``captured`` (the metadata the caller already holds; outside the
+    engine nothing sets a context)."""
+    if is_forward_context_available():
+        attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            md = attn_metadata[prefix]
+            assert isinstance(md, Inkling2Metadata)
+            return md
+    return captured

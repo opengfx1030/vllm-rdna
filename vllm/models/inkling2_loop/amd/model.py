@@ -772,6 +772,11 @@ class Inkling2LoopTextForCausalLM(nn.Module):
     # The DSpark draft (``mtp.safetensors``) reads taps of the target: the runner asks
     # for them through the EAGLE3 interface (see docs/rdna2/inkling2-dspark.md).
     supports_eagle3 = True
+    # ``SupportsEagleBase`` members (``supports_eagle3`` is a runtime-checkable protocol
+    # that needs every one of them): the target owns its embedding and LM head, which
+    # the draft shares.
+    has_own_lm_head = False
+    has_own_embed_tokens = False
 
     def __init__(
         self,

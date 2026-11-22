@@ -3,7 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Profile prefill / decode steps of the real Inkling-2-Mini checkpoint (1 GPU).
 
-Boots the checkpoint like ``real_check.py`` (offline ``LLM``, eager, fp16) but with
+Boots the checkpoint like ``real_check.py`` (offline ``LLM``, eager unless
+``--cudagraph-mode`` names a graph mode, fp16) but with
 ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` so the model runs in this process, then drives
 the engine one ``LLMEngine.step()`` at a time:
 
@@ -361,13 +362,14 @@ class FwdTimer:
 
 
 class Rig:
-    def __init__(self, llm, seed: int = 1234) -> None:
+    def __init__(self, llm, seed: int = 1234, spec_k: int = 0) -> None:
         from vllm import SamplingParams
 
         self.llm = llm
         self.eng = llm.llm_engine
         self.rng = random.Random(seed)
         self.counter = 0
+        self.spec_k = spec_k
         self.SamplingParams = SamplingParams
 
     def _prompt(self, n: int | None = None) -> dict:
@@ -382,7 +384,10 @@ class Rig:
         ``ctx(kind, i)`` returns a context manager wrapped around each step.
         """
         sp = self.SamplingParams(
-            temperature=0.0, max_tokens=ndec + 16, ignore_eos=True, detokenize=False
+            temperature=0.0,
+            max_tokens=ndec * (1 + self.spec_k) + 16,
+            ignore_eos=True,
+            detokenize=False,
         )
         ids = []
         for _ in range(nreq):
@@ -711,6 +716,27 @@ def main() -> int:
         help="also time the prefill step of one prompt of this many tokens",
     )
     ap.add_argument(
+        "--cudagraph-mode",
+        default="eager",
+        help="eager (enforce_eager, the default) or a CUDAGraphMode name such as "
+        "FULL_AND_PIECEWISE: the steps then replay captured graphs, so the forward "
+        "timer of pass A2 (it wraps the python forward) is skipped and the profiler "
+        "counts the kernels the replays launch",
+    )
+    ap.add_argument(
+        "--prefill-sizes",
+        default="",
+        help="token counts of the prefill (PIECEWISE) graphs, e.g. 32,128,1024 "
+        "(default: the engine's grid up to its platform maximum)",
+    )
+    ap.add_argument(
+        "--spec-k",
+        type=int,
+        default=0,
+        help="DSpark draft tokens (0: no speculation); a decode step is then draft + "
+        "verify and emits up to 1 + k tokens",
+    )
+    ap.add_argument(
         "--path",
         choices=["reference", "hip"],
         help="VLLM_INKLING2_PATH (default: the native HIP kernels on a GPU)",
@@ -724,10 +750,16 @@ def main() -> int:
     from vllm import LLM
 
     t0 = time.time()
+    graphs = args.cudagraph_mode != "eager"
+    cc: dict = {"cudagraph_mode": args.cudagraph_mode}
+    if args.prefill_sizes:
+        sizes = [int(s) for s in args.prefill_sizes.split(",")]
+        cc["prefill_cudagraph_capture_token_sizes"] = sizes
+        cc["max_prefill_cudagraph_capture_tokens"] = max(sizes)
     llm = LLM(
         model=args.ckpt,
         dtype="float16",
-        enforce_eager=True,
+        **({"compilation_config": cc} if graphs else {"enforce_eager": True}),
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -736,6 +768,16 @@ def main() -> int:
         async_scheduling=False,
         enable_prefix_caching=False,
         disable_log_stats=True,
+        **(
+            {
+                "speculative_config": {
+                    "method": "dspark",
+                    "num_speculative_tokens": args.spec_k,
+                }
+            }
+            if args.spec_k
+            else {}
+        ),
         limit_mm_per_prompt={"image": 0},  # text only
     )
     print(f"BOOT OK in {time.time() - t0:.1f}s", flush=True)
@@ -766,7 +808,7 @@ def main() -> int:
         flush=True,
     )
 
-    rig = Rig(llm)
+    rig = Rig(llm, spec_k=args.spec_k)
     nd = args.decode_steps
     batches = [1, args.batch] if args.batch != 1 else [1]
 
@@ -799,7 +841,7 @@ def main() -> int:
     ft = FwdTimer()
     ft.install()
     try:
-        for b in batches:
+        for b in [] if graphs else batches:
             ft.rows.clear()
             phases = [rig.run_phase(b, nd) for _ in range(2)]
             # rows: per step order prefill, decode*nd, per phase

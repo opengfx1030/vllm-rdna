@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import os
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 import torch.nn as nn
@@ -44,6 +44,10 @@ _ON_RDNA2 = on_rdna2_hip()
 
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
+    # A draft that ships the RDNA2 HIP port of ``_prepare_dflash_inputs_kernel``
+    # (``inkling2_dspark_prepare_inputs``) opts in; every other DFlash / DSpark draft
+    # keeps the Triton kernel on every platform.
+    uses_hip_prepare_inputs: ClassVar[bool] = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
@@ -584,6 +588,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_model_len,
                 self.sample_from_anchor,
                 num_reqs,
+                hip_kernel=self.uses_hip_prepare_inputs,
             )
 
         if num_speculative_tokens == 0:
@@ -987,6 +992,7 @@ def prepare_dflash_inputs(
     max_model_len: int,
     sample_from_anchor: bool = False,
     num_reqs_override: int | None = None,
+    hip_kernel: bool = False,
 ) -> None:
     num_reqs = input_batch.num_reqs if num_reqs_override is None else num_reqs_override
     assert num_reqs <= input_batch.num_reqs
@@ -995,7 +1001,7 @@ def prepare_dflash_inputs(
     # per-request query length, not the total token count across the batch.
     max_target_query_len = int(input_batch.num_scheduled_tokens[:num_reqs].max())
     max_tokens_per_req = max_target_query_len + num_query_per_req
-    if _ON_RDNA2 and cp_size == 1:
+    if hip_kernel and _ON_RDNA2 and cp_size == 1:
         ops.inkling2_dspark_prepare_inputs(
             input_buffers.input_ids,
             input_buffers.positions,

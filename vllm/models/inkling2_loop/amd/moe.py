@@ -369,6 +369,11 @@ def repack_nvfp4(
     return b_q, b_s, b_g.contiguous()
 
 
+#: UE8M0 scale bytes the MXFP8 kernel supports: its fp16 factor 2^(scale - 119) is a
+#: fp16 number for 95..134 (the checkpoint's scales are 113..118).
+MXFP8_SCALE_RANGE = (95, 134)
+
+
 def repack_mxfp8(
     weight_e4m3: torch.Tensor, scale_ue8m0: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -385,10 +390,16 @@ def repack_mxfp8(
         raise ValueError(
             f"scale shape {tuple(scale_ue8m0.shape)} != {(num_e, n, k // 32)}"
         )
-    return (
-        _pack_k_words(weight_e4m3).view(torch.uint32),
-        _transpose_scales(scale_ue8m0),
-    )
+    scales = _transpose_scales(scale_ue8m0)
+    if not scales.is_meta:  # the meta-device header checks have no values to read
+        low, high = int(scales.min()), int(scales.max())
+        if low < MXFP8_SCALE_RANGE[0] or high > MXFP8_SCALE_RANGE[1]:
+            raise ValueError(
+                f"MXFP8 scale bytes span {low}..{high}; the kernel dequantizes with "
+                f"the fp16 factor 2^(scale - 119), exact for "
+                f"{MXFP8_SCALE_RANGE[0]}..{MXFP8_SCALE_RANGE[1]}"
+            )
+    return _pack_k_words(weight_e4m3).view(torch.uint32), scales
 
 
 class ExpertsNvfp4(_ExpertsKernel):
@@ -579,6 +590,23 @@ class _MoEGate(Inkling2LoopTopKRouter):
         self.e_score_correction_bias = nn.Parameter(bias, requires_grad=False)
 
 
+#: Routed rows per expert block of the serving expert GEMMs by token count, per expert
+#: format: ``((largest token count, rows), ...)``, ``_BLOCK_M_WIDE`` above the last.
+#: A block holds the rows of ONE expert and 8 * T routed rows spread over 128 experts,
+#: so up to a few dozen tokens nearly every block holds a single row and a wider block
+#: only adds padded rows of dot2 work; from ~64 tokens experts get several rows and
+#: wide blocks stream each expert tile once.  Measured per launch on the V620 at the
+#: real layer shapes (``tools/rdna/inkling2/moe_rows_bench.py``, see
+#: ``docs/rdna2/inkling2-port-spec.md``): the width chosen is the fastest of the four
+#: at every measured token count or within 3% of it, and 5 tokens in 8-row blocks cost
+#: 387 us per NVFP4 layer (w13 + w2) against 241 us in 2-row blocks.
+_BLOCK_M_BY_TOKENS = {
+    "nvfp4": ((4, 1), (12, 2), (64, 4)),
+    "mxfp8": ((4, 1), (48, 2)),
+}
+_BLOCK_M_WIDE = 8
+
+
 class Inkling2LoopMoE(_ExpertsKernel):
     """One Inkling-2-Mini MoE layer: fp32 sigmoid router + NVFP4 / MXFP8
     experts on the gfx1030 kernels.  ``forward`` takes flat ``[T, H]`` fp16.
@@ -731,14 +759,10 @@ class Inkling2LoopMoE(_ExpertsKernel):
     # -- compute ----------------------------------------------------------
 
     def _default_block_size_m(self, num_tokens: int, top_k: int) -> int:
-        # the kernels support 1/2/4/8 routed rows per expert block
-        if num_tokens <= 1:
-            return 1
-        if num_tokens <= 2:
-            return 2
-        if num_tokens <= 4:
-            return 4
-        return 8
+        for limit, rows in _BLOCK_M_BY_TOKENS[self.quant_format]:
+            if num_tokens <= limit:
+                return rows
+        return _BLOCK_M_WIDE
 
     def _gemm(
         self,
