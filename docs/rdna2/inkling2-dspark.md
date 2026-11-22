@@ -7,6 +7,51 @@ repo's existing dense RDNA2 GEMM designs); PyTorch / CPU code exists only as the
 fp64 oracle in tests and tools.  Numbers below are copied from runs on the box
 (`par1-cs25`, b4 HIP 2, gfx1030) unless marked `[INFERENCE]`.
 
+## Run DSpark
+
+One command on one card (the checkpoint directory has to hold `mtp.safetensors`, the draft; at TP=2 use
+`RECIPE=inkling2-mini-tp2-dspark HIP_VISIBLE_DEVICES=4,5`):
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1-dspark MODEL=/path/to/inkling2-mini \
+  VENV=/path/to/venv HIP_VISIBLE_DEVICES=3
+```
+
+The recipe is `inkling2-mini-tp1` plus `SEQS=2`, `MAXLEN=125000` and
+`SPEC_CONFIG='{"method":"dspark","num_speculative_tokens":7,"num_speculative_tokens_per_batch_size":[[1,2,2]]}'`:
+the model requires `num_speculative_tokens` 7 (the draft block is 8 rows) and the schedule is how many of
+them the engine verifies per step (2 for one or two requests, no draft above). Any key can be overridden
+after `RECIPE=`. Smoke test of the running server (text, image, prefix cache, stream, concurrent requests):
+`python tools/rdna/inkling2/serve_smoke.py --url http://127.0.0.1:18221`.
+
+Booted this way on the final head (the `0fd3e424dc` build, one V620 alone, `par1-cs25` HIP 3; up after 63 s with warm
+caches) the smoke test passes, as it does on the no-draft engine of the same settings (`SPEC_CONFIG=`). Decode of one
+request, temperature 0, 160 tokens, 3 prompts of each kind of text of the speculation profile (ms per token from the first
+streamed chunk to the last, mean of the 3; `tokens per step` is the engine's own acceptance counters):
+
+| text | no draft | DSpark K = 2 | speed-up | tokens per step |
+| --- | --- | --- | --- | --- |
+| chat | 17.48 | 15.96 | 1.10x | 1.84 |
+| code_gen | 17.48 | 14.26 | 1.23x | 2.05 |
+| code_edit | 18.01 | 12.18 | 1.48x | 2.58 |
+| prose | 17.51 | 15.54 | 1.13x | 1.88 |
+| structured | 17.55 | 12.18 | 1.44x | 2.40 |
+| rag | 18.01 | 12.27 | 1.47x | 2.55 |
+| mean of the six | 17.67 | 13.73 | 1.29x | |
+
+The in-process bench of the speculation profile (same kinds of text, 6-12 prompts each) gave 14.01 for the six-type mean at
+K = 2. What the draft costs in context: the KV cache holds 125,597 tokens (185,568 without the draft; 125,000 requested, so
+0.5 % to spare: lower `MAXLEN` if the engine refuses to start on another card), the weights are 19.58 GiB against 18.69 and
+the graphs 0.87 GiB against 0.29. Greedy output against the no-draft engine (18 prompts, 160 tokens, the 3 prompts of each
+kind): 1 of 18 identical, the first divergence at token 60 (median); the no-draft engine against its own second run of the
+same prompts: 3 of 18 identical, median 56. At each first divergence the other run's token is within 0.50 nats of the
+reference's best (0.36 for the no-draft pair), as in the teacher-forced runs below.
+
+At TP=2 the recipe is checked in print mode only (no second card was free): `PRINT=1 bash tools/rdna/serve_rdna.sh
+RECIPE=inkling2-mini-tp2-dspark ...` prints the TP=2 plan of `inkling2-mini-tp2` with the same `SPEC_CONFIG`, `SEQS=2` and
+`MAXLEN=780000` (the longest context measured earlier, about 790,000). The rest of this file is the design and the
+measurements.
+
 ## Status
 
 | Item | State |

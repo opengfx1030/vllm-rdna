@@ -35,6 +35,8 @@ bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1 MODEL=/path/to/inkling2-m
 | [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | 1 | 18221 | 180,000 | 16 | 1,024 | one card: short and medium contexts, up to 16 concurrent requests |
 | [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | 2 | 18222 | 1,048,576 | 8 | 184 | the full context on two cards; lower latency than TP=1 |
 | [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | 4 | 18223 | 1,048,576 | 8 | 4,096 | the full context with room for two such requests; fastest prefill |
+| [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | 1 | 18221 | 125,000 | 2 | 1,024 | `inkling2-mini-tp1` with the DSpark draft: one or two requests decode 1.22x / 1.10x faster, with less context |
+| [`inkling2-mini-tp2-dspark`](../../tools/rdna/recipes/inkling2-mini-tp2-dspark.env) | 2 | 18222 | 780,000 | 2 | 184 | `inkling2-mini-tp2` with the DSpark draft: 1.29x / 1.14x at one / two requests, with less context |
 
 All three serve the model as `inkling2-mini` on `127.0.0.1`, capture HIP graphs
 (`FULL_AND_PIECEWISE`, the model's default capture grid), enable prefix caching and accept one
@@ -188,19 +190,21 @@ every process of the 942,628 and 1,046,914-token runs.
 
 The model's own draft (`mtp.safetensors`: three layers, a block of 8 rows, a Markov head) runs on native
 HIP kernels under the same `FULL_AND_PIECEWISE` graphs, with prefix caching, at TP=1 and TP=2; TP=4 shares
-the TP=2 code path and was not run through the engine. **It is not in the recipe defaults**: at this
-model's MoE row cost it pays at one or two requests only, and it takes context length. Switch it on with
-the launcher key `SPEC_CONFIG`; the model requires `num_speculative_tokens` 7, and the schedule decides
-how many of the 7 drafted tokens the engine verifies per step (2 for one or two requests, none above):
+the TP=2 code path and was not run through the engine. **The three recipes above stay without it**: at this
+model's MoE row cost it pays at one or two requests only, and it takes context length. Its own recipes are
+the same ones with the draft, `SEQS=2` and the longest context that fits; the launcher key `SPEC_CONFIG`
+(the engine's `--speculative-config`) carries it: the model requires `num_speculative_tokens` 7, and the
+schedule decides how many of the 7 drafted tokens the engine verifies per step (2 for one or two requests,
+none above):
 
 ```bash
-bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1 MODEL=/path/to/inkling2-mini VENV=/path/to/venv \
-  HIP_VISIBLE_DEVICES=3 SEQS=2 MAXLEN=125000 \
-  SPEC_CONFIG='{"method":"dspark","num_speculative_tokens":7,"num_speculative_tokens_per_batch_size":[[1,2,2]]}'
+bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1-dspark MODEL=/path/to/inkling2-mini \
+  VENV=/path/to/venv HIP_VISIBLE_DEVICES=3
 ```
 
-TP=2: `RECIPE=inkling2-mini-tp2 HIP_VISIBLE_DEVICES=4,5 SEQS=2 MAXLEN=780000`. With more slots keep the
-tail of the schedule: `[[1,2,2],[3,8,0]]`.
+TP=2: `RECIPE=inkling2-mini-tp2-dspark HIP_VISIBLE_DEVICES=4,5` (SEQS 2, 780,000 tokens). With more slots keep
+the tail of the schedule: `SEQS=8 SPEC_CONFIG='{"method":"dspark","num_speculative_tokens":7,
+"num_speculative_tokens_per_batch_size":[[1,2,2],[3,8,0]]}'`.
 
 Decode ms per token of one request (graph replay, 24 chat prompts x 128 tokens, speed-up over no draft in
 brackets; the TP=2 rows are one session on the same two cards):
@@ -240,7 +244,8 @@ full context back at TP=2; it is not built (`docs/rdna2/inkling2-dspark.md`).
 
 ## Known limits
 
-- **Speculative decoding (DSpark) is opt-in and not in the recipe defaults.** It speeds one or two requests
+- **Speculative decoding (DSpark) is opt-in: `inkling2-mini-tp1-dspark` / `-tp2-dspark`, not the recipes
+  above.** It speeds one or two requests
   up (TP=1 1.24x / 1.11x, TP=2 1.29x / 1.14x), loses from three, and costs context length (section above);
   the 1,048,576-token TP=2 / TP=4 recipes keep it off. The sampled (non-greedy) draft raises
   `NotImplementedError` at TP > 1; TP=4 was not run with the draft.

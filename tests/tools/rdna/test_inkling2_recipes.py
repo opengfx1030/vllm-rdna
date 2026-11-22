@@ -139,3 +139,52 @@ def test_no_rocblas_tunableop_rows(venv):
 
 def test_ports_are_distinct():
     assert len({port for _, port, *_ in RECIPES.values()}) == len(RECIPES)
+
+
+# DSpark recipe -> (the recipe it builds on, max_model_len, max_num_seqs)
+DSPARK = {
+    "inkling2-mini-tp1-dspark": ("inkling2-mini-tp1", 125000, 2),
+    "inkling2-mini-tp2-dspark": ("inkling2-mini-tp2", 780000, 2),
+}
+SPEC = (
+    '{"method":"dspark","num_speculative_tokens":7,'
+    '"num_speculative_tokens_per_batch_size":[[1,2,2]]}'
+)
+
+
+@pytest.mark.parametrize("recipe", DSPARK)
+def test_dspark_recipe_is_its_base_recipe_plus_the_draft(venv, recipe):
+    base, max_len, seqs = DSPARK[recipe]
+    result = plan(venv, f"RECIPE={recipe}")
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert flag(out, "--speculative-config", SPEC)
+    assert flag(out, "--max-model-len", str(max_len))
+    assert flag(out, "--max-num-seqs", str(seqs))
+    # Everything else is the base recipe's plan, flag for flag and variable for
+    # variable: the launcher's own keys on the command line give the same plan.
+    ref = plan(
+        venv,
+        f"RECIPE={base}",
+        f"SEQS={seqs}",
+        f"MAXLEN={max_len}",
+        f"SPEC_CONFIG={SPEC}",
+    )
+    assert ref.returncode == 0, ref.stderr
+    assert out.replace(recipe, base) == ref.stdout
+
+
+@pytest.mark.parametrize("recipe", DSPARK)
+def test_dspark_recipe_keys_follow_the_caller(venv, recipe):
+    max_len = DSPARK[recipe][1]
+    # The caller's environment wins over the recipe and over the recipe it builds on
+    # (PORT is set only by the latter).
+    out = plan(venv, f"RECIPE={recipe}", PORT="19999", SEQS="4").stdout
+    assert flag(out, "--port", "19999")
+    assert flag(out, "--max-num-seqs", "4")
+    assert flag(out, "--max-model-len", str(max_len))
+    assert flag(out, "--speculative-config", SPEC)
+    # KEY=value after RECIPE= wins over both; an empty SPEC_CONFIG drops the draft.
+    out = plan(venv, f"RECIPE={recipe}", "MAXLEN=90000", "SPEC_CONFIG=").stdout
+    assert flag(out, "--max-model-len", "90000")
+    assert "--speculative-config" not in out
