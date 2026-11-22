@@ -213,6 +213,30 @@ def test_the_draft_checks_its_block_width_and_context_length(draft):
         oracle.build_model(draft, VOCAB, PADDED, 4, 2_000_000, "cpu", False)
 
 
+@pytest.mark.parametrize(
+    ("schedule", "max_seqs", "expected"),
+    [
+        (None, 8, 7),  # no schedule: every drafted token can be verified
+        ([[1, 1, 3], [2, 8, 0]], 8, 3),
+        ([[1, 8, 5]], 8, 5),
+        ([[1, 2, 2], [3, 8, 6]], 2, 2),  # batch sizes past max_num_seqs never occur
+        ([[1, 2, 2], [3, 4, 6]], 8, 6),  # the last range carries on to max_num_seqs
+        ([[1, 8, 0]], 8, 1),  # the head still needs one step to run
+        ([[1, 8, 9]], 8, 7),  # the block has seven tokens
+    ],
+)
+def test_the_draft_runs_as_many_markov_steps_as_the_schedule_verifies(
+    mod, schedule, max_seqs, expected
+):
+    cfg = types.SimpleNamespace(
+        speculative_config=types.SimpleNamespace(
+            num_speculative_tokens_per_batch_size=schedule
+        ),
+        scheduler_config=types.SimpleNamespace(max_num_seqs=max_seqs),
+    )
+    assert mod.scheduled_draft_tokens(cfg, 7) == expected
+
+
 def test_attention_metadata_builder_references_the_persistent_buffers(mod):
     from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -396,6 +420,28 @@ def test_requests_beyond_one_head_chunk_match_the_oracle(synthetic_hip):
     res = hip.propose(_contexts(lengths, anchors, seed=21))
     assert res.logits.shape[0] == 40
     _check(hip, res)
+
+
+@requires_gpu
+@pytest.mark.parametrize("steps", [1, 3, 6])
+def test_the_markov_chain_stops_at_the_largest_verified_token(synthetic_hip, steps):
+    """A schedule that verifies at most ``steps`` tokens makes the draft run that many
+    Markov steps: they are the full chain's first tokens bit for bit (which the tests
+    above hold to the oracle), the later columns are never written, and the backbone
+    is untouched."""
+    hip, anchors = synthetic_hip
+    ctx = _contexts([37, 300, 1100], anchors, seed=13)
+    full = hip.propose(ctx, capture_logits=False)
+    assert full.tokens[:, steps:].all(), "a full chain writes every column"
+    full_steps = hip.model._markov_steps
+    hip.model._markov_steps = steps
+    try:
+        cut = hip.propose(ctx, capture_logits=False)
+    finally:
+        hip.model._markov_steps = full_steps
+    assert torch.equal(cut.tokens[:, :steps], full.tokens[:, :steps])
+    assert not cut.tokens[:, steps:].any(), "the unused columns keep their zeros"
+    assert torch.equal(cut.hidden, full.hidden)
 
 
 @requires_gpu

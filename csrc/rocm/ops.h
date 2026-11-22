@@ -965,6 +965,10 @@ void inkling2_dspark_fold_bias(torch::Tensor head, torch::Tensor b,
 void inkling2_dspark_argmax(torch::Tensor logits, torch::Tensor out,
                             int64_t num_rows, int64_t vocab);
 
+void inkling2_dspark_argmax_partial(torch::Tensor logits, torch::Tensor part,
+                                    int64_t num_rows, int64_t vocab,
+                                    int64_t first_id);
+
 void inkling2_dspark_prepare_inputs(
     torch::Tensor input_ids, torch::Tensor positions, torch::Tensor is_padding,
     torch::Tensor query_start_loc, torch::Tensor seq_lens,

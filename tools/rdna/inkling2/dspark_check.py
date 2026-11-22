@@ -592,6 +592,7 @@ def fake_vllm_config(hf_config, num_steps: int, max_reqs: int, max_model_len: in
         speculative_config=types.SimpleNamespace(
             draft_model_config=types.SimpleNamespace(hf_config=hf_config),
             num_speculative_tokens=num_steps,
+            draft_sample_method="greedy",
         ),
         model_config=types.SimpleNamespace(
             dtype=torch.float16, max_model_len=max_model_len
@@ -611,23 +612,29 @@ def build_model(
     device: str | torch.device,
     load: bool = True,
     num_steps: int | None = None,
+    tp=None,
 ):
     """``Inkling2DSparkModel`` of ``d``'s shapes on ``device``; with ``load`` the
     weights of ``d`` (as bf16) go through the model's own loader.  ``num_steps`` is
-    the speculative token count of the (fake) config, the block's by default."""
+    the speculative token count of the (fake) config, the block's by default; ``tp``
+    (a ``parallel.TensorParallel``) is the tensor-parallel group the model finds
+    itself in, the single rank by default."""
     from vllm.models.inkling2_loop.amd import dspark as mod
     from vllm.models.inkling2_loop.amd import state as state_mod
 
     hf = draft_hf_config(d, vocab, padded_vocab)
     steps = d.cfg.num_steps if num_steps is None else num_steps
     fake = fake_vllm_config(hf, steps, max_reqs, max_model_len)
-    old = state_mod.get_current_vllm_config
+    old, old_tp = state_mod.get_current_vllm_config, mod.current_tensor_parallel
     state_mod.get_current_vllm_config = lambda: fake
+    if tp is not None:
+        mod.current_tensor_parallel = lambda: tp
     try:
         with torch.device(device):
             model = mod.Inkling2DSparkModel(vllm_config=fake)
     finally:
         state_mod.get_current_vllm_config = old
+        mod.current_tensor_parallel = old_tp
     if load:
         model.load_weights((k, v.bfloat16()) for k, v in d.tensors.items())
     return model
@@ -638,7 +645,10 @@ class HipDraft:
 
     ``lm_head`` / ``embed_rows`` / ``embed_norm`` stand for the target's tied
     weights (they enter the draft in fp16).  Everything the oracle needs of them is
-    kept in float64 as the draft sees it (``lm64``, ``embed64``, ``norm64``).
+    kept in float64 as the draft sees it (``lm64``, ``embed64``, ``norm64``).  With
+    ``tp`` (a ``parallel.TensorParallel`` of size > 1) this is one rank of a tensor-
+    parallel group: the model holds the vocabulary shard of the head and of the
+    embedding table that the target's rank would, the oracle still sees all of it.
     """
 
     def __init__(
@@ -653,17 +663,27 @@ class HipDraft:
         page_size: int = 16,
         max_model_len: int = 8192,
         device: str = "cuda",
+        tp=None,
     ) -> None:
         import types
 
         from vllm.models.inkling2_loop.amd import dspark as mod
+        from vllm.models.inkling2_loop.amd.parallel import NO_TP, lm_head_shard
 
         c = d.cfg
         self.d, self.c, self.mod = d, c, mod
         self.device = torch.device(device)
         self.max_reqs, self.page_size = max_reqs, page_size
+        tp = NO_TP if tp is None else tp
+        self.tp = tp
         self.model = build_model(
-            d, lm_head.shape[0], padded_vocab, max_reqs, max_model_len, self.device
+            d,
+            lm_head.shape[0],
+            padded_vocab,
+            max_reqs,
+            max_model_len,
+            self.device,
+            tp=tp,
         )
         dev = self.device
         table = torch.zeros(padded_vocab, c.hidden_size, dtype=torch.float16)
@@ -671,11 +691,19 @@ class HipDraft:
             table[tok] = row.half()
         norm16 = embed_norm.half().to(dev)
         lm16 = lm_head.half().to(dev)
-        self.model.model.embed_tokens = types.SimpleNamespace(weight=table.to(dev))
+        shard, head = table, lm16
+        if tp.enabled:  # this rank's rows, zero where the last shard is padded
+            lo, rows, take = lm_head_shard(padded_vocab, tp.size, tp.rank)
+            shard = torch.zeros(rows, c.hidden_size, dtype=torch.float16)
+            shard[:take] = table[lo : lo + take]
+            lo, rows, take = lm_head_shard(lm_head.shape[0], tp.size, tp.rank)
+            head = torch.zeros(rows, c.hidden_size, dtype=torch.float16, device=dev)
+            head[:take] = lm16[lo : lo + take]
+        self.model.model.embed_tokens = types.SimpleNamespace(weight=shard.to(dev))
         self.model.model.embed_norm = types.SimpleNamespace(
             weight=norm16, variance_epsilon=c.eps
         )
-        self.model.lm_head = types.SimpleNamespace(weight=lm16)
+        self.model.lm_head = types.SimpleNamespace(weight=head)
         self.model.refresh_derived_weights()
         self.lm64 = lm16.double().cpu()
         self.norm64 = norm16.double().cpu()

@@ -2344,6 +2344,17 @@ def inkling2_dspark_argmax(
     torch.ops._rocm_C.inkling2_dspark_argmax(logits, out, num_rows, vocab)
 
 
+def inkling2_dspark_argmax_partial(
+    logits: torch.Tensor, part: torch.Tensor, num_rows: int, vocab: int, first_id: int
+) -> None:
+    """The (value, id) partial of one vocabulary shard: ``part[r]`` is the fp32 maximum
+    of ``logits[r, :vocab]`` and ``part[num_rows + r]`` the int32 bits of ``first_id``
+    plus the lowest index of that maximum (NaN as -inf)."""
+    torch.ops._rocm_C.inkling2_dspark_argmax_partial(
+        logits, part, num_rows, vocab, first_id
+    )
+
+
 def inkling2_dspark_prepare_inputs(
     input_ids: torch.Tensor,
     positions: torch.Tensor,
@@ -6552,6 +6563,18 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         logits: torch.Tensor, out: torch.Tensor, num_rows: int, vocab: int
     ) -> None:
         return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_dspark_argmax_partial"):
+
+        @register_fake("_rocm_C::inkling2_dspark_argmax_partial")
+        def _inkling2_dspark_argmax_partial_fake(
+            logits: torch.Tensor,
+            part: torch.Tensor,
+            num_rows: int,
+            vocab: int,
+            first_id: int,
+        ) -> None:
+            return
 
     @register_fake("_rocm_C::inkling2_dspark_prepare_inputs")
     def _inkling2_dspark_prepare_inputs_fake(
