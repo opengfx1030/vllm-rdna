@@ -227,3 +227,33 @@ Still open: the engine/GPU acceptance (`tools/rdna/inkling2/tiny_vllm_check.py`)
 csrc sampler fix, and replacing the PyTorch loop in `Inkling2Attention._attend` by a
 kernel. The `(q, k, v, mlp)` message order is validated against the transformers
 modeling code (tiny8), not against the real checkpoint packing (open question 1).
+
+## 2026-11-22 — real checkpoint boots and answers on one V620 (b4 HIP 2, TP=1, eager, fp16)
+
+`tools/rdna/inkling2/real_check.py` (offline `LLM`, `--max-model-len 2048
+--max-num-batched-tokens 1024`, `skip_tokenizer_init`, chat-templated prompts like the
+oracle). Box tree `~/w4a8_runs/leapquant/tree-inkling2`, log
+`~/w4a8_runs/inkling2-work/Lead/real3.log`.
+
+* Weights load in 6.5 s, "Model loading took 17.74 GiB", engine boot 32 s.
+* First-step top-8 of "What is the capital of France?" is the CPU oracle's top-8 in the
+  same order (`<|message_model|>` 0.0, then 䁱, `user`, `<|content_thinking|>`, 鋽, ...;
+  logprobs −21…−22). Greedy text: `<|message_model|><|content_thinking|>The user asks a
+  simple factual question: capital of France. Need answer accurately. France's capital
+  is Paris. ...`. Second prompt also coherent. Not yet a numeric comparison against the
+  oracle's full logits (oracle prints raw logits, the engine log-probs).
+* Speed is not a result: 22-token prompt + 32 decoded tokens took 11 s (eager,
+  PyTorch attention loop, `block_size_m=8` expert kernels).
+
+Findings of this session:
+
+| # | symptom | root cause | fix |
+|---|---|---|---|
+| 1 | oracle top-8 was punctuation/digit noise for every message-slot order | `ref_checkpoint.py` copied `w13` verbatim; the checkpoint interleaves gate/up rows (`Interleave(dim=1)`) | de-interleave in the oracle (cache files `l<N>.deint.safetensors`, converted from the old cache by a pure row permutation) and in `model.py::copy_gate_up_deinterleaved` |
+| 2 | `torch.OutOfMemoryError` in `process_weights_after_loading` (29.6 GiB allocated) | `load_weights` kept `params` / `buffers` dicts alive, so the checkpoint-layout experts were never freed while the repacked copies were allocated | `del params, buffers, target, tensor` before the repack loop |
+| 3 | `ValueError: ... 6.77 GiB KV cache is needed` at `--max-model-len 4096`, 8192-token chunks | conv-state owners use 8-token blocks and `SlidingWindowSpec` worst case `window + max_num_batched_tokens`: 6 groups x ~1025 blocks of a 2 MiB page set | smaller `--max-num-batched-tokens`; **open design item**: one conv state slot per request instead of per token |
+| 4 | tiny acceptance `last/top1 0/3` | `tiny_vllm_check.py` prompts (seed 1234) differ from the `prompts.json` that `I2Real/regen.sh` fed to `tiny_reference.py` | regenerate refs with the seed-1234 prompts; after that tiny1/tiny8 top-1 3/3 and tiny1 greedy ids equal the reference for 8/8, 8/8, 7/8 steps; the abs(dlogp) failures are the router-chaos noise described above (tiny1 last-position mean 0.009 / 1.05 / 0.139, same as the CPU fp16 emulation) |
+
+The oracle's message-slot order sweep cannot separate the orders at the first token
+(all give `<|message_model|>` at +21 logits); `q,k,v,m` (the order validated against the
+transformers code on tiny8) stays.

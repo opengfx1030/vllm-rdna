@@ -473,6 +473,10 @@ class Inkling2LoopForConditionalGeneration(nn.Module):
             msg = torch.stack([slots[c] for c in self._msg_order], dim=1)
             self.model.message_input.query.data.copy_(msg)
             loaded.add("model.message_input.query")
+        # the repack frees each layer's checkpoint-layout experts; the local dicts
+        # (and `target`) would keep every one of them alive until load_weights
+        # returns and double the expert memory
+        del params, buffers, target, tensor
         for moe in self._moe_modules:
             moe.process_weights_after_loading()
         return loaded
