@@ -222,7 +222,9 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
     for (int j = 0; j < 4; ++j) block_c[m][j] = 0.0f;
 
   int k = offset_k;
-  const float g14 = global * 16384.0f;  // x 2^14 is exact: (e * global) * 2^14 == e * (global * 2^14) bit for bit
+  // fp16 scale = RNE16((e * global) * 2^14) in the shipped operation order.  Do not hoist global * 2^14: the compiler
+  // then fuses the multiply into the fp16 convert (one rounding instead of two) and the scale is one fp16 ulp off for
+  // ~6e-5 of the (byte, global) pairs (test_nvfp4_scale_keeps_the_shipped_double_rounding_on_tie_cases)
   while (k < end_k) {
     // Two 16-K scale rows x 4 columns: one aligned 32-bit load per row (n is a multiple of 4, size_n of 8).
     const uint32_t sw0 = *(const uint32_t*)s_ptr;
@@ -230,8 +232,8 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
     half2 sc[4][2];
   #pragma unroll
     for (int j = 0; j < 4; ++j) {
-      sc[j][0] = __float2half2_rn(e4m3_scale_to_f32((sw0 >> (8 * j)) & 0xFFu) * g14);
-      sc[j][1] = __float2half2_rn(e4m3_scale_to_f32((sw1 >> (8 * j)) & 0xFFu) * g14);
+      sc[j][0] = __float2half2_rn(e4m3_scale_to_f32((sw0 >> (8 * j)) & 0xFFu) * global * 16384.0f);
+      sc[j][1] = __float2half2_rn(e4m3_scale_to_f32((sw1 >> (8 * j)) & 0xFFu) * global * 16384.0f);
     }
     s_ptr += 2 * size_n;
 

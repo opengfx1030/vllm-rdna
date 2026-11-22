@@ -193,12 +193,20 @@ decode, against 64 `v_dot2`; `[INFERENCE]` ~44 us of VALU time in each 74 us
 magnitude bits of 4 nibbles into one byte each and places those bytes with
 `v_perm_b32` at the high byte of each fp16 value x 2^-14: 19 VALU ops per
 word instead of ~48; the multiply by the scale pair is unchanged.  The scale
-bytes are loaded as one dword per 4 columns, `e4m3_scale_to_f32` decodes a
+bytes are loaded as one dword per 4 columns and `e4m3_scale_to_f32` decodes a
 normal e4m3 byte by moving its exponent and mantissa bits up (bias +120; the
-subnormals below 8 take the converted integer) and `global * 16384` is
-hoisted (`(e * global) * 2^14 == e * (global * 2^14)` bit for bit: a power
-of two scaling).  Every dequantised fp16 value is bit-identical to the
-shipped one.
+subnormals below 8 take the converted integer): its float bits equal the
+shipped decode for all 256 bytes.  The fp16 scale keeps the shipped arithmetic
+in the shipped operation order, `RNE16((e * global) * 2^14)`.  The first
+version of this patch hoisted `global * 16384` (the fp32 product is the same
+bit for bit), but the compiler then fuses the multiply into the fp16 convert
+(one rounding instead of two) and the scale changed by one fp16 ulp for
+~6e-5 of the (byte, global) pairs.  Comparing the production kernels of the
+two builds (K = 256: one CAS add per output, deterministic) found it: 0 of
+329,472 outputs differ on random data, 168,630 of 329,472 on data forced onto
+tie-prone pairs.  With the shipped order restored the kernel is bit-identical
+to the shipped one on both (0 of 658,944 outputs).  Dequant exact (2^32
+words), scale rounding identical to shipped.
 
 | rows (bm) | shipped us/visit | fast us/visit | delta |
 |---|---|---|---|
@@ -220,9 +228,15 @@ shipped one.
 | fast dequant, `FUSE_GLUE=0` | 17.776 | 18.65 (53.6) |
 | fast dequant + glue levers (default) | 17.010 | 18.07 (55.3) |
 
-Gates: the dequantised weights are identical, so the fp64-oracle error is
-unchanged.  The 163 oracle / bit-identity tests of the moe suite pass on the
-new kernel; the new `test_nvfp4_dequant_is_exact_for_every_nibble_and_scale_class`
+Gates: the dequantised weights are identical to the shipped ones (device
+check of `dequant_e2m1_8_fp16_fast` against the shipped function over all 2^32
+words x 4 scale pairs x 4 fp16 pairs: 0 mismatches; production kernels 0 of
+658,944 outputs differ), so the fp64-oracle error is unchanged.  The 163
+oracle / bit-identity tests of the moe suite pass on the new kernel; the new
+`test_nvfp4_scale_keeps_the_shipped_double_rounding_on_tie_cases` (8 tie-prone
+(byte, global) pairs, block_m 1/2) passes on the shipped kernel and on this
+one and fails on the hoisted first version; the new
+`test_nvfp4_dequant_is_exact_for_every_nibble_and_scale_class`
 (one expert, one-hot activations: the kernel output must equal the fp16
 dequantised weight exactly, for all 16 E2M1 nibbles and scale bytes of every
 e4m3 class including subnormals and negatives, block_m 1/2/4/8) passes; 4
@@ -230,7 +244,8 @@ hand mutants are killed (selector byte, magnitude mask, subnormal threshold,
 wrong scale row; the subnormal-threshold mutant survives the random-scale
 oracle tests and is killed by the exactness test only).  NLL, real ops with
 the default flags against the shipped run: mean |dlogp| 0.0477 vs run-to-run
-floor 0.0504 (p99 0.3653 vs 0.3612, max 0.7664 vs 0.4929), PASS.
+floor 0.0504 (p99 0.3653 vs 0.3612, max 0.7664 vs 0.4929), PASS (measured with the
+hoisted scale; the final kernel computes the shipped scale bit for bit).
 
 ### 3.5 Tried and dropped
 

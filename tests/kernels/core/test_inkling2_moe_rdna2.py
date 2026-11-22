@@ -257,6 +257,51 @@ def test_nvfp4_dequant_is_exact_for_every_nibble_and_scale_class(ops, block_m):
     assert torch.equal(out.cpu().double(), expected)
 
 
+def _tie_pairs(count: int = 8):
+    """(e4m3 scale byte, fp32 global) pairs whose fp16 scale differs between the shipped rounding (the fp32
+    product e * global, times 2^14, then fp16: two roundings) and a single rounding of the exact product (what a
+    compiler-fused multiply + convert gives): ~6e-5 of all pairs, one fp16 ulp of the scale."""
+    import numpy as np
+
+    gl = np.exp2(np.random.default_rng(1).uniform(-11, -4, 300000)).astype(np.float32)
+    found = []
+    for byte in range(0x08, 0x78, 7):  # ordinary positive normals
+        e = np.float32(_e4m3(torch.tensor([byte])).item())
+        dbl = ((e * gl).astype(np.float32) * np.float32(16384.0)).astype(np.float16)
+        sgl = (np.float64(e) * gl.astype(np.float64) * 16384.0).astype(np.float16)
+        bad = np.nonzero(dbl.view(np.uint16) != sgl.view(np.uint16))[0]
+        if len(bad):
+            found.append((byte, float(gl[bad[0]])))
+        if len(found) == count:
+            break
+    assert len(found) == count
+    return found
+
+
+@pytest.mark.parametrize("block_m", [1, 2])
+def test_nvfp4_scale_keeps_the_shipped_double_rounding_on_tie_cases(ops, block_m):
+    """The fp16 scale is RNE16(RNE32(e * global) * 2^14).  On the pairs where that differs from a single rounding
+    of the exact product the kernel must still give the shipped value (a fused multiply + convert does not)."""
+    k, n = 32, 8
+    nib = (torch.arange(k)[:, None] + 3 * torch.arange(n)[None, :]) % 16
+    words = nib.reshape(k // 8, 8, n)
+    q = sum(words[:, i] << (4 * i) for i in range(8))
+    q = ((q + 2**31) % 2**32 - 2**31).to(torch.int32)[None]
+    ids = torch.zeros(k, 1, dtype=torch.int32)
+    sorted_ids, expert_ids, ntpp = moe_align_for(ids, block_m)
+    tw = torch.empty(0, dtype=torch.float32, device=DEV)
+    for byte, g in _tie_pairs():
+        scales = torch.full((1, k // 16, n), byte, dtype=torch.uint8)
+        glob = torch.tensor([g], dtype=torch.float32)
+        expected = _nvfp4_dequant(q, scales, glob)[0]
+        out = torch.zeros(k, n, dtype=torch.float16, device=DEV)
+        ops.moe_nvfp4_gemm_rdna2(
+            torch.eye(k, dtype=torch.float16, device=DEV), out, q.to(DEV), scales.to(DEV), glob.to(DEV), tw,
+            sorted_ids, expert_ids, ntpp, 1, block_m, False, 0,
+        )
+        assert torch.equal(out.cpu().double(), expected), (hex(byte), g)
+
+
 def moe_align_for(ids: torch.Tensor, block_m: int):
     from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
         moe_align_block_size,
