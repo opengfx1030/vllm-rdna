@@ -86,10 +86,19 @@ capture included): TP=1 44 s, TP=2 64 s, TP=4 59 s [measured, `serve_one.sh`].
 | `RDNA_AR`, `VLLM_RDNA_AR_MAX_KB`, `VLLM_RDNA_AR_ONESHOT_KB` | 1, 256, 256 (TP > 1) | `RDNA_AR=0` | the one-shot HIP all-reduce up to 256 KiB (28 decode tokens in fp32), RCCL above; captured inside the graphs | the cost of RCCL for every reduction was not measured: no decode step needed the fallback |
 | `COMPILATION_CONFIG` | unset | JSON | an explicit capture grid, e.g. `{"cudagraph_mode":"FULL_AND_PIECEWISE","decode_cudagraph_capture_request_sizes":[1,2,4,8]}` | fewer graphs, less KV budget spent; a request count without its own graph replays in the next larger one (3 rows in the 4-row graph cost 35.4 ms against 30.8 ms in an exact one, port spec part B) |
 | `EXTRA_ARGS='--limit-mm-per-prompt {"image":1}'` | one image per prompt | `{"image":0}` | `0` does not load the vision tower | saves 0.6 GiB per rank at TP=2 (weights 9.0 against 9.6 GiB) |
+| `VLLM_INKLING2_PREFILL_BM` | 1 (code default, not set by the recipes) | `0` | the fp16 `v_dot2` 32-row expert kernels for the MoE chunks of at least `VLLM_INKLING2_PREFILL_BM_MIN_TOKENS` tokens; `0` restores the shipped decode-shaped kernels (A/B and rollback) | 1,000-token prefill 873 - 883 ms -> 487 ms at TP=1 [measured, `inkling2-moe-prefill-bm.md`]; decode and graphs untouched |
+| `VLLM_INKLING2_PREFILL_INT8` | 0 | `1` | **experimental**: W4A8 int8 kernel for the NVFP4 layers (quantises the activations: a quality change, off by default) | 487.6 -> 452.5 ms at 1,000 tokens; NLL 0.0574 against the shipped path's own 0.0477 floor [measured] |
+| `VLLM_INKLING2_PREFILL_BM_MIN_TOKENS` | 128 | any | the chunk size from which the 32-row expert kernels run; smaller chunks, decode and every graph step keep the shipped kernels | NVFP4 breaks even at ~48 tokens, MXFP8 at ~128 [measured] |
 
 The default capture grid for this architecture is decode graphs for every request count from 1
 to min(16, `SEQS`) and mixed / prefill graphs for 1, 2, 4, 8, 16, 24 and 32 tokens; a step with
 more tokens (a prefill chunk) runs eager.
+
+The prefill expert kernels apply to the layers whose expert K fits (TP=1: every NVFP4 and MXFP8
+layer). At TP=2 / TP=4 the intermediate size is sharded to 576 / 288 and only the MXFP8 layers
+(K = 288) take them; the NVFP4 layers keep the shipped kernels. The prefill timings below
+(`Boot, capture and prefix cache`, `Long context`, the full-length prompts) were measured with
+the shipped expert kernels; see "Prefill (expert kernels)" for the 32-row kernels.
 
 ## Slots and memory
 
@@ -251,6 +260,9 @@ full context back at TP=2; it is not built (`docs/rdna2/inkling2-dspark.md`).
 - **Greedy output is not bit-stable**: two runs of the same eager engine produce different continuations
   for a third of the prompts, at near-ties of the logits. Graph replay is within that noise. Judge a change
   by the teacher-forced NLL, not by the identity of the generations.
+- **The prefill expert kernels (default on) add the top-k rows of a token with fp16 atomics like the
+  shipped kernels.** Two runs of the same prefill are not bitwise equal (the first-stage GEMM is);
+  judge a change by the NLL (`inkling2-moe-prefill-bm.md`, "Determinism").
 - **`tools/rdna/inkling2/real_check.py` prints `PREFIX HIT FAIL` and a first-step limit failure**; both are
   known false failures of the check (it compares two noisy numbers).
 
@@ -292,6 +304,24 @@ host launch cost the graph removes [inference].
 | engine boot, eager / graphs (`graph_check`, 4,096-token engine) | 24.7 / 25.8 s | 34.7 / 36.6 s | 36.9 / 39.1 s |
 | graph capture | 2 s, 0.70 GiB | 2 s | 2 s (the log's memory counter reads -0.20 GiB) |
 | 1,301-token prompt, cold / warm (graphs) | 1.54 / 0.39 s | 0.97 / 0.28 s | 0.70 / 0.23 s |
+
+### Prefill (expert kernels)
+
+The prefill expert kernels (`csrc/rocm/moe_prefill_bm_rdna2.cu`, default on, details and every
+table in [`inkling2-moe-prefill-bm.md`](inkling2-moe-prefill-bm.md)) read the native checkpoint
+tensors as the shipped kernels do and dequantise inside the GEMM; a MoE layer visit runs the
+router, the work-list builder, the w13 GEMM, swiglu and the w2 GEMM (5 launches, the shipped
+path 4). TP=1, 1,000-token prompt, clean step wall on HIP 5:
+
+| | shipped (`VLLM_INKLING2_PREFILL_BM=0`) | default (fp16 `v_dot2` 32-row) | W4A8 (experimental) |
+| --- | ---: | ---: | ---: |
+| step ms (tok/s) | 873.6 / 880.4 / 883.4 (1,130) | 487.6 / 487.3 / 488.1 (2,051) | 452.5 / 452.1 / 453.3 (2,210) |
+| teacher-forced NLL against the shipped run A (floor 0.0477, limit 0.1054) | | 0.0458 | 0.0574 |
+
+Served through `serve_rdna.sh RECIPE=inkling2-mini-tp1` (1,000-token prompt of counting numbers,
+greedy): the 32 generated tokens and the 96 tokens of a short decode equal the shipped kernels'
+(largest logprob difference 0.006), the prefix cache hits 960 of 1,000 tokens in both, graph
+capture takes 2 s and 0.70 GiB in both, decode takes 20.2 ms per token in both [measured].
 
 ### Correctness with graphs
 
@@ -335,3 +365,5 @@ ran on it, the suites were not re-run on the rebuilt library. Pre-commit clean.
 - [`inkling2-vision.md`](inkling2-vision.md): the vision tower and its kernels.
 - [`inkling2-dspark.md`](inkling2-dspark.md): the draft model, its kernels, the K sweep, TP=2, equality
   and the memory it costs.
+- [`inkling2-moe-prefill-bm.md`](inkling2-moe-prefill-bm.md): the prefill expert kernels (default on), their
+  switches, launch list, quality gates, measurements, tests and the experimental W4A8 variant.
