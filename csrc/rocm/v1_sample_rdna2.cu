@@ -800,7 +800,9 @@ __global__ void topk_log_softmax_kernel(
     // elements [r * 128 * VEC + t * VEC, + VEC) in register order.
     bool vectorised = false;
     if constexpr (std::is_same_v<T, float>) {
-      if (VEC == 4 && begin + 4 * threadIdx.x < limit) {
+      // Both 512-element groups are loaded below, so the fast path needs the
+      // whole 1024 block in range; a partial last block takes the masked path.
+      if (VEC == 4 && begin + kTopkBlock <= vocab_size) {
 #pragma unroll
         for (int g = 0; g < 8; g += 4) {
           const int64_t base = begin + (g / 4) * 512 + 4 * threadIdx.x;
