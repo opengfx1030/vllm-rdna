@@ -427,12 +427,39 @@ final count follows in a later commit.
 ## 9. Six-arch build and archdiff
 
 `moe_prefill_bm_jit.py --archs "gfx1030;gfx1100;gfx90a;gfx942;gfx950;gfx1200"` compiles the file for
-all six arches (`BUILD OK`; every arch but gfx1030 compiles the same empty stubs of the
-kernels, host code identical, so the op table is the same everywhere); the `_rocm_C` build of
-this patch compiles it with the other ROCm sources (1 new object, the objects that include
-`ops.h` rebuilt). `tools/rdna/archdiff.sh` of the C++ part against `origin/rdna_extras`
-(`EXPECT='_kernel|inkling2|_rdna2|moe_prefill_bm'`, `MAY_DIFFER` = every arch) is running at
-the time of this commit; its verdict follows as a receipt in a follow-up commit.
+all six arches (`BUILD OK`); the `_rocm_C` build of this patch compiles it with the other ROCm
+sources (1 new object, the objects that include `ops.h` rebuilt).
+
+Receipt of `tools/rdna/archdiff.sh` (BASE `origin/rdna_extras` 9031c79a04, HEAD the merge head
+plus this change; `EXPECT='_kernel|inkling2|_rdna2|moe_prefill_bm'`, `MAY_DIFFER` = every arch;
+12 objects compiled and disassembled per arch; 844 s; exit 0, "PASS: 262 differing functions,
+all expected"):
+
+| arch | functions base / head | identical | changed | only in base | only in head | verdict |
+|---|---|---|---|---|---|---|
+| gfx90a | 121 / 313 | 121 | 0 | 0 | 192 | expected only |
+| gfx942 | 121 / 313 | 121 | 0 | 0 | 192 | expected only |
+| gfx950 | 121 / 313 | 121 | 0 | 0 | 192 | expected only |
+| gfx1030 | 121 / 373 | 121 | 0 | 0 | 252 | expected only |
+| gfx1100 | 121 / 313 | 121 | 0 | 0 | 192 | expected only |
+| gfx1200 | 121 / 313 | 121 | 0 | 0 | 192 | expected only |
+
+`origin/rdna_extras` predates the Inkling-2 port, so every Inkling-2 function (this change and
+the attention, glue, linear, vit, dspark and decode-expert files) is "only in head"; the 121
+functions the two trees share are bit-identical on all six arches (0 changed, 0 after
+masking). The functions of this change:
+
+| function | gfx1030 | gfx90a / gfx942 / gfx950 / gfx1100 / gfx1200 |
+|---|---|---|
+| `nvfp4_prefill_kernel<32,128,128>` | 5898 instructions | empty stub (no code) |
+| `mxfp8_prefill_kernel<32,128,256>` | 5769 | empty stub |
+| `nvfp4_i8_prefill_kernel<32,128,256>` | 5159 | empty stub |
+| `moe_prefill_cta_kernel` | 584 | 678 to 845 (plain C++, compiled everywhere) |
+| `moe_prefill_act_quant_kernel` | 255 | 265 to 294 (plain C++, compiled everywhere) |
+
+The two helper kernels use no RDNA2 instruction, so they are real code on every arch and only
+the three dot2 / dot4 GEMM kernels are stubs elsewhere. The report covers code generation
+only: no kernel ran and no GPU was touched.
 
 ## 10. Limits, risks, open items
 
