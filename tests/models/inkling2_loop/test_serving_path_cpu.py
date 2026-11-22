@@ -284,6 +284,7 @@ def _default_decode_sizes(
                 use_multi_module_mtp=lambda: False,
                 use_gemma4_mtp=lambda: False,
                 enable_adaptive_verification=False,
+                speculator_config=SimpleNamespace(uses_adaptive_num_tokens=False),
             )
             if k
             else None

@@ -611,6 +611,7 @@ def _mock_config_for_cudagraph_sizes(
             use_multi_module_mtp=lambda: False,
             use_gemma4_mtp=lambda: False,
             enable_adaptive_verification=False,
+            speculator_config=SimpleNamespace(uses_adaptive_num_tokens=False),
         )
         if num_speculative_tokens
         else None
