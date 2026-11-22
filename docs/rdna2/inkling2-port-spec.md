@@ -1835,39 +1835,41 @@ tests still pass); the unit test on `seq_idx` and the kernel tests with 64-token
 | KV planner (`tests/v1/core`: the 8 kv / packing files, CPU) | 314 passed, 31 failed. The same 31 fail with git HEAD's `_get_packed_kv_cache_groups` (30 in `test_leapquant_page_packing.py`, e.g. `'_StateLayer' object has no attribute 'state_alignment'`; 1 in `test_kv_cache_planning.py`); HEAD's planner gives 312 passed, 33 failed, the 2 extra being the new unbalanced-bucket tests (`StopIteration`) |
 | mutation checks of the ring guards (`ninja _rocm_C` only, a library per mutant, `-k "ignores_padding_that_reads_as_request_zero or ignores_rows_shorter or skips_the_null_block"`, HIP 3) | all killed: c9 (`p < p1` only) 3 failed / 42 passed, c10 (`0 <= p` only) 10 / 35, c11 (null-block guard removed) 30 / 15; the old `seq_idx` fill under a plugin: `test_seq_idx_of_a_graphs_padding_is_minus_one` fails; the real library's sha256 verified after the mutant builds |
 | six-arch compile of `inkling2_attn_rdna2.hip.o` (gfx90a gfx942 gfx950 gfx1030 gfx1100 gfx1200) | `compile_exit=0`; the object carries one code bundle per arch (gfx1030, gfx1100, gfx1200, gfx90a, gfx942, gfx950) |
+| rebuild of the merged tree `0722fa5075` (`build_lq.sh`, incremental, box tree) | 131 s, exit 0, `vllm/_rocm_C.abi3.so` sha256 `7956ea22e0ec0dd5e2267650a19d80e9d41ec71c77396f36017e0f02486955b7`. The kernel, serving-path and CPU suites above ran on the library before the merge and were not re-run; the decode tables and the full-length runs ran on this one |
 
 ### Decode with HIP graphs (`graph_check.py`, ms per generated token of one request, = the step time of `b` rows)
 
 `--max-model-len 4096 --max-num-seqs 16 --prefix-caching --tokens 64 --reps 3`, default capture grid
 (decode graphs for 1 .. 16 requests, mixed graphs for 1, 2, 4, 8, 16, 24, 32 tokens), `FULL_AND_PIECEWISE`
 against `--enforce-eager`, same engine otherwise. TP > 1 uses the one-shot HIP all-reduce up to 256 KiB
-(`--ar-backend rdna --ar-max-kb 256`). TP = 1 and TP = 2 were measured on the build before the last two
-ring guards (one compare per ring write, off the decode critical path [INFERENCE]); the TP = 4 columns
-on the final library.
+(`--ar-backend rdna --ar-max-kb 256`). TP = 1 (on HIP 4) and TP = 2 were measured on the rebuilt merged tree
+`0722fa5075`; the TP = 4 columns on the library one build earlier, before the merge added the DSpark kernel
+(not called by this path).
 
 | requests | TP=1 eager | TP=1 graph | ratio | TP=2 eager | TP=2 graph | ratio | TP=4 eager | TP=4 graph | ratio |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 20.09 | 19.12 | 0.952 | 16.21 | 14.16 | 0.873 | 16.94 | 11.54 | 0.681 |
-| 2 | 23.78 | 23.28 | 0.979 | 17.55 | 16.04 | 0.914 | 17.04 | 12.65 | 0.742 |
-| 3 | 27.20 | 26.53 | 0.976 | 19.35 | 18.00 | 0.930 | 18.77 | 13.76 | 0.733 |
-| 4 | 30.70 | 30.12 | 0.981 | 21.26 | 20.04 | 0.942 | 17.47 | 15.00 | 0.859 |
-| 5 | 32.87 | 32.08 | 0.976 | 22.46 | 21.32 | 0.949 | 16.92 | 15.54 | 0.918 |
-| 6 | 35.15 | 34.40 | 0.979 | 23.80 | 22.63 | 0.951 | 18.47 | 17.02 | 0.922 |
-| 7 | 38.42 | 37.29 | 0.971 | 25.80 | 24.50 | 0.950 | 20.00 | 18.60 | 0.930 |
-| 8 | 40.40 | 39.62 | 0.981 | 26.94 | 25.84 | 0.959 | 20.69 | 19.10 | 0.923 |
-| 12 | 47.73 | 46.65 | 0.977 | 31.48 | 30.30 | 0.962 | 24.38 | 22.90 | 0.939 |
-| 16 | 50.57 | 48.69 | 0.963 | 33.82 | 33.84 | 1.001 | 25.58 | 24.55 | 0.960 |
+| 1 | 20.37 | 19.32 | 0.948 | 15.98 | 14.12 | 0.883 | 16.94 | 11.54 | 0.681 |
+| 2 | 24.03 | 23.22 | 0.966 | 17.45 | 16.20 | 0.928 | 17.04 | 12.65 | 0.742 |
+| 3 | 27.69 | 26.73 | 0.965 | 19.41 | 18.18 | 0.937 | 18.77 | 13.76 | 0.733 |
+| 4 | 30.96 | 30.00 | 0.969 | 21.23 | 19.99 | 0.942 | 17.47 | 15.00 | 0.859 |
+| 5 | 33.10 | 32.27 | 0.975 | 22.66 | 21.17 | 0.935 | 16.92 | 15.54 | 0.918 |
+| 6 | 35.51 | 34.62 | 0.975 | 23.76 | 22.57 | 0.950 | 18.47 | 17.02 | 0.922 |
+| 7 | 38.47 | 37.77 | 0.982 | 25.85 | 24.55 | 0.950 | 20.00 | 18.60 | 0.930 |
+| 8 | 40.72 | 39.91 | 0.980 | 27.08 | 25.94 | 0.958 | 20.69 | 19.10 | 0.923 |
+| 12 | 48.17 | 47.67 | 0.990 | 31.70 | 30.42 | 0.960 | 24.38 | 22.90 | 0.939 |
+| 16 | 50.31 | 48.22 | 0.958 | 32.82 | 31.69 | 0.966 | 25.58 | 24.55 | 0.960 |
 
-Graph throughput (requests x tokens per second, all requests): 1 request TP=1 52.3, TP=2 70.6, TP=4 86.7;
-8 requests 201.9 / 309.6 / 418.8; 16 requests 328.6 / 472.8 / 651.6. The TP = 4 eager column is noisy (b = 3
+Graph throughput (requests x tokens per second, all requests): 1 request TP=1 51.8, TP=2 70.8, TP=4 86.7;
+8 requests 200.5 / 308.4 / 418.8; 16 requests 331.8 / 504.8 / 651.6. The TP = 4 eager column is noisy (b = 3
 is slower than b = 4); the large TP = 4 gain at b <= 3 (0.68 - 0.74) is probably the host launch cost the graph
 removes [INFERENCE].
 
 * The part B2 TP = 1 graph numbers (18.97 / 22.93 / 26.71 / 30.09 / 32.53 / 34.71 / 37.62 / 40.24 for 1 .. 8
-  rows) reproduce on the merged tree within 1% (19.12 / 23.28 / 26.53 / 30.12 / 32.08 / 34.40 / 37.29 /
-  39.62): the ring and the TP work cost nothing at TP = 1.
-* Graphs help more the more launches a step has: 4.8% at TP = 1, 12.7% at TP = 2 for one request (eager 16.21 ->
-  graph 14.16 ms), and the gain shrinks to 0 - 4% at 16 requests where the step is GPU bound.
+  rows) reproduce on the rebuilt merged tree within 2% (19.32 / 23.22 / 26.73 / 30.00 / 32.27 / 34.62 / 37.77 /
+  39.91): the ring and the TP work cost nothing at TP = 1.
+* Graphs help more the more launches a step has: 5.2% at TP = 1, 11.6% at TP = 2 and 31.9% at TP = 4 for one
+  request (TP = 2: eager 15.98 -> graph 14.12 ms), and the gain shrinks to 3 - 4% at 16 requests where the step
+  is GPU bound.
 * Capture takes 2 s and 0.70 GiB at TP = 1 (SEQS 16), 0.19 - 0.31 GiB per rank at TP = 2 (engine log "took");
   the graph memory comes out of the KV budget (the extensible cache is sized after capture): -9.5% KV tokens
   at TP = 1 (45,175 eager -> 40,876 at a 4,096-token engine), none at a 4,096-token TP = 2 engine (162,601 ->
@@ -1888,11 +1890,11 @@ about a third of the cases at near-ties, so the criterion is the teacher-forced 
 | Run | greedy continuations identical to eager (30) | max abs dlogp of the first divergence | NLL mean abs dlogp vs A | mean logp |
 |---|---:|---:|---:|---:|
 | eager A / eager B (floor) | 21 | 0.0649 | 0.0463 | -1.9824 / -1.9844 |
-| TP = 1 graphs | 20 (25 against a second eager run) | 0.0804 | 0.0463 PASS | -1.9829 |
-| TP = 2 eager (merge) / graphs | 25 | 0.1038 | 0.0437 PASS / 0.0450 PASS | -1.9829 / -1.9835 |
+| TP = 1 graphs | 20 (25 against a second eager run); 17 on the rebuilt tree | 0.0804 / 0.0626 | 0.0463 PASS | -1.9829 |
+| TP = 2 eager (merge) / graphs | 25; 22 on the rebuilt tree | 0.1038 / 0.0959 | 0.0437 PASS / 0.0450 PASS | -1.9829 / -1.9835 |
 | TP = 4 eager (merge) / graphs | 21 (graphs against the `g4_eager` run of this session) | 0.0954 | 0.0416 PASS / 0.0446 PASS | -1.9796 / -1.9853 |
 
-Every first divergence is at a near-tie (gap <= 0.25 nats at TP = 1, <= 0.08 at TP = 2, <= 0.23 at TP = 4). `real_check.py`
+Every first divergence is at a near-tie (largest gap 0.224 nats at TP = 1, 0.113 at TP = 2, 0.233 at TP = 4, all <= 0.25). `real_check.py`
 still prints `PREFIX HIT FAIL` and exits 1 on every run (hit-vs-cold 0.18 against a cold-vs-cold of 0.49
 nats: the criterion compares two noisy numbers; a known false failure, not a graph effect).
 Prefix caching with graphs: a 1,301-token prompt cold / warm 1.53 / 0.39 s at TP = 1 (eager the same),
@@ -1934,6 +1936,37 @@ log's capture counter reads between -0.50 and 0.30 GiB across ranks and runs (be
 depth, found, device peak 25.58 GiB of 29.98 on HIP 2. (Not comparable with the earlier tree's 682 tok/s,
 which is the average over 942,628 tokens: the rate falls with depth.)
 
+### Full-length prompts (rebuilt merged tree `0722fa5075`, recipe settings, needle at depth 0.5)
+
+`long_context_check.py` at the recipes' settings (tower loaded, `--max-model-len 1048576`, `--max-num-seqs 8`,
+graphs; TP = 2: `--max-num-batched-tokens 184` and `VLLM_KV_CACHE_MARGIN_FLOOR_MIB=2048` on HIP 4 + 5; TP = 4:
+`--max-num-batched-tokens 4096` and the default floor on HIP 2 - 5), `--frac 0.9` (942,628 tokens, the earlier
+tree's prompt) and `--prompt-tokens 1048000` (built: 1,046,914 tokens, 99.84% of the length). One cold prefill,
+a warm repeat (prefix hit), a 96-token decode at that depth and a 4,088-token control with the same needle:
+
+| TP | Prompt tokens | Prefill (cold) | Warm repeat | Decode at depth | Needle / control | Device peak |
+|---|---:|---:|---:|---:|---|---:|
+| 2 | 942,628 | 2,492.9 s (41.5 min) = **378 tok/s** | 0.43 s | **49.8 ms/token** | found / found | 27.20 GiB |
+| 2 | 1,046,914 | 3,000.5 s (50.0 min) = **349 tok/s** | 0.31 s | **54.3 ms/token** | found / found | 27.20 GiB |
+| 4 | 942,628 | 1,266.9 s (21.1 min) = **744 tok/s** | 0.38 s | **30.1 ms/token** | found / found | 25.58 GiB |
+| 4 | 1,046,914 | 1,516.9 s (25.3 min) = **690 tok/s** | 0.29 s | **32.0 ms/token** | found / found | 25.58 GiB |
+
+* Against the earlier eager tree on the same 942,628-token prompt (343 tok/s and 51.8 ms/token at TP = 2; 682
+  tok/s and 32.1 ms/token at TP = 4): prefill +10% (TP = 2) and +9% (TP = 4), decode -4% and -6%. The prefill
+  rate falls with depth (TP = 2: 811 tok/s for 261,052 tokens, 378 for 942,628, 349 for 1,046,914; TP = 4: 1,589,
+  744, 690).
+* Memory: the KV cache is committed at boot, so the device figure does not move during a run. TP = 2: 27.20 GiB
+  right after boot and at every phase (a 10-second sampler of all four cards read 27,849 - 27,850 MiB on HIP 4
+  and 5), 2.78 GiB free at the lowered floor. TP = 4: 25.49 GiB after boot, 25.58 GiB peak (26,168 - 26,204 MiB
+  on HIP 2 - 5).
+* KFD `evicted_ms` (sampled every 15 s per process, tagged with its HIP list): 0 for the main process and the
+  workers of every run above. The non-zero entries in the monitor log belong to other agents' jobs on HIP 2 and
+  3 (the first eight lines: up to 3,067 ms in the TP = 2 window); no process showed a non-zero value during the
+  TP = 4 hold (15:28 - 16:17 box time).
+* The needle was found in every run (substring match of the passphrase in the 96 generated tokens). At 1,046,914
+  tokens and TP = 2 the answer first names another fact ("Fact 37429: the number 191999 is odd. Wait no, let's
+  scan. Actually ...") before the text reaches the passphrase.
+
 ### Vision through the V2 runner with graphs (`vision_engine_check.py`)
 
 One image, the same image twice (the second request is a prefix hit: 128 of 134 prompt tokens, ids equal to
@@ -1962,11 +1995,11 @@ The engine keeps `max(3 GiB, 0.75 x transient peak)` free after sizing on ROCm
 1,037,312: with graphs captured and the default floor the full context is refused at every chunk size that
 prefills at a useful rate (table above). `VLLM_KV_CACHE_MARGIN_FLOOR_MIB` (new, `vllm/envs.py` and
 `vllm/v1/worker/extensible_kv_cache.py`; unset or empty keeps the platform default, so no other model
-changes) lowers the floor; the TP = 2 recipe sets 2048 MiB. Evidence that 2 GiB is enough here: the
-262,144-token needle with the tower loaded peaked at 27.20 GiB of 29.98 on both cards, i.e. 2.78 GiB free,
-and the TP = 1 needle of the earlier tree kept 3.74 GiB free; the floor was not touched in either run.
-Not proven: a 1M-token prompt (about 51 minutes of prefill at TP = 2) and workloads that allocate more
-than these two (a very long prompt-logprobs request, a multimodal batch of other shapes).
+changes) lowers the floor; the TP = 2 recipe sets 2048 MiB. Evidence that 2 GiB is enough here: needles of
+261,052, 942,628 and 1,046,914 tokens with the tower loaded all peaked at 27.20 GiB of 29.98 on both cards, i.e.
+2.78 GiB free, and the TP = 1 needle of the earlier tree kept 3.74 GiB free; the floor was not touched in any
+run. Not proven: workloads that allocate more than these (a very long prompt-logprobs request, a multimodal
+batch of other shapes).
 
 ### Open risks and next steps (after this section)
 
@@ -1974,9 +2007,9 @@ than these two (a very long prompt-logprobs request, a multimodal batch of other
   it needs a vocab-shard-aware head gathering per-rank partials); the recipes keep it off. At TP = 1 the
   Inkling2Spec branch drafts with the ring sized `3 + k` rows (`FULL_AND_PIECEWISE` boots and captures on this
   tree with its scratch predicate, which is the predicate merged here).
-* **A 1,048,576-token prompt was not run end to end** (prefill about 51 minutes at TP = 2 [DERIVED from the
-  942,628-token run], 28 minutes at TP = 4 [INFERENCE]); the needles are 262,144 tokens (and 90% of the fit at
-  TP = 1).
+* **Full-length prompts were run once each** (one needle at depth 0.5, tower loaded): 1,046,914 tokens prefill in
+  50.0 minutes at TP = 2 and 25.3 minutes at TP = 4. Other depths, several long prompts at once and a vision
+  prompt at that length were not run.
 * **The TP = 2 recipe depends on the lowered margin floor** (2 GiB); with the default 3 GiB the full context
   does not boot once graphs are captured. TP = 4 needs no change.
 * **Mixed graphs reach 32 tokens only**; a prefill chunk (184 - 4,096 tokens) runs eager, as before.

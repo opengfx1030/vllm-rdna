@@ -145,20 +145,35 @@ the full context would need a chunk of roughly 70 - 80 tokens [INFERENCE from th
 booted]: a step that streams the whole expert set for so few tokens is not a way to serve a million-token
 prompt, so the recipe lowers the floor. `VLLM_KV_CACHE_MARGIN_FLOOR_MIB=2048`
 gives the cache the 1 GiB difference; what was lost against the default is 1 GiB of free device memory
-beyond the measured transient peak. At TP=2 with the tower the 262,144-token needle (the prompt is 261,052
-tokens) peaked at 27.20 GiB of 29.98 on both cards: 2.78 GiB stayed free [measured]. A text-only TP=2 engine
+beyond the measured transient peak. At TP=2 with the tower, prompts of 261,052, 942,628 and 1,046,914 tokens
+all peaked at 27.20 GiB of 29.98 on both cards (the cache is committed at boot; the figure is the same right
+after it): 2.78 GiB stayed free [measured]. A text-only TP=2 engine
 with the default floor loses 11,264 tokens (1.07%) against 1,048,576; with the tower it would lose more
 [derived from the boots above].
 
-The 261,052-token needle prompt (tower loaded, 1,048,576-token engine, graphs, `MAXBAT` 184, floor 2 GiB)
-prefilled in 321.8 s (811 tok/s; 665 tok/s eager on the earlier tree), decoded at 24.4 ms/token at that depth
-(eager 26.4 ms) and the needle at depth 0.5 was found [measured].
-
 **TP=4** (HIP 2 - 5, `SEQS` 8, `MAXBAT` 4,096, graphs, `--max-model-len 1048576`, the engine's default 3 GiB
 floor) [measured]: with the tower loaded the pool holds 2,250,192 tokens (37,552 blocks per rank at the
-warmup estimate, 18.34 GiB), 2.15 times the model's length; text only 2,331,686 tokens (2.22x). The
-261,052-token needle (tower loaded) prefilled in 164.3 s (1,589 tok/s), decoded at 17.1 ms/token at that
-depth and was found at depth 0.5; the device peaked at 25.58 GiB of 29.98 (HIP 2).
+warmup estimate, 18.34 GiB), 2.15 times the model's length; text only 2,331,686 tokens (2.22x).
+
+Needle runs at the recipes' settings (tower loaded, 1,048,576-token engine, graphs; TP=2: `MAXBAT` 184 and
+floor 2 GiB; TP=4: `MAXBAT` 4,096 and the default floor): one cold prefill, a warm repeat, a 96-token decode at
+that depth and a 4,088-token control with the same needle, the needle at depth 0.5 [measured]. 1,046,914 tokens
+is 99.8% of the model's length:
+
+| TP | Prompt tokens | Prefill (cold) | Warm repeat | Decode at depth | Needle / control | Device peak |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| 1 (auto-fit 180,928) | 162,814 | 251.1 s = 648 tok/s | - | 31.9 ms/token | found / - | 25.59 GiB |
+| 2 | 261,052 | 321.8 s = 811 tok/s | - | 24.4 ms/token | found / - | 27.20 GiB |
+| 2 | 942,628 | 2,492.9 s (41.5 min) = 378 tok/s | 0.43 s | 49.8 ms/token | found / found | 27.20 GiB |
+| 2 | 1,046,914 | 3,000.5 s (50.0 min) = 349 tok/s | 0.31 s | 54.3 ms/token | found / found | 27.20 GiB |
+| 4 | 261,052 | 164.3 s = 1,589 tok/s | - | 17.1 ms/token | found / - | 25.58 GiB |
+| 4 | 942,628 | 1,266.9 s (21.1 min) = 744 tok/s | 0.38 s | 30.1 ms/token | found / found | 25.58 GiB |
+| 4 | 1,046,914 | 1,516.9 s (25.3 min) = 690 tok/s | 0.29 s | 32.0 ms/token | found / found | 25.58 GiB |
+
+Against the earlier eager tree on the same 942,628-token prompt (TP=2 343 tok/s and 51.8 ms/token, TP=4
+682 tok/s and 32.1 ms/token) prefill is 10% / 9% faster and decode 4% / 6% faster. The prefill rate falls with
+depth, so the 50 and 25 minutes are not extrapolations of the 261k rates. The KFD `evicted_ms` counter read 0 for
+every process of the 942,628 and 1,046,914-token runs.
 
 ## Known limits
 
@@ -168,10 +183,10 @@ depth and was found at depth 0.5; the device peaked at 25.58 GiB of 29.98 (HIP 2
   no `--mm-processor-kwargs`, so the launcher's `vision-cap` feature is not used.
 - **Graphs cover decode steps of up to `min(16, SEQS)` requests and mixed steps of up to 32 tokens.**
   A prefill chunk runs eager. A request count of the decode grid replays in its own graph.
-- **A full 1,048,576-token prompt was not run.** Its prefill is about 51 minutes at TP=2 at the eager rate
-  of the earlier tree (942,628 tokens at 343 tok/s average [derived]); the 262k needle prefilled 22% faster
-  here, so about 42 minutes [inference]. TP=4: about 28 minutes at the earlier rate [inference]. The needles
-  of this page are 262,144 tokens (TP=1: 90% of the fit).
+- **A full-length prompt is a long job**: 1,046,914 tokens (99.8% of 1,048,576) prefill in 50.0 minutes at TP=2
+  (349 tok/s) and 25.3 minutes at TP=4 (690 tok/s), against 811 and 1,589 tok/s for a 261k prompt (the rate
+  falls with depth). Each was run once, one needle at depth 0.5; several long prompts at once and a long prompt
+  with an image were not run.
 - **TP=1 holds about 181k tokens, not the model's million**: the KV cache is 32 KiB per token (eight
   full-attention layer visits, counting the three passes of the loop) and 18.68 GiB of the 29.98 GiB are
   weights. The recipe is 180,000.
@@ -193,24 +208,24 @@ Real checkpoint, merged tree built on the box, V620 cards shared with other jobs
 
 `graph_check.py --max-model-len 4096 --max-num-seqs 16 --prefix-caching --tokens 64 --reps 3`, eager
 (`--enforce-eager`) against `FULL_AND_PIECEWISE` on the default grid; TP > 1 on the one-shot all-reduce up to
-256 KiB. TP=1 and TP=2 come from the build before the last two ring guards (one compare per ring write, not
-on the decode critical path [inference]), TP=4 from the final library.
+256 KiB. TP=1 (on HIP 4) and TP=2 are the rebuilt merged tree (0722fa5075); TP=4 is the same code one build
+earlier (the merge added the DSpark kernel, which this path does not call).
 
 | requests | TP=1 eager | TP=1 graph | ratio | TP=2 eager | TP=2 graph | ratio | TP=4 eager | TP=4 graph | ratio |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 20.09 | 19.12 | 0.952 | 16.21 | 14.16 | 0.873 | 16.94 | 11.54 | 0.681 |
-| 2 | 23.78 | 23.28 | 0.979 | 17.55 | 16.04 | 0.914 | 17.04 | 12.65 | 0.742 |
-| 3 | 27.20 | 26.53 | 0.976 | 19.35 | 18.00 | 0.930 | 18.77 | 13.76 | 0.733 |
-| 4 | 30.70 | 30.12 | 0.981 | 21.26 | 20.04 | 0.942 | 17.47 | 15.00 | 0.859 |
-| 5 | 32.87 | 32.08 | 0.976 | 22.46 | 21.32 | 0.949 | 16.92 | 15.54 | 0.918 |
-| 6 | 35.15 | 34.40 | 0.979 | 23.80 | 22.63 | 0.951 | 18.47 | 17.02 | 0.922 |
-| 7 | 38.42 | 37.29 | 0.971 | 25.80 | 24.50 | 0.950 | 20.00 | 18.60 | 0.930 |
-| 8 | 40.40 | 39.62 | 0.981 | 26.94 | 25.84 | 0.959 | 20.69 | 19.10 | 0.923 |
-| 12 | 47.73 | 46.65 | 0.977 | 31.48 | 30.30 | 0.962 | 24.38 | 22.90 | 0.939 |
-| 16 | 50.57 | 48.69 | 0.963 | 33.82 | 33.84 | 1.001 | 25.58 | 24.55 | 0.960 |
+| 1 | 20.37 | 19.32 | 0.948 | 15.98 | 14.12 | 0.883 | 16.94 | 11.54 | 0.681 |
+| 2 | 24.03 | 23.22 | 0.966 | 17.45 | 16.20 | 0.928 | 17.04 | 12.65 | 0.742 |
+| 3 | 27.69 | 26.73 | 0.965 | 19.41 | 18.18 | 0.937 | 18.77 | 13.76 | 0.733 |
+| 4 | 30.96 | 30.00 | 0.969 | 21.23 | 19.99 | 0.942 | 17.47 | 15.00 | 0.859 |
+| 5 | 33.10 | 32.27 | 0.975 | 22.66 | 21.17 | 0.935 | 16.92 | 15.54 | 0.918 |
+| 6 | 35.51 | 34.62 | 0.975 | 23.76 | 22.57 | 0.950 | 18.47 | 17.02 | 0.922 |
+| 7 | 38.47 | 37.77 | 0.982 | 25.85 | 24.55 | 0.950 | 20.00 | 18.60 | 0.930 |
+| 8 | 40.72 | 39.91 | 0.980 | 27.08 | 25.94 | 0.958 | 20.69 | 19.10 | 0.923 |
+| 12 | 48.17 | 47.67 | 0.990 | 31.70 | 30.42 | 0.960 | 24.38 | 22.90 | 0.939 |
+| 16 | 50.31 | 48.22 | 0.958 | 32.82 | 31.69 | 0.966 | 25.58 | 24.55 | 0.960 |
 
-Graph throughput (all requests together, tokens per second): 1 request TP=1 52.3, TP=2 70.6, TP=4 86.7;
-8 requests 201.9 / 309.6 / 418.8; 16 requests 328.6 / 472.8 / 651.6. The TP=4 eager column is noisy (3
+Graph throughput (all requests together, tokens per second): 1 request TP=1 51.8, TP=2 70.8, TP=4 86.7;
+8 requests 200.5 / 308.4 / 418.8; 16 requests 331.8 / 504.8 / 651.6. The TP=4 eager column is noisy (3
 requests are slower than 4); the large TP=4 gain at 3 requests or fewer (ratios 0.68 - 0.74) is probably the
 host launch cost the graph removes [inference].
 
@@ -218,17 +233,18 @@ host launch cost the graph removes [inference].
 
 | | TP=1 | TP=2 | TP=4 |
 | --- | ---: | ---: | ---: |
-| engine boot, eager / graphs (`graph_check`, 4,096-token engine) | 37.3 / 39.1 s | 35.4 / 37.7 s | 36.9 / 39.1 s |
+| engine boot, eager / graphs (`graph_check`, 4,096-token engine) | 24.7 / 25.8 s | 34.7 / 36.6 s | 36.9 / 39.1 s |
 | graph capture | 2 s, 0.70 GiB | 2 s | 2 s (the log's memory counter reads -0.20 GiB) |
-| 1,301-token prompt, cold / warm (graphs) | 1.53 / 0.39 s | 0.97 / 0.28 s | 0.70 / 0.23 s |
+| 1,301-token prompt, cold / warm (graphs) | 1.54 / 0.39 s | 0.97 / 0.28 s | 0.70 / 0.23 s |
 
 ### Correctness with graphs
 
 Teacher-forced NLL of 799 positions against the TP=1 eager run A (limit: 2 x the A-vs-B floor of 0.0463 + 0.01 =
-0.1027): TP=1 graphs 0.0463, TP=2 graphs 0.0450, TP=4 graphs 0.0446 (eager: TP=2 0.0437, TP=4 0.0416). Greedy
-continuations of 30 prompts identical to eager: 20 at TP=1 (the eager-against-eager floor is 21), 25 at TP=2,
-21 at TP=4; every first divergence is at a near-tie (gap at most 0.25 nats). Details: port spec, "merged tree:
-final results".
+0.1027): TP=1 graphs 0.0463, TP=2 graphs 0.0450, TP=4 graphs 0.0446 (eager: TP=2 0.0437, TP=4 0.0416); these
+NLL runs predate the rebuild. Greedy continuations of 30 prompts identical to eager: TP=1 17 on the rebuilt tree
+(20 in the first run; the eager-against-eager floor is 21), TP=2 22 (25), TP=4 21; every first divergence is at a
+near-tie (largest gap 0.22 nats at TP=1, 0.11 at TP=2, 0.23 at TP=4). Details: port spec, "merged tree: final
+results".
 
 ### Vision (images through the V2 runner with graphs)
 
@@ -248,10 +264,11 @@ from its single answer after token 18 - 41 as it does under eager.
 
 ### Gates
 
-Final library, HIP 3: kernel suites 863 + 1,075 passed; `test_serving_path_gpu.py` +
+Final library before the merge, HIP 3: kernel suites 863 + 1,075 passed; `test_serving_path_gpu.py` +
 `test_serving_path_graph_gpu.py` 146 passed; the ring guards killed 3 of 3 mutants (c9 - c11 of
 `inkling2-attn-kernels.md`); CPU suite of the model, the recipes and the margin floor 686 passed, 97
-skipped, 0 failed. Pre-commit clean.
+skipped, 0 failed. The merged tree was rebuilt (131 s, exit 0); the decode tables and the full-length runs above
+ran on it, the suites were not re-run on the rebuilt library. Pre-commit clean.
 
 ## Related notes
 
