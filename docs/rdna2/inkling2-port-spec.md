@@ -218,10 +218,12 @@ fp16 is the serving dtype, and the random tiny model is router-chaotic: a near-t
 the top-2 expert choice flips under fp16 rounding and is amplified through the loop.
 CPU emulation with exact experts, last-position mean |dlogp| vs the fp32 reference
 (free routing / expert choice forced to the fp32 run's): tiny1 5 tokens 6.2e-3 /
-6.2e-3, 40 tokens 1.053 / 1.5e-2, 70 tokens 0.139 / 7.9e-3; tiny8 1.0e-2, 1.8e-2,
-1.2e-2 (no flips). So "mean |dlogp| < 0.05" is a statement about routing stability of
-the prompt, not only about the kernels; the forced-route number is the noise floor of
-the fp16 path.
+6.2e-3, 40 tokens 1.053 / 1.5e-2, 70 tokens 0.139 / 7.9e-3; tiny8 (seed 0, the
+checkpoint of the GPU runs) 1.7e-2 / 1.7e-2, 6.045 / 6.1e-2, 1.777 / 2.8e-2. So "mean
+|dlogp| < 0.05" is a statement about routing stability of the prompt, not only about
+the kernels; the forced-route number is the noise floor of the fp16 path (mean over all
+positions 7e-3 .. 1e-2 for tiny1 and 1.9e-2 .. 2.2e-2 for tiny8, also for chunked
+prefill, mixed batches and cached decode: `test_fp16_*_given_the_same_expert_choice`).
 
 Still open: the engine/GPU acceptance (`tools/rdna/inkling2/tiny_vllm_check.py`), the
 csrc sampler fix, and replacing the PyTorch loop in `Inkling2Attention._attend` by a
@@ -257,3 +259,151 @@ Findings of this session:
 The oracle's message-slot order sweep cannot separate the orders at the first token
 (all give `<|message_model|>` at +21 logits); `q,k,v,m` (the order validated against the
 transformers code on tiny8) stays.
+
+## 2026-11-22 — tiny acceptance: router near-tie flips, and a same-step prefix-hit bug
+
+Signals of the engine acceptance (`tiny_vllm_check.py`): tiny8 with
+`max_num_batched_tokens=16`, 40-token prompt: last-position top-1 False, max abs dlogp
+32.04, mean 6.33 (the 5- and 70-token prompts fine); concurrent requests differing from
+the single-request runs (tiny8 default: other ids, max 5.14; tiny8 chunked 12.9; tiny1
+default 6.35); tiny8 default decode of the 40-token prompt leaving the reference ids
+after 2 steps (mean 0.72).
+
+Method (throw-away tooling outside the repository, no debug code in the model:
+`~/w4a8_runs/inkling2-work/I2Tiny/{i2debug,engine_debug,engine_analysis,make_teacher}.py`):
+the engine runs in-process (`VLLM_ENABLE_V1_MULTIPROCESSING=0`) and class-level patches
+record, per engine step and layer visit, the layer output, the attention output, the
+router top-k ids and their margin (k-th minus (k+1)-th selection score). They can also
+*impose* router decisions taken from the fp32 CPU run (the teacher: the paged model with
+exact fp32 experts, equal to the transformers reference to 2e-3) by position, matching the
+requests to teacher sequences by token content. The free runs reproduce the acceptance
+numbers (tiny8 chunked, 40 tokens: top-1 False, mean 6.3268, max 32.039), so these are the
+acceptance runs.
+
+1. **Every deviation starts at a router near-tie.** In every free run the first router
+   decision that differs from the fp32 run has an fp32 margin of 6e-5 .. 1.9e-3 (fp16
+   engine margin 1.1e-4 .. 1.5e-3); the layer outputs before it are at fp16 noise
+   (relative error <= 1.6e-2 tiny8, <= 5e-3 tiny1), after it O(1) (0.85 .. 1.6):
+
+   | run | first flip | margin fp32 / engine | layer-output rel. error before / after |
+   |---|---|---|---|
+   | tiny8 chunked, p40 alone (signal 1) | chunk 2, layer 3 visit 1, position 28 | 1.9e-4 / 1.4e-3 | 8.5e-3 / 1.43 |
+   | tiny8 default, p40 alone (signal 3) | first decode token, position 40, layer 3 visit 2 | 6.1e-5 / 3.5e-4 | 1.6e-2 / 1.58 |
+   | tiny8 default, batch of 3, p40 (signal 2) | prefill, layer 3 visit 1, position 28 | 1.9e-4 / 3.7e-4 | 5.9e-3 / 1.35 |
+   | tiny8 default, batch of 3, p70 | prefill, layer 2 visit 1, position 45 | 6.2e-4 / 2.0e-4 | 4.1e-3 / 1.55 |
+   | tiny1 default, p40 alone | prefill, layer 2 visit 1, position 5 | 2.3e-4 / 1.1e-4 | 2.7e-3 / 1.01 |
+   | tiny1 default, p70 alone | prefill, layer 3 visit 0, position 10 | 1.3e-4 / 1.9e-4 | 3.0e-3 / 1.26 |
+
+   Which near-tie flips depends on the GEMM shapes: the 40-token prompt of tiny8 has no
+   flip in its default single-request prefill (last-position mean 0.0525), 40 flipped
+   decisions in the batch of 3 and 60 when chunked. The decode signal is one decision at
+   the first decode token (position 40, margin 6.1e-5): decode step 0 is off by mean
+   1.39 and the ids leave the reference one token later.
+
+2. **With the fp32 router decisions imposed every scenario agrees with the reference**:
+   ids equal the reference for 8/8 steps for every request of every forced run, and the
+   last-position mean abs dlogp (prompts 5 / 40 / 70) is at the noise floor:
+
+   | scenario | tiny8 default | tiny8 chunked | tiny1 default | tiny1 chunked |
+   |---|---|---|---|---|
+   | alone, free routing | 0.0216 / 0.0525 / 0.0420 | 0.0216 / 6.327 / 0.0423 | 0.0090 / 1.052 / 0.139 | 0.0090 / 1.053 / 0.139 |
+   | alone, forced | 0.0216 / 0.0525 / 0.0352 | 0.0216 / 0.0447 / 0.0343 | 0.0090 / 0.0240 / 0.0126 | 0.0090 / 0.0258 / 0.0120 |
+   | batch of 3, forced | 0.0241 / 0.0584 / 0.0300 | 0.0234 / 0.0481 / 0.0297 | 0.0090 / 0.0186 / 0.0115 | 0.0090 / 0.0250 / 0.0105 |
+
+   The worst layer-output relative error over all visits and positions of the forced runs
+   is 1.0e-2 for the 5-token and 1.4e-2 .. 1.8e-2 for the 40- and 70-token prompts
+   (tiny8), 4.2e-3 .. 6.6e-3 (tiny1), the same alone, batched and chunked, and of the
+   order of the CPU fp16 emulation with exact experts (1.3e-2 tiny8, 4e-3 .. 6e-3
+   tiny1): the expert kernels add no visible noise on top of fp16.
+
+3. **No cross-request state.** A batch of 5 with a dummy 23-token request in front and
+   the 40-token prompt twice (rows 1 and 4), the 70- and 5-token prompts in between,
+   forced: 8/8 ids for every request; the two copies differ per visit by a relative
+   1.0e-2 (tiny8) / 4.4e-3 (tiny1), less than each differs from the teacher (1.6e-2 /
+   5.5e-3), and in the logprobs by at most 0.147 / 0.050 over 8 steps (chunked: 0.113 /
+   0.044). That is rounding noise from the batch row. A contaminated state would be
+   O(1). The same holds for the chunked batches (copies cannot be told apart by row
+   there; every request is within 1.8e-2 of the teacher per visit).
+
+4. **The flips are noise-level events.** On the path pinned to the teacher the engine's
+   own (unforced) decisions differ from the fp32 ones in 0 .. 5 of 96 .. 1232 decisions
+   per prompt, all at fp32 margins <= 1.9e-3 (0.1 .. 2.4 % of all decisions have a margin
+   that small).
+
+5. **What the real engine hands over** (block tables of the 70-token prompt, tiny1
+   chunked, dumped from the model): the hybrid 64 / 4 / 4 / 64 layout with scattered
+   block ids; the null block 0 for the blocks below the window of the first scheduled
+   token (a conv group, block size 4, at the second 16-token chunk: columns 0-2 null,
+   live blocks from position 12 on); slot mapping
+   `block * block_size + position % block_size`; *stale non-null block ids in the unused
+   tail columns* of the persistent block-table row (ids of the previous request in that
+   row), never read. This is what `paged_harness.py` emulates, except that it pads the
+   tail with the null block (a read there fails the NaN check).
+
+6. **A state bug found on the way, fixed: a same-step prefix hit read unwritten conv
+   history.** `KVCacheManager.allocate_slots` registers the full blocks of the tokens it
+   schedules in the prefix cache *before* they are computed
+   (`coordinator.cache_blocks(request, computed + new)`), so a request scheduled later in
+   the same pass (identical prompts, `n > 1` samples, a shared system prompt) can hit
+   blocks that the first request only writes in the very step both run in. `conv_taps`
+   read the history of the first tokens of the hit (the previous three positions, owned
+   by the other request) before it wrote the inputs of the step: unwritten or stale
+   slots. K/V were not affected (`kv_write` of the whole batch precedes `_attend`).
+   `conv_taps` now writes first. Prefix caching is on by default for this architecture
+   (`ModelConfig.is_prefix_caching_supported` is true for generative models). CPU, on
+   HEAD: `test_conv_taps_of_a_prefix_hit_on_blocks_written_in_the_same_step` (state
+   level) and `test_prefix_cache_hit_on_blocks_written_in_the_same_step` (whole model)
+   fail with non-finite output (the poisoned page is read; real memory would give wrong
+   finite values); with the fix they match the dense oracle / the reference (state: max
+   abs diff 1e-7 .. 1e-6; model, fp32: max abs dlogit 3e-5 .. 1.5e-4).
+
+   On the engine (fp32 router decisions imposed, prefix caching on, three requests `p2`,
+   `p2`, `p2[:67]` in one `generate` call: the scheduler hands the model one 79-token
+   step, `70 + 6 + 3` tokens, the two hits with `cached 64`; the runner puts the short
+   requests first):
+
+   | conv_taps | checkpoint | request | ids equal ref | last top-1 | mean / max abs dlogp | first layer visit above 5 % |
+   |---|---|---|---|---|---|---|
+   | HEAD (reads first) | tiny1 | owner | 8/8 | True | 0.0120 / 0.055 | none (6.5e-3 worst) |
+   | HEAD (reads first) | tiny1 | hit | **0/8** | **False** | **2.72 / 11.09** | visit 0 (layer 0), rel. 0.90 at position 64 |
+   | fixed | tiny1 | hit | 8/8 | True | 0.0125 / 0.052 | none (5.2e-3 worst) |
+   | HEAD (reads first) | tiny8 | hit | **0/8** | **False** | **3.83 / 15.50** | visit 0 (layer 0), rel. 0.75 at position 64 |
+   | fixed | tiny8 | hit | 8/8 | True | 0.0319 / 0.122 | none (9.0e-3 worst) |
+
+   Hits on blocks of a *finished* request (five sequential `generate` calls, `cached 64`
+   for the repeated 70-token prompt and for its 67-token prefix) were correct with both
+   versions: ids 8/8, mean 0.0126 (tiny1) / 0.0347 (tiny8). With chunked prefill
+   (16 tokens per step, tiny1) the three requests no longer share a step; both full
+   prompts are correct (cached 64, ids 8/8, mean 0.0121 / 0.0122).
+   The same-step tests are the GPU-free guard; the engine runs are
+   `engine_debug.py --prefix-caching [--old-conv]` (`--old-conv` swaps the HEAD
+   `conv_taps` in).
+
+7. **The engine is deterministic run to run.** Three identical free-routing runs of the
+   40-token prompt alone and of the batch of three, on tiny8, give bitwise equal ids and
+   logprobs and a maximum layer-output difference of exactly 0: the router flips of
+   finding 1 are deterministic functions of the GEMM shapes, not races.
+
+Consequences. `tiny_vllm_check.py` judges a *chaotic* checkpoint with free routing: its
+ids / top-1 / mean checks on the 40- and 70-token prompts and its batch-vs-single check
+(`worst < 0.05`, below the 0.11 .. 0.15 that two identical forced tiny8 requests differ
+by at different batch rows) fail for reasons that are properties of the random model, not
+of the serving code. The deterministic verdict is the forced-route run. CPU side, the
+fp16 tests of `test_paged_model.py` now impose the fp32 run's expert choice by position
+for chunked prefill (chunk 7 / 16, KV block 4 / 64), a mixed batch and cached decode
+(`test_fp16_*_given_the_same_expert_choice`: mean abs dlogp 7e-3 .. 2.2e-2), and the
+8-layer fixture uses the seed of the GPU checkpoint, so the CPU free-routing numbers show
+the same kind of deviation as the engine (last position of p40: 6.0, p70: 1.8).
+`PagedWorld.fork_prefix` emulates a prefix-cache hit (shared reference-counted blocks, the
+null block before the window of the windowed groups, optionally on blocks the owner only
+writes in the same step); `test_prefix_cache_hit_*` run a hit request and the owner of its
+blocks in one batch and decode them, let the owner finish while the hit is alive, and
+schedule the hit and its owner in the same step in both batch orders (fp32 max abs dlogit
+4e-5 .. 1.5e-4). The scheduler's own hit logic (`find_longest_cache_hit`, alignment) is
+vLLM code; the engine runs above exercise it (hit length 64 = the 64-token block of the
+hybrid layout).
+`test_long_sequence_past_every_window_matches_reference` runs 200 tokens (chunks of 16 /
+33, then single-token steps through positions 79 and 143, where the 64-token blocks of
+the windowed groups become free) with the freed pages poisoned: max abs dlogit
+7e-5 .. 1.7e-4. The tiny prompts of the engine runs (<= 78 tokens) never free such a
+block, so that part is CPU-only.

@@ -89,6 +89,54 @@ def test_conv_taps_matches_dense_short_conv(stream, conv_bs, seed):
         assert err < UNIT_TOL
 
 
+@pytest.mark.parametrize("stream", [state_mod.STREAM_K, state_mod.STREAM_ATTN])
+@pytest.mark.parametrize("conv_bs", [4, 8])
+@pytest.mark.parametrize("hit_first", [False, True])
+def test_conv_taps_of_a_prefix_hit_on_blocks_written_in_the_same_step(
+    stream, conv_bs, hit_first
+):
+    """The scheduler registers the blocks of the tokens it schedules before they are
+    computed, so a request of the batch can hit blocks that another request writes in
+    this very step: the conv history of its first tokens is read from those blocks, so
+    ``conv_taps`` has to write the inputs of the step before it reads."""
+    cfg = text_config()
+    nkv, D, H, k = cfg.num_key_value_heads, cfg.head_dim, cfg.hidden_size, 4
+    channels = (nkv * D, nkv * D, H, H)
+    fake = fake_vllm_config("none", None)
+    with patched(state_mod, "get_current_vllm_config", lambda: fake):
+        owner = state_mod.Inkling2ConvOwner(
+            num_kv_heads=nkv, stream_channels=channels, kernel_size=k, prefix="t.conv"
+        )
+    world = PagedWorld([(owner, "conv")], {"conv": (conv_bs, k)}, torch.float32)
+    C = channels[stream]
+    gen = torch.Generator().manual_seed(0)
+    paged_conv = attn_mod.StaticSconv(C, k)
+    dense_conv = dense.ShortConvolution(C, k)
+    with torch.no_grad():
+        dense_conv.conv1d.weight.copy_(0.5 * torch.randn(C, 1, k, generator=gen))
+        paged_conv.conv1d.weight.copy_(dense_conv.conv1d.weight)
+    n, hit = 70, 64
+    x_all = torch.randn(n, C, generator=gen)
+    with torch.no_grad():
+        want = dense_conv(x_all)
+    world.fork_prefix(0, 1, hit, in_flight=True)
+    work = [(0, n), (1, n - hit)]
+    if hit_first:
+        work.reverse()
+    first = {0: 0, 1: hit}  # first position each request computes
+    md = world.metadata(work)["t.conv"]
+    x = torch.cat([x_all[first[r] :] for r, _ in work])
+    with torch.no_grad():
+        taps = state_mod.conv_taps(owner, stream, x, world.positions(work), md)
+        y = paged_conv.forward_taps(taps)
+    at = 0
+    for r, count in work:
+        err = float((y[at : at + count] - want[first[r] :]).abs().max())
+        _report(f"same-step hit stream={stream} bs={conv_bs} request {r}", err)
+        assert err < UNIT_TOL
+        at += count
+
+
 @pytest.mark.parametrize("window", [None, 16])
 @pytest.mark.parametrize("kv_bs", [4, 16, 64])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])

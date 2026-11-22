@@ -266,6 +266,18 @@ def conv_taps(
     first = md.query_start_loc[:-1].long()[seq_idx]  # [T] first row of the request
     row = torch.arange(T, device=x.device)
     p0 = positions[first]  # position of the request's first token this step
+    # Write this step's inputs before any read: a prefix-cache hit of this batch reads
+    # the history of its first tokens from blocks that another request of the batch only
+    # writes in this very step (the scheduler registers the blocks of the tokens it
+    # schedules before they are computed).  Slots of different positions never overlap.
+    slot = md.slot_mapping
+    ok = slot >= 0
+    s = slot.clamp(min=0)
+    blk_w, off_w = s // bs, s % bs
+    cur = cache[blk_w, :, off_w, o0 : o0 + w]
+    cache[blk_w, :, off_w, o0 : o0 + w] = torch.where(
+        ok[:, None, None], x.view(T, H, w), cur
+    )
     taps = [x]
     for lag in range(1, k):
         src_pos = positions - lag
@@ -277,15 +289,6 @@ def conv_taps(
         hist_x = x[(row - lag).clamp(min=0)]
         t = torch.where(in_chunk[:, None], hist_x, hist_cache)
         taps.append(torch.where(valid[:, None], t, torch.zeros_like(t)))
-    # Write this step's inputs (after the reads above; slots do not overlap).
-    slot = md.slot_mapping
-    ok = slot >= 0
-    s = slot.clamp(min=0)
-    blk_w, off_w = s // bs, s % bs
-    cur = cache[blk_w, :, off_w, o0 : o0 + w]
-    cache[blk_w, :, off_w, o0 : o0 + w] = torch.where(
-        ok[:, None, None], x.view(T, H, w), cur
-    )
     return torch.stack(taps, dim=0)
 
 

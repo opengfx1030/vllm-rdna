@@ -18,6 +18,14 @@ default 6-layer model and the 8-layer variant (loop 2:6 x3, two attention-residu
 blocks inside the loop, so the message slots are observable).  Logits of **every**
 position are compared.
 
+fp16 is the serving dtype.  The random tiny models are router-chaotic: a near-tie in the
+top-k expert choice flips under fp16 rounding and moves the logits by O(1), and which
+decisions flip depends on the chunking and the batch (the GPU engine shows the same, see
+``docs/rdna2/inkling2-port-spec.md``).  The ``test_fp16_*`` tests therefore impose the
+expert choice of the fp32 run by position (``PagedModel.forced_routes``), also for
+chunked prefill, mixed batches and cached decode: a state or metadata bug then shows up
+in the logits, a router flip cannot.
+
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
         PYTHONPATH=$TREE:$TFM_MAIN pytest \
         tests/models/inkling2_loop/test_paged_model.py -q
@@ -119,6 +127,10 @@ class PagedModel:
         if experts == "exact":
             self._install_dense_experts(tensors)
         self.world: PagedWorld | None = None
+        # the step being run: (request, first row, end row, first position), and how
+        # often each layer's router ran in it (= the layer visit)
+        self._segments: list[tuple[int, int, int, int]] = []
+        self._visits: dict[int, int] = defaultdict(int)
 
     def reset(
         self,
@@ -174,6 +186,11 @@ class PagedModel:
         )
         assert self.world is not None
         positions = self.world.positions(spec)
+        self._segments, at = [], 0
+        for r, n in spec:
+            self._segments.append((r, at, at + n, self.world.computed.get(r, 0)))
+            at += n
+        self._visits = defaultdict(int)
         mds = self.world.metadata(spec) if metadata else {}
         getter = (lambda prefix: mds[prefix]) if metadata else (lambda prefix: None)
         with patched(model_mod, "get_metadata", getter):
@@ -223,25 +240,37 @@ class PagedModel:
                 h.remove()
 
     @contextlib.contextmanager
-    def forced_routes(self, routes):
-        """Router decisions (which experts) taken from ``routes``; the weights stay
-        this model's own sigmoid scores of those experts."""
-        calls: dict[int, int] = defaultdict(int)
-        saved = []
+    def forced_routes(self, routes: dict[int, dict[tuple[int, int], torch.Tensor]]):
+        """Router decisions (which experts) of the requests in ``routes`` taken from
+        ``routes[request][(layer, visit)]`` (top-k ids ``[T, k]`` of the whole
+        sequence, indexed by position, whatever the chunking / batching); the weights
+        stay this model's own sigmoid scores of those experts.  Other requests keep
+        their own choice."""
 
         def forced(i, gate):
             def forward(hidden):
                 flat = hidden.float().reshape(-1, gate.hidden_dim)
                 logits = torch.nn.functional.linear(flat, gate.weight)
                 scores = torch.sigmoid(logits)
-                idx = routes[(i, calls[i])].to(hidden.device)
-                calls[i] += 1
+                visit = self._visits[i]
+                self._visits[i] += 1
+                idx = torch.topk(
+                    scores + gate.e_score_correction_bias,
+                    gate.top_k,
+                    dim=-1,
+                    sorted=False,
+                ).indices
+                for req, a, b, pos0 in self._segments:
+                    if req in routes:
+                        table = routes[req][(i, visit)]
+                        idx[a:b] = table[pos0 : pos0 + (b - a)].to(idx.device)
                 w = scores.gather(1, idx)
                 w = w / (w.sum(-1, keepdim=True) + 1e-20)
                 return logits, w * gate.routed_scaling_factor, idx
 
             return forward
 
+        saved = []
         for i, layer in enumerate(self.lm.model.layers):
             saved.append((layer.mlp.gate, layer.mlp.gate.forward))
             layer.mlp.gate.forward = forced(i, layer.mlp.gate)
@@ -265,7 +294,7 @@ def variant(request, tmp_path_factory):
         spec = make.TinySpec(
             num_hidden_layers=8, loop_start=2, loop_end=6, loop_num_passes=3
         )
-        seed = 3
+        seed = 0  # make_tiny_checkpoint.py's default: the checkpoint of the GPU runs
     path = tmp_path_factory.mktemp(request.param)
     make.write_checkpoint(path, spec, seed=seed)
     return types.SimpleNamespace(
@@ -275,6 +304,7 @@ def variant(request, tmp_path_factory):
         ref=ref.build_reference(path),
         models={},  # dtype -> PagedModel (weights loaded once)
         logits={},  # prompt -> reference logits of every position
+        routes={},  # sequence -> expert choice of the fp32 run
     )
 
 
@@ -350,17 +380,42 @@ def test_greedy_decode_matches_reference(variant):
     assert _err(variant, "greedy decode", torch.cat(rows), want_logits) < FP32_TOL
 
 
-def test_batch_of_requests_matches_reference(variant):
-    """Prefill chunks, single-token steps and a whole prefill of different requests
-    in one batch, in changing batch order; each equals its own uncached reference."""
-    p5, p40, p70 = _prompts()
-    pm = _model(variant)
-    plan = [
+@pytest.mark.parametrize("kv_bs", [4, 64])
+@pytest.mark.parametrize("chunk", [16, 33])
+def test_long_sequence_past_every_window_matches_reference(variant, kv_bs, chunk):
+    """200 tokens: the windowed groups (16 keys, 4 conv taps) free their blocks behind
+    the window, the 64-token ones from position 79 and 143 on.  Chunked prefill and
+    single-token decode steps (also exactly where a block becomes free: positions 79 and
+    143) never read a freed block (the harness poisons them)."""
+    gen = torch.Generator().manual_seed(99)
+    ids = torch.randint(0, 500, (200,), generator=gen).tolist()
+    pm = _model(variant, kv_block_size=kv_bs)
+    plan = [(0, 70, chunk), (70, 150, 1), (150, 196, chunk), (196, 200, 1)]
+    rows = []
+    for first, end, size in plan:
+        for start in range(first, end, size):
+            rows.append(pm.step([(0, ids[start : min(start + size, end)])])[0])
+    what = f"200 tokens chunk {chunk} kv_bs {kv_bs}"
+    assert _err(variant, what, torch.cat(rows), _want(variant, ids)) < FP32_TOL
+
+
+def _batch_plan(p5, p40, p70):
+    """Prefill chunks, single-token steps and a whole prefill of different requests in
+    one batch, in changing batch order (request 0 ends up as ``p5 + [7]``)."""
+    return [
         [(1, p40[:16]), (2, p70[:50]), (0, p5)],
         [(2, p70[50:51]), (1, p40[16:33])],
         [(1, p40[33:]), (2, p70[51:52]), (0, [7])],
         [(2, p70[52:])],
     ]
+
+
+def test_batch_of_requests_matches_reference(variant):
+    """Prefill chunks, single-token steps and a whole prefill of different requests
+    in one batch, in changing batch order; each equals its own uncached reference."""
+    p5, p40, p70 = _prompts()
+    pm = _model(variant)
+    plan = _batch_plan(p5, p40, p70)
     fed: dict[int, list[int]] = {0: [], 1: [], 2: []}
     got: dict[int, list[torch.Tensor]] = {0: [], 1: [], 2: []}
     for step in plan:
@@ -415,6 +470,31 @@ def _dlogp(got: torch.Tensor, want: torch.Tensor) -> torch.Tensor:
     return torch.log_softmax(got.float(), -1) - torch.log_softmax(want.float(), -1)
 
 
+def _expert_choice(variant, ids) -> dict[tuple[int, int], torch.Tensor]:
+    """Top-k expert ids of every (layer, visit) of the fp32 run over all of ``ids``."""
+    key = tuple(ids)
+    if key not in variant.routes:
+        pm32 = _model(variant, dtype=torch.float32)
+        with pm32.recording_routes() as routes:
+            pm32.step([(0, ids)])
+        variant.routes[key] = routes
+    return variant.routes[key]
+
+
+def _fp16_check(variant, what: str, got, ids, first: int = 0) -> None:
+    """``got``: fp16 logits of the positions ``first ..`` of ``ids``.  With the expert
+    choice of the fp32 run they agree to ~1e-2 (rounding only)."""
+    want = _want(variant, ids)[first : first + len(got)]
+    assert torch.isfinite(got).all()
+    d = _dlogp(got, want)
+    print(
+        f"[paged] {variant.name} fp16 {what}: mean|dlogp| {float(d.abs().mean()):.3e}"
+        f" (last position {float(d[-1].abs().mean()):.3e})"
+    )
+    assert float(d.abs().mean()) < 0.05
+    assert int(got[-1].argmax()) == int(want[-1].argmax())
+
+
 def test_fp16_serving_dtype_matches_reference_given_the_same_expert_choice(variant):
     """Serving dtype: fp16 weights / activations (experts exact).  The only thing
     fp16 rounding can do on top of the fp32 run is flip near-tie top-k router
@@ -423,13 +503,11 @@ def test_fp16_serving_dtype_matches_reference_given_the_same_expert_choice(varia
     prompts = _prompts()
     free, forced = [], []
     for ids in prompts:
-        pm32 = _model(variant, dtype=torch.float32)
-        with pm32.recording_routes() as routes:
-            pm32.step([(0, ids)])
+        routes = _expert_choice(variant, ids)
         pm = _model(variant, dtype=torch.float16)
         free.append(pm.step([(0, ids)])[0])
         pm.reset()
-        with pm.forced_routes(routes):
+        with pm.forced_routes({0: routes}):
             forced.append(pm.step([(0, ids)])[0])
     for ids, f, g in zip(prompts, free, forced):
         want = _want(variant, ids)
@@ -444,3 +522,153 @@ def test_fp16_serving_dtype_matches_reference_given_the_same_expert_choice(varia
         assert torch.isfinite(f).all() and torch.isfinite(g).all()
         assert float(d.abs().mean()) < 0.05
         assert int(g[-1].argmax()) == int(want[-1].argmax())
+
+
+@pytest.mark.parametrize("kv_bs", [4, 64])
+@pytest.mark.parametrize("chunk", [7, 16])
+@pytest.mark.parametrize("n", [40, 70])
+def test_fp16_chunked_prefill_given_the_same_expert_choice(variant, kv_bs, chunk, n):
+    """Chunked prefill in the serving dtype: free routing flips near-ties differently
+    from the unchunked run (the chunk shapes change the rounding), the expert choice
+    of the fp32 run removes that and leaves rounding noise only."""
+    ids = _prompts()[PROMPT_LENS.index(n)]
+    pm = _model(variant, dtype=torch.float16, kv_block_size=kv_bs)
+    with pm.forced_routes({0: _expert_choice(variant, ids)}):
+        got = pm.run(0, ids, chunk)
+    _fp16_check(variant, f"chunk {chunk} kv_bs {kv_bs} n={n}", got, ids)
+
+
+def test_fp16_batch_given_the_same_expert_choice(variant):
+    """Requests of different prompts in one batch share no state (the expert choice
+    of every request is its own fp32 run's)."""
+    p5, p40, p70 = _prompts()
+    seqs = {0: p5 + [7], 1: p40, 2: p70}
+    pm = _model(variant, dtype=torch.float16)
+    fed: dict[int, list[int]] = {0: [], 1: [], 2: []}
+    got: dict[int, list[torch.Tensor]] = {0: [], 1: [], 2: []}
+    routes = {r: _expert_choice(variant, ids) for r, ids in seqs.items()}
+    with pm.forced_routes(routes):
+        for step in _batch_plan(p5, p40, p70):
+            out = pm.step([(r, list(t)) for r, t in step])
+            for r, t in step:
+                fed[r] += t
+                got[r].append(out[r])
+    for r in (0, 1, 2):
+        assert fed[r] == seqs[r]
+        _fp16_check(variant, f"batch request {r}", torch.cat(got[r]), seqs[r])
+
+
+def test_fp16_cached_decode_given_the_same_expert_choice(variant):
+    ids = _prompts()[2]
+    split = len(ids) - 8
+    pm = _model(variant, dtype=torch.float16)
+    with pm.forced_routes({0: _expert_choice(variant, ids)}):
+        rows = [pm.step([(0, ids[:split])])[0][-1:]]
+        for tok in ids[split : len(ids) - 1]:
+            rows.append(pm.step([(0, [tok])])[0])
+    _fp16_check(variant, "cached decode", torch.cat(rows), ids, first=split - 1)
+
+
+def test_forced_routes_follow_the_positions_of_each_request(variant):
+    """The forcing the fp16 tests rely on: the router rows of a request get the expert
+    choice of their own request and positions, whatever the chunking or the requests
+    around them."""
+    p5, p40, _ = _prompts()
+    seqs = {0: p5 + [7], 1: p40}
+    pm = _model(variant, dtype=torch.float16)
+    experts = pm.lm.model.layers[0].mlp.gate.weight.shape[0]
+    # not the model's own choice, so that the forcing cannot pass by accident
+    table = {
+        r: {key: (ids + 1) % experts for key, ids in _expert_choice(variant, s).items()}
+        for r, s in seqs.items()
+    }
+    plan = [[(1, p40[:16]), (0, p5)], [(1, p40[16:33])], [(0, [7]), (1, p40[33:])]]
+    checked = 0
+    with pm.forced_routes(table):
+        for work in plan:
+            with pm.recording_routes() as got:
+                pm.step([(r, list(t)) for r, t in work])
+            for req, a, b, pos0 in pm._segments:
+                for (layer, visit), ids in got.items():
+                    want = table[req][(layer, visit)][pos0 : pos0 + (b - a)]
+                    assert torch.equal(ids[a:b], want), (req, layer, visit)
+                    checked += 1
+    assert checked > 0
+
+
+HIT = 64  # a multiple of every group's block size, like the engine's hybrid alignment
+
+
+@pytest.mark.parametrize("kv_bs", [4, 16, 64])
+@pytest.mark.parametrize("same_tail", [True, False])
+@pytest.mark.parametrize("chunk", [None, 4])
+def test_prefix_cache_hit_matches_the_reference(variant, kv_bs, same_tail, chunk):
+    """A request whose first 64 tokens are a prefix-cache hit (blocks computed by
+    another request and shared, the null block before the window of the windowed groups)
+    computes only the rest (in one step or in chunks), then decodes like a request that
+    computed everything itself; the request that owns the blocks continues in the same
+    batch."""
+    ids = _prompts()[2]
+    seqs = {
+        0: list(ids),
+        1: ids[:HIT] + (ids[HIT:] if same_tail else [3, 1, 4, 1, 5, 9]),
+    }
+    pm = _model(variant, kv_block_size=kv_bs)
+    pm.step([(0, ids[:HIT])])
+    assert pm.world is not None
+    pm.world.fork_prefix(0, 1, HIT)
+    tail = len(ids) - HIT
+    got: dict[int, list[torch.Tensor]] = {0: [], 1: []}
+    for a in range(0, tail, chunk or tail):
+        end = a + (chunk or tail)
+        out = pm.step([(r, seqs[r][HIT + a : HIT + end]) for r in (0, 1)])
+        for r in (0, 1):
+            got[r].append(out[r])
+    for tokens in ((11, 13), (12, 14)):  # decode, both requests in one batch
+        out = pm.step([(r, [tokens[r]]) for r in (0, 1)])
+        for r in (0, 1):
+            seqs[r].append(tokens[r])
+            got[r].append(out[r])
+    for r in (0, 1):
+        want = _want(variant, seqs[r])[HIT:]
+        err = _err(
+            variant, f"prefix hit kv_bs {kv_bs} request {r}", torch.cat(got[r]), want
+        )
+        assert err < FP32_TOL
+
+
+def test_prefix_cache_hit_outlives_the_owner(variant):
+    """The shared blocks stay alive when the request that computed them finishes, and
+    are not handed to the next request."""
+    p5, p40, p70 = _prompts()
+    pm = _model(variant, kv_block_size=16, seed=3)
+    pm.step([(0, p70[:HIT])])
+    assert pm.world is not None
+    pm.world.fork_prefix(0, 1, HIT)
+    pm.world.finish(0)
+    out = pm.step([(1, p70[HIT:]), (2, p40), (3, p5)])  # new requests recycle blocks
+    for r, ids in ((1, p70), (2, p40), (3, p5)):
+        want = _want(variant, ids)[HIT if r == 1 else 0 :]
+        assert (
+            _err(variant, f"hit outlives its owner, request {r}", out[r], want)
+            < FP32_TOL
+        )
+
+
+@pytest.mark.parametrize("kv_bs", [4, 64])
+@pytest.mark.parametrize("hit_first", [False, True])
+def test_prefix_cache_hit_on_blocks_written_in_the_same_step(variant, kv_bs, hit_first):
+    """The scheduler registers the blocks of the tokens it schedules before they are
+    computed, so a request of the same batch can hit blocks that the owner only writes
+    in this very step: the cache reads of the hit (K/V of its window, the conv history
+    of its first tokens) must see those writes, whatever the order in the batch."""
+    ids = _prompts()[2]
+    pm = _model(variant, kv_block_size=kv_bs)
+    assert pm.world is not None
+    pm.world.fork_prefix(0, 1, HIT, in_flight=True)
+    work = [(0, ids), (1, ids[HIT:])]
+    out = pm.step(work[::-1] if hit_first else work)
+    for r, first in ((0, 0), (1, HIT)):
+        want = _want(variant, ids)[first:]
+        what = f"same-step hit kv_bs {kv_bs} request {r}"
+        assert _err(variant, what, out[r], want) < FP32_TOL

@@ -17,6 +17,9 @@ hands over, on torch CPU tensors:
   when they are freed, and the null block must stay NaN forever.  Reading anything this
   request did not write turns the result into NaN; writing through another group's
   metadata hits the null-block check.
+* prefix-cache hits: ``PagedWorld.fork_prefix`` starts a request on blocks that
+  another request computed (shared and reference counted; a windowed group keeps only
+  the blocks its window still needs, the blocks before are the null block).
 """
 
 from __future__ import annotations
@@ -60,14 +63,19 @@ class Group:
         self.free = ids
         self.owners: list = []
         self.tables: dict[int, list[int]] = {}
+        self.refs: dict[int, int] = {}  # block -> requests holding it
 
     def _poison(self, blk: int) -> None:
         for owner in self.owners:
             owner.kv_cache[blk] = float("nan")
 
     def release(self, blk: int) -> None:
-        self._poison(blk)
-        self.free.append(blk)
+        """Drop one holder of ``blk``; the last one poisons the page and frees it."""
+        self.refs[blk] -= 1
+        if self.refs[blk] == 0:
+            del self.refs[blk]
+            self._poison(blk)
+            self.free.append(blk)
 
     def remove_skipped(self, req: int, num_computed: int) -> None:
         """``SlidingWindowManager.remove_skipped_blocks``."""
@@ -85,7 +93,24 @@ class Group:
         while len(table) < cdiv(num_tokens, self.bs):
             blk = self.free.pop()
             self._poison(blk)
+            self.refs[blk] = 1
             table.append(blk)
+
+    def share(self, src: int, dst: int, num_tokens: int) -> None:
+        """Prefix-cache hit: ``dst`` starts from the first ``num_tokens`` tokens held in
+        the blocks of ``src`` (shared, reference counted).  A windowed group only keeps
+        the blocks of the last ``window - 1`` tokens, the ones before are the null block
+        (``SlidingWindowManager.find_longest_cache_hit``)."""
+        assert num_tokens % self.bs == 0, "hits are block aligned"
+        end = num_tokens // self.bs
+        first = 0
+        if self.window is not None:
+            first = max(0, num_tokens - (self.window - 1)) // self.bs
+        needed = self.tables[src][first:end]
+        assert len(needed) == end - first and 0 not in needed, "the hit blocks are gone"
+        for blk in needed:
+            self.refs[blk] += 1
+        self.tables[dst] = [0] * first + needed
 
     def row(self, req: int, width: int, first_pos: int) -> list[int]:
         """Block-table row of the forward pass: entries wholly below the window of
@@ -212,6 +237,28 @@ class PagedWorld:
         for g in self.groups.values():
             g.finish(req)
         self.computed.pop(req, None)
+
+    def fork_prefix(
+        self, src: int, dst: int, num_tokens: int, in_flight: bool = False
+    ) -> None:
+        """``dst`` is a prefix-cache hit of ``num_tokens`` tokens on the blocks of
+        ``src`` (call it before ``src`` frees them: its next ``metadata`` does).
+
+        ``in_flight``: the scheduler registers the blocks of the tokens it schedules
+        before they are computed, so a request of the same batch can hit blocks that
+        ``src`` only writes in the step both run in; ``src`` has allocated them and
+        computed nothing yet."""
+        assert dst not in self.computed
+        if in_flight:
+            assert self.computed.get(src, 0) == 0
+            for g in self.groups.values():
+                g.tables.setdefault(src, [])
+                g.allocate(src, num_tokens)
+        else:
+            assert self.computed[src] >= num_tokens
+        for g in self.groups.values():
+            g.share(src, dst, num_tokens)
+        self.computed[dst] = num_tokens
 
 
 @contextlib.contextmanager

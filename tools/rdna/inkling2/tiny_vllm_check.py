@@ -33,11 +33,18 @@ Usage (``HIP_VISIBLE_DEVICES`` must select exactly the GPU you were assigned)::
 
 Thresholds: the reference runs fp32 with exactly dequantised experts, the engine fp16
 activations on the W4A16 / W8A16 kernels, so the comparison is statistical.  A random
-tiny model also flips near-tie top-k router decisions under fp16 rounding, and one flip
-moves the logits of the tokens after it by O(1): ``tests/models/inkling2_loop/
-test_paged_model.py`` shows the CPU fp16 emulation of this very checkpoint with *exact*
-experts at last-position mean |dlogp| ``[0.006, 1.05, 0.14]`` for the three prompts and
-at ``<= 0.015`` once the expert choice of the fp32 run is imposed.
+tiny model also flips near-tie top-k router decisions under fp16 rounding (fp32 margins
+of 1e-4 .. 2e-3 against fp16 noise of ~1e-2), and one flip moves the logits of the
+tokens after it by O(1).  Which decisions flip depends on the GEMM shapes, so the same
+prompt can fail alone, chunked or in a batch.  ``tests/models/inkling2_loop/
+test_paged_model.py`` shows the CPU fp16 emulation of these checkpoints with *exact*
+experts at last-position mean |dlogp| ``[0.006, 1.05, 0.14]`` (tiny1) and
+``[0.017, 6.0, 1.8]`` (tiny8) for the three prompts, and at ``0.006 .. 0.061`` once the
+expert choice of the fp32 run is imposed.  On the engine the same imposition (see
+``docs/rdna2/inkling2-port-spec.md``, 2026-11-22) gives the reference ids for 8/8 steps
+in every scenario (alone, batched, shifted in a batch, chunked), so a failure on the 40
+or 70 token prompt is a routing-stability statement about the prompt until that
+forced-route check says otherwise.
 """
 
 from __future__ import annotations
@@ -229,16 +236,8 @@ def main() -> int:
         while agree < steps and r["ids"][agree] == ref_ids[i][agree]:
             agree += 1
         per_step = [compare(r["lp"][s], ref_dec[i, s]) for s in range(agree)]
-        mean = (
-            float(np.mean([m["mean_abs"] for m in per_step]))
-            if per_step
-            else float("nan")
-        )
-        mx = (
-            float(np.max([m["max_abs"] for m in per_step]))
-            if per_step
-            else float("nan")
-        )
+        mean = float(np.mean([m["mean_abs"] for m in per_step])) if per_step else None
+        mx = float(np.max([m["max_abs"] for m in per_step])) if per_step else None
         report["decode"].append(
             {
                 "ids": r["ids"],
@@ -248,9 +247,14 @@ def main() -> int:
                 "max_abs": mx,
             }
         )
+        shown = (
+            "mean|dlogp| n/a (no step equal)"
+            if mean is None
+            else f"mean|dlogp|={mean:.5f} max={mx:.4f}"
+        )
         print(
             f"  decode n={len(ids[i]):3d}: ids {r['ids']} vs ref {ref_ids[i]} "
-            f"(first {agree}/{steps} equal) mean|dlogp|={mean:.5f} max={mx:.4f}",
+            f"(first {agree}/{steps} equal) {shown}",
             flush=True,
         )
     check(
@@ -259,10 +263,14 @@ def main() -> int:
         f"{[d['agree'] for d in report['decode']]} "
         f"of {steps} steps equal the reference",
     )
+    means = [
+        None if d["mean_abs"] is None else round(d["mean_abs"], 5)
+        for d in report["decode"]
+    ]
     check(
         "decode/mean_abs",
         all(d["mean_abs"] < args.tol_mean for d in report["decode"] if d["agree"]),
-        f"{[round(d['mean_abs'], 5) for d in report['decode']]} (tol {args.tol_mean})",
+        f"{means} (tol {args.tol_mean}; None: no step equal)",
     )
     # the decode run's first step is the last-position run again (state is not reused)
     same = all(
