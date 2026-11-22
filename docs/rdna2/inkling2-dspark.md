@@ -348,7 +348,10 @@ bf16 weights are converted at load).
   profile found for the fifth-row cost (the row policy picked the 8-row MoE instance from 5
   tokens, and the old mxfp8 kernel spilled registers; per-launch numbers there): the K table
   above was measured before it; the re-measurement on the merged tree is in "Merged tree"
-  below (K = 2 is the best verified width there, 1.24x at batch 1).
+  below (K = 2 is the best verified width there, 1.24x at batch 1).  Which K is best depends on the
+  content (K = 3 on chat, 7 on retrieval-style text): `speculator_options={"adaptive_k": {}}` lets the
+  scheduler pick it every step from the running acceptance, measurements in
+  `inkling2-speculation-profile.md` section 9.
 * `draft_logits.py` (`_assign_rows_kernel` / `_stale_drafts_kernel`) is runner-owned Triton
   used only for probabilistic drafting; greedy drafting (default) does not touch it.
 * Prefix-cache hits: the draft K/V blocks are cached with the target's, so a hit reads
@@ -555,11 +558,18 @@ Levers, by what the trace shows.  Done: the Markov chain stops at the schedule's
 verified K (`scheduled_draft_tokens`, `_markov_steps`; the tokens after it are never read: the
 runner passes `draft_tokens[:, :num_spec_tokens]` on), 0.13 ms per skipped step (measured
 above); its GPU oracle test (`test_the_markov_chain_stops_at_the_largest_verified_token`)
-passes.  Not done: an 8-bit copy of the LM head for the base sweep (about -1 ms per step, 3%,
-costs 0.46 GB and acceptance risk `[INFERENCE]`), a frequency-pruned draft vocabulary (about
--1.7 ms; needs an acceptance measurement on real outputs), graph capture limited to the widths
-the schedule produces (memory only).  The sweep is at the memory roofline, the layers are at
-250 - 395 GB/s: the draft is about 14% of a K = 7 step and the K = 2 / 3 gain is bounded by the
+passes.  Done since (`inkling2-speculation-profile.md` section 9): a frequency-pruned draft
+vocabulary as an explicit opt-in file (`speculator_options={"draft_vocab": "ids.npy"}`, made offline
+by `tools/rdna/inkling2/draft_vocab.py`; TP = 1, greedy), the whole draft's graph replay at K = 2
+falls from 4.47 to 2.37 ms with 32768 ids and the acceptance was measured on real outputs; and a
+content-adaptive number of verified drafts (`speculator_options={"adaptive_k": {}}`, scheduler side;
+`enable_adaptive_verification` is refused at config time: the Markov head keeps no per-position draft
+distribution for it).  Not done: an 8-bit copy of the LM head for the base sweep (about -1 ms per
+step at the full vocabulary, 0.17 ms with the pruned one; costs 0.46 GB and acceptance risk
+`[INFERENCE]`), one draft graph per verified K (the unused Markov steps, 0.2 - 0.45 ms), graph
+capture limited to the widths the schedule produces (memory only; the adaptive mode captures them
+all, +0.5 GiB).  The sweep is at the memory roofline, the layers are at 250 - 395 GB/s: the draft is
+about 14% of a K = 7 step at the full vocabulary and the K = 2 / 3 gain is bounded by the
 verification rows, not the draft.
 
 Bugs found on the merged tree: FULL capture of the draft (verify batches of 8 rows with the
