@@ -1115,6 +1115,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor? norm_w, Tensor! out, float eps, float norm_eps) -> ()");
   rocm_ops.impl("inkling2_glue_attn_res", torch::kCUDA,
                 &inkling2_glue_attn_res);
+  // Inkling-2-Mini attention-chain node fusions
+  // (csrc/rocm/inkling2_fuse_attn_rdna2.cu).
+  rocm_ops.def(
+      "inkling2_fuse_attn_res_conv(Tensor! blocks, int n_blocks, Tensor? x0, "
+      "Tensor conv_x, Tensor conv_w, Tensor! conv_cache, Tensor block_table, "
+      "Tensor seq_idx, Tensor query_start_loc, Tensor seq_lens, "
+      "int stream_offset, int num_kv_heads, int block_size, Tensor!? x1_out, "
+      "Tensor!? partial_out, Tensor? append, Tensor query, Tensor? norm_w, "
+      "Tensor! out, float eps, float norm_eps) -> ()");
+  rocm_ops.impl("inkling2_fuse_attn_res_conv", torch::kCUDA,
+                &inkling2_fuse_attn_res_conv);
+  rocm_ops.def(
+      "inkling2_fuse_msgs_fill(Tensor blocks, int n_blocks, Tensor x0, "
+      "Tensor x1, Tensor queries, Tensor! out, float eps) -> ()");
+  rocm_ops.impl("inkling2_fuse_msgs_fill", torch::kCUDA,
+                &inkling2_fuse_msgs_fill);
   rocm_ops.def(
       "inkling2_glue_msg_gate_down(Tensor h, Tensor m, Tensor wd, "
       "Tensor! d, float eps) -> ()");

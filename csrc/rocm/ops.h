@@ -889,19 +889,17 @@ void moe_nvfp4_bm_i8_rdna2(torch::Tensor a8, torch::Tensor sa, torch::Tensor c,
 // activations to inkling2_glue_swiglu followed by the plain GEMM).
 void moe_nvfp4_gemm_swiglu_rdna2(
     torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
-    torch::Tensor b_scales, torch::Tensor b_globals,
-    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
-    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
-    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
-    int64_t output_topk, double gate_cap, double up_cap);
+    torch::Tensor b_scales, torch::Tensor b_globals, torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
+    bool mul_topk_weight, int64_t output_topk, double gate_cap, double up_cap);
 
 void moe_mxfp8_gemm_swiglu_rdna2(
     torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
     torch::Tensor b_scales, torch::Tensor topk_weights,
     torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
     torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
-    bool mul_topk_weight, int64_t output_topk, double gate_cap,
-    double up_cap);
+    bool mul_topk_weight, int64_t output_topk, double gate_cap, double up_cap);
 
 // Inkling-2-Mini attention core on RDNA2 (gfx1030): paged short convolutions,
 // K/V prep and paged attention with learned relative bias and sink logit.
@@ -1353,6 +1351,28 @@ void inkling2_glue_attn_res(const torch::Tensor& blocks, int64_t n_blocks,
                             const std::optional<torch::Tensor>& norm_w,
                             const torch::Tensor& out, double eps,
                             double norm_eps);
+
+// Inkling-2-Mini attention-chain node fusions on RDNA2 (gfx1030): the static
+// short conv fused into the attn_res that consumes it, and the messages of a
+// whole loop pass in one launch.  Bit-identical to the launches they replace.
+// See docs/rdna2/inkling2-fuse-attn-chain.md.
+void inkling2_fuse_attn_res_conv(
+    const torch::Tensor& blocks, int64_t n_blocks,
+    const std::optional<torch::Tensor>& x0, const torch::Tensor& conv_x,
+    const torch::Tensor& conv_w, const torch::Tensor& conv_cache,
+    const torch::Tensor& block_table, const torch::Tensor& seq_idx,
+    const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
+    int64_t stream_offset, int64_t num_kv_heads, int64_t block_size,
+    const std::optional<torch::Tensor>& x1_out,
+    const std::optional<torch::Tensor>& partial_out,
+    const std::optional<torch::Tensor>& append, const torch::Tensor& query,
+    const std::optional<torch::Tensor>& norm_w, const torch::Tensor& out,
+    double eps, double norm_eps);
+
+void inkling2_fuse_msgs_fill(const torch::Tensor& blocks, int64_t n_blocks,
+                             const torch::Tensor& x0, const torch::Tensor& x1,
+                             const torch::Tensor& queries,
+                             const torch::Tensor& out, double eps);
 
 void inkling2_glue_msg_gate_down(const torch::Tensor& h, const torch::Tensor& m,
                                  const torch::Tensor& wd,

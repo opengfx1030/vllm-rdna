@@ -29,7 +29,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 from ..configs import Inkling2LoopConfig, Inkling2LoopTextConfig
-from . import blocks, loader
+from . import blocks, fuse_chain, loader
 from .attention import (
     Inkling2Attention,
     StaticSconv,
@@ -454,6 +454,7 @@ class Inkling2Model(nn.Module):
         # serving path (``Inkling2LoopTextForCausalLM`` switches it on after loading)
         self.serving = False
         self.glue_ws: Inkling2GlueWorkspace | None = None
+        self._msg_batch: fuse_chain.MessageBatch | None = None
         self._tap_slots: dict[int, int] = {}
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -569,6 +570,11 @@ class Inkling2Model(nn.Module):
         self._msg_queries = [
             self.message_input.query[j] for j in range(cfg.num_loop_layers)
         ]
+        self._msg_batch = (
+            fuse_chain.MessageBatch(ws, self.message_input.query)
+            if fuse_chain.FUSE_ATTN_CHAIN and ws.has_loop
+            else None
+        )
         self.configure_taps()
 
     def configure_taps(self) -> None:
@@ -663,11 +669,20 @@ class Inkling2Model(nn.Module):
             copy(x0, v.prev_x0)
             copy(x1, v.prev_x1)
 
-            def fill(j, n_prev=n_prev):
-                ops.inkling2_glue_attn_res(
-                    v.prev_blk, n_prev, v.prev_x0, self._msg_queries[j], v.msgs,
-                    x1=v.prev_x1, eps=eps,
-                )  # fmt: skip
+            batch = self._msg_batch
+            if batch is not None and not batch.usable(T):
+                batch = None
+            if batch is not None:
+                batch.fill(v, n_prev, eps)  # the messages of all layers of this pass
+
+            def fill(j, n_prev=n_prev, batch=batch):
+                if batch is not None:
+                    batch.select(v, j)
+                else:
+                    ops.inkling2_glue_attn_res(
+                        v.prev_blk, n_prev, v.prev_x0, self._msg_queries[j], v.msgs,
+                        x1=v.prev_x1, eps=eps,
+                    )  # fmt: skip
 
             x0, x1, n = run(loop_layers, v.pre_x0, v.pre_x1, num_pre, visit, fill)
         x0, x1, n = run(self.layers[le:], x0, x1, n, 0)

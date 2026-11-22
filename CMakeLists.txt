@@ -1828,6 +1828,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/inkling2_vit_rdna2.cu"
       "csrc/rocm/inkling2_linear_rdna2.cu"
       "csrc/rocm/inkling2_glue_rdna2.cu"
+      "csrc/rocm/inkling2_fuse_attn_rdna2.cu"
       # DeepSeek-V4 RDNA kernels (csrc/rocm/rdna/<feature>/ layout).
       "csrc/rocm/rdna/dsv4/indexer_mqa_logits.cu"
       "csrc/rocm/rdna/dsv4/kv_insert.cu"

@@ -2856,6 +2856,82 @@ def inkling2_glue_attn_res(
     )
 
 
+def inkling2_fuse_attn_res_conv(
+    blocks: torch.Tensor,
+    n_blocks: int,
+    x0: torch.Tensor | None,
+    conv_x: torch.Tensor,
+    conv_w: torch.Tensor,
+    conv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_idx: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    stream_offset: int,
+    num_kv_heads: int,
+    block_size: int,
+    query: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    x1_out: torch.Tensor | None = None,
+    partial_out: torch.Tensor | None = None,
+    append: torch.Tensor | None = None,
+    norm_w: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+) -> None:
+    """``inkling2_sconv_static(conv_x, ..., write_state=True)`` +
+    ``inkling2_glue_attn_res`` in ONE launch, bit-identical: the conv result is the
+    lazy residual ``x1`` of attn_res (partial state ``x0 + conv``; with ``x0=None``
+    the conv result alone) and is stored only when ``x1_out`` is given.  Valid for
+    batches of single-token requests (``conv_writes_in_op``); the conv state is
+    written by this op.  ``conv_x`` is the ``[T, H]`` fp16 conv input (MLP / o_proj
+    output), ``conv_w`` the ``[H, 1, 4]`` fp32 conv weight, ``conv_cache`` the fp16
+    paged state and ``query`` is ``[Q, H]`` (``Q`` = 1, or 3 with ``x0``); the other
+    arguments are those of ``inkling2_glue_attn_res`` and ``inkling2_sconv_static``.
+    """
+    torch.ops._rocm_C.inkling2_fuse_attn_res_conv(
+        blocks,
+        n_blocks,
+        x0,
+        conv_x,
+        conv_w,
+        conv_cache,
+        block_table,
+        seq_idx,
+        query_start_loc,
+        seq_lens,
+        stream_offset,
+        num_kv_heads,
+        block_size,
+        x1_out,
+        partial_out,
+        append,
+        query,
+        norm_w,
+        out,
+        eps,
+        norm_eps,
+    )
+
+
+def inkling2_fuse_msgs_fill(
+    blocks: torch.Tensor,
+    n_blocks: int,
+    x0: torch.Tensor,
+    x1: torch.Tensor,
+    queries: torch.Tensor,
+    out: torch.Tensor,
+    eps: float = 1e-6,
+) -> None:
+    """The message ``inkling2_glue_attn_res`` (4 queries, fp32 result) of every layer
+    of a loop pass in one launch: ``out[:, j] = attn_res(blocks, n_blocks, x0, x1=x1,
+    queries[j])`` for ``queries [L, 4, H]`` and ``out [T, L, 4, H]``."""
+    torch.ops._rocm_C.inkling2_fuse_msgs_fill(
+        blocks, n_blocks, x0, x1, queries, out, eps
+    )
+
+
 def inkling2_glue_msg_gate_down(
     h: torch.Tensor,
     m: torch.Tensor,
@@ -6947,6 +7023,49 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
     @register_fake("_rocm_C::inkling2_linear_argmax_reduce")
     def _inkling2_linear_argmax_reduce_fake(
         part_val: torch.Tensor, part_idx: torch.Tensor, out: torch.Tensor
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "inkling2_fuse_msgs_fill"
+):
+
+    @register_fake("_rocm_C::inkling2_fuse_attn_res_conv")
+    def _inkling2_fuse_attn_res_conv_fake(
+        blocks: torch.Tensor,
+        n_blocks: int,
+        x0: torch.Tensor | None,
+        conv_x: torch.Tensor,
+        conv_w: torch.Tensor,
+        conv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_idx: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        stream_offset: int,
+        num_kv_heads: int,
+        block_size: int,
+        x1_out: torch.Tensor | None,
+        partial_out: torch.Tensor | None,
+        append: torch.Tensor | None,
+        query: torch.Tensor,
+        norm_w: torch.Tensor | None,
+        out: torch.Tensor,
+        eps: float,
+        norm_eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_fuse_msgs_fill")
+    def _inkling2_fuse_msgs_fill_fake(
+        blocks: torch.Tensor,
+        n_blocks: int,
+        x0: torch.Tensor,
+        x1: torch.Tensor,
+        queries: torch.Tensor,
+        out: torch.Tensor,
+        eps: float,
     ) -> None:
         return
 
