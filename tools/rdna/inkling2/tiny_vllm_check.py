@@ -21,6 +21,15 @@ Checks (a failed check makes the exit code 1):
 * ``--chunked``: ``max_num_batched_tokens`` small enough that the longest prompt is
   prefilled in several chunks, so ``last`` / ``decode`` / ``batch`` also cover chunked
   prefill and mixed chunk + chunk batches.
+* ``--prefix-caching``: the engine's prefix cache is on, so ``decode`` / ``batch`` hit
+  the blocks of the runs before them (the first decode step must equal the prefill-only
+  run); ``prefix/*`` adds two identical requests in one batch on a cold cache (the
+  second hits blocks the first only writes in that very step), a warm repeat, and a new
+  tail after a shared prefix with and without the hit;
+* ``--path``: ``VLLM_INKLING2_PATH``: the torch reference or the native HIP kernels (the
+  default on a GPU).  The HIP kernels need the attention shapes of
+  ``make_tiny_checkpoint.py --head-dim 128 --d-rel 16 --num-heads 6 --num-kv-heads 2``;
+  ``--router-bias-scale 100`` makes the routing fp16-stable (exact comparisons).
 
 The prompts are the ones of the tiny harness (``torch.randint(0, 500)`` with seed 1234,
 5 / 40 / 70 tokens); the 70-token one exceeds the sliding window (16) and the relative
@@ -51,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -117,8 +127,24 @@ def main() -> int:
         default=0.05,
         help="max allowed mean |dlogp| (last position / decode steps)",
     )
+    ap.add_argument(
+        "--tol-batch",
+        type=float,
+        default=0.05,
+        help="max allowed |dlogp| between runs of one prompt that differ only in batch "
+        "composition / prefix hit (fp16 noise grows with the loop visits: use 0.15 "
+        "on the 8-layer checkpoint)",
+    )
     ap.add_argument("--json", help="write all metrics here")
+    ap.add_argument(
+        "--path",
+        choices=["reference", "hip"],
+        help="VLLM_INKLING2_PATH: the torch reference or the native HIP kernels "
+        "(default: the HIP kernels on a GPU)",
+    )
     args = ap.parse_args()
+    if args.path:
+        os.environ["VLLM_INKLING2_PATH"] = args.path
 
     ckpt = Path(args.ckpt)
     ref_last = np.load(ckpt / "ref_logits.npy")  # [P, V]
@@ -143,6 +169,10 @@ def main() -> int:
         max_logprobs=vocab,
         max_num_seqs=args.max_num_seqs,
         enable_prefix_caching=args.prefix_caching,
+        limit_mm_per_prompt={"image": 0},  # the tiny checkpoints have no vision weights
+        # no vision tower at all: its HIP kernels only take the real 20x20 patch
+        # geometry, the tiny ``vision_config`` is there for the transformers reference
+        hf_overrides={"vision_config": None},
     )
     if args.chunked:
         kwargs["max_num_batched_tokens"] = 16
@@ -238,6 +268,14 @@ def main() -> int:
         per_step = [compare(r["lp"][s], ref_dec[i, s]) for s in range(agree)]
         mean = float(np.mean([m["mean_abs"] for m in per_step])) if per_step else None
         mx = float(np.max([m["max_abs"] for m in per_step])) if per_step else None
+        flip = None
+        if agree < steps:  # first step whose greedy token differs from the reference
+            want, got = ref_ids[i][agree], r["ids"][agree]
+            flip = {
+                "prompt": len(ids[i]),
+                "step": agree,
+                "ref_gap": float(ref_dec[i, agree][want] - ref_dec[i, agree][got]),
+            }
         report["decode"].append(
             {
                 "ids": r["ids"],
@@ -245,6 +283,7 @@ def main() -> int:
                 "agree": agree,
                 "mean_abs": mean,
                 "max_abs": mx,
+                "flip": flip,
             }
         )
         shown = (
@@ -257,11 +296,23 @@ def main() -> int:
             f"(first {agree}/{steps} equal) {shown}",
             flush=True,
         )
+    flips = [d["flip"] for d in report["decode"] if d["flip"]]
+    # a flip is fp16 noise when the reference's own gap between the two tokens is below
+    # the largest |dlogp| of the agreeing steps; the random tiny weights give near-flat
+    # distributions, so such ties are common
+    noise = max(
+        (d["max_abs"] for d in report["decode"] if d["max_abs"] is not None),
+        default=0.0,
+    )
     check(
         "decode/ids",
-        all(d["agree"] == steps for d in report["decode"]),
-        f"{[d['agree'] for d in report['decode']]} "
-        f"of {steps} steps equal the reference",
+        all(f["ref_gap"] <= noise for f in flips),
+        f"{[d['agree'] for d in report['decode']]} of {steps} steps equal the reference"
+        + "".join(
+            f"; n={f['prompt']} step {f['step']}: reference gap {f['ref_gap']:.4f}"
+            for f in flips
+        )
+        + f" (noise {noise:.4f})",
     )
     means = [
         None if d["mean_abs"] is None else round(d["mean_abs"], 5)
@@ -272,12 +323,19 @@ def main() -> int:
         all(d["mean_abs"] < args.tol_mean for d in report["decode"] if d["agree"]),
         f"{means} (tol {args.tol_mean}; None: no step equal)",
     )
-    # the decode run's first step is the last-position run again (state is not reused)
+    # the decode run's first step is the last-position run again (state is not reused);
+    # with prefix caching it hits the blocks of the previous run, a different chunk
+    # shape: fp16 noise, not bitwise equality
+    atol = 0.1 if args.prefix_caching else 1e-3
     same = all(
-        np.allclose(dec[i]["lp"][0], last[i]["lp"][0], atol=1e-3)
+        np.allclose(dec[i]["lp"][0], last[i]["lp"][0], atol=atol)
         for i in range(num_prompts)
     )
-    check("decode/step0_equals_last", same, "first decode step == the prefill-only run")
+    check(
+        "decode/step0_equals_last",
+        same,
+        f"first decode step == the prefill-only run (atol {atol})",
+    )
 
     # ---- all prompts concurrently in one batch -------------------------------
     batch = generate(ids, steps)
@@ -298,9 +356,57 @@ def main() -> int:
     check("batch/ids", same_ids, "concurrent requests generate the single-request ids")
     check(
         "batch/logprobs",
-        worst < 0.05,
-        f"max |dlogp| vs the single-request runs {worst:.5f}",
+        worst < args.tol_batch,
+        f"max |dlogp| vs the single-request runs {worst:.5f} (tol {args.tol_batch})",
     )
+
+    # ---- prefix caching: a hit must give the output of a cold run ------------
+    if args.prefix_caching:
+        longest = ids[-1]
+        # identical requests in one batch on a cold cache: the second one hits blocks
+        # the first one only writes in this very step
+        llm.reset_prefix_cache()
+        pair = generate([longest, longest], steps)
+        worst = max(
+            (
+                float(np.abs(r["lp"] - dec[-1]["lp"]).max())
+                for r in pair
+                if r["ids"] == dec[-1]["ids"]
+            ),
+            default=float("inf"),
+        )
+        same = all(r["ids"] == dec[-1]["ids"] for r in pair)
+        check(
+            "prefix/same_step_hit",
+            same and worst < args.tol_batch,
+            f"two identical {len(longest)}-token requests in one batch (cold cache): "
+            f"ids equal the single run {same}, max |dlogp| {worst:.5f}",
+        )
+        # a later request hits the blocks of finished ones
+        again = generate([longest], steps)[0]
+        same = again["ids"] == dec[-1]["ids"]
+        worst = (
+            float(np.abs(again["lp"] - dec[-1]["lp"]).max()) if same else float("inf")
+        )
+        check(
+            "prefix/cross_step_hit",
+            same and worst < args.tol_batch,
+            f"warm cache, same prompt: ids equal {same}, max |dlogp| {worst:.5f}",
+        )
+        # a different tail after a shared prefix, with and without the hit
+        branch = longest[:67] + [(longest[67] + 1) % vocab, longest[69]]
+        llm.reset_prefix_cache()
+        cold = generate([branch], steps)[0]
+        llm.reset_prefix_cache()
+        generate([longest], 1)  # primes the cache with the shared prefix
+        warm = generate([branch], steps)[0]
+        same = warm["ids"] == cold["ids"]
+        worst = float(np.abs(warm["lp"] - cold["lp"]).max()) if same else float("inf")
+        check(
+            "prefix/hit_vs_cold",
+            same and worst < args.tol_batch,
+            f"67 shared tokens + a new tail: ids equal {same}, max |dlogp| {worst:.5f}",
+        )
 
     report["pass"] = ok
     print("RESULT", "PASS" if ok else "FAIL", flush=True)

@@ -14,6 +14,7 @@ in query chunks: correctness first, the Triton/HIP kernel replaces ``_attend``.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,9 @@ from .state import (
     kv_read,
     kv_write,
 )
+
+if TYPE_CHECKING:
+    from .glue import Inkling2GlueWorkspace
 
 _QUERY_CHUNK = 256
 
@@ -301,6 +305,209 @@ class Inkling2Attention(nn.Module):
                 o = torch.einsum("chgn,nhd->chgd", p.view(c, nkv, g, -1), vv)
                 out[a:b] = o.reshape(c, nh, D)
         return out
+
+    # -- HIP serving path --------------------------------------------------
+    @torch.no_grad()
+    def prepare_hip(self, ws: Inkling2GlueWorkspace) -> None:
+        """Pack the dense weights for the native kernels and free the originals.
+
+        The pack owns the only copy of the six (eight with the dynamic-conv taps)
+        projections, so the serving model holds the weights once.  Everything the
+        kernels read per call is prepared here: fp32 scales, the transposed fp16
+        relative-position basis, the conv weights and the shared output buffers.
+        """
+        from . import linear_pack as lp
+
+        cfg = self.config
+        q, rb = self.q_proj, self.relative_position_bias
+        dyn: tuple[torch.Tensor | None, torch.Tensor | None] = (None, None)
+        if not self.is_sliding:
+            dyn = (
+                self.k_proj.sconv.weight_proj.weight,
+                self.v_proj.sconv.weight_proj.weight,
+            )
+        self._attn_in = lp.inkling2_linear_pack_attn_in(
+            q.linear.weight,
+            self.o_proj.gate_proj.weight,
+            rb.linear.weight,
+            self.sink_proj.weight,
+            self.k_proj.linear.weight,
+            self.v_proj.linear.weight,
+            *dyn,
+        )
+        self._o_pack = lp.inkling2_linear_pack_o_proj(self.o_proj.linear.weight)
+        self._rel_proj_t = rb.proj.detach().t().contiguous().half()
+        self._q_scale = q.norm.scale.detach().float().contiguous()
+        self._rel_scale = rb.norm.scale.detach().float().contiguous()
+        if self.is_sliding:
+            self._k_weight = self.k_proj.sconv.conv1d.weight.detach()
+            self._v_weight = self.v_proj.sconv.conv1d.weight.detach()
+        else:
+            self._k_weight = self.k_proj.sconv.static_weight.detach()
+            self._v_weight = self.v_proj.sconv.static_weight.detach()
+        for module in (
+            q.linear,
+            self.o_proj.gate_proj,
+            rb.linear,
+            self.sink_proj,
+            self.k_proj.linear,
+            self.v_proj.linear,
+            self.o_proj.linear,
+        ):
+            del module.weight
+        if not self.is_sliding:
+            del self.k_proj.sconv.weight_proj.weight
+            del self.v_proj.sconv.weight_proj.weight
+        del rb.proj
+        self._segments = [
+            ws.segment(name, n)
+            for name, n in zip(self._attn_in.names, self._attn_in.seg_n)
+        ]
+        self._attn_out = ws.attn_out(self.num_heads * self.head_dim)
+        self._attn_ws = ws.attn_ws
+        self._window = self.window or 0
+        self._log_scale = not self.is_sliding
+        self._log_alpha = float(cfg.log_scaling_alpha)
+        self._log_n_floor = float(cfg.log_scaling_n_floor)
+        self._q_clip = float(cfg.qk_l2_clip_threshold)
+        self._rel_clip = float(cfg.rel_l2_clip_threshold)
+        self._rms_eps = float(cfg.rms_norm_eps)
+
+    def forward_hip(
+        self,
+        hq: torch.Tensor,
+        hk: torch.Tensor,
+        hv: torch.Tensor,
+        positions: torch.Tensor,
+        kv_owner: Inkling2KVOwner,
+        conv_owner: Inkling2ConvOwner,
+        kv_md: Inkling2Metadata,
+        conv_md: Inkling2Metadata,
+        o_out: torch.Tensor,
+    ) -> torch.Tensor:
+        """Fused input projections, k / v short convs + KV write, attention, o_proj.
+
+        ``hq`` / ``hk`` / ``hv`` are the fp16 ``[T, H]`` streams, ``o_out`` the fp16
+        ``[T, H]`` buffer that receives the o_proj output (the input of the
+        post-attention short conv).
+        """
+        from vllm import _custom_ops as ops
+
+        T = hq.shape[0]
+        outs = [seg[:T] for seg in self._segments]
+        self._attn_in([hq, hk, hv], outs)
+        named = dict(zip(self._attn_in.names, outs))
+        k_off = conv_owner.stream_ranges[STREAM_K][0]
+        v_off = conv_owner.stream_ranges[STREAM_V][0]
+        for _ in range(conv_passes(conv_md)):
+            ops.inkling2_kv_prep(
+                named["k"],
+                named["v"],
+                self._k_weight,
+                self._v_weight,
+                named.get("dyn_k"),
+                named.get("dyn_v"),
+                conv_owner.kv_cache,
+                conv_md.block_table,
+                conv_md.slot_mapping,
+                conv_md.seq_idx,
+                conv_md.query_start_loc,
+                conv_md.seq_lens,
+                kv_owner.kv_cache,
+                kv_md.slot_mapping,
+                k_off,
+                v_off,
+                self._q_clip,
+                self._rms_eps,
+            )
+        splits = kv_md.splits.get((self.num_kv_heads, self._window))
+        if splits is None:
+            splits = kv_md.splits[(self.num_kv_heads, self._window)] = (
+                ops.inkling2_attention_splits(
+                    kv_md.num_reqs,
+                    self.num_kv_heads,
+                    self._window,
+                    kv_md.max_seq_len,
+                    kv_md.max_query_len,
+                )
+            )
+        attn = self._attn_out[:T]
+        ops.inkling2_attention(
+            named["q"],
+            named["rel"],
+            named["sink"],
+            named["gate"],
+            self._q_scale,
+            self._rel_scale,
+            self._rel_proj_t,
+            positions,
+            kv_owner.kv_cache,
+            kv_md.block_table,
+            kv_md.seq_lens,
+            kv_md.query_start_loc,
+            attn,
+            self._attn_ws,
+            self._window,
+            self.rel_extent,
+            self._log_scale,
+            self._log_alpha,
+            self._log_n_floor,
+            self._q_clip,
+            self._rel_clip,
+            kv_md.max_query_len,
+            splits[0],
+            splits[1],
+        )
+        self._o_pack([attn], [o_out])
+        return o_out
+
+
+def conv_passes(md: Inkling2Metadata) -> int:
+    """Launches of each op that reads conv history from the cache and writes this step's
+    conv inputs into it in one kernel (``inkling2_sconv_static``, ``inkling2_kv_prep``).
+
+    The first ``k - 1`` tokens of a request chunk take their history from the cache.
+    The scheduler registers the blocks of the tokens it schedules in the prefix cache
+    before they are computed, so a prefix-cache hit of the same batch can read history
+    that another request only writes in this very step.  The reference path writes all
+    inputs before it reads any (``conv_taps``); one launch cannot order the CTAs, a
+    second launch can: the conv inputs the first one wrote do not depend on history, so
+    the second finds them all in the cache and recomputes what the first derived from
+    stale history.  A batch of single-token chunks reads the cache only at positions the
+    previous step wrote, except when a request with a one-token prefix-cache tail
+    shares a step with the owner that completes that block with its own decode token:
+    that corner needs a write-phase / read-phase split inside the kernels
+    (``docs/rdna2/inkling2-port-spec.md``, integration part A).
+    """
+    return 2 if md.max_query_len > 1 else 1
+
+
+def static_conv_hip(
+    conv: StaticSconv,
+    x: torch.Tensor,
+    out: torch.Tensor,
+    owner: Inkling2ConvOwner,
+    md: Inkling2Metadata,
+    stream: int,
+) -> None:
+    """Static depthwise short conv of one stream: fp16 ``x [T, C]`` -> fp32 ``out``."""
+    from vllm import _custom_ops as ops
+
+    offset = owner.stream_ranges[stream][0]
+    for _ in range(conv_passes(md)):
+        ops.inkling2_sconv_static(
+            x,
+            conv.conv1d.weight,
+            out,
+            owner.kv_cache,
+            md.block_table,
+            md.slot_mapping,
+            md.seq_idx,
+            md.query_start_loc,
+            md.seq_lens,
+            offset,
+            owner.num_kv_heads,
+        )
 
 
 def get_metadata(prefix: str) -> Inkling2Metadata | None:

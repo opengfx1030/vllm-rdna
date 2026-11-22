@@ -819,6 +819,12 @@ class SpeculativeConfig:
                 }
             )
             return hf_config
+        if hf_config.model_type == "inkling2_loop" and getattr(
+            hf_config, "mtp_config", None
+        ):
+            from vllm.models.inkling2_loop.configs import Inkling2DSparkConfig
+
+            return Inkling2DSparkConfig.from_target(hf_config)
         text_config = getattr(hf_config, "text_config", hf_config)
         if getattr(text_config, "model_type", None) == "mistral_large_4" and getattr(
             text_config, "mtp_config", None

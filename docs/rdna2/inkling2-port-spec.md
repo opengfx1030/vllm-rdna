@@ -407,3 +407,222 @@ hybrid layout).
 the windowed groups become free) with the freed pages poisoned: max abs dlogit
 7e-5 .. 1.7e-4. The tiny prompts of the engine runs (<= 78 tokens) never free such a
 block, so that part is CPU-only.
+
+## 2026-11-22 — integration part A: the serving path on the HIP kernels (eager, TP=1)
+
+`Inkling2LoopForConditionalGeneration` now serves from the native kernels
+(`csrc/rocm/inkling2_{attn,glue,linear,vit,dspark}_rdna2.cu` plus the existing expert
+GEMMs); the eager torch implementation stays as the reference.  Graph capture is not
+enabled (part B).  Kernel schemas and wiring recipes are in `inkling2-attn-kernels.md`,
+`inkling2-glue-kernels.md`, `inkling2-linear-kernels.md`, `inkling2-vision.md`,
+`inkling2-dspark.md`.
+
+### Design
+
+1. **Two paths, one class, no fallback.** `Inkling2Model.forward` dispatches to
+   `forward_reference` (the torch code of the port, unchanged: what the CPU harness tests
+   run and the oracle of the GPU parity tests) or `forward_hip`.  The mode is HIP when the
+   default device is cuda/hip and reference on CPU; `VLLM_INKLING2_PATH=reference|hip`
+   overrides it (the tools take `--path`), `Inkling2LoopTextForCausalLM(serving=...)` is
+   the switch of the tests.  `prepare_hip` repacks and then deletes the checkpoint-layout
+   weights, so the torch code cannot run on a serving model (a test asserts the
+   `AttributeError`) and `forward_hip` has no torch compute: a missing op raises.
+2. **One layer visit** (`Inkling2DecoderLayer.forward_hip`, 16 kernels on average per
+   visit, 48 visits per forward): block residual + layer norm
+   (`inkling2_glue_attn_res`, with messages followed by `msg_gate_down` / `msg_gate_mix`),
+   the fused attention-input GEMV pack (q, o-gate, relative bias, sink, k, v and the
+   dynamic-conv taps of full layers in one launch), `inkling2_kv_prep`,
+   `inkling2_attention` (split count and workspace from the metadata), `inkling2_sconv_static`
+   (post-attention), the MLP-input `attn_res` (+ gates), `inkling2_glue_moe_route`, expert
+   GEMM 1, `inkling2_glue_swiglu`, expert GEMM 2, `inkling2_sconv_static` (post-MLP).
+   The model ends with the final norm and the `lm_head` pack (softcap, vocab mask,
+   optional fused argmax: `greedy_token_ids`).  MessageGate and the router use the fused
+   glue ops, not the standalone linear-pack router / controller (fewer launches).
+3. **Weights are repacked once and freed.** The attention pack, the o_proj pack, the
+   stacked gate / layer-norm weights, the router and the lm_head pack replace the
+   checkpoint tensors (`del module.weight`).  Real checkpoint: "Model loading took
+   18.08 GiB" against 17.74 GiB on the torch path, and the engine logs the persistent
+   workspace of 0.33 GiB for 1024 tokens per step, so the packs add 0.01 GiB.  The router
+   and gate weights of the real checkpoint are not exactly representable in fp16 (0/24
+   routers, 0/12 loop layers), so they stay fp32 (FMA path) and no value is ever rounded.
+   Tiny models, census of the tensors each model owns (cache owners and the workspace
+   excluded): HIP 12.44 / 16.44 MiB against 12.52 / 16.67 MiB for the reference (tiny1 /
+   tiny8), `test_serving_weights_are_held_once`.
+4. **Persistent scratch, no host syncs.** `Inkling2GlueWorkspace` (`amd/glue.py`) owns every
+   per-step buffer (block states, messages, MoE scratch, attention workspace and split
+   buffers, taps), sized for `MAX_MOE_TOKENS` / `max_num_batched_tokens`; `SeqIdxScratch`
+   (`amd/state.py`) the token -> request map.  `test_forward_allocates_nothing_and_never_syncs`
+   warms one forward up (memoised workspace views, lazy module state), then runs the HIP
+   forward under `set_sync_debug_mode("error")` and checks that the allocator count does
+   not move.  `embed_input_ids`, `compute_logits` and `greedy_token_ids` allocate (they run
+   on the runner side, outside any future graph).
+5. **Same-step prefix hits.** A hit request whose conv taps live in blocks the owner only
+   writes in the same step needs the conv write phase to finish before the read phase.
+   The ops cannot order the two inside one launch, so `conv_passes` launches `kv_prep` and
+   `sconv_static` twice when `max_query_len > 1`.  Mutation check: with one pass
+   (`conv_passes = lambda md: 1`) all 8 `test_prefix_cache_hit_on_blocks_written_in_the_same_step`
+   cases fail.  Residual corner: a batch of single-token chunks only where a one-token
+   tail hit shares the step with the owner that completes that block; a csrc write /
+   read-phase split would remove it and the double launch.
+6. **Vision.** The served class is `Inkling2LoopForConditionalGeneration(Inkling2MultiModalMixin,
+   Inkling2LoopTextForCausalLM, SupportsMultiModal)`; with `--limit-mm-per-prompt
+   image=0` the tower is not built (the real run boots that way).  The vision kernels
+   take the real 20 x 20 patch geometry only, so the tiny engine checks boot with
+   `hf_overrides={"vision_config": None}`.
+   Real checkpoint with the tower (`real_check.py --vision`): "Model loading took 18.68
+   GiB" (0.60 GiB for the tower), the encoder cache is profiled at start-up with one
+   maximum-size image through the vision kernels, the text answers are unchanged, and a
+   synthetic 448 x 336 image of a red disc on blue (132 prompt tokens) is described as "a
+   red circle centered on a blue background".
+
+### Measurements (real checkpoint, one V620, eager, TP=1, `profile_decode.py`)
+
+22-token prompts, 8 decode steps; "clean" = unprofiled wall time.
+
+| | torch path (baseline) | HIP path |
+|---|---:|---:|
+| decode step, batch 1 | 341.7 ms | **23.7 ms** (14.4x) |
+| decode step, batch 4 | 417.0 ms | **35.8 ms** (11.6x) |
+| prefill, 22 tokens, batch 1 | 366.8 ms | 75.6 ms (73.4 .. 76.7) |
+| prefill, 4 x 22 tokens | 481.7 ms | 170.1 ms (166.4 .. 172.1) |
+| prefill, one 1000-token prompt | | 1262 ms (792 tokens/s) |
+| kernels per decode step, batch 1 / 4 | 23,826 / 28,242 | **779 / 779** |
+| kernels per prefill step, batch 1 / 4 | | 978 / 978 |
+| GPU busy share of the clean decode wall, batch 1 | | 93.9% |
+| model memory ("Model loading took") | 17.74 GiB | 18.08 GiB (incl. 0.33 GiB workspace) |
+
+Batch-1 decode is 22.3 ms of GPU time in 779 kernels (mean 28.6 us): attention-input pack
+6.15 ms (27.6%), expert GEMM 1 4.56 ms (20.4%), expert GEMM 2 2.40 ms (10.7%), `lm_head`
+2.13 ms (9.5%), `o_proj` pack 1.94 ms (8.7%), message gates 1.13 ms, `attn_res` 0.99 ms,
+attention 0.85 ms, route 0.79 ms, `sconv` 0.45 ms, `kv_prep` 0.43 ms, swiglu 0.27 ms,
+the rest below 0.2 ms.  The step is GPU-bound now: [INFERENCE] a HIP graph can remove at
+most the 1.4 ms of idle time (6%) plus the host side of the step; the levers are kernel
+time (attention-input GEMV, expert GEMMs, `lm_head`).  The launch count fell 31x (decode);
+the forward, launch to completion, fell from 333.8 ms to 20.5 ms (11.1 ms of it host launch
+time).
+
+### Validation
+
+| gate | result |
+|---|---|
+| build, all five `.cu` files in one tree | exit 0 (831 s); `ops_check` missing: `[]` |
+| CPU suite (`tests/models/inkling2_loop` + the three `test_inkling2_*` files) | 519 passed, 76 skipped |
+| `test_inkling2_linear_rdna2.py` (the DenseLinear auto-pick, first run on a GPU) | 677 passed |
+| `test_serving_path_gpu.py` (116 tests, tiny1 / tiny8), final tree | 116 passed (152 s); the run before the last tolerance change had 1 failed, fixed |
+| `real_check.py` (real checkpoint, 32 tokens) | coherent, see below |
+| `real_check.py --prefix-caching --long-prompt-tokens 1500` | PASS |
+| `real_check.py --vision` (tower loaded, one image request) | coherent text answers, correct image description |
+| `tiny_vllm_check.py` tiny1-stable: default / chunked / prefix / chunked + prefix | 4 / 4 `RESULT PASS` |
+| `tiny_vllm_check.py` tiny8-stable: default / prefix | `RESULT PASS` (`--tol-batch 0.15`) |
+| `tiny_vllm_check.py` tiny8-stable: chunked, chunked + prefix | `decode/ids` fails on one flip (finding 5), everything else passes |
+
+`test_serving_path_gpu.py` replays every layer visit of the reference path on the HIP layer
+from the recorded inputs (teacher forced, so errors cannot compound) and compares the
+router choices: worst relative error 1.07e-3 .. 1.26e-3 per token on tiny8-stable with 0
+router rows differing in all four scenarios (prefill 70, chunked 70/16, prefill + decode,
+batch).  Model level against transformers: mean |dlogp| 0.028 .. 0.033 (prefill, chunked,
+random schedules, prefix hits, same-step hits); HIP against the reference path 0.017 ..
+0.025.  The 200-token window test is teacher forced as well: the free-running comparison
+flips a router near-tie on one chunking (HIP against reference 0.27 where both are 0.27
+from transformers on another).
+
+Engine, tiny checkpoints (HIP shaped, router bias x100, last-position mean |dlogp| against
+transformers per prompt of 5 / 40 / 70 tokens, greedy ids equal out of 8):
+
+| checkpoint, mode | HIP path | torch path (same engine, same checkpoint) |
+|---|---|---|
+| tiny1, default | 0.0068 / 0.0133 / 0.0128, ids 8/8 x3 | 0.0072 / 0.0140 / 0.0104, ids 8/8 x3 |
+| tiny1, chunked 16 | 0.0068 / 0.0125 / 0.0163, ids 8/8 x3 | 0.0072 / 0.0118 / 0.0096, ids 8/8 x3 |
+| tiny8, default | 0.0218 / 0.0936 / 0.0286, ids 8/8 x3 | 0.0238 / 0.0884 / 0.0408, ids 8/8 x3 |
+| tiny8, chunked 16 | 0.0218 / 0.0518 / 0.0307, ids 8/8, 3/8, 8/8 | 0.0238 / 0.0735 / 0.0355, ids 8/8 x3 |
+
+The old tiny checkpoints (head dim 32, d_rel 8) are rejected by the kernels, so the
+statistics quoted before (tiny1 [0.009, 1.05, 0.139], ids 8/8, 8/8, 7/8) cannot be
+reproduced on the HIP path; `make_tiny_checkpoint.py --head-dim 128 --d-rel 16
+--num-heads 6 --num-kv-heads 2 [--router-bias-scale 100]` writes the HIP-shaped ones.
+On them both paths are statistically the same (the torch path's tiny8 default mean, 0.0510,
+is just above the 0.05 tolerance of the check, the HIP path's 0.0480 just below) and better
+than the old free-routing numbers because the stable checkpoints do not flip routes.
+Free-routing HIP-shaped tiny8 (statistics only): reference 2.965, HIP 0.413 (chaotic, see
+the previous section).
+
+Real checkpoint, first-step top-8 after the chat template, torch path -> HIP path:
+
+* "What is the capital of France?": `<|message_model|>` 0.0, 䁱 -21.04 -> -21.09, user
+  -21.13 -> -21.17, `<|content_thinking|>` -21.40 -> -21.22; ranks 5 .. 8 hold the same
+  four tokens (鋽, two byte-fallback tokens, суш) in a different order at -21.9 .. -22.7.
+  The 32 generated tokens are identical: "The user asks a simple factual question:
+  capital of France. Need answer accurately. France's capital is Paris. Need final
+  concise. Ensure".
+* "Write one word: hello": `<|message_model|>` 0.0, 鋽 -19.35 -> -19.32, U+200B -20.60 ->
+  -20.29, `<|content_thinking|>` -22.43 -> -22.28, U+FEFF -22.57 -> -22.32, then the tail
+  permuted.  Both answers are coherent and agree up to "Need answer", then differ at a
+  near-tie.
+
+### Findings
+
+1. **A dtype bug the GPU run found.** `inkling2_glue_msg_gate_mix` needs the forget and
+   the gain weights in one dtype; the first version picked fp16 per tensor (46 failures,
+   all tiny1).  `_stack_gates` now takes fp16 pair-interleaved weights only when both are
+   exactly representable, else fp32 for both.
+2. **The HIP path is not run-to-run reproducible with more than two experts per token.**
+   The expert GEMMs add a token's expert outputs into the pre-zeroed output with a packed
+   fp16 CAS atomic add (`moe_lowp_dot2_rdna2.cu`; `moe_accum_rdna2.cuh` documents it as
+   "order-dependent at fp16 precision"), both paths share them.  Two experts commute, so
+   `test_run_to_run_difference_by_experts_per_token[2]` is bitwise equal (and every tiny
+   engine rerun above is); with eight of sixteen experts and the choice fixed by the bias
+   the max logit difference of five identical runs is 0.20 .. 0.24 on a scale of 19.6
+   (1.0 .. 1.2%).  On the real checkpoint two cold runs of one prompt differ in the
+   top-8 logprobs by 0.00 .. 0.14 (22 tokens) and 0.35 .. 1.19 nats (1510 tokens, tail ranks
+   at -21), the router amplifying the rounding.  Greedy ids and top-1 stay the same in every
+   HIP run we made.  A deterministic reduction (per-k rows summed in order by the next glue
+   op, or a fixed-point accumulation like the one `moe_accum_rdna2.cuh` has for the W4A16
+   kernels) is the way to bitwise
+   reproducibility; it matters for graph replay comparisons and speculative verification.
+3. **Prefix caching on the real checkpoint.** A 1510-token prompt (cold: chunks of 1024 and
+   486 tokens), cold prefill 1.95 s, with a hit 0.12 s; the generated ids, the text and
+   the first-step top-1 are identical cold, cold again and with the hit; top-8 logprob
+   differences hit against cold 0.48 .. 1.74 against 0.35 .. 1.19 between two cold runs
+   (finding 2), so `real_check.py` judges the hit against the measured floor
+   (`hit <= 2 x floor + 0.1`).
+4. **Engine boot of the tiny checkpoints.** The first GPU engine run failed on the vision
+   tower (`kernels are written for 20x20 native patches`): the tiny `vision_config` is for
+   the transformers reference; the engine checks drop it through `hf_overrides`.
+5. **tiny8 chunked, n = 40: one greedy flip.** At decode step 3 the HIP path picks a
+   token that is 1.02 nats below the reference's top-1 (the agreeing steps show
+   |dlogp| <= 0.27); the torch path does not flip there but fails its own batch-versus-single
+   check in that mode (max 0.164, ids differ).  The teacher-forced layer parity (validation
+   section: 0 router rows differing, relative error 1.3e-3) is the kernel-level verdict; this
+   flip is attributed to the router-chaotic random model [INFERENCE, not isolated to a
+   layer visit].
+
+### What part B (graphs, TP, long context) must handle
+
+* `Inkling2MetadataBuilder._cudagraph_support` is `NEVER`; it needs a real value and
+  `build_metadata_for_cudagraph_capture`.  `Inkling2Metadata` has to be built into
+  persistent in-place `block_table`, `query_start_loc`, `seq_lens` and `slot_mapping`
+  buffers; `seq_idx` already lives in `SeqIdxScratch` (filled per step by
+  `build_qsa_metadata_rdna2` outside the graph).
+* The attention split count and workspace depend on `max_query_len`, the request count
+  and `max_model_len` (`inkling2_attention_splits`, `inkling2_attention_workspace_numel`):
+  fix them at capture time (decode graphs with `max_query_len = 1`, spec-verify / mixed
+  graphs with `1 + num_speculative_tokens`).  Padded requests need `seq_lens = 0`, padded
+  tokens `slot_mapping = -1` (the attention doc also asks `seq_idx = -1`; the scratch reads
+  padded tokens as request 0, harmless in eager where T is the real token count).
+* Decide `conv_passes` (twice-launched `kv_prep` / `sconv_static` for multi-token steps):
+  inside a graph it doubles those nodes; the clean fix is the csrc write / read-phase
+  split (item 5).
+* The V2 runner must capture FULL graphs around `forward` only: `embed_input_ids`,
+  `compute_logits` and `greedy_token_ids` allocate; `ws.bind(T)` views have to be created
+  per captured size before capture.  `greedy_token_ids` is not wired into the sampler yet
+  (runner-owned).
+* TP: o_proj emits an fp32 partial and needs an all-reduce, `lm_head` shards the vocab
+  (`inkling2_linear_pack_lm_head(tp_size, tp_rank)`), the router is replicated,
+  `Inkling2LoopMoE` asserts TP = 1, `q_scale` / `rel_scale` need per-rank slices, the KV
+  and conv owners split by KV head.
+* Long context: `check_kernel_shapes` and the workspace bound (`attention_workspace_numel`)
+  were validated up to `max_model_len` 2048; TP = 1 maximum length and TP = 2/4 at
+  1,048,576 need the split count and the workspace re-derived for those lengths.
+* Speed: the step is GPU-bound (93.9% busy); [INFERENCE] a graph gains at most ~6% of a
+  batch-1 decode step, so the next gains are kernel time (attention input GEMV 27.6%,
+  expert GEMMs 31%, `lm_head` 9.5%).

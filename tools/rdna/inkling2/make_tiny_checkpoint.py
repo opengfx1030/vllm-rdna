@@ -39,7 +39,9 @@ There is no vision tower, no MTP file and no tokenizer: the harness works on
 raw token ids.  ``config.json`` still carries a (tiny) ``vision_config`` because
 the transformers ``Inkling2LoopConfig`` validates it.
 
-Usage: ``python make_tiny_checkpoint.py --out DIR [--seed N] [--list]``
+Usage: ``python make_tiny_checkpoint.py --out DIR [--seed N] [--list]``; the native HIP
+kernels need ``--head-dim 128 --d-rel 16`` and a GQA group of at most 4 (for example
+``--num-heads 6 --num-kv-heads 2``), the defaults are the harness contract.
 """
 
 from __future__ import annotations
@@ -84,6 +86,9 @@ class TinySpec:
     vocab_size: int = 512
     unpadded_vocab_size: int = 500
     full_layers: tuple[int, ...] | None = None  # default: every odd layer
+    # > 1 scales the router's selection bias until the top-k choice is far from any
+    # tie, so fp16 rounding cannot flip it (routing-stable model for exact comparisons)
+    router_bias_scale: float = 1.0
 
     def __post_init__(self) -> None:
         if self.loop_start % self.n_layers_per_attn_res_block:
@@ -339,7 +344,8 @@ def build_tensors(spec: TinySpec, seed: int) -> dict[str, torch.Tensor]:
                 )
 
         dense(lp + "mlp.gate.weight", n_exp, h, fan_in=h)
-        t[lp + "mlp.gate.bias"] = r.normal(n_exp, std=0.05)
+        # (the draw is the same for every scale: only the size of the bias changes)
+        t[lp + "mlp.gate.bias"] = r.normal(n_exp, std=0.05) * spec.router_bias_scale
 
         ex = lp + "mlp.experts."
         # logical experts: rows [0, I) gate, [I, 2I) up.  The real checkpoint stores
@@ -475,6 +481,18 @@ def main() -> int:
     ap.add_argument("--loop-start", type=int, default=TinySpec.loop_start)
     ap.add_argument("--loop-end", type=int, default=TinySpec.loop_end)
     ap.add_argument("--loop-passes", type=int, default=TinySpec.loop_num_passes)
+    ap.add_argument("--head-dim", type=int, default=TinySpec.head_dim)
+    ap.add_argument("--d-rel", type=int, default=TinySpec.d_rel)
+    ap.add_argument("--num-heads", type=int, default=TinySpec.num_heads)
+    ap.add_argument("--num-kv-heads", type=int, default=TinySpec.num_kv_heads)
+    ap.add_argument("--sliding-window", type=int, default=TinySpec.sliding_window)
+    ap.add_argument("--rel-extent", type=int, default=TinySpec.rel_extent)
+    ap.add_argument(
+        "--router-bias-scale",
+        type=float,
+        default=TinySpec.router_bias_scale,
+        help="scale of the router's selection bias (100: fp16-stable top-k choice)",
+    )
     ap.add_argument("--list", action="store_true", help="print every key, dtype, shape")
     args = ap.parse_args()
     spec = TinySpec(
@@ -482,6 +500,13 @@ def main() -> int:
         loop_start=args.loop_start,
         loop_end=args.loop_end,
         loop_num_passes=args.loop_passes,
+        head_dim=args.head_dim,
+        d_rel=args.d_rel,
+        num_heads=args.num_heads,
+        num_kv_heads=args.num_kv_heads,
+        sliding_window=args.sliding_window,
+        rel_extent=args.rel_extent,
+        router_bias_scale=args.router_bias_scale,
     )
     tensors = write_checkpoint(Path(args.out).expanduser(), spec, args.seed)
     print(

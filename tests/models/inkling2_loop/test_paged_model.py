@@ -3,7 +3,7 @@
 """CPU gate for the *paged* Inkling-2 serving model against the transformers reference.
 
 The code under test is the serving code itself -
-``Inkling2LoopForConditionalGeneration`` (``load_weights`` included), ``Inkling2Model``,
+``Inkling2LoopTextForCausalLM`` (``load_weights`` included), ``Inkling2Model``,
 the attention / conv / KV state code and
 ``Inkling2MetadataBuilder`` - on torch CPU tensors, behind the engine emulation of
 ``paged_harness.py`` (per-group block tables with their own block size, sliding-window
@@ -93,7 +93,11 @@ def _prompts(vocab: int = 500) -> list[list[int]]:
 class PagedModel:
     """The serving model + the emulated engine around it.  CPU by default;
     ``device="cuda"`` with ``experts="kernel"`` runs the gfx1030 expert kernels
-    (``experts="exact"``: the dense fp32 experts of the reference, on ``device``)."""
+    (``experts="exact"``: the dense fp32 experts of the reference, on ``device``).
+
+    ``path``: ``"reference"`` is the eager torch path (the oracle), ``"hip"`` the native
+    HIP kernels of the serving path (needs a GPU, ``experts="kernel"`` and a checkpoint
+    with the attention shapes of the kernels, see ``glue.check_kernel_shapes``)."""
 
     def __init__(
         self,
@@ -102,11 +106,15 @@ class PagedModel:
         dtype: torch.dtype,
         device="cpu",
         experts: str = "exact",
+        path: str = "reference",
     ) -> None:
-        assert experts in ("exact", "kernel")
+        assert experts in ("exact", "kernel") and path in ("reference", "hip")
+        assert path == "reference" or experts == "kernel"
         self.device = torch.device(device)
+        self.path = path
         hf_config = Inkling2LoopConfig.from_pretrained(str(ckpt))
         fake = fake_vllm_config(ckpt, hf_config)
+        self.max_tokens = fake.scheduler_config.max_num_batched_tokens
         old = torch.get_default_dtype()
         torch.set_default_dtype(dtype)  # the engine builds the model under its dtype
         try:
@@ -114,8 +122,8 @@ class PagedModel:
                 patched(state_mod, "get_current_vllm_config", lambda: fake),
                 torch.device(self.device),
             ):
-                self.lm = model_mod.Inkling2LoopForConditionalGeneration(
-                    vllm_config=fake
+                self.lm = model_mod.Inkling2LoopTextForCausalLM(
+                    vllm_config=fake, serving=path == "hip"
                 )
         finally:
             torch.set_default_dtype(old)
@@ -152,6 +160,8 @@ class PagedModel:
             num_blocks=num_blocks,
             seed=seed,
             device=self.device,
+            hip=self.path == "hip",
+            max_tokens=self.max_tokens,
         )
         return self
 

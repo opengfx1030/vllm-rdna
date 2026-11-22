@@ -4,8 +4,9 @@
 device.
 
 The tiny checkpoints of ``make_tiny_checkpoint.py`` exercise the numerics; this file
-checks that ``Inkling2LoopForConditionalGeneration.load_weights`` accepts every tensor
-of the real checkpoint (names, shapes, dtypes) without reading any tensor data: the
+checks that ``Inkling2LoopTextForCausalLM.load_weights`` accepts every text tensor
+of the real checkpoint (names, shapes, dtypes; ``model.visual.*`` belongs to the vision
+mixin) without reading any tensor data: the
 model is built with the real config under ``torch.device("meta")``, the safetensors
 *headers* of ``~/hfcache/inkling2-mini`` are turned into meta tensors of the same dtype
 and shape, and the real ``load_weights`` (including ``process_weights_after_loading``)
@@ -79,16 +80,20 @@ def build_meta_model(ckpt: Path = CKPT):
             patched(state_mod, "get_current_vllm_config", lambda: fake),
             torch.device("meta"),
         ):
-            lm = model_mod.Inkling2LoopForConditionalGeneration(vllm_config=fake)
+            lm = model_mod.Inkling2LoopTextForCausalLM(vllm_config=fake)
     finally:
         torch.set_default_dtype(old)
     return lm, fake
 
 
 def load_header_weights(lm, header) -> set[str]:
-    """Run the real ``load_weights`` over meta tensors shaped like ``header``."""
+    """Run the real ``load_weights`` over meta tensors shaped like ``header`` (the
+    vision mixin strips the ``model.visual.*`` tensors before the text stack sees them,
+    see ``test_vision_text_stack.py``)."""
     weights = (
-        (k, torch.empty(s, dtype=d, device="meta")) for k, (d, s) in header.items()
+        (k, torch.empty(s, dtype=d, device="meta"))
+        for k, (d, s) in header.items()
+        if not k.startswith("model.visual.")
     )
     with torch.no_grad():
         return lm.load_weights(weights)
@@ -359,7 +364,7 @@ def test_load_weights_deinterleaves_expert_rows(tmp_path):
     torch.set_default_dtype(torch.float16)
     try:
         with patched(state_mod, "get_current_vllm_config", lambda: fake):
-            lm = model_mod.Inkling2LoopForConditionalGeneration(vllm_config=fake)
+            lm = model_mod.Inkling2LoopTextForCausalLM(vllm_config=fake)
     finally:
         torch.set_default_dtype(old)
     lm.load_weights(iter(tensors.items()))

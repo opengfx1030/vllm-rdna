@@ -793,3 +793,92 @@ class Inkling2LoopMoE(_ExpertsKernel):
             )
         _, weights, ids = self.gate(hidden_states)
         return super().forward(hidden_states, ids, weights)
+
+    # -- HIP serving path -------------------------------------------------
+
+    @torch.no_grad()
+    def prepare_hip(self) -> None:
+        """Router weights of ``inkling2_glue_moe_route``; frees the fp32 parameter.
+
+        The V_DOT2 router takes fp16 weights, which is exact when the checkpoint's bf16
+        values convert to fp16 without loss; otherwise the fp32 weights stay (FMA
+        path), so the router logits never deviate from the checkpoint's values.
+        """
+        if not self._processed:
+            raise RuntimeError(
+                f"{self.prefix}: call process_weights_after_loading() before "
+                "prepare_hip()"
+            )
+        weight = self.gate.weight.detach()
+        w16 = weight.to(torch.float16)
+        self.router_fp16 = bool(torch.equal(w16.float(), weight))
+        self.router_w = (w16 if self.router_fp16 else weight).contiguous()
+        del self.gate.weight
+
+    def forward_hip(
+        self, x16: torch.Tensor, ws: Any, out_all: torch.Tensor
+    ) -> torch.Tensor:
+        """Router, expert GEMMs and swiglu on the HIP kernels (no allocation).
+
+        ``x16``: fp16 ``[T, H]`` (the MoE input), ``out_all``: fp16 ``[T, H]``
+        buffer that receives the output.  Chunks of at most ``ws.moe_chunk`` tokens
+        share the scratch of ``ws`` (``Inkling2GlueWorkspace``): the router launch
+        zero-fills ``gate_up`` and the chunk's output, the GEMMs accumulate into them.
+        """
+        from vllm import _custom_ops as ops
+
+        T, K = x16.shape[0], self.top_k
+        step = min(self.max_tokens_per_call, ws.moe_chunk)
+        scale = self.gate.routed_scaling_factor
+        bias = self.gate.e_score_correction_bias
+        for s in range(0, T, step):
+            e = min(s + step, T)
+            tc = e - s
+            bm = self._default_block_size_m(tc, K)
+            m = ws.moe_views(tc, bm)
+            x = x16 if tc == T else x16[s:e]
+            out = out_all if tc == T else out_all[s:e]
+            ops.inkling2_glue_moe_route(
+                x,
+                self.router_w,
+                bias,
+                m.logits,
+                m.topk_w,
+                m.topk_ids,
+                m.sorted_ids,
+                m.expert_ids,
+                ws.post_pad,
+                ws.route_counters,
+                bm,
+                scale,
+                zero1=m.gu,
+                zero2=out,
+            )
+            self._gemm(
+                "w13",
+                x,
+                m.gu,
+                ws.no_weights,
+                m.sorted_ids,
+                m.expert_ids,
+                ws.post_pad,
+                K,
+                bm,
+                False,
+                0,
+            )
+            ops.inkling2_glue_swiglu(m.gu, m.act, self.gate_softcap, self.up_softcap)
+            self._gemm(
+                "w2",
+                m.act,
+                out,
+                m.topk_w_flat,
+                m.sorted_ids,
+                m.expert_ids,
+                ws.post_pad,
+                1,
+                bm,
+                True,
+                K,
+            )
+        return out_all

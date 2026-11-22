@@ -20,7 +20,9 @@ Both owners share one metadata builder; model code reads the metadata with
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+import os
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 import torch
@@ -45,6 +47,27 @@ from vllm.v1.kv_cache_interface import (
 # Stream order inside the packed per-head conv width.
 STREAM_K, STREAM_V, STREAM_ATTN, STREAM_MLP = 0, 1, 2, 3
 
+#: ``VLLM_INKLING2_PATH=reference`` runs the eager torch reference path (the oracle of
+#: the tests) on a GPU, ``hip`` insists on the HIP kernels; unset: HIP kernels on a
+#: GPU and the reference path on the CPU.  There is never a silent fallback from one
+#: to the other.
+PATH_ENV = "VLLM_INKLING2_PATH"
+
+
+def use_hip_ops(device: torch.device | str | None = None) -> bool:
+    """Whether the model serves with the native HIP kernels (``csrc/rocm``)."""
+    want = os.environ.get(PATH_ENV, "").strip().lower()
+    if want not in ("", "hip", "reference"):
+        raise ValueError(f"{PATH_ENV} must be 'hip' or 'reference', got {want!r}")
+    dev = torch.device(device if device is not None else torch.get_default_device())
+    if want == "reference":
+        return False
+    if dev.type != "cuda":
+        if want == "hip":
+            raise RuntimeError(f"{PATH_ENV}=hip needs a ROCm device, got {dev}")
+        return False
+    return True
+
 
 @dataclass
 class Inkling2Metadata(AttentionMetadata):
@@ -57,10 +80,101 @@ class Inkling2Metadata(AttentionMetadata):
     num_reqs: int
     max_query_len: int
     max_seq_len: int
+    # split-K factors of ``inkling2_attention`` per (kv heads, window); the layers of
+    # a step share the metadata, so the host-side helper runs once per distinct shape
+    splits: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
+
+
+class SeqIdxScratch:
+    """Persistent buffers of the HIP ``token -> request`` map (no per-step allocation).
+
+    ``torch.ops._rocm_C.build_qsa_metadata_rdna2`` is the engine's device-side
+    request-of-token search; with ``compress_ratio=1`` and no ring it only writes
+    ``token_to_req`` (tokens past the mapped ones read as request 0, which is harmless:
+    padded tokens carry ``slot_mapping = -1`` and the conv / KV ops skip them) plus two
+    per-token scratch arrays that Inkling-2 does not use.
+    """
+
+    def __init__(self, max_tokens: int, device: torch.device | str) -> None:
+        from vllm import _custom_ops  # noqa: F401  (registers torch.ops._rocm_C)
+
+        if not hasattr(torch.ops._rocm_C, "build_qsa_metadata_rdna2"):
+            raise RuntimeError(
+                "Inkling-2 serving needs torch.ops._rocm_C.build_qsa_metadata_rdna2 "
+                "(csrc/rocm/qsa_metadata_rdna2.cu is not in this build)"
+            )
+        self.max_tokens = max_tokens
+        self.token_to_req = torch.zeros(max_tokens, dtype=torch.int32, device=device)
+        self._positions = torch.empty(max_tokens, dtype=torch.int64, device=device)
+        self._visible = torch.empty(max_tokens, dtype=torch.int32, device=device)
+        self._slots = torch.empty(max_tokens, dtype=torch.int64, device=device)
+
+    def fill(self, c: CommonAttentionMetadata) -> torch.Tensor:
+        num_tokens = c.num_actual_tokens
+        if num_tokens > self.max_tokens:
+            raise ValueError(
+                f"{num_tokens} tokens exceed the {self.max_tokens} the metadata "
+                "scratch was sized for (scheduler max_num_batched_tokens)"
+            )
+        num_reqs = c.num_reqs
+        if num_tokens and num_reqs:
+            torch.ops._rocm_C.build_qsa_metadata_rdna2(
+                c.query_start_loc[: num_reqs + 1],
+                c.seq_lens[:num_reqs],
+                c.slot_mapping,
+                c.block_table_tensor,
+                self.token_to_req,
+                self._positions,
+                self._visible,
+                self._slots,
+                None,
+                num_reqs,
+                int(c.query_start_loc_cpu[num_reqs]),
+                num_tokens,
+                0,
+                math.ceil(math.log2(num_reqs)),
+                0,
+                1,
+                1,
+                1,
+                0,
+            )
+        return self.token_to_req[:num_tokens]
+
+
+def make_metadata(
+    c: CommonAttentionMetadata, scratch: SeqIdxScratch | None
+) -> Inkling2Metadata:
+    """Per-group metadata of one step.  ``scratch`` (HIP path) fills the persistent
+    ``seq_idx`` buffer on the device; without it (reference path) torch builds it."""
+    num_reqs = c.num_reqs
+    num_tokens = c.num_actual_tokens
+    qsl = c.query_start_loc[: num_reqs + 1]
+    if scratch is None:
+        q_lens = (qsl[1:] - qsl[:-1]).to(torch.int64)
+        seq_idx = torch.repeat_interleave(
+            torch.arange(num_reqs, device=qsl.device, dtype=torch.int32),
+            q_lens,
+            output_size=num_tokens,
+        )
+    else:
+        seq_idx = scratch.fill(c)
+    return Inkling2Metadata(
+        block_table=c.block_table_tensor[:num_reqs],
+        slot_mapping=c.slot_mapping[:num_tokens],
+        seq_lens=c.seq_lens[:num_reqs],
+        query_start_loc=qsl,
+        seq_idx=seq_idx,
+        num_actual_tokens=num_tokens,
+        num_reqs=num_reqs,
+        max_query_len=c.max_query_len,
+        max_seq_len=c.max_seq_len,
+    )
 
 
 class Inkling2MetadataBuilder(AttentionMetadataBuilder[Inkling2Metadata]):
-    # Eager torch implementation: no graph capture yet.
+    # No graph capture yet: the HIP ops are capturable but the metadata tensors the
+    # runner hands over are not persistent (see docs/rdna2/inkling2-port-spec.md).
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(
@@ -71,6 +185,11 @@ class Inkling2MetadataBuilder(AttentionMetadataBuilder[Inkling2Metadata]):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._scratch: SeqIdxScratch | None = None
+        if use_hip_ops(device):
+            self._scratch = SeqIdxScratch(
+                vllm_config.scheduler_config.max_num_batched_tokens, device
+            )
 
     def build(
         self,
@@ -78,27 +197,7 @@ class Inkling2MetadataBuilder(AttentionMetadataBuilder[Inkling2Metadata]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> Inkling2Metadata:
-        c = common_attn_metadata
-        num_reqs = c.num_reqs
-        num_tokens = c.num_actual_tokens
-        qsl = c.query_start_loc[: num_reqs + 1]
-        q_lens = (qsl[1:] - qsl[:-1]).to(torch.int64)
-        seq_idx = torch.repeat_interleave(
-            torch.arange(num_reqs, device=qsl.device, dtype=torch.int32),
-            q_lens,
-            output_size=num_tokens,
-        )
-        return Inkling2Metadata(
-            block_table=c.block_table_tensor,
-            slot_mapping=c.slot_mapping[:num_tokens],
-            seq_lens=c.seq_lens[:num_reqs],
-            query_start_loc=qsl,
-            seq_idx=seq_idx,
-            num_actual_tokens=num_tokens,
-            num_reqs=num_reqs,
-            max_query_len=c.max_query_len,
-            max_seq_len=c.max_seq_len,
-        )
+        return make_metadata(common_attn_metadata, self._scratch)
 
 
 class Inkling2Backend(AttentionBackend):

@@ -143,6 +143,8 @@ class PagedWorld:
         num_blocks: int = 128,
         seed: int = 0,
         device="cpu",
+        hip: bool = False,
+        max_tokens: int = 1024,
     ) -> None:
         self.device = torch.device(device)
         self.groups = {
@@ -172,8 +174,9 @@ class PagedWorld:
                 )
             g.owners.append(owner)
         self.computed: dict[int, int] = {}
-        # build() reads nothing from the builder instance
-        self.builder = object.__new__(state_mod.Inkling2MetadataBuilder)
+        # ``hip``: ``seq_idx`` comes from the persistent device scratch of the HIP
+        # serving path (what ``Inkling2MetadataBuilder`` does on a GPU); otherwise torch
+        self.scratch = state_mod.SeqIdxScratch(max_tokens, self.device) if hip else None
 
     def metadata(
         self, work: list[tuple[int, int]]
@@ -203,6 +206,7 @@ class PagedWorld:
                 query_start_loc=torch.tensor(
                     starts, dtype=torch.int32, device=self.device
                 ),
+                query_start_loc_cpu=torch.tensor(starts, dtype=torch.int32),
                 block_table_tensor=torch.tensor(
                     rows, dtype=torch.int32, device=self.device
                 ),
@@ -211,7 +215,7 @@ class PagedWorld:
                 max_query_len=max(n_tok),
                 max_seq_len=max(seq_lens),
             )
-            md = self.builder.build(0, common)
+            md = state_mod.make_metadata(common, self.scratch)
             for owner in g.owners:
                 out[owner.prefix] = md
         return out
@@ -271,13 +275,18 @@ def patched(obj, name, value):
         setattr(obj, name, old)
 
 
-def fake_vllm_config(model_dir, hf_config, dtype=torch.float16):
+def fake_vllm_config(
+    model_dir, hf_config, dtype=torch.float16, max_num_batched_tokens: int = 1024
+):
     """The slice of ``VllmConfig`` that the owners and the model read."""
     return types.SimpleNamespace(
         model_config=types.SimpleNamespace(
             hf_config=hf_config, dtype=dtype, model=str(model_dir), revision=None
         ),
         compilation_config=types.SimpleNamespace(static_forward_context={}),
+        scheduler_config=types.SimpleNamespace(
+            max_num_batched_tokens=max_num_batched_tokens
+        ),
     )
 
 
