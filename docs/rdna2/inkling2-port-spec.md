@@ -967,3 +967,362 @@ layout, validation and every table are in `inkling2-tensor-parallel.md`.  Run wi
   capture-safe, graph replay measured in `bench_tp_comm.py`); TP=4 prefix-cache and image
   runs with the shard; attention kernels at lengths beyond 2,048 tokens (the
   long-context check, not this work); prefill speed at chunk 64.
+
+## 2026-11-22 — merged tree: the conv ring and tensor parallelism together (branch `feat/inkling2-merge`)
+
+`feat/inkling2-conv` (42fffe0e8c, the fp16 position-addressed conv ring) and
+`feat/inkling2-tp` (6d25f71128, TP=2 / 4 on the HIP path, validated on the old fp32
+per-token conv layout only) merged without a textual conflict (7d88271ade) but had never
+run together.  They meet in three places: the conv owner of a rank is `[H_r, S, W_r]`
+(`H_r = 8 / tp` kv heads, a row width that grows with TP), the post-attention conv input
+of a TP rank is the fp32 all-reduce of the `o_proj` partials while the ring stores fp16,
+and the planner (`tools/rdna/inkling2/kv_plan.py`) has to agree with what the model
+allocates.  Box `par1-cs25`, V620 (gfx1030), eager, fp16, `VLLM_RDNA_AR=1` at TP > 1;
+other agents' jobs ran on the neighbouring cards, so latencies are indicative (the KFD
+`evicted_ms` of the TP=2 / TP=4 engine processes of the long runs stayed 0).  Every
+number below was measured on this tree unless it says [INFERENCE].
+
+### Found and fixed
+
+1. **The tree did not build** (CMake step 145 of 157): `inkling2_glue_rdna2.hip:1868:
+   error: expected unqualified-id`.  `embed_lookup_kernel`, the one kernel the TP branch
+   added, was not a template, and the repo's clang-format breaks the launch of such a
+   kernel after the namespace (`inkling2_glue::` / `embed_lookup_kernel<<<...>>>(a);`),
+   which hipify turns into a statement clang rejects [INFERENCE for the mechanism; the
+   failing line is the observation].  Every other launch in the file is `kernel<0>` with
+   the `<<<...>>>` on the next line: those kernels carry a dummy `template <int DUMMY =
+   0>` for exactly this.  `embed_lookup_kernel` is one now (body unchanged); the pre-commit
+   clang-format keeps that form.  Rebuild of the one translation unit: `build_exit=0`
+   (136 s).
+2. **The planner derived wrong pages for TP > 1.**  `kv_plan.py` built the TP=1 model and
+   divided the specs by TP: TP=2 got a 19,968 B conv page (the rank allocates 33,792 B)
+   and one conv group at every TP (the rank's owners make 2 at TP=2 and 3 at TP=4).  The
+   real model builds the conv owner of a rank from the streams the rank holds: K and V
+   are per kv head (128 channels each), the post-attention and MLP streams are
+   replicated, so their share per kv head grows with TP:
+   `W = 128 + 128 + 2 x 2304 / H_r` = 832 / 1408 / 2560.
+   `layer_specs(cfg, tp)` now builds the rank's own `Inkling2LoopTextForCausalLM` on the
+   meta device and reads the owners' specs; the planner no longer patches the platform at
+   import (`v620_platform()` context manager).  The model needed no change:
+   `Inkling2DecoderLayer` builds its conv owner from `self_attn.num_kv_heads` already.
+3. **Stale docstrings.**  `Inkling2ConvOwner` and `static_conv_hip` said the conv inputs
+   are fp16 and the state exact; at TP > 1 the post-attention input is fp32 (below).
+4. **`long_context_check.py`** had no tensor parallelism: `--tensor-parallel-size`,
+   `--ar-backend rdna` (`VLLM_RDNA_AR=1`) and `--text-only` (no vision tower, see the
+   long-context section) were added.
+5. **A test-order leak in the new planner tests** (found by the whole-session CPU run,
+   not by the files alone: 1 failure and 13 errors in `test_inkling2_tiny_harness.py`,
+   `'Inkling2LoopTextConfig' object has no attribute 'pad_token_id'`).  Building the
+   engine config of the real checkpoint registers the repo's config classes with
+   `AutoConfig` for the rest of the process, so the transformers reference of the tiny
+   harness, which runs later, got the repo's text config instead of transformers' own.
+   The `plan` fixture of `test_tensor_parallel.py` now builds the config under a copy
+   of `CONFIG_MAPPING._extra_content`; planner tests followed by the harness: 46
+   passed (before: 1 failed, 13 errors).
+
+### The caches of a rank (real config, fp16, 64-token blocks)
+
+| TP | kv heads / rank | K\|V page (layer, block) | conv row `W` | conv page, ring 3 / 10 rows | pool block | conv groups, k = 0 / k = 7 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 8 | 262,144 B | 832 | 39,936 / 133,120 B | 2 MiB | 1 x 48 layers / 4 x 12 |
+| 2 | 4 | 131,072 B | 1,408 | 33,792 / 112,640 B | 1 MiB | 2 x 24 / 6 x 8 |
+| 4 | 2 | 65,536 B | 2,560 | 30,720 / 102,400 B | 0.5 MiB | 3 x 16 / 10 (8 x 5 + 2 x 4) |
+
+The pool block is 8 full-attention pages; a conv group holds `pool block // conv page`
+layers (52 / 31 / 17 at k = 0, 15 / 9 / 5 at k = 7), so the groups are `cdiv(48, that)`.
+Every case has five sliding-window groups of 8 layers (49 blocks at mnbt 1024) and one
+full-attention group of 8 layers (`L / 64` blocks); a conv group needs 34 blocks at mnbt
+1024.  The conv state per rank does not shrink like the KV does (the replicated streams),
+but it is 34 blocks per group and ends at 51 - 68 MiB whatever TP is.
+
+One max-length request, from the planner (k = 0, mnbt 1024, `max_num_seqs` 2; the
+planner holds `F` = 2 x mnbt in-flight tokens):
+
+| L | TP=1 | TP=2 | TP=4 |
+| ---: | ---: | ---: | ---: |
+| 201,600 | 3,429 blocks = 6.697 GiB | 3,463 = 3.382 GiB | 3,497 = 1.708 GiB |
+| 262,144 | 4,375 = 8.545 GiB | 4,409 = 4.306 GiB | 4,443 = 2.169 GiB |
+| 1,048,576 | 16,663 = 32.545 GiB | 16,697 = 16.306 GiB | 16,731 = 8.169 GiB |
+| 1,048,576, k = 7 | 16,765 = 32.744 GiB | 16,833 = 16.438 GiB | 16,969 = 8.286 GiB |
+
+The conv-branch section above scaled the TP=1 pages by `1 / tp` (16.272 / 8.136 GiB at k =
+0 and 16.372 / 8.186 GiB at k = 7 for TP=2 / 4); the numbers here are 0.03 - 0.10 GiB
+higher.  The planner and the engine agree: TP=1 mnbt 1024 needs 3,429 blocks at 201,600
+tokens and the engine's boot extends the cache to 3,430 blocks; for TP=2 at 1,048,576 the
+lengths the engine's own budgets hold are 1,039,104 / 1,044,032 / 1,047,424 (budgets 16.00
+/ 16.07 / 16.11 GiB at mnbt 256 / 224 / 192) and `kv_plan.py --budget-gib` gives 1,039,296
+/ 1,044,288 / 1,047,360.
+
+### fp32 -> fp16: the conv state at TP > 1
+
+At TP=1 every conv input is an fp16 GEMM output, so the fp16 ring is exact.  At TP > 1 one
+of the four streams, the post-attention one, is the all-reduced fp32 sum of the `o_proj`
+partials (the K, V and MLP streams are fp16).  The conv kernels read the taps of the
+current chunk from that fp32 input exactly and store it rounded to nearest even in the
+fp16 ring, so only the *history* of a later chunk or step is rounded: the same rounding
+TP=1 applies once, at the epilogue of the `o_proj` GEMM, to the same quantity (up to the
+fp32 summation order).  `test_conv_state_rounds_fp32_inputs_to_fp16` pins the kernel
+semantics for the real TP shapes (kv heads, per-head stream width) = (2, 128), (4, 576),
+(2, 1152).
+
+What the rounding costs, in three tiers.  (1) CPU, fp32 compute (nothing else rounds),
+router-stable `tiny1`, the 70-token prompt, max |dlogit|
+(`test_tp_fp16_conv_ring_only_rounds_the_history`):
+
+| TP | chunk | fp32 rings: TP=N vs transformers | fp32 rings: TP=N vs TP=1 | fp16 ring costs at TP=N / at TP=1 | TP=N vs TP=1, fp16 rings | stored entries whose fp16 rounding differs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 1 | 7.7e-5 | 5.5e-5 | 1.68e-2 / 1.75e-2 | 8.4e-3 | 1.10% |
+| 2 | 7 | 5.6e-5 | 5.4e-5 | 8.7e-3 / 8.5e-3 | 1.8e-3 | 1.03% |
+| 4 | 1 | 6.3e-5 | 5.8e-5 | 1.60e-2 / 1.75e-2 | 8.5e-3 | 1.14% |
+| 4 | 7 | 6.1e-5 | 6.0e-5 | 8.4e-3 / 8.5e-3 | 3.1e-3 | 1.05% |
+
+With equal rings TP=N equals TP=1 to the fp32 summation order (5e-5); the fp16 ring costs
+the same on N ranks as on one; and what N ranks and one still differ by with fp16 rings
+is smaller than that cost: the summation order moves a stored value by a few fp32 ulps,
+which flips its fp16 rounding for about 1% of the stored entries.  On the free-routing
+`tiny8` the same experiment is dominated by a router flip that the rounding causes at
+chunk 1 (13.5 logits at TP=1 and TP=N alike on one variant, 2.75 at TP=1 only on the
+router-biased one): a discrete decision, not a TP effect, and the reason the quantitative
+test uses `tiny1`.  (2) GPU, the HIP kernels in fp16 with thread ranks on one card
+(`test_serving_path_gpu.py::test_tp_*`, mean / max |dlogp| against TP=1, 70-token prompts):
+
+| checkpoint | scenario | TP=2 vs TP=1 | TP=4 vs TP=1 | TP=1 vs transformers | TP=2 vs TP=2 with the attention stream cast to fp16 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| tiny1 | prefill 70 | 1.01e-2 / 0.072 | 1.09e-2 / 0.091 | 1.18e-2 / 0.099 | |
+| tiny1 | chunked 70 / 16 | 1.06e-2 / 0.066 | 1.16e-2 / 0.093 | 1.21e-2 / 0.117 | 1.08e-2 / 0.112 |
+| tiny1 | decode from 30 | 0.98e-2 / 0.067 | 1.05e-2 / 0.091 | 1.13e-2 / 0.078 | 1.02e-2 / 0.084 |
+| tiny8 | prefill 70 | 2.36e-2 / 0.178 | 2.64e-2 / 0.226 | 2.96e-2 / 0.210 | |
+| tiny8 | chunked 70 / 16 | 2.54e-2 / 0.171 | 2.50e-2 / 0.209 | 2.78e-2 / 0.229 | 2.60e-2 / 0.173 |
+| tiny8 | decode from 30 | 2.38e-2 / 0.180 | 2.60e-2 / 0.226 | 2.81e-2 / 0.207 | 2.43e-2 / 0.165 |
+
+The control (the TP=1 conv input, an fp16 cast of the all-reduced attention stream, in
+place of the fp32 one) moves the logits by the same amount as every other fp16-level
+perturbation (TP against TP=1, TP=1 against the fp32 reference); the ring's rounding is
+not resolvable against the pipeline's own noise.  (3) The engine on the tiny checkpoints
+(below): TP=2 against TP=1 gives last-position 0.0455 / 0.00919 (max / mean |dlogp|) on
+`tiny1` and 0.1192 / 0.0263 on `tiny8`, the old layout's 0.046 / 0.0092 and 0.119 /
+0.0263.
+
+### Validation of the merged tree
+
+| Check | Result |
+| --- | --- |
+| build, all csrc together (`build_lq.sh`, MAX_JOBS 8) | first build failed at step 145 (above); second `build_exit=0` after 238 s; one-TU rebuild after the template fix 136 s |
+| CPU `tests/models/inkling2_loop`, `test_inkling2_loop_blocks.py`, `test_inkling2_loop_moe.py`, `test_inkling2_tiny_harness.py` (one session, `HIP_VISIBLE_DEVICES=` empty) | final tree: **716 passed, 92 skipped, 0 failed in 683 s**.  Earlier runs of the same selection: 694 passed in 625 s on the tree before the planner and ring tests existed; 702 passed, 1 failed, 13 errors with the planner tests (the `AutoConfig` leak, item 5 above) |
+| CPU `test_tensor_parallel.py` | 156 passed in 280 s: +28 tests, among them the per-rank cache specs and page sizes at TP=1 / 2 / 4 against the numbers above, the planner tool against the owners' pages (k = 0 / 7), the planner's groups against the pages, the runner's `allocate_kv_cache` of the planner's config binding to every owner (ring `[blocks, H_r, rows, W]`, no page overlap inside a block), and the fp16-ring test above |
+| planner mutation check (`kv_plan.py`, each mutant must fail the planner tests) | 3 of 3 killed: TP=1 specs divided by TP (the old derivation) 8 tests fail, TP=1 row width in the draft ring 8 fail, drafts ignored 3 fail; the restored file 18 pass |
+| ring-test mutation check (`test_tp_fp16_conv_ring_only_rounds_the_history`, 4 cases, mutants of `paged_harness.py` on a copy) | mutant A, the ring dtype ignored (rings stay fp32): 4 of 4 killed; mutant B, the "fp16" ring is bf16: 2 of 4 killed (the chunk-7 cases stay under the 0.1 bound); harness restored (`cmp`) |
+| GPU `test_serving_path_gpu.py`, whole file on the final tree (rebuilt binary) | 138 passed in 174 s (the 122 of the TP=1 run + the 16 new TP tests) |
+| GPU `test_serving_path_gpu.py::test_tp_*` (new, thread ranks on one card) | 16 passed in 24 s (the first version had two failures: a strict last-position argmax assert on the 70-token prompt, whose top-3 logprobs are within 0.036; it uses the clear-margin check now) |
+| kernels `test_inkling2_attn_rdna2.py` | 818 passed in 370 s (668 on the conv branch + the TP shapes of the conv ops and the fp32-input rounding cases) |
+| kernels `test_inkling2_glue_rdna2.py` | 212 passed in 81 s on the first build; 212 passed in 81 s and the 16 TP thread tests above passed again on the build with the template fix |
+| six-arch compile of the glue TU (hipified source, the repo build's compile command with the arch list replaced by gfx1030 gfx1100 gfx90a gfx942 gfx950 gfx1200) | `compile_exit=0` before and after the template fix; `llvm-objdump --offloading` lists all six code objects; `embed_lookup_kernel<0>` on gfx1030: 8 VGPRs, 26 SGPRs, no scratch, no LDS, occupancy 16 (the TP doc's figures for the non-template kernel), the other five arches hold the 0-VGPR stub |
+| csrc mutation checks | not re-run: the fix is a dummy template parameter and a line break, no semantic change; the 17 bit-exact embedding tests (inside the 212) pass on the rebuilt kernel; the TP branch's 10 of 10 mutants of that kernel are recorded in `inkling2-glue-kernels.md` 7.5 |
+| `uvx pre-commit run --files <changed files>` | clean (ruff, ruff format, clang-format, mypy, SPDX, tethering ...), run twice |
+
+### Engine on the tiny checkpoints (`tiny_vllm_check.py`, HIP kernels, fp16, eager)
+
+`tiny1-tp` (6 layers) and `tiny8-tp` (8 layers, loop x3), 24 q / 8 kv heads, head_dim 128, router
+bias x100, default / chunked (chunk 16) / prefix caching / chunked + prefix caching; TP=1 on
+HIP 3, TP=2 on 4,5, TP=4 on 2,3,4,5 with `--ar-backend rdna`; `tiny8` with `--tol-batch
+0.15` as in the TP doc.  The tool's RESULT line:
+
+| checkpoint | TP | default | chunked | prefix | chunked + prefix |
+| --- | ---: | --- | --- | --- | --- |
+| tiny1 | 1 | PASS | PASS | PASS | PASS |
+| tiny1 | 2 | PASS | FAIL: `last/top1`, `batch/ids` | PASS | FAIL: `last/top1`, `batch/ids` |
+| tiny1 | 4 | PASS | FAIL: `batch/ids` | FAIL: `prefix/hit_vs_cold` | PASS |
+| tiny8 | 1 | PASS | PASS | PASS | PASS |
+| tiny8 | 2 | PASS | PASS | PASS | PASS |
+| tiny8 | 4 | PASS | PASS | PASS | PASS |
+
+All four failures are the known near-tie flips of the tiny random model, not the ring or
+the TP split: every other check of those runs passes (last-position mean |dlogp| 0.0100 -
+0.0115, decode 8 of 8 ids for the prompts that are not near a tie, `batch/logprobs` 0.037 -
+0.043 against 0.05, `prefix/same_step_hit` and `prefix/cross_step_hit` equal).  The fp32
+reference of the 70-token prompt has three tokens within 0.036 of each other (log-probs
+-1.7655 / -1.7831 / -1.8014 for the tokens 110 / 377 / 333; the engine's own noise is
+0.04 - 0.06).  TP=1 chunked and the default runs at TP=2 / 4 keep that order; TP=2
+chunked gives 333, 110, 377 at -1.7826 / -1.7844 / -1.7844 (the three within 0.002) and
+TP=4 chunked 110, 333, 377.  The `prefix/hit_vs_cold` branch prompt (67 shared tokens and
+a new tail) has an fp32 top-2 gap of 0.0267 at decode step 6, so the cold and the warm
+run (different chunking) land on different sides of it at TP=4 and not at TP=1 / 2.
+Max / mean |dlogp| of the engine at TP=N against the engine at TP=1 (`--dump` files, same
+statistics as `--against`), default mode; the TP doc's old-layout numbers in the last
+column:
+
+| checkpoint | TP | last position | decode (8 steps) | batch | old layout: last / decode / batch |
+| --- | ---: | ---: | ---: | ---: | --- |
+| tiny1 | 2 | 0.0455 / 0.0092 | 0.0574 / 0.0099 | 0.0600 / 0.0102 | 0.046 / 0.0092, 0.057 / 0.0105, 0.057 / 0.0108 |
+| tiny1 | 4 | 0.0385 / 0.0088 | 0.0541 / 0.0097 | 0.0622 / 0.0097 | 0.039 / 0.0088, 0.059 / 0.0101, 0.083 / 0.0104 |
+| tiny8 | 2 | 0.1192 / 0.0263 | 0.2326 / 0.0270 | 0.2326 / 0.0257 | 0.119 / 0.0263, 0.230 / 0.0263, 0.230 / 0.0263 |
+| tiny8 | 4 | 0.1347 / 0.0223 | 0.1667 / 0.0233 | 0.1796 / 0.0232 | 0.135 / 0.0223, 0.221 / 0.0237, 0.176 / 0.0242 |
+
+The last-position statistics are the old layout's to three digits and the decode / batch
+means are within 7% of them (the maxima move by the engine's run-to-run noise; the greedy
+ids of every prompt equal TP=1's in the default runs, 8 of 8).  In the chunked + prefix
+modes `prefix/hit_vs_cold` is exactly 0.00000 at TP=1 / 2 / 4 on both checkpoints (the
+hit leaves the chunking of the rest unchanged), and 0.04 - 0.09 in the plain prefix mode,
+where the hit changes it.
+
+### Engine on the real checkpoint (`real_check.py`, `--max-model-len 8192`, mnbt 1024, prefix caching, vision, eager)
+
+Run A and B at TP=1 (HIP 3), TP=2 (HIP 4,5, `--ar-backend rdna`), TP=4 (HIP 2,3,4,5); the
+teacher-forced NLL of 799 positions of this document's text against run A, run B (the
+TP=1 repeat) being the noise floor; no `--against` (its first-step top-8 limit false-fails
+and would skip the later phases, the criterion is the NLL one):
+
+| | TP=1 run A | TP=1 run B | TP=2 | TP=4 |
+| --- | ---: | ---: | ---: | ---: |
+| boot | 46.2 s | 33.3 s | 44.4 s | 46.6 s |
+| "Model loading took" per GPU (with the vision tower) | 18.68 GiB | 18.68 GiB | 9.86 GiB | 5.44 GiB |
+| engine "GPU KV cache size" (`max_model_len` 8192) | 69,038 tokens, 8.43x | 69,038, 8.43x | 266,676, 32.55x | 663,983, 81.05x |
+| "capital of France" | coherent, ends "France's capital is Paris" in its thinking text | the same | the same | the same |
+| "write one word: hello" | coherent | diverges mid-sentence (near-tie) | the same as A | the same as A |
+| image (red circle on blue) | "a red circle centered on a blue background" | the same | the same | the same |
+| 1,510-token prompt, prefill cold / warm (prefix hit) | 1.99 s / 0.12 s | 1.99 s / 0.12 s | 1.16 s / 0.08 s | 0.75 s / 0.06 s |
+| mean logp over the 799 positions | -1.9824 | -1.9844 | -1.9829 | -1.9796 |
+| mean \|dlogp\| against A (limit 2 x floor + 0.01 = 0.1027) | | 0.0463 (the floor) | **0.0437 PASS** | **0.0416 PASS** |
+| p99 / max \|dlogp\| against A | | 0.328 / 0.483 | 0.303 / 0.615 | 0.316 / 0.587 |
+
+The TP=1 repeat differs from run A by 0.0463, the TP runs by 0.0416 - 0.0437: the TP split
+and the fp16 ring are inside the run-to-run noise of the engine (the TP doc's old-layout
+numbers: floor 0.0399, TP=2 0.0425 / 0.0439, TP=4 0.0473 / 0.0515).  The tool's
+`PREFIX HIT FAIL` line appears in every run, TP=1 included: the warm run generates other
+ids than the cold one while the first-step top-1 is the same, the known near-tie spread of
+the continuation (TP doc).  Max |dlogp| of the top-8 tokens the two runs share, hit
+against cold / cold against cold again: 0.455 / 0.340 (TP=1 A), 0.534 / 0.528 (TP=1 B),
+1.747 / 0.500 (TP=2), 0.906 / 0.673 (TP=4).
+
+### Long context on the merged tree (real checkpoint, `long_context_check.py` / `real_check.py`, eager, prefix caching, `max_num_seqs` 2)
+
+The TP=2 and TP=4 rows are text only (`limit_mm_per_prompt={"image": 0}`); the TP=1 runs
+carry the vision tower (18.68 GiB of weights, encoder cache profiled).  The planner
+numbers of the table at the top of this section are the "needs"; the engine's outcome at
+boot:
+
+Settings of every run here: `dtype=float16`, `enforce_eager=True`,
+`gpu_memory_utilization=0.92` (the extensible KV cache takes what its margin leaves),
+`max_num_seqs=2`, prefix caching on, `VLLM_RDNA_AR=1` at TP > 1; command
+`tools/rdna/inkling2/long_context_check.py --ckpt ~/hfcache/inkling2-mini
+--chat-template-file <ckpt>/chat_template.jinja --tensor-parallel-size N --ar-backend rdna
+--max-model-len 1048576 --max-num-batched-tokens M [--prompt-tokens P] --text-only` (TP=1:
+`--max-model-len -1`, mnbt 1,024, no `--text-only`, `--ar-backend` not needed); the boot
+searches used `real_check.py` with the same engine arguments.
+
+| TP | `--max-model-len` | mnbt | KV blocks after warm-up | outcome |
+| ---: | ---: | ---: | --- | --- |
+| 1 | auto-fit | 1,024 | 3,430 (6.70 GiB) | **201,600**: "GPU KV cache size" 201,658 tokens, 1.00x; the fit before the warm-up forward was 247,680 (8.11 GiB free), cut to 201,600 after it; boot 27.5 s |
+| 2 | 1,048,576 | 256 | 16,382 (16.00 GiB) | refused: 16.14 GiB needed, estimated maximum 1,039,104 |
+| 2 | 1,048,576 | 224 | 16,452 (16.07 GiB) | refused: 16.13 GiB needed, estimated maximum 1,044,032 |
+| 2 | 1,048,576 | 192 | 16,498 (16.11 GiB) | refused: 16.13 GiB needed, estimated maximum 1,047,424 |
+| 2 | 1,048,576 | 184 | 16,530 (16.14 GiB) | **boots** (the largest tried that does; 185 - 191 not tried): 1,049,655 tokens, 1.00x; boot 35.7 s |
+| 2 | 1,048,576 | 176 | 16,542 | boots: 1,050,417 tokens |
+| 2 | 1,048,576 | 160 | 16,566 | boots: 1,052,260 tokens |
+| 2, with the vision tower | 1,048,576 | 160 | 15,940 (15.57 GiB) | refused: 16.12 GiB needed, estimated maximum 1,012,160 |
+| 2, with the vision tower | 1,000,000 | 160 | 15,940 (15.57 GiB) | **boots**: 1,012,127 tokens, 1.01x; short answers and the image request ("a red circle centered on a blue ...") coherent; boot 41.9 s |
+| 4 | 1,048,576 | 4,096 | 38,008 (18.56 GiB) | **boots**: 2,277,517 tokens, 2.17x (one request needs 17,499 blocks, planner); boot 40.9 s |
+| 4 | 1,048,576 | 8,192 | 35,968 (17.56 GiB) | boots: 2,034,768 tokens, 1.94x; short answers coherent; boot 45.0 s (not timed with a needle) |
+| 4, with the vision tower | 1,048,576 | 4,096 | 36,708 (17.92 GiB) | **boots**: 2,197,701 tokens, 2.10x; weights 6.21 GiB (5.61 text only); short answers and the image request answered; boot 47.7 s |
+
+A rank's budget grows by 1.92 blocks (MiB at TP=2) per token of `max_num_batched_tokens`
+given up (16,382 -> 16,566 blocks from 256 to 160; the engine's log: 19.32 -> 19.44 GiB
+free after warm-up and 0.36 -> 0.29 GiB kept for transient activations), while the need
+of one request shrinks by only 0.22 blocks per token (16,529 -> 16,508): the memory of
+the chunk's forward, not the conv groups, decides how large a chunk TP=2 can take; 184 is
+the largest tried that boots.  The conv branch's shrinking of the conv group (34 blocks
+per group) removed the TP agent's chunk-64 limit (old layout: mnbt <= 96, 16,752 blocks
+held at 96).  With the vision tower the model loads 0.60 GiB more per rank (9.59 against
+8.99 GiB) and TP=2 no longer fits the full length at mnbt 160: the engine's estimate was
+1,012,160 tokens, and `--max-model-len 1000000` booted with 1,012,127 (row above).  Even
+a chunk of 1 token would add at most 160 x 1.92 MiB = 0.30 GiB (15.87 GiB held against
+16.12 GiB needed) [INFERENCE from the slope above, not run].  The margin the extensible
+KV cache keeps free (`KV_CACHE_MARGIN_FLOOR_BYTES`, 3 GiB on ROCm) would have to fall to
+about 2.45 GiB (18.83 + 0.03 - 0.29 - 16.12) for the full length to fit with vision
+[INFERENCE, not run].
+
+Needle runs (`long_context_check.py`: a passphrase in the middle of a numbered fact list,
+the instruction at the end; `--prompt-tokens 262144` builds 261,052 tokens, the 1M timing
+run uses this size so that a prefill takes minutes, not half an hour):
+
+| | TP=1 | TP=2 | TP=4 |
+| --- | ---: | ---: | ---: |
+| `--max-model-len` / mnbt | 201,600 / 1,024 | 1,048,576 / 184 | 1,048,576 / 4,096 |
+| prompt | 181,434 tokens (90% of the length) | 261,052 tokens (25%) | 261,052 tokens (25%) |
+| cold prefill | 382.0 s = **475 tok/s** | 392.7 s = **665 tok/s** | 195.5 s = **1,335 tok/s** |
+| warm prefill (full prefix hit) | 0.30 s | 0.22 s | 0.16 s |
+| decode at that depth | **35.5 ms/token** | **26.4 ms/token** | **27.0 ms/token** |
+| needle at depth 0.5 | FOUND | FOUND | FOUND |
+| control (4,088 tokens) | FOUND | FOUND | FOUND |
+
+The TP=1 numbers are the conv branch's (475 tok/s, 35.6 ms/token): the merge did not
+change the single-card path.  KFD `evicted_ms` stayed 0 for the TP=2 and TP=4 engine
+processes (`kfd_monitor.sh`; the TP=1 needle ran before the monitor started).  TP=4
+prefills twice as fast as TP=2 with a chunk 22x larger (4,096 against 184), the TP=2
+chunk being what the 16 GiB budget allows; the decode step does not get faster from TP=2
+to TP=4 (26.4 against 27.0 ms/token): both are eager-mode launch and all-reduce latency
+bound [INFERENCE, not profiled]; the graphs of the DSpark / graphs branch are the open
+lever.
+
+Depth scaling, every needle run above and the ~90% one at TP=2 (the instruction and the
+needle at depth 0.5; the prefill rate is the average over the whole prompt):
+
+| run | prompt | cold prefill | warm prefill | decode | needle / control |
+| --- | ---: | ---: | ---: | ---: | --- |
+| TP=1, limit 201,600 | 181,434 (90%) | 382.0 s = 475 tok/s | 0.30 s | 35.5 ms/token | FOUND / FOUND |
+| TP=2, limit 1,048,576, mnbt 184 | 261,052 (25%) | 392.7 s = 665 tok/s | 0.22 s | 26.4 ms/token | FOUND / FOUND |
+| TP=2, limit 1,048,576, mnbt 184 | **942,628 (89.9%)** | **2,751.8 s = 343 tok/s** | 0.42 s | **51.8 ms/token** | FOUND (Fact 33705) / FOUND |
+| TP=4, limit 1,048,576, mnbt 4,096 | 261,052 (25%) | 195.5 s = 1,335 tok/s | 0.16 s | 27.0 ms/token | FOUND / FOUND |
+| TP=4, limit 1,048,576, mnbt 4,096 | **942,628 (89.9%)** | **1,382.7 s = 682 tok/s** | 0.34 s | **32.1 ms/token** | FOUND (Fact 33705) / FOUND |
+
+The ~90% prompt at TP=2 took 46 minutes to prefill: the average rate halves from 261k to
+943k tokens (the full-attention layers read the whole history for every chunk of 184
+tokens [INFERENCE: not profiled]), and the decode step grows by 25.4 ms from depth 261k
+to 943k (0.037 ms per 1,000 tokens of context).  A per-token cost `a + b x depth` fitted
+to the two TP=2 prefills (a = 0.96 ms, b = 2.1 ns per token of depth) gives about 3,290 s
+(55 minutes) for a full 1,048,576-token prompt [INFERENCE from the fit, not run].  The
+request fit in the 16,530 blocks the engine held (14,729 full-attention blocks plus the
+window and conv groups' share, about 130 blocks at mnbt 184; the planner's need of the
+full length at that chunk is 16,513); KFD `evicted_ms` stayed 0 for the engine processes.
+
+TP=4 (mnbt 4,096) prefilled the same 942,628 tokens in 23 minutes (the average rate falls
+from 1,335 to 682 tok/s, a factor 1.96; 1.94 at TP=2), and its decode step grew by 5.1
+ms from depth 261k to 943k, a fifth of TP=2's growth (the factor is not 2; not
+profiled).  The same two-point fit gives about 1,650 s (28 minutes) for a full
+1,048,576-token prompt at TP=4 [INFERENCE, not run].
+
+### Open risks and next steps (merged tree)
+
+* **TP=2 with the vision tower does not fit 1,048,576 tokens** at mnbt 160 (15.57 GiB
+  held, 16.12 GiB needed); `--max-model-len 1000000` boots with it (1,012,127 tokens,
+  1.01x, image request answered).  The text only engine boots at the full length with 16
+  blocks to spare at mnbt 184 (16,530 held, 16,508 - 16,529 needed).  Choices: TP=2 +
+  vision at about 1.0M, lower `KV_CACHE_MARGIN_FLOOR_BYTES` (3 GiB on ROCm, all models),
+  or TP=4 (8.2 GiB needed at 1M; booted with the vision tower, 2.10x).
+* **Eager only.**  FULL_AND_PIECEWISE graphs and the DSpark draft at TP > 1 belong to the
+  graphs / DSpark branch and were not run on this tree; every decode number above is
+  eager (26 - 36 ms/token).  Graph memory comes out of the same KV budget, which at
+  TP=2 and 1M is 17 blocks (MiB) wide at mnbt 184 (16,530 held, 16,513 needed) and 58 at
+  mnbt 160 [INFERENCE: the capture sizes or the chunk will have to shrink].
+* **hipify and clang-format.**  A non-template `__global__` launch that the repo's
+  clang-format wraps after the namespace breaks the CMake build only (the JIT builds of
+  the kernel tests do not go through hipify).  `embed_lookup_kernel` was the only one;
+  a build of the glue TU belongs in whatever gates a csrc change.
+* **csrc mutation checks were not re-run** for the template change (no semantic change;
+  the 17 bit-exact tests pass on the rebuilt kernel).
+* **Prefix-hit comparisons are noise-dominated**: `real_check.py` reports
+  `PREFIX HIT FAIL` at TP=1 too (the continuation of a warm and a cold prompt differs
+  at a near-tie while the first-step top-1 is equal), and `tiny_vllm_check.py`
+  `prefix/hit_vs_cold` failed in 1 of the 8 TP > 1 runs with prefix caching (the fp32
+  reference has a 0.0267 top-2 gap at decode step 6 of that prompt).  In the chunked +
+  prefix runs `prefix/hit_vs_cold` and `prefix/cross_step_hit` are bitwise (0.00000).
+* **The fp16 ring rounding at TP > 1 cannot be resolved on the GPU** against the
+  pipeline noise (0.01 mean |dlogp| at TP=1 against transformers); the evidence is the
+  CPU fp32-compute test.
+* **Latencies are indicative**: other agents ran on the neighbouring cards; the TP=4 jobs
+  held HIP 2 - 5 for long stretches.
+
+Next steps: (1) merge the graphs / DSpark branch on this tree and re-run the TP=2 / 4
+boots at 1M with graphs (the 16 GiB budget at TP=2 is the constraint), then the needle
+decode with graphs; (2) decide the TP=2 + vision length; (3) a full 1,048,576-token
+prompt at TP=2 (about 55 minutes of eager prefill, see above) once graphs are in.

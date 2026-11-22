@@ -3,10 +3,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Needle-in-a-haystack run of the real Inkling-2-Mini checkpoint at a long context.
 
-Boots the checkpoint (one GPU, eager, fp16, prefix caching) with ``--max-model-len``
-(``-1``: the engine auto-fits the largest length the KV memory holds and logs it; use
-``--boot-only`` to read it), renders a chat prompt of about ``--frac`` of it (numbered
-filler facts with one passphrase hidden at ``--depth``) and prints
+Boots the checkpoint (one GPU, or ``--tensor-parallel-size`` GPUs; eager, fp16, prefix
+caching) with ``--max-model-len`` (``-1``: the engine auto-fits the largest length the
+KV memory holds and logs it; use ``--boot-only`` to read it), renders a chat prompt of
+about ``--frac`` of it (or ``--prompt-tokens`` tokens: numbered filler facts with one
+passphrase hidden at ``--depth``) and prints
 
 * the prefill throughput of the cold prompt,
 * the prefill of the same prompt on a warm prefix cache (everything but the last
@@ -19,6 +20,14 @@ filler facts with one passphrase hidden at ``--depth``) and prints
     HIP_VISIBLE_DEVICES=3 python long_context_check.py --ckpt ~/hfcache/inkling2-mini \
         --chat-template-file ~/hfcache/inkling2-mini/chat_template.jinja \
         --max-model-len 262144 --frac 0.9
+
+Tensor parallel (``--ar-backend rdna`` selects the one-shot HIP all-reduce)::
+
+    HIP_VISIBLE_DEVICES=4,5 python long_context_check.py \
+        --ckpt ~/hfcache/inkling2-mini \
+        --chat-template-file ~/hfcache/inkling2-mini/chat_template.jinja \
+        --tensor-parallel-size 2 --ar-backend rdna --max-model-len 1048576 \
+        --max-num-batched-tokens 184 --prompt-tokens 262144 --text-only
 """
 
 from __future__ import annotations
@@ -115,6 +124,14 @@ def main() -> int:
     ap.add_argument("--max-num-seqs", type=int, default=2)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.92)
     ap.add_argument("--boot-only", action="store_true")
+    ap.add_argument("--tensor-parallel-size", type=int, default=1)
+    ap.add_argument("--ar-backend", choices=["rccl", "rdna"], default="rccl")
+    ap.add_argument(
+        "--text-only",
+        action="store_true",
+        help="boot without the vision tower and the encoder cache "
+        "(limit_mm_per_prompt image=0): their memory goes to the KV cache",
+    )
     ap.add_argument(
         "--vram-file",
         default="",
@@ -129,6 +146,9 @@ def main() -> int:
         "(runs the engine in this process so the constant can be patched)",
     )
     args = ap.parse_args()
+
+    if args.ar_backend == "rdna":
+        os.environ["VLLM_RDNA_AR"] = "1"
 
     if args.kv_margin_gib is not None:
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -153,12 +173,14 @@ def main() -> int:
         model=args.ckpt,
         dtype="float16",
         enforce_eager=True,
+        tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         skip_tokenizer_init=True,
         enable_prefix_caching=True,
+        **({"limit_mm_per_prompt": {"image": 0}} if args.text_only else {}),
     )
     print(f"BOOT OK in {time.time() - t0:.1f}s", flush=True)
     if args.vram_file:

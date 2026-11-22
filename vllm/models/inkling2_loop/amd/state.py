@@ -292,10 +292,13 @@ class Inkling2ConvOwner(nn.Module, AttentionLayerBase):
 
     ``H = num_kv_heads`` heads; each of the four streams owns a column range of the
     ``W = row_width`` columns of every head (a stream of ``C`` channels is viewed
-    ``[H, C/H]``).  ``state`` is the bound cache as ``[nb, H, S, W]`` in the model
-    dtype: the inputs of the conv are fp16 values on the serving path (GEMM outputs),
-    so the state is exact; position ``p`` of a request lives in the block
-    ``block_table[req, p // block_size]`` at ring row ``p % S``.
+    ``[H, C/H]``).  ``state`` is the bound cache as ``[nb, H, S, W]`` in the model dtype
+    (fp16).  At TP=1 every conv input is an fp16 GEMM output, so the state is exact; at
+    TP>1 the post-attention stream is the fp32 all-reduce of the o_proj partials: the
+    conv reads the current chunk's taps exactly and stores them rounded to fp16, so the
+    history of a later chunk or step comes back rounded to nearest even.  Position
+    ``p`` of a request lives in the block ``block_table[req, p // block_size]`` at
+    ring row ``p % S``.
     """
 
     def __init__(

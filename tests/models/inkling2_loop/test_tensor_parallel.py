@@ -38,12 +38,18 @@ pytest.importorskip(
 )
 pytest.importorskip("vllm.models.inkling2_loop.amd.model")
 
-from paged_harness import patched, text_config  # noqa: E402
+from paged_harness import (  # noqa: E402
+    fake_vllm_config,
+    owners_of,
+    patched,
+    text_config,
+)
 from test_paged_model import (  # noqa: E402
     FP32_TOL,
     PROMPT_LENS,
     PagedModel,
     _batch_plan,
+    _load_tool,
     _prompts,
     make,
     ref,
@@ -56,7 +62,11 @@ from vllm.models.inkling2_loop.amd import (
 )
 from vllm.models.inkling2_loop.amd import model as model_mod  # noqa: E402
 from vllm.models.inkling2_loop.amd import moe as moe_mod  # noqa: E402
-from vllm.models.inkling2_loop.configs import Inkling2LoopTextConfig  # noqa: E402
+from vllm.models.inkling2_loop.amd import state as state_mod  # noqa: E402
+from vllm.models.inkling2_loop.configs import (  # noqa: E402
+    Inkling2LoopConfig,
+    Inkling2LoopTextConfig,
+)
 
 # ---------------------------------------------------------------------------
 # sharding arithmetic
@@ -287,11 +297,15 @@ def _per_thread_metadata(monkeypatch):
 
 class RankModel(PagedModel):
     """One rank of a thread group: the paged serving model with this rank's weights
-    and this rank's share of the (exact, dense) experts."""
+    and this rank's share of the (exact, dense) experts; ``kwargs`` select another
+    device / expert kernels / path (``PagedModel``), e.g. the HIP serving path of
+    ``test_serving_path_gpu.py``."""
 
-    def __init__(self, ckpt, tensors, dtype, tp: parallel.TensorParallel) -> None:
+    def __init__(
+        self, ckpt, tensors, dtype, tp: parallel.TensorParallel, **kwargs
+    ) -> None:
         with patched(model_mod, "current_tensor_parallel", lambda: tp):
-            super().__init__(ckpt, tensors, dtype)
+            super().__init__(ckpt, tensors, dtype, **kwargs)
 
     def _install_dense_experts(self, tensors) -> None:
         tp = self.lm.tp
@@ -339,24 +353,40 @@ def _threads():
     ref.configure_threads(8)
 
 
-@pytest.fixture(scope="module", params=["tiny1", "tiny8"])
-def variant(request, tmp_path_factory):
-    if request.param == "tiny1":
-        spec = make.TinySpec(**TINY)
+def _variant(name: str, tmp_path_factory, **spec_args):
+    if name == "tiny1":
+        spec = make.TinySpec(**TINY, **spec_args)
     else:
         spec = make.TinySpec(
-            **TINY, num_hidden_layers=8, loop_start=2, loop_end=6, loop_num_passes=3
+            **TINY,
+            num_hidden_layers=8,
+            loop_start=2,
+            loop_end=6,
+            loop_num_passes=3,
+            **spec_args,
         )
-    path = tmp_path_factory.mktemp(request.param)
+    path = tmp_path_factory.mktemp(name)
     make.write_checkpoint(path, spec, seed=0)
     return types.SimpleNamespace(
-        name=request.param,
+        name=name,
         path=path,
         tensors=ref.read_checkpoint(path),
         ref=ref.build_reference(path),
         groups={},  # tp size -> (ThreadGroup, [RankModel])
         logits={},
     )
+
+
+@pytest.fixture(scope="module", params=["tiny1", "tiny8"])
+def variant(request, tmp_path_factory):
+    return _variant(request.param, tmp_path_factory)
+
+
+@pytest.fixture(scope="module")
+def stable(tmp_path_factory):
+    """``tiny1`` with the router's selection bias scaled up until the top-k choice is
+    far from any tie: a perturbation as small as an fp16 rounding flips no expert."""
+    return _variant("tiny1", tmp_path_factory, router_bias_scale=100.0)
 
 
 def _group(variant, size: int):
@@ -697,6 +727,99 @@ def test_greedy_token_ids_gathers_the_argmax_partials(monkeypatch, size, rows):
 
 
 # ---------------------------------------------------------------------------
+# the fp16 conv ring at TP > 1
+# ---------------------------------------------------------------------------
+
+
+def _ring_logits(model, ids, chunk: int, conv_dtype) -> torch.Tensor:
+    """Logits of ``ids`` fed ``chunk`` tokens per step with the conv rings in
+    ``conv_dtype``: one rank (``PagedModel``) or a thread group ``(group, ranks)``."""
+    if isinstance(model, PagedModel):
+        return model.reset(conv_dtype=conv_dtype).run(0, ids, chunk)
+    group, ranks = model
+
+    def run(r):
+        return ranks[r].reset(conv_dtype=conv_dtype).run(0, ids, chunk)
+
+    return _same_on_every_rank(group.run(run))
+
+
+SUM_ORDER_TOL = 5e-4  # fp32 compute, N ranks against one rank: 1.4e-4 at most seen
+
+
+def _conv_owners(model: PagedModel) -> list:
+    return [o for o, g in owners_of(model.lm.model.layers) if g == "conv"]
+
+
+def _replicated_ring(owner, stream: int) -> torch.Tensor:
+    """The ring of a replicated stream (post-attention / post-MLP) as
+    ``[blocks, rows, channels]``: the same channel order whatever the rank's head
+    count."""
+    o0, w = owner.stream_ranges[stream]
+    ring = owner.kv_cache[..., o0 : o0 + w]  # [blocks, H, rows, w]
+    return ring.permute(0, 2, 1, 3).reshape(ring.shape[0], ring.shape[2], -1)
+
+
+def _rounding_flips(a: PagedModel, b: PagedModel) -> float:
+    """Fraction of the replicated-stream ring entries of two fp32-ring runs (the same
+    blocks and positions) whose fp16 rounding differs."""
+    flips = total = 0
+    for oa, ob in zip(_conv_owners(a), _conv_owners(b)):
+        for stream in (state_mod.STREAM_ATTN, state_mod.STREAM_MLP):
+            x, y = _replicated_ring(oa, stream), _replicated_ring(ob, stream)
+            seen = torch.isfinite(x) & torch.isfinite(y)
+            flips += int((x.half()[seen] != y.half()[seen]).sum())
+            total += int(seen.sum())
+    return flips / total
+
+
+@pytest.mark.parametrize("chunk", [1, 7])
+@pytest.mark.parametrize("size", [2, 4])
+def test_tp_fp16_conv_ring_only_rounds_the_history(stable, size, chunk):
+    """The engine keeps the conv rings in fp16.  Where TP=1 feeds the conv fp16 GEMM
+    outputs (stored exactly), a TP rank feeds the fp32 sum of the o_proj partials: the
+    current token's taps are exact and its history comes back from the ring rounded.
+    With fp32 compute (nothing else rounds) on a router-stable model:
+
+    * fp32 rings: N ranks and one rank equal each other and transformers up to the fp32
+      summation order: the shards, the replicated streams and the ring addressing add
+      nothing;
+    * fp16 rings: the rounding costs the same on N ranks as on one, and what N ranks
+      and one rank still differ by is less than that cost: the fp32 summation order
+      moves a stored value by a few ulps, which flips its fp16 rounding for the ~1% of
+      the entries that sit near a boundary.
+    """
+    ids = _prompts()[2]
+    one, tp = _tp1_model(stable), _group(stable, size)
+    exact = _ring_logits(tp, ids, chunk, torch.float32)
+    one_exact = _ring_logits(one, ids, chunk, torch.float32)
+    flips = _rounding_flips(tp[1][0], one)
+    rounded = _ring_logits(tp, ids, chunk, torch.float16)
+    one_rounded = _ring_logits(one, ids, chunk, torch.float16)
+
+    def err(a, b):
+        return float((a - b).abs().max())
+
+    ring, one_ring = err(rounded, exact), err(one_rounded, one_exact)
+    print(
+        f"[tp-ring] {stable.name} tp={size} chunk {chunk}: max|dlogit| fp32 ring vs "
+        f"transformers {err(exact, _want(stable, ids)):.3e}; tp{size} fp16 ring vs "
+        f"tp{size} fp32 ring {ring:.3e}; tp1 fp16 ring vs tp1 fp32 ring "
+        f"{one_ring:.3e}; tp{size} vs tp1 with fp16 rings "
+        f"{err(rounded, one_rounded):.3e}, with fp32 rings "
+        f"{err(exact, one_exact):.3e}; fp16 rounding of the stored replicated "
+        f"streams differs in {flips:.2e} of the entries"
+    )
+    assert err(exact, _want(stable, ids)) < SUM_ORDER_TOL
+    assert err(exact, one_exact) < SUM_ORDER_TOL
+    assert 4 * SUM_ORDER_TOL < ring < 0.1
+    assert 4 * SUM_ORDER_TOL < one_ring < 0.1
+    assert ring < 2 * one_ring and one_ring < 2 * ring
+    assert err(rounded, one_rounded) < max(ring, one_ring)
+    assert 0 < flips < 0.05
+
+
+# ---------------------------------------------------------------------------
 # workspace
 # ---------------------------------------------------------------------------
 
@@ -721,3 +844,259 @@ def test_workspace_is_sized_for_the_rank_share(size):
     )
     with pytest.raises(ValueError, match="not divisible"):
         glue_mod.Inkling2GlueWorkspace(cfg, 48, "cpu", tp_size=3)
+
+
+# ---------------------------------------------------------------------------
+# the caches of a rank
+# ---------------------------------------------------------------------------
+
+# Pages of one layer visit of the real Inkling-2-Mini (fp16, 64-token blocks) per TP
+# degree, as (K|V page, conv ring page, conv row width): the K|V page follows the
+# rank's kv heads (8 / tp); a conv row holds, per head, the rank's k and v channels
+# (128 each) next to the replicated post-attention and post-MLP streams (2304
+# channels each) spread over the rank's heads, and the page is 3 ring rows of it.
+REAL_PAGES = {
+    1: (262_144, 39_936, 832),
+    2: (131_072, 33_792, 1408),
+    4: (65_536, 30_720, 2560),
+}
+
+
+def _real_rank(size: int, rank: int = 0, drafts: int = 0):
+    """The model of rank ``rank`` of ``size`` of the real Inkling-2-Mini (meta device)
+    and the vLLM config slice it was built with."""
+    fake = fake_vllm_config(
+        "real-model", Inkling2LoopConfig(), num_speculative_tokens=drafts
+    )
+    old = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float16)
+    try:
+        with (
+            patched(state_mod, "get_current_vllm_config", lambda: fake),
+            patched(loader, "read_expert_formats", lambda m, r, n: ["nvfp4"] * n),
+            torch.device("meta"),
+        ):
+            lm = model_mod.Inkling2LoopTextForCausalLM(
+                vllm_config=fake, serving=False, tp=parallel.TensorParallel(size, rank)
+            )
+    finally:
+        torch.set_default_dtype(old)
+    return lm, fake
+
+
+def _specs_of(lm, fake):
+    """``(kv specs, conv specs)`` of every layer visit, in model order."""
+    kv, conv = [], []
+    for layer in lm.model.layers:
+        kv += [o.get_kv_cache_spec(fake) for o in layer.kv_owners]
+        conv += [o.get_kv_cache_spec(fake) for o in layer.conv_owners]
+    return kv, conv
+
+
+@pytest.mark.parametrize("drafts", [0, 7])
+@pytest.mark.parametrize("size", [1, 2, 4])
+def test_real_rank_cache_specs_and_pages(size, drafts):
+    """The owners of a rank of the real model declare the pages the engine allocates:
+    K|V pages of the rank's kv heads, a conv ring page of the rank's own row width
+    (not the TP=1 row divided by the degree)."""
+    from vllm.models.inkling2_loop.amd.conv_state import Inkling2ConvSpec
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+
+    cfg = Inkling2LoopConfig().text_config
+    kv_page, conv_page, row = REAL_PAGES[size]
+    nkv = cfg.num_key_value_heads // size
+    ring = cfg.sconv_kernel_size - 1 + drafts
+    # the pinned numbers follow from the config
+    assert kv_page == 64 * nkv * 2 * cfg.head_dim * 2
+    assert row == 2 * cfg.head_dim + 2 * cfg.hidden_size // nkv
+    assert conv_page == nkv * 3 * row * 2
+
+    seen = []
+    for rank in sorted({0, size - 1}):
+        lm, fake = _real_rank(size, rank, drafts)
+        kv, conv = _specs_of(lm, fake)
+        assert len(kv) == 48 and len(conv) == 48
+        assert sum(isinstance(s, SlidingWindowSpec) for s in kv) == 40
+        assert sum(isinstance(s, FullAttentionSpec) for s in kv) == 8
+        for spec in kv:
+            assert spec.num_kv_heads == nkv and spec.head_size == cfg.head_dim
+            assert spec.page_size_bytes == kv_page
+        for spec in conv:
+            assert isinstance(spec, Inkling2ConvSpec)
+            assert spec.num_kv_heads == nkv and spec.head_size == row
+            assert spec.block_size == spec.tokens_per_state == 64
+            assert spec.state_content_bytes == ring * row * 2
+            assert spec.page_size_bytes == nkv * ring * row * 2
+            if not drafts:
+                assert spec.page_size_bytes == conv_page
+        for layer in lm.model.layers:
+            for owner in layer.conv_owners:
+                assert owner.ring_rows == ring and owner.row_width == row
+                # k and v are the rank's heads (one head's head_dim of each per
+                # row), the two replicated streams share the heads
+                widths = [w for _, w in owner.stream_ranges]
+                assert widths == [cfg.head_dim] * 2 + [cfg.hidden_size // nkv] * 2
+        seen.append((kv, conv))
+    for kv, conv in seen[1:]:  # every rank holds the same pages
+        assert (kv, conv) == seen[0]
+
+
+def lm_owners(fake) -> dict:
+    """Cache owners of a model built under ``fake``, by registered layer name."""
+    return dict(fake.compilation_config.static_forward_context)
+
+
+def _cdiv(a: int, b: int) -> int:
+    return -(-a // b)
+
+
+@pytest.fixture(scope="module")
+def plan(tmp_path_factory):
+    """The engine config of the real Inkling-2-Mini at ``max_model_len`` 262,144 and
+    1,024-token chunks as the planner tool ``kv_plan.py`` builds it for a V620 (no
+    GPU, no weights), and the tool itself.  Building the config registers the repo's
+    config classes with ``AutoConfig``; that registration is dropped again, the
+    transformers reference tests of the session load transformers' own classes."""
+    from transformers import CONFIG_MAPPING
+
+    kv_plan = _load_tool("kv_plan")
+    ckpt = tmp_path_factory.mktemp("real-config")
+    hf_config = Inkling2LoopConfig()
+    hf_config.architectures = ["Inkling2LoopForConditionalGeneration"]
+    hf_config.save_pretrained(ckpt)
+    args = types.SimpleNamespace(
+        ckpt=str(ckpt), max_num_batched_tokens=1024, max_num_seqs=2, layout="BLNHC"
+    )
+    with (
+        patched(CONFIG_MAPPING, "_extra_content", dict(CONFIG_MAPPING._extra_content)),
+        kv_plan.v620_platform(),
+    ):
+        cfg = kv_plan.engine_config(args, 262144)
+    return types.SimpleNamespace(tool=kv_plan, cfg=cfg)
+
+
+@pytest.mark.parametrize("drafts", [0, 7])
+@pytest.mark.parametrize("size", [1, 2, 4])
+def test_planner_tool_derives_the_pages_the_rank_owners_declare(plan, size, drafts):
+    """``kv_plan.py`` builds the rank's model itself and widens the conv ring of its
+    specs by the speculative tokens: the result is what the owners declare when the
+    engine runs with a speculative config.  (Dividing the TP=1 specs by the degree
+    gives 19,968 B instead of 33,792 B conv pages at TP=2.)"""
+    kv_plan = plan.tool
+    with patched(loader, "read_expert_formats", lambda m, r, n: ["nvfp4"] * n):
+        tool = kv_plan.layer_specs(plan.cfg, size)
+    lm, fake = _real_rank(size, 0, drafts)
+    own = {name: o.get_kv_cache_spec(fake) for name, o in lm_owners(fake).items()}
+    assert set(tool) == set(own)
+    for name, spec in tool.items():
+        assert kv_plan.with_drafts(spec, drafts) == own[name], name
+
+
+@pytest.mark.parametrize("drafts", [0, 7])
+@pytest.mark.parametrize("size", [1, 2, 4])
+def test_planner_groups_hold_the_rank_pages(plan, size, drafts):
+    """One pool block holds the 8 layers of a full-attention group; the conv layers
+    (a page of ``3 + drafts`` rows each) fill as many blocks as their pages need, so a
+    rank's conv state is split into ``48 / (block // page)`` groups: 1 / 2 / 3 at
+    TP = 1 / 2 / 4 (4 / 6 / 10 with 7 draft tokens), not one at every degree."""
+    from vllm.v1.core import kv_cache_planning as planning
+
+    kv_plan, cfg = plan.tool, plan.cfg
+    text = cfg.model_config.hf_config.text_config
+    kv_page, _, row = REAL_PAGES[size]
+    nkv = text.num_key_value_heads // size
+    conv_page = nkv * (text.sconv_kernel_size - 1 + drafts) * row * 2
+    with patched(loader, "read_expert_formats", lambda m, r, n: ["nvfp4"] * n):
+        specs = kv_plan.layer_specs(cfg, size)
+    builder, groups = kv_plan.rank_groups(cfg, specs, drafts)
+    pool = planning._pool_bytes_per_block_from_builder(builder, cfg, groups)
+    assert pool == 8 * kv_page
+    n_conv = _cdiv(48, pool // conv_page)
+    assert (
+        n_conv
+        == {(1, 0): 1, (2, 0): 2, (4, 0): 3, (1, 7): 4, (2, 7): 6, (4, 7): 10}[
+            size, drafts
+        ]
+    )
+    rows = kv_plan.group_rows(cfg, groups)
+    kinds = [kind for kind, _, _ in rows]
+    assert (
+        kinds.count("SlidingWindowSpec") == 5 and kinds.count("FullAttentionSpec") == 1
+    )
+    conv = [r for r in rows if r[0] == "Inkling2ConvSpec"]
+    assert len(conv) == n_conv == len(kinds) - 6
+    assert sum(layers for _, layers, _ in conv) == 48
+    assert max(layers for _, layers, _ in conv) * conv_page <= pool
+    # blocks one request of ``max_model_len`` needs per group: the window (or the conv
+    # taps) plus the tokens in flight, a block more for the partial one; all of it for
+    # the full-attention group
+    length, flight = cfg.model_config.max_model_len, cfg.max_in_flight_tokens
+    window = text.sliding_window_size - 1
+    for kind, layers, blocks in rows:
+        if kind == "SlidingWindowSpec":
+            assert blocks == _cdiv(min(window + flight, length), 64) + 1
+        elif kind == "Inkling2ConvSpec":
+            taps = text.sconv_kernel_size - 1
+            assert blocks == _cdiv(min(taps + flight, length), 64) + 1
+        else:
+            assert blocks == length // 64 and layers == 8
+
+
+@pytest.mark.parametrize("drafts", [0, 7])
+@pytest.mark.parametrize("size", [1, 2, 4])
+def test_allocated_pages_bind_to_the_rank_owners(plan, size, drafts):
+    """The runner's allocation of the planner's config (the real ``allocate_kv_cache``,
+    on CPU): every layer gets a view of its owner's shape, a conv owner's ring comes
+    out as ``[blocks, kv heads, rows, row width]``, and inside one group the pages of
+    the layers of a block do not overlap and stay inside the block."""
+    from vllm.v1.core import kv_cache_planning as planning
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    cfg = plan.cfg
+    lm, fake = _real_rank(size, 0, drafts)
+    owners = lm_owners(fake)
+    # the owners' own specs (their ring already has the rows for the drafts)
+    specs = {name: o.get_kv_cache_spec(fake) for name, o in owners.items()}
+    groups = planning.get_kv_cache_groups(cfg, specs)
+    builder = planning.get_kv_cache_config_builder(cfg)
+    blocks = 5
+    kv_cfg = builder.get_kv_cache_config_from_groups(cfg, groups, num_blocks=blocks)
+    layout = cfg.cache_config.get_resolved_kv_cache_layout()
+    views = allocate_kv_cache(
+        kv_cfg,
+        torch.device("cpu"),
+        layout,
+        None,
+        allocate=lambda n: torch.zeros(n, dtype=torch.int8),
+    )
+    assert set(views) == set(owners)
+    text = cfg.model_config.hf_config.text_config
+    nkv = text.num_key_value_heads // size
+    for name, view in views.items():
+        owner = owners[name]
+        owner.kv_cache = view
+        assert view.dtype == torch.float16 and view.shape[:2] == (blocks, nkv)
+        if isinstance(owner, state_mod.Inkling2ConvOwner):
+            assert owner.state.shape == (
+                blocks,
+                nkv,
+                text.sconv_kernel_size - 1 + drafts,
+                REAL_PAGES[size][2],
+            )
+        else:
+            assert view.shape[2:] == (64, 2 * text.head_dim)
+    pool = kv_cfg.kv_cache_tensors[0].size // blocks
+    for group in kv_cfg.kv_cache_groups:
+        for block in range(1, blocks):
+            spans = []
+            for name in group.layer_names:
+                v = views[name]
+                base = v.untyped_storage().data_ptr()
+                first = (v.storage_offset() + block * v.stride(0)) * v.element_size()
+                extent = 1 + sum(
+                    (n - 1) * s for n, s in zip(v.shape[1:], v.stride()[1:])
+                )
+                spans.append((first, first + extent * v.element_size(), base))
+            spans.sort()
+            assert spans[0][0] >= block * pool and spans[-1][1] <= (block + 1) * pool
+            assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:])), group

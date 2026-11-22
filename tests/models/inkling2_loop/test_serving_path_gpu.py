@@ -60,6 +60,12 @@ from test_paged_model import (  # noqa: E402
     make,
     ref,
 )
+from test_tensor_parallel import (  # noqa: E402
+    RankModel,
+    ThreadGroup,
+    ThreadTP,
+    _metadata_of_this_rank,
+)
 
 from vllm import _custom_ops as ops  # noqa: E402
 from vllm.models.inkling2_loop.amd import model as model_mod  # noqa: E402
@@ -74,8 +80,8 @@ KV_BS = [16, 64]  # the attention kernels take power-of-two pages of at least 16
 REL_TOL = 1e-2  # per-token relative error of a layer visit (non-flipped routes)
 
 
-def _variant(name: str, tmp_path_factory, bias_scale: float):
-    shape = {**SHAPE, "router_bias_scale": bias_scale}
+def _variant(name: str, tmp_path_factory, bias_scale: float, heads=SHAPE):
+    shape = {**heads, "router_bias_scale": bias_scale}
     if name.startswith("tiny1"):
         spec = make.TinySpec(**shape)
     else:
@@ -781,3 +787,144 @@ def test_run_to_run_difference_by_experts_per_token(top_k, tmp_path_factory):
         assert worst == 0.0
     else:
         assert worst < 5 * REL_TOL * scale
+
+
+# -- tensor parallel on one GPU: the ranks are threads of this process ---------------
+TP_SHAPE = {"head_dim": 128, "d_rel": 16, "num_heads": 24, "num_kv_heads": 8}
+
+
+@pytest.fixture(scope="module", params=["tiny1", "tiny8"])
+def tpv(request, tmp_path_factory):
+    """Router-stable HIP-shaped checkpoints with the real model's 24 / 8 heads: they
+    shard over 2 and 4 ranks."""
+    return _variant(f"{request.param}-tp", tmp_path_factory, STABLE_BIAS, TP_SHAPE)
+
+
+@pytest.fixture
+def thread_ranks(monkeypatch):
+    """Every rank has its own caches and block tables: the metadata getter of the model
+    code is looked up per thread."""
+    monkeypatch.setattr(model_mod, "get_metadata", _metadata_of_this_rank)
+
+
+def _tp_ranks(v, size: int):
+    """``size`` ranks of the HIP serving path in one thread group (weights loaded once
+    per variant), fresh caches.  The collectives are the thread group's: every rank
+    adds the fp32 o_proj partials and the fp16 MoE partials of the others in rank
+    order, like ``rdna_ar``."""
+    key = f"hip-tp{size}"
+    if key not in v.models:
+        group = ThreadGroup(size)
+        v.models[key] = (
+            group,
+            [
+                RankModel(
+                    v.path,
+                    v.tensors,
+                    torch.float16,
+                    ThreadTP(group, r),
+                    device="cuda",
+                    experts="kernel",
+                    path="hip",
+                )
+                for r in range(size)
+            ],
+        )
+    group, ranks = v.models[key]
+    for rank in ranks:
+        rank.reset(kv_block_size=16)
+    return group, ranks
+
+
+def _tp_logits(group, ranks, steps) -> torch.Tensor:
+    """Logits ``[n, vocab]`` of every token of a one-request scenario; every rank
+    returns the same bits."""
+    rows = []
+    for work in steps:
+        per_rank = group.run(lambda r, work=work: ranks[r].step(work))
+        for other in per_rank[1:]:
+            assert torch.equal(per_rank[0][0], other[0]), "ranks disagree"
+        rows.append(per_rank[0][0])
+    return torch.cat(rows)
+
+
+def _tp1_logits(v, steps) -> torch.Tensor:
+    pm = _pm(v, "hip", kv_block_size=16)
+    return torch.cat([pm.step(work)[0] for work in steps])
+
+
+def _tp_scenarios():
+    ids = _prompts()[2]
+    return {
+        "prefill 70": [[(0, ids)]],
+        "chunked 70 / 16": [[(0, ids[a : a + 16])] for a in range(0, 70, 16)],
+        # after 30 tokens every step takes its three history rows from the conv ring
+        "decode from 30": [[(0, ids[:30])], *[[(0, [t])] for t in ids[30:]]],
+    }
+
+
+def _spread(a: torch.Tensor, b: torch.Tensor) -> str:
+    d = _dlogp(a, b).abs()
+    return f"{float(d.mean()):.3e} / {float(d.max()):.3e}"
+
+
+@pytest.mark.parametrize("size", [2, 4])
+@pytest.mark.parametrize("scenario", list(_tp_scenarios()))
+def test_tp_hip_ranks_match_tp1(tpv, thread_ranks, size, scenario):
+    """The HIP serving path on 2 / 4 ranks against the same path on one rank and
+    against transformers: only rounding differs (the o_proj partials are summed in fp32
+    and reach the conv as fp32, the fp16 MoE partials are summed in fp16)."""
+    steps = _tp_scenarios()[scenario]
+    ids = _prompts()[2]
+    group, ranks = _tp_ranks(tpv, size)
+    got = _tp_logits(group, ranks, steps)
+    one = _tp1_logits(tpv, steps)
+    want = _want(tpv, ids)
+    assert got.shape == one.shape == want.shape
+    print(
+        f"[hip-tp] {tpv.name} tp{size} {scenario}: mean / max |dlogp| tp{size} vs tp1 "
+        f"{_spread(got, one)}; tp{size} vs transformers {_spread(got, want)}; tp1 vs "
+        f"transformers {_spread(one, want)}"
+    )
+    _rollback_check(tpv, f"hip tp{size} {scenario}", got, ids, 0)
+    assert float(_dlogp(got, one).abs().mean()) < 0.05
+
+
+@pytest.mark.parametrize("scenario", ["chunked 70 / 16", "decode from 30"])
+def test_tp_conv_ring_rounding_is_small_against_the_other_tp_differences(
+    tpv, thread_ranks, scenario, monkeypatch
+):
+    """At TP > 1 the post-attention conv reads the fp32 sum of the o_proj partials where
+    TP=1 reads the fp16 GEMM output, and its ring (fp16) stores the history rounded.
+    The same 2-rank run with that input rounded to fp16 before the conv (what TP=1
+    feeds it) isolates this: its difference to the plain 2-rank run is the effect of
+    the fp32 input and the rounded history, next to the difference of either to TP=1
+    (summation order of the partial sums) and to transformers (fp16 rounding)."""
+    steps = _tp_scenarios()[scenario]
+    ids = _prompts()[2]
+    group, ranks = _tp_ranks(tpv, 2)
+    plain = _tp_logits(group, ranks, steps)
+    real = model_mod.static_conv_hip
+
+    def rounded(conv, x, out, owner, md, stream):
+        if stream == state_mod.STREAM_ATTN:
+            assert x.dtype == torch.float32  # the all-reduced o_proj partials
+            x = x.half()
+        real(conv, x, out, owner, md, stream)
+
+    monkeypatch.setattr(model_mod, "static_conv_hip", rounded)
+    group, ranks = _tp_ranks(tpv, 2)
+    cut = _tp_logits(group, ranks, steps)
+    monkeypatch.setattr(model_mod, "static_conv_hip", real)
+    one = _tp1_logits(tpv, steps)
+    want = _want(tpv, ids)
+    ring = float(_dlogp(plain, cut).abs().mean())
+    other = float(_dlogp(cut, one).abs().mean())
+    print(
+        f"[hip-tp-ring] {tpv.name} {scenario}: mean / max |dlogp| plain tp2 vs "
+        f"fp16-input tp2 {_spread(plain, cut)}; fp16-input tp2 vs tp1 "
+        f"{_spread(cut, one)}; plain tp2 vs tp1 {_spread(plain, one)}; plain tp2 vs "
+        f"transformers {_spread(plain, want)}"
+    )
+    assert not torch.equal(plain, cut), "the rounded input changed nothing"
+    assert ring < 0.05 and other < 0.05

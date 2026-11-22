@@ -150,6 +150,7 @@ class PagedWorld:
         device="cpu",
         hip: bool = False,
         max_tokens: int = 1024,
+        conv_dtype=None,
     ) -> None:
         self.device = torch.device(device)
         self.groups = {
@@ -176,7 +177,7 @@ class PagedWorld:
                     owner.num_kv_heads,
                     owner.ring_rows,
                     owner.row_width,
-                    kv_dtype,
+                    conv_dtype or kv_dtype,
                     self.device,
                 )
             g.owners.append(owner)

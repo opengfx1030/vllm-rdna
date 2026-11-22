@@ -852,6 +852,15 @@ other ops, no new source file.
   of the whole glue source with the repo flags): compiles; gfx1030 8 VGPRs, 26 SGPRs,
   no scratch, no LDS, occupancy 16 waves per SIMD; the other five arches hold the empty
   stub of the kernel (0 VGPRs, no scratch, no LDS) like the other glue kernels.
+* **Launch form** (found on the merged tree, whose CMake build stopped at step 145 with
+  `inkling2_glue_rdna2.hip:1868: error: expected unqualified-id`): the kernel was the
+  source's only non-template `__global__` function.  clang-format wraps its launch after
+  `inkling2_glue::` and `hipify` does not parse the split qualified name; a joined line
+  does not survive the repo's formatter.  It carries a dummy template parameter now
+  (`template <int DUMMY = 0>`, launched as `embed_lookup_kernel<0>`) like `swiglu_kernel`
+  and `copy_states_kernel`; the kernel body is unchanged.  After the change: the 212 glue
+  tests and the 16 TP thread tests pass, the six-architecture compile is `compile_exit=0`
+  with the same resources (gfx1030 8 VGPRs, 26 SGPRs, no scratch, no LDS, occupancy 16).
 
 ## 8. Risks and limits
 

@@ -514,7 +514,11 @@ def static_conv_hip(
     md: Inkling2Metadata,
     stream: int,
 ) -> None:
-    """Static depthwise short conv of one stream: fp16 ``x [T, C]`` -> fp32 ``out``.
+    """Static depthwise short conv of one stream: ``x [T, C]`` -> fp32 ``out``.
+
+    ``x`` is fp16, except the post-attention stream of a TP rank, which is the fp32
+    all-reduce of the o_proj partials: its taps are read exactly and written to the
+    fp16 state rounded.
 
     The first ``k - 1`` tokens of a request chunk read their history from the conv
     state, so a chunk of several tokens writes its inputs after the conv has run

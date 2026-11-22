@@ -827,6 +827,7 @@ struct LookupArgs {
   int H8;
 };
 
+template <int DUMMY = 0>
 __global__ void __launch_bounds__(256) embed_lookup_kernel(const LookupArgs a) {
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
   const int64_t t = blockIdx.x;
@@ -1863,8 +1864,8 @@ void inkling2_glue_embed_lookup(const at::Tensor& ids, const at::Tensor& table,
   const at::cuda::OptionalCUDAGuard guard(device_of(table));
   const hipStream_t stream = at::cuda::getCurrentCUDAStream();
   if (T == 0) return;
-  inkling2_glue::
-      embed_lookup_kernel<<<dim3((unsigned)T), dim3(256), 0, stream>>>(a);
+  inkling2_glue::embed_lookup_kernel<0>
+      <<<dim3((unsigned)T), dim3(256), 0, stream>>>(a);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

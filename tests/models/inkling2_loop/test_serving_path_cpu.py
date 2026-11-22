@@ -115,7 +115,7 @@ def _rows_used(nkv: int, reqs: int, window: int, max_seq: int, max_q: int) -> in
 
 
 @pytest.mark.parametrize("group", [1, 2, 3, 4])
-@pytest.mark.parametrize("nkv", [1, 2, 3, 8, 16])
+@pytest.mark.parametrize("nkv", [1, 2, 3, 4, 8, 16])
 def test_attention_workspace_bound_covers_every_split_configuration(nkv, group):
     nh = nkv * group
     if nh % 2:

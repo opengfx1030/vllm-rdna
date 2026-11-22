@@ -382,7 +382,16 @@ def _assert_cache(cache: torch.Tensor, want: torch.Tensor, what: str) -> None:
 @pytest.mark.parametrize("bs,ring", GEOMETRIES)
 @pytest.mark.parametrize(
     "nkv,width,dtype",
-    [(8, 288, torch.float32), (4, 576, torch.float16), (2, 128, torch.float16)],
+    [
+        (8, 288, torch.float32),
+        (4, 576, torch.float16),
+        (2, 128, torch.float16),
+        # the post-attention (fp32 o_proj all-reduce) and post-MLP (fp16) streams of
+        # a TP=2 / TP=4 rank: 2304 channels over its 4 / 2 kv heads
+        (4, 576, torch.float32),
+        (2, 1152, torch.float32),
+        (2, 1152, torch.float16),
+    ],
 )
 @pytest.mark.parametrize("padding", PADDINGS)
 @pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
@@ -536,13 +545,14 @@ def test_conv_state_write(case, bs, ring, padding, token_major, layers):
 
 @requires_kernels
 @pytest.mark.parametrize("bs,ring", GEOMETRIES)
-def test_conv_state_rounds_fp32_inputs_to_fp16(bs, ring):
-    """An fp32 ``x`` that is not fp16-representable (nothing on the serving path
-    produces one) is stored rounded to nearest even; the taps inside the chunk are
-    exact, the history comes back rounded."""
+@pytest.mark.parametrize("nkv,width", [(2, 128), (4, 576), (2, 1152)])
+def test_conv_state_rounds_fp32_inputs_to_fp16(bs, ring, nkv, width):
+    """An fp32 ``x`` that is not fp16-representable (the post-attention stream of a
+    tensor-parallel rank: the fp32 all-reduce of the o_proj partials) is stored
+    rounded to nearest even; the taps inside the chunk are exact, the history comes
+    back rounded."""
     ops = _ops()
     q_lens, seq_lens = [37, 5, 1], [90, 5, 41]
-    nkv, width = 2, 128
     cw = ConvWorld(
         q_lens,
         seq_lens,

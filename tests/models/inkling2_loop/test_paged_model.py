@@ -149,8 +149,11 @@ class PagedModel:
         conv_block_size: int | None = None,
         num_blocks: int = 128,
         seed: int = 0,
+        conv_dtype=None,
     ) -> PagedModel:
-        """New, NaN-filled caches (the weights are kept)."""
+        """New, NaN-filled caches (the weights are kept); ``conv_dtype``: the dtype of
+        the conv rings (the engine stores them in the model dtype, whatever the dtype
+        of the conv inputs)."""
         k = self.cfg.sconv_kernel_size
         self.world = PagedWorld(
             owners_of(self.lm.model.layers),
@@ -165,6 +168,7 @@ class PagedModel:
             device=self.device,
             hip=self.path == "hip",
             max_tokens=self.max_tokens,
+            conv_dtype=conv_dtype,
         )
         return self
 

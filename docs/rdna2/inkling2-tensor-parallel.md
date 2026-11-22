@@ -87,6 +87,17 @@ request.  Shrinking the state is the conv-state work of the `feat/inkling2-conv`
 sharding it would need the short convolutions of the attention / MLP streams to be
 sharded as well.
 
+> **Superseded on the merged tree** (`feat/inkling2-merge`, section "merged tree" of
+> `inkling2-port-spec.md`): this section and the memory numbers below measured the old
+> per-token fp32 conv layout.  With the fp16 conv ring of `feat/inkling2-conv` a rank's
+> conv page is `[8 / tp, 3, W]` fp16 with `W` = 832 / 1408 / 2560 (39,936 / 33,792 /
+> 30,720 B per layer and 64-token block at TP = 1 / 2 / 4), a request pays 34 blocks per
+> conv group (1 / 2 / 3 groups: 51 - 68 MiB at mnbt 1024) instead of about 1.5 GiB, and the
+> model's 1,048,576 tokens boot on TP=2 with `--max-num-batched-tokens` 184 (the largest
+> tried; text only: the vision tower's 0.6 GiB per rank does not fit) and on TP=4 with 4096
+> (2.17x concurrency).  The chunk-64 requirement and "the conv state does not shrink with
+> TP" are the old layout's.
+
 ## Validation
 
 **CPU** (`test_tensor_parallel.py`, 128 tests, 177 s; the existing suite of
