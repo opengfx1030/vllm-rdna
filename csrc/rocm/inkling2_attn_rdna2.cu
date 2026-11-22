@@ -76,6 +76,7 @@ constexpr int kI2BC = 64;  // keys per tile
 constexpr int kI2TileThreads = 128;
 constexpr int kI2SubTile = 16;     // keys per decode super-tile
 constexpr int kI2MaxSplits = 256;  // split-K partials per (request, kv head)
+constexpr int kI2FusedWaves = 16;  // waves (= splits) of a fused decode CTA
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -738,6 +739,329 @@ __global__ __launch_bounds__(128) void i2_decode_kernel(I2AttnArgs a) {
   }
 }
 
+// ------------- decode with an in-CTA split merge (q_len == 1) --------------
+// Grid (H_q, 1, R), block 32 * kI2FusedWaves.  A CTA owns one (request, q
+// head); the G q heads of a kv head read the same K / V rows through L2, and
+// each CTA does a G-th of the arithmetic of a kv-head CTA (what bounds a
+// short window).  Wave w walks the super-tiles [w tps, (w + 1) tps) of the
+// key range exactly like split w of i2_decode_kernel (the same per-octet
+// online softmax and octet merge), the wave partials meet in LDS, and wave 0
+// merges them with the operations of i2_combine_kernel (same order, plus the
+// single-partial epilogue of i2_decode_kernel).  One launch, no workspace
+// rows and no combine launch: a sliding-window layer, whose ~1k keys are one
+// short DRAM burst, no longer pays two kernels and the gap between them.
+// `splits_decode == 0` selects this kernel.  It serves the q_len == 1
+// requests only: a multi-token request of the same call is the tile kernel's
+// and its partials are merged by i2_combine_kernel.
+//
+// Differences from i2_decode_kernel that change timing only (every product
+// and sum of a split is the same, in the same order): the block-table page
+// of a super-tile is a scalar load (the wave index is made uniform) instead
+// of a vector load and a full vmcnt wait, and sink / gate are loaded before
+// the key walk so that nothing waits on global memory after the LDS barrier.
+
+// One 16-key super-tile of a decode wave in registers.  Lane (octet oc,
+// column c) holds, for the keys kb + 4 rho + oc, the K / V b128 pieces of its
+// columns and the pair [2c, 2c + 2) of the relative-bias weights of the key's
+// distance.
+struct I2FdTile {
+  uint4 kk[4][2], vv[4][2];
+  uint32_t pw[4];
+};
+
+// Issues the loads of super-tile st (zeros for the keys outside the key range).
+__device__ __forceinline__ void i2_fd_load(const I2AttnArgs& a, int r, int kvh,
+                                           int L, const I2DecodeSplit& ds,
+                                           int st, int c, int oc, I2FdTile& t) {
+  const int kb = ds.lo16 + st * kI2SubTile;
+  const int page = a.block_table[(int64_t)r * a.bt_stride + (kb >> a.bs_shift)];
+  const int slot0 = kb & ((1 << a.bs_shift) - 1);
+  const int64_t head_off = (int64_t)kvh * a.kv_s1;
+  const int pq = L - 1;
+  #pragma unroll
+  for (int rho = 0; rho < 4; ++rho) {
+    const int j = kb + rho * 4 + oc;
+    uint32_t pw = 0u;
+    if ((j >= ds.lo) && (j < L)) {
+      const _Float16* p = a.kv + (int64_t)page * a.kv_s0 + head_off +
+                          (int64_t)(slot0 + rho * 4 + oc) * a.kv_s2;
+      t.kk[rho][0] = *reinterpret_cast<const uint4*>(p + c * 8);
+      t.kk[rho][1] = *reinterpret_cast<const uint4*>(p + 64 + c * 8);
+      t.vv[rho][0] = *reinterpret_cast<const uint4*>(p + 128 + c * 8);
+      t.vv[rho][1] = *reinterpret_cast<const uint4*>(p + 192 + c * 8);
+      const int dist = pq - j;
+      if (dist < a.rel_extent)
+        pw = *reinterpret_cast<const uint32_t*>(a.proj_t + (int64_t)dist * 16 +
+                                                2 * c);
+    } else {
+      t.kk[rho][0] = t.kk[rho][1] = make_uint4(0u, 0u, 0u, 0u);
+      t.vv[rho][0] = t.vv[rho][1] = make_uint4(0u, 0u, 0u, 0u);
+    }
+    t.pw[rho] = pw;
+  }
+}
+
+// q / relative-feature prologue of q head hq (scaled L2 clip, optional log
+// scale), as in i2_decode_kernel.  Lane c owns the q dims [8c, 8c + 8) and
+// [64 + 8c, 64 + 8c + 8) and the relative features [2c, 2c + 2).
+__device__ __forceinline__ void i2_fd_prologue(const I2AttnArgs& a, int t,
+                                               int hq, int c,
+                                               uint32_t (&qreg)[8],
+                                               uint32_t& relw) {
+  const float tau = a.log_scale ? i2_log_tau(a, t) : 1.0f;
+  const _Float16* qrow = a.q + (int64_t)t * a.q_stride + hq * kI2D;
+  const uint4 u0 = *reinterpret_cast<const uint4*>(qrow + c * 8);
+  const uint4 u1 = *reinterpret_cast<const uint4*>(qrow + 64 + c * 8);
+  const float* sc = a.q_scale + hq * kI2D;
+  const float4 s0 = *reinterpret_cast<const float4*>(sc + c * 8);
+  const float4 s1 = *reinterpret_cast<const float4*>(sc + c * 8 + 4);
+  const float4 s2 = *reinterpret_cast<const float4*>(sc + 64 + c * 8);
+  const float4 s3 = *reinterpret_cast<const float4*>(sc + 64 + c * 8 + 4);
+  float x[16];
+  x[0] = i2_lo(u0.x) * s0.x;
+  x[1] = i2_hi(u0.x) * s0.y;
+  x[2] = i2_lo(u0.y) * s0.z;
+  x[3] = i2_hi(u0.y) * s0.w;
+  x[4] = i2_lo(u0.z) * s1.x;
+  x[5] = i2_hi(u0.z) * s1.y;
+  x[6] = i2_lo(u0.w) * s1.z;
+  x[7] = i2_hi(u0.w) * s1.w;
+  x[8] = i2_lo(u1.x) * s2.x;
+  x[9] = i2_hi(u1.x) * s2.y;
+  x[10] = i2_lo(u1.y) * s2.z;
+  x[11] = i2_hi(u1.y) * s2.w;
+  x[12] = i2_lo(u1.z) * s3.x;
+  x[13] = i2_hi(u1.z) * s3.y;
+  x[14] = i2_lo(u1.w) * s3.z;
+  x[15] = i2_hi(u1.w) * s3.w;
+  float ss = 0.f;
+  #pragma unroll
+  for (int i = 0; i < 16; ++i) ss += x[i] * x[i];
+  ss += i2_xor(ss, 1);
+  ss += i2_xor(ss, 2);
+  ss += i2_xor(ss, 4);
+  const float f = fminf(1.0f, a.q_clip / (sqrtf(ss) + 1e-6f));
+  #pragma unroll
+  for (int w = 0; w < 8; ++w) {
+    float y0 = i2_round_half(x[2 * w] * f);
+    float y1 = i2_round_half(x[2 * w + 1] * f);
+    if (a.log_scale) {
+      y0 = i2_round_half(y0 * tau);
+      y1 = i2_round_half(y1 * tau);
+    }
+    qreg[w] = i2_pack(y0, y1);
+  }
+
+  const uint32_t rraw = *reinterpret_cast<const uint32_t*>(
+      a.rel + (int64_t)t * a.rel_stride + hq * 16 + 2 * c);
+  const float2 rs =
+      *reinterpret_cast<const float2*>(a.rel_scale + hq * 16 + 2 * c);
+  const float r0 = i2_lo(rraw) * rs.x, r1 = i2_hi(rraw) * rs.y;
+  float rss = r0 * r0 + r1 * r1;
+  rss += i2_xor(rss, 1);
+  rss += i2_xor(rss, 2);
+  rss += i2_xor(rss, 4);
+  const float rf = fminf(1.0f, a.rel_clip / (sqrtf(rss) + 1e-6f));
+  float y0 = i2_round_half(r0 * rf), y1 = i2_round_half(r1 * rf);
+  if (a.log_scale) {
+    y0 = i2_round_half(y0 * tau);
+    y1 = i2_round_half(y1 * tau);
+  }
+  relw = i2_pack(y0, y1);
+}
+
+// Online softmax update of the wave's octet with the 4 keys of super-tile st
+// it owns (the loop body of i2_decode_kernel).
+__device__ __forceinline__ void i2_fd_step(const I2AttnArgs& a, int L,
+                                           const I2DecodeSplit& ds, int st,
+                                           int oc, const I2FdTile& t,
+                                           const uint32_t (&qreg)[8],
+                                           uint32_t relw, float& m_run,
+                                           float& l_run, float (&acc)[16]) {
+  const int kb = ds.lo16 + st * kI2SubTile;
+  #pragma unroll
+  for (int rho = 0; rho < 4; ++rho) {
+    const int j = kb + rho * 4 + oc;
+    const bool valid = (j >= ds.lo) && (j < L);
+    float v[16];
+    v[0] = i2_lo(t.vv[rho][0].x);
+    v[1] = i2_hi(t.vv[rho][0].x);
+    v[2] = i2_lo(t.vv[rho][0].y);
+    v[3] = i2_hi(t.vv[rho][0].y);
+    v[4] = i2_lo(t.vv[rho][0].z);
+    v[5] = i2_hi(t.vv[rho][0].z);
+    v[6] = i2_lo(t.vv[rho][0].w);
+    v[7] = i2_hi(t.vv[rho][0].w);
+    v[8] = i2_lo(t.vv[rho][1].x);
+    v[9] = i2_hi(t.vv[rho][1].x);
+    v[10] = i2_lo(t.vv[rho][1].y);
+    v[11] = i2_hi(t.vv[rho][1].y);
+    v[12] = i2_lo(t.vv[rho][1].z);
+    v[13] = i2_hi(t.vv[rho][1].z);
+    v[14] = i2_lo(t.vv[rho][1].w);
+    v[15] = i2_hi(t.vv[rho][1].w);
+    float qk = 0.f;
+    qk = i2_dot2(qreg[0], t.kk[rho][0].x, qk);
+    qk = i2_dot2(qreg[1], t.kk[rho][0].y, qk);
+    qk = i2_dot2(qreg[2], t.kk[rho][0].z, qk);
+    qk = i2_dot2(qreg[3], t.kk[rho][0].w, qk);
+    qk = i2_dot2(qreg[4], t.kk[rho][1].x, qk);
+    qk = i2_dot2(qreg[5], t.kk[rho][1].y, qk);
+    qk = i2_dot2(qreg[6], t.kk[rho][1].z, qk);
+    qk = i2_dot2(qreg[7], t.kk[rho][1].w, qk);
+    float sp = fmaf(qk, a.scale, i2_dot2(relw, t.pw[rho], 0.f));
+    sp += i2_xor(sp, 1);
+    sp += i2_xor(sp, 2);
+    sp += i2_xor(sp, 4);
+    const float s = valid ? sp : -INFINITY;
+    const float m_new = fmaxf(m_run, s);
+    const float alpha = (m_run == -INFINITY) ? 0.f : __expf(m_run - m_new);
+    const float p = (s == -INFINITY) ? 0.f : __expf(s - m_new);
+    l_run = fmaf(l_run, alpha, p);
+  #pragma unroll
+    for (int i = 0; i < 16; ++i) acc[i] = fmaf(p, v[i], acc[i] * alpha);
+    m_run = m_new;
+  }
+}
+
+template <int G, int NW>
+__global__ __launch_bounds__(NW *
+                             32) void i2_decode_fused_kernel(I2AttnArgs a) {
+  __shared__ __attribute__((aligned(16))) float s_acc[NW][kI2D];
+  __shared__ float s_ml[NW][2];
+  __shared__ float s_w[NW];
+  const int lane = threadIdx.x & 31;
+  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x >> 5);
+  const int hq = blockIdx.x;
+  const int kvh = hq / G;
+  const int r = blockIdx.z;
+  const int qs = a.qsl[r];
+  if (a.qsl[r + 1] - qs != 1) return;  // CTA-uniform: no barrier is skipped
+  const int t = qs;
+  const int L = a.seq_lens[r];
+  const int c = lane & 7;
+  const int oc = lane >> 3;
+
+  if (L <= 0) {  // padded request: define the output
+    if (wave == 0 && oc == 0) {
+      _Float16* o = a.out + (int64_t)t * a.out_stride + hq * kI2D;
+      *reinterpret_cast<uint4*>(o + c * 8) = make_uint4(0u, 0u, 0u, 0u);
+      *reinterpret_cast<uint4*>(o + 64 + c * 8) = make_uint4(0u, 0u, 0u, 0u);
+    }
+    return;
+  }
+  const I2DecodeSplit ds = i2_decode_split(L, a.window, NW);
+  const int st0 = wave * ds.tps;
+
+  // merge-phase operands of wave 0, loaded before the walk
+  float sink = 0.f;
+  uint2 gw = make_uint2(0u, 0u);
+  if (wave == 0) {
+    sink = (float)a.sink[(int64_t)t * a.sink_stride + hq];
+    if (a.gate != nullptr)
+      gw = *reinterpret_cast<const uint2*>(a.gate + (int64_t)t * a.gate_stride +
+                                           hq * kI2D + 4 * lane);
+  }
+
+  if (st0 < ds.nst) {  // wave-uniform
+    const int st1 = min(ds.nst, st0 + ds.tps);
+    I2FdTile tile;
+    i2_fd_load(a, r, kvh, L, ds, st0, c, oc, tile);
+    uint32_t qreg[8];
+    uint32_t relw;
+    i2_fd_prologue(a, t, hq, c, qreg, relw);
+    float m_run = -INFINITY, l_run = 0.f, acc[16];
+  #pragma unroll
+    for (int i = 0; i < 16; ++i) acc[i] = 0.f;
+    for (int st = st0; st < st1; ++st) {
+      if (st != st0) i2_fd_load(a, r, kvh, L, ds, st, c, oc, tile);
+      i2_fd_step(a, L, ds, st, oc, tile, qreg, relw, m_run, l_run, acc);
+    }
+    // ---- merge the four octets of the wave
+  #pragma unroll
+    for (int off = 8; off <= 16; off <<= 1) {
+      const float m2 = i2_xor(m_run, off);
+      const float l2 = i2_xor(l_run, off);
+      const float mn = fmaxf(m_run, m2);
+      const float f1 = (m_run == -INFINITY) ? 0.f : __expf(m_run - mn);
+      const float f2 = (m2 == -INFINITY) ? 0.f : __expf(m2 - mn);
+      l_run = l_run * f1 + l2 * f2;
+  #pragma unroll
+      for (int i = 0; i < 16; ++i)
+        acc[i] = acc[i] * f1 + i2_xor(acc[i], off) * f2;
+      m_run = mn;
+    }
+    if (oc == 0) {
+      float* so = &s_acc[wave][0];
+      *reinterpret_cast<float4*>(so + c * 8) =
+          make_float4(acc[0], acc[1], acc[2], acc[3]);
+      *reinterpret_cast<float4*>(so + c * 8 + 4) =
+          make_float4(acc[4], acc[5], acc[6], acc[7]);
+      *reinterpret_cast<float4*>(so + 64 + c * 8) =
+          make_float4(acc[8], acc[9], acc[10], acc[11]);
+      *reinterpret_cast<float4*>(so + 64 + c * 8 + 4) =
+          make_float4(acc[12], acc[13], acc[14], acc[15]);
+      if (c == 0)
+        *reinterpret_cast<float2*>(&s_ml[wave][0]) = make_float2(m_run, l_run);
+    }
+  }
+  __syncthreads();
+
+  // ---- merge (wave 0; lane l owns the head dims [4 l, 4 l + 4)).  The LDS
+  // row s_w is written and read by this wave only: the LDS executes the
+  // accesses of one wave in order, so a wave barrier is enough.
+  if (wave != 0) return;
+  const int n_active = ds.n_active;
+  float4 o;
+  if (n_active == 1) {  // the single-partial epilogue of i2_decode_kernel
+    const float m = s_ml[0][0], l = s_ml[0][1];
+    const float mx = fmaxf(m, sink);
+    const float w = (m == -INFINITY) ? 0.f : __expf(m - mx);
+    const float f = w / fmaf(l, w, __expf(sink - mx));
+    const float4 p = *reinterpret_cast<const float4*>(&s_acc[0][0] + 4 * lane);
+    o = make_float4(p.x * f, p.y * f, p.z * f, p.w * f);
+  } else {
+    float mg = sink, den = 0.f;
+    for (int s = lane; s < n_active; s += 32) mg = fmaxf(mg, s_ml[s][0]);
+  #pragma unroll
+    for (int off = 16; off >= 1; off >>= 1) mg = fmaxf(mg, i2_xor(mg, off));
+    for (int s = lane; s < n_active; s += 32) {
+      const float2 ml = *reinterpret_cast<const float2*>(&s_ml[s][0]);
+      const float w = (ml.x == -INFINITY) ? 0.f : __expf(ml.x - mg);
+      s_w[s] = w;
+      den = fmaf(ml.y, w, den);
+    }
+  #pragma unroll
+    for (int off = 16; off >= 1; off >>= 1) den += i2_xor(den, off);
+    den += __expf(sink - mg);
+    __builtin_amdgcn_wave_barrier();
+    o = make_float4(0.f, 0.f, 0.f, 0.f);
+  #pragma unroll 8
+    for (int s = 0; s < n_active; ++s) {
+      const float w = s_w[s];
+      const float4 p =
+          *reinterpret_cast<const float4*>(&s_acc[s][0] + 4 * lane);
+      o.x = fmaf(p.x, w, o.x);
+      o.y = fmaf(p.y, w, o.y);
+      o.z = fmaf(p.z, w, o.z);
+      o.w = fmaf(p.w, w, o.w);
+    }
+    o.x /= den;
+    o.y /= den;
+    o.z /= den;
+    o.w /= den;
+  }
+  if (a.gate != nullptr) {
+    o.x *= i2_sigmoid(i2_lo(gw.x));
+    o.y *= i2_sigmoid(i2_hi(gw.x));
+    o.z *= i2_sigmoid(i2_lo(gw.y));
+    o.w *= i2_sigmoid(i2_hi(gw.y));
+  }
+  *reinterpret_cast<uint2*>(a.out + (int64_t)t * a.out_stride + hq * kI2D +
+                            4 * lane) =
+      make_uint2(i2_pack(o.x, o.y), i2_pack(o.z, o.w));
+}
+
 // ------------------------------ tile (q_len >= 2) --------------------------
 // Grid (ceil(max_q / 16), H_kv * S, R), block kI2TileThreads.  The CTA owns 16
 // query tokens x G heads of one kv head (ROWS = 16 G rows) and walks 64-key
@@ -1192,6 +1516,7 @@ __global__ __launch_bounds__(128) void i2_combine_kernel(I2AttnArgs a) {
   if (q_len <= 0 || L < q_len || i0 >= q_len) return;
   int n_active, ntok;
   if (q_len == 1) {
+    if (a.splits_a == 0) return;  // fused decode: the final output is written
     n_active = i2_decode_split(L, a.window, a.splits_a).n_active;
     ntok = 1;
   } else {
@@ -1685,9 +2010,13 @@ void inkling2_attention(torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
   TORCH_CHECK(window >= 0 && max_query_len >= 1, "bad window / max_query_len");
 
   const int S_A = (int)splits_decode, S_B = (int)splits_tile;
-  TORCH_CHECK(splits_decode >= 1 && splits_decode <= kI2MaxSplits &&
+  // splits_decode == 0: the q_len == 1 requests run in the fused kernel (all
+  // splits of a (request, kv head) in one CTA, merged in LDS: no partial rows)
+  TORCH_CHECK(splits_decode >= 0 && splits_decode <= kI2MaxSplits &&
                   splits_tile >= 1 && splits_tile <= kI2MaxSplits,
-              "splits must be in [1, ", kI2MaxSplits, "]");
+              "splits_decode must be in [0, ", kI2MaxSplits,
+              "], splits_tile in [1, ", kI2MaxSplits, "]");
+  const bool fused = S_A == 0;
   const int tiles = (int)((max_query_len + kI2BR - 1) / kI2BR);
   const bool has_tile = max_query_len > 1;
   // partial rows: S_A per decode request, then S_B per token of tile requests
@@ -1751,12 +2080,18 @@ void inkling2_attention(torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(q));
   auto stream = at::cuda::getCurrentCUDAStream();
   const dim3 grid_a(nkv, (S_A + 3) / 4, R);
+  const dim3 grid_f(nh, 1, R);
   const dim3 grid_b(tiles, nkv * S_B, R);
   const dim3 grid_c(tiles, nkv, R);
   if (R == 0) return;
   #define I2_ATTN_LAUNCH(GG)                                          \
     do {                                                              \
-      i2_decode_kernel<GG><<<grid_a, 128, 0, stream>>>(a);            \
+      if (fused) {                                                    \
+        i2_decode_fused_kernel<GG, kI2FusedWaves>                     \
+            <<<grid_f, kI2FusedWaves * 32, 0, stream>>>(a);           \
+      } else {                                                        \
+        i2_decode_kernel<GG><<<grid_a, 128, 0, stream>>>(a);          \
+      }                                                               \
       C10_CUDA_KERNEL_LAUNCH_CHECK();                                 \
       if (has_tile) {                                                 \
         i2_tile_kernel<GG><<<grid_b, kI2TileThreads, 0, stream>>>(a); \

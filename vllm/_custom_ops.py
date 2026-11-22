@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -2052,6 +2053,17 @@ def moe_mxfp8_gemm_swiglu_rdna2(
 
 _INKLING2_MAX_SPLITS = 256  # kI2MaxSplits of csrc/rocm/inkling2_attn_rdna2.cu
 
+#: ``VLLM_INKLING2_DECODE_FUSED`` picks the decode kernel of `inkling2_attention`
+#: (``docs/rdna2/inkling2-attn-kernels.md`` section 11): ``1`` (default) runs the
+#: q_len == 1 requests of sliding-window layers in the fused kernel (all splits of a
+#: (request, q head) in one CTA, merged in LDS: one launch, no partial rows, no combine
+#: launch), ``0`` restores the shipped split-K decode kernel + combine launch for every
+#: layer, ``2`` also fuses the full-attention layers of a single-request batch (faster
+#: than split-K + combine at every depth for one request, 2x slower at depth for two or
+#: more; checked end to end up to 28k of context only: opt-in).  Read once at import
+#: (the split factors are baked into a captured CUDA graph).
+_INKLING2_DECODE_FUSED = os.environ.get("VLLM_INKLING2_DECODE_FUSED", "1")
+
 
 def inkling2_attention_workspace_numel(
     num_reqs: int,
@@ -2062,9 +2074,10 @@ def inkling2_attention_workspace_numel(
 ) -> int:
     """fp32 elements of the split-K workspace used by `inkling2_attention`.
 
-    A decode request (one query token) keeps `splits_decode` partials, every
-    token of a multi-token request keeps `splits_tile` partials; a partial is a
-    128-wide fp32 accumulator plus the (max, sum) softmax state per q head.
+    A decode request (one query token) keeps `splits_decode` partials (none with
+    `splits_decode == 0`, the fused decode kernel), every token of a multi-token
+    request keeps `splits_tile` partials; a partial is a 128-wide fp32 accumulator
+    plus the (max, sum) softmax state per q head.
     """
     rows = splits_decode * num_reqs + splits_tile * num_tokens
     return rows * num_q_heads * (128 + 2)
@@ -2086,12 +2099,21 @@ def inkling2_attention_splits(
     saturate DRAM on a V620 and keep the latency chain of a short window at
     two super-tiles per wave (measured sweeps: docs/rdna2/inkling2-attn-kernels.md).
     A tile CTA owns 16 query tokens of one kv head and the GPU wants ~144 CTAs.
+
+    `splits_decode == 0` selects the fused decode kernel (see
+    ``VLLM_INKLING2_DECODE_FUSED``): it is returned for sliding-window layers,
+    whose window of ~1k keys is a single short DRAM burst that a split-K kernel
+    pays two launches for.
     """
     cap = _INKLING2_MAX_SPLITS
     # keys a request can attend: the window (+ super-tile slack) or the context
     keys = window + 16 if window > 0 else max_seq_len
     groups = max(num_reqs * num_kv_heads, 1)
-    splits_decode = min(max(-(-256 // groups), 1), max(-(-keys // 16) // 2, 1), cap)
+    mode = _INKLING2_DECODE_FUSED
+    fused = mode not in ("", "0") and (window > 0 or (mode == "2" and num_reqs == 1))
+    splits_decode = (
+        0 if fused else min(max(-(-256 // groups), 1), max(-(-keys // 16) // 2, 1), cap)
+    )
     tiles = -(-max_query_len // 16)
     ctas = tiles * groups
     splits_tile = 1

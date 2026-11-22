@@ -87,7 +87,7 @@ inkling2_attention(Tensor q, Tensor rel, Tensor sink, Tensor? gate,
 | `log_alpha`, `log_n_floor` | `0.1`, `8192`. |
 | `q_clip`, `rel_clip` | `22.627416997969522`, `8.0`. |
 | `max_query_len` | host upper bound of `q_len` (`1` for a pure decode batch; it must be `>=` the real maximum, otherwise longer requests are not computed). |
-| `splits_decode`, `splits_tile` | split-K factors in `[1, 256]`: upper bounds on the partials per decode request / per tile CTA row (section 5). |
+| `splits_decode`, `splits_tile` | split-K factors, `splits_decode` in `[0, 256]` and `splits_tile` in `[1, 256]`: upper bounds on the partials per decode request / per tile CTA row (section 5). `splits_decode == 0` runs the decode requests in the fused kernel: no partial rows, no combine launch (section 11). |
 
 `nh` / `H_kv` is the GQA group size `g in {1, 2, 3, 4}`; the model has `g = 3` at
 every TP degree (24/8, 12/4, 6/2).
@@ -272,6 +272,9 @@ same ring rows hold the history and, for a long chunk, its tail).
   split-fastest grid vs 1277 us, [INFERENCE] for the cause). A request with `n`
   super-tiles uses `min(splits_decode, n)` partials, so `splits_decode` is an upper
   bound that short sequences do not pay for.
+* **Fused decode** (`splits_decode == 0`, the sliding layers by default): one CTA of 16
+  waves per `(request, q head)` walks the key range, merges the wave partials in LDS
+  and writes the output row: no workspace rows and no combine launch (section 11).
 * **Prefill / chunked prefill / spec-verify** (`q_len >= 2`): one 128-thread CTA per
   (16 query tokens, kv head, split) walks 64-key tiles in LDS (255 VGPRs, 55.5 KB
   LDS at `g = 3`); `splits_tile` splits the key range of one CTA row when the grid
@@ -282,6 +285,9 @@ same ring rows hold the history and, for a long chunk, its tail).
   max(ceil(keys / 16) // 2, 1), 256)` (about 256 waves, at least two super-tiles per
   wave); `splits_tile = 1` unless `max_query_len > 1` and `ceil(max_q / 16) * groups
   < 144`, then `min(ceil(144 / ctas), max(key_tiles // 4, 1), 16)`.
+  `VLLM_INKLING2_DECODE_FUSED` (section 11.3) replaces `splits_decode` by `0` on the
+  sliding layers (default `1`), on full layers of a one-request batch too with `2`;
+  `0` restores the formula above everywhere.
 * Partials are merged by `i2_combine_kernel` (one wave per q head, LDS weights),
   which also adds the sink to the denominator and applies the gate. A request
   whose range fits one split is finished in the main kernel; the combine kernel
@@ -297,8 +303,8 @@ same ring rows hold the history and, for a long chunk, its tail).
   bounds from `inkling2_attention_splits(R, H_kv, window, max_model_len,
   max_query_len)` and a workspace sized for them. Replay may carry any
   `seq_lens` / `block_table` / `query_start_loc` content; `max_query_len == 1`
-  graphs (FULL decode) launch only the decode and combine kernels, mixed
-  PIECEWISE graphs also the tiled kernel. `tests/.../test_attention_cuda_graph_replay`
+  graphs (FULL decode) launch the decode kernel and, with split-K, the combine
+  kernel, mixed PIECEWISE graphs also the tiled kernel. `tests/.../test_attention_cuda_graph_replay`
   captures once and replays with new lengths and block tables.
 * The grid depends on host integers only (`R`, `H_kv`, splits, `max_query_len`);
   tokens beyond `query_start_loc[R]` and empty / padded requests are inert.
@@ -342,12 +348,29 @@ python tools/rdna/inkling2/bench_attn.py --md --cold --tp 4 --only attn --ctx 16
 python tools/rdna/inkling2/bench_attn.py --sweep-splits --only attn --ctx 16384 131072 --batch 1 --verify-q 2 4 8 --prefill 0 --torch-iters 0
 ```
 
+The sweep includes `S=0`, the fused decode kernel (section 11). The decode end-to-end
+check on the real checkpoint (teacher-forced decode NLL against the shipped
+configuration's own run-to-run floor, greedy decode, decode ms/token; one process per flag
+value; section 11.5):
+
+```bash
+VLLM_INKLING2_DECODE_FUSED=0 python tools/rdna/inkling2/decode_check.py run --out A1.json
+VLLM_INKLING2_DECODE_FUSED=1 python tools/rdna/inkling2/decode_check.py run --out B.json
+VLLM_INKLING2_DECODE_FUSED=0 python tools/rdna/inkling2/decode_check.py run --out A2.json
+python tools/rdna/inkling2/decode_check.py compare A1.json A2.json B.json
+```
+
 ## 8. Verification
 
 `tests/kernels/attention/test_inkling2_attn_rdna2.py`: 863 tests (the conv ops are the large
 majority, attention decode / prefill / mixed / layouts / long context / graph replay the rest),
 all passing on the real registered-ops build (no dev aliasing) on a V620 (HIP 3, merged tree,
 `863 passed in 381 s`; 45 of them are the padding and null-block tests listed below).
+The fused decode kernel (section 11) brought the file to 911 tests: `911 passed in 383 s`
+on the real build of that change (V620, HIP 5, `_rocm_C` built from the patched source).
+With the default flag the policy-driven sliding decode cases run the fused kernel; the
+split-K decode kernel keeps its sliding-window coverage through explicit splits
+(`attention_decode[...-split-k]`, the mixed-splits and group-size cases).
 Every GPU case compares against an fp64 CPU oracle built from the dense K / V (the
 oracle's prologue is bit-identical to `Inkling2Attention._scaled_clip`) and checks the
 poisoned memory: unused cache pages, padding rows and the split workspace are filled
@@ -363,6 +386,7 @@ with NaN, so a read of anything the kernel must not read fails the case.
 | long context | TP=4 full layer with 1,048,576 tokens (three split settings) |
 | cache layouts | head-major, token-major, and both interleaved with two other layers' NaN pages (block stride = 3 pages) |
 | graphs / API | CUDA-graph replay with new lengths and block tables, padded requests, host-check rejections (workspace, splits), fake-tensor tracing of all four ops |
+| fused decode (`splits_decode == 0`) | decode worlds of both windows and layouts, mixed batches, `g = 1 / 2 / 4`, window starts at every offset of a super-tile (flat softmax), padded rows, empty workspace, graph replay, 1M tokens, the split policy of the three flag values (section 11.5) |
 
 Errors against the oracle (fp16 output, `rtol = 4e-3`, `atol = 8e-4`;
 `max_rel` over `|ref| >= 1e-2`; `worst / bound` is the largest `err / (atol + rtol |ref|)`
@@ -588,6 +612,10 @@ Other measurements on the same kernel:
   sliding 599 / 610 us vs 533 / 533 us, full 648 / 650 vs 572 / 575 us, 131072-deep chunk
   144 / 145 ms vs 125 / 128 ms (-12 to -13%), verify q=4 sliding 45.8 vs 48.0 us (+5%).
   The shipped kernel keeps 128 threads; the geometry derives from `kI2TileThreads`.
+* **Sliding-layer decode** in this section's tables was measured with split-K + combine
+  (`splits_decode >= 1`). With `VLLM_INKLING2_DECODE_FUSED=1` (default) the policy
+  runs the sliding layers in the fused kernel (section 11: 30 -> 15 us per layer visit at
+  `B = 1`); `bench_attn.py --sweep-splits` lists it as `S=0`.
 
 ## 10. Limits, risks and integration notes
 
@@ -643,3 +671,270 @@ Other measurements on the same kernel:
   (AGENTS.md prefers `benchmarks/kernels/`); the mutation harness used for section 8
   is a scratch tool outside the repo, the exact one-line mutations are listed there so
   they can be reproduced by hand.
+
+## 11. Fused decode kernel (`splits_decode == 0`)
+
+With `splits_decode == 0` the `q_len == 1` requests of `inkling2_attention` run in
+`i2_decode_fused_kernel`: one CTA per `(request, q head)` of `kI2FusedWaves = 16` waves
+walks the key range, the 16 wave partials are merged in LDS and the gated fp16 row is
+written by the same CTA. One launch, no partial rows in the workspace, and the call
+launches no `i2_combine_kernel` unless it also holds a multi-token request.
+`splits_decode >= 1` keeps the shipped split-K decode kernel + combine launch bit for
+bit (the shipped kernels were not edited; section 11.5).
+
+### 11.1 Why
+
+A sliding-window layer attends `window = 1024` keys: 4.2 MB of K | V per layer visit at
+TP=1 (8 kv heads x 1040 keys x 512 B), about 9.5 us of DRAM time at the 450 GB/s streaming
+roofline. The shipped path pays for that with two kernels and the launch gap between them.
+In the served CUDA graph (`inkling2-decode-glue.md` section 2: 783 kernels per step, 18.5 ms
+of GPU busy time in a 20.1 ms step; `inkling2-decode-moe-profile.md` section 5: at 1k
+context `i2_decode_kernel` averages 17.2 us and `i2_combine_kernel` 4.2 us, 48 launches
+each; a dependent graph kernel costs ~3 us of launch gap, `inkling2-decode-glue.md` section
+2.1) one sliding visit is 17.2 + 4.2 us of kernels plus the gaps: 29.5 - 29.9 us in a cold
+chain of 40 visits. The 8 full-attention visits take 0.6 - 1.5 ms each at 64k - 160k, where the
+decode kernel is at the DRAM roofline (shipped policy, cold, decode + combine: 16k 178 us =
+377 GB/s, 64k 617 us = 435, 131k 1200 us = 447, 160k 1494 us = 449; streaming probe
+437 - 463 GB/s) and is left alone.
+
+### 11.2 Design
+
+* **Grid `(H_q, 1, R)`, block `32 * 16`**: the CTA is per q head, not per kv head. The
+  three q heads of a kv head read the same K | V rows at the same time and share them
+  through L2, and each CTA does a third of the arithmetic of a kv-head CTA, which is what
+  bounds a 1k-key window (kv-head CTA, 3 heads each: 25 us; q-head CTA: 15 us).
+* **Wave `w`** walks the 16-key super-tiles `[w * tps, (w + 1) * tps)` of the key range
+  (`i2_decode_split(L, window, 16)`, the same partition function as the shipped kernel
+  with `splits = 16`), with the shipped per-octet online softmax and octet merge
+  (`__shfl_xor` 8 / 16). The page of a super-tile is a scalar load (the wave index is
+  made uniform with `readfirstlane`): the shipped kernel's vector page load costs a full
+  `vmcnt(0)` wait per super-tile.
+* **Merge** (wave 0, after one `__syncthreads`): the wave partials `(acc[128], m, l)` sit
+  in LDS (`s_acc[16][128]`, `s_ml`, `s_w`: 8.4 KB); wave 0 merges them with the
+  operations of `i2_combine_kernel` in the same order (`mg = max(sink, m_s)`,
+  `den = sum l_s w_s + exp(sink - mg)`, `o = sum acc_s w_s / den`, `* sigmoid(gate)`); a
+  request whose range fits one wave takes the single-partial epilogue of the shipped
+  decode kernel. The sink and gate rows are loaded before the walk.
+* **Fixed shape, no workspace**: the grid does not depend on the context; a wave beyond
+  the last super-tile of a short request is idle; `L <= 0` (padded request) writes the
+  zero row; requests with `q_len != 1` return before any barrier (CTA-uniform).
+* **Resources**: 124 VGPRs (8 waves per SIMD), 0 spills, 8.4 KB LDS.
+* **What did not help** (measured, dropped): software pipelining of the next super-tile
+  (15.5 vs 15.0 us), DPP instead of `ds_bpermute` shuffles (-0.3 us), 20 - 32 waves
+  (15.1 - 15.4 us at `B = 1`, much worse at `B >= 2` and at depth), a kv-head CTA with
+  3 heads (25 us). Floors of the same grid / block: an empty kernel 3.0 us (launch), the
+  same kernel with only the K | V loads 14.2 us. The arithmetic is ~1 us on top of the
+  loads: the kernel is DRAM- and launch-bound, so there is nothing left to tune in it.
+
+### 11.3 Flag and policy
+
+`VLLM_INKLING2_DECODE_FUSED` (read once at import, `vllm/_custom_ops.py`; the split
+factors are baked into captured graphs):
+
+| Value | Sliding layers | Full layers |
+| --- | --- | --- |
+| `0` | split-K + combine (shipped) | split-K + combine (shipped) |
+| `1` (default) | fused, every batch size | split-K + combine |
+| `2` | fused | fused for a single request only (`num_reqs == 1`), else split-K |
+
+`inkling2_attention_splits` returns `splits_decode = 0` accordingly; `splits_tile` is
+unchanged. `inkling2_attention_workspace_numel` stays an upper bound (the kernel needs
+no decode rows with `splits_decode == 0`, section 5). The op signature is unchanged.
+
+Mode `2` is opt-in: on a full layer the fused kernel is 3 - 23% faster than split-K +
+combine for one request at every depth (section 11.4), and an end-to-end run with it
+saves a further 0.19 - 0.20 ms per decode token over mode `1` at 1.7k / 7k context and
+0.48 ms at 24k (single runs, section 11.5); but it is 2.2x slower at 64k with two or four requests and 17 - 19% slower
+at 16k (a CTA of 16 waves per `(request, head)` leaves the DRAM idle when the key walk of
+a wave is long and the grid has few CTAs; the shipped policy splits that range over 256
+waves; [INFERENCE] for the cause), so it is gated on `num_reqs == 1`; its end-to-end runs
+stop at 28k of context.
+
+### 11.4 Measurements
+
+One V620 (HIP 5, TP=1 shapes: 24 q / 8 kv heads, `g = 3`), CUDA-graph replay, cold
+(distinct caches cycled so the 128 MB L3 does not hold the K | V rows), real-build
+semantics (`splits = (0, 1)` vs the shipped policy for the same call), `dec_bench.py` /
+`chain_bench.py` scratch benches (logs below).
+
+Sliding decode layer, `L = 1089`, us per call:
+
+| `B` | shipped (policy) | fused 12 waves | fused 16 waves (shipped config) | speed-up |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 30.0 | 15.5 | 15.5 | 1.94x |
+| 2 | 36.6 | 31.0 | 31.1 | 1.18x |
+| 4 | 55.2 | 50.7 | 51.1 | 1.08x |
+| 8 | 92.7 | 91.1 | 91.9 | 1.01x |
+| 16 | 175.9 | 166.7 | 168.8 | 1.04x |
+| 32 | 372.6 | 317.0 | 318.8 | 1.17x |
+| 64 | 679.0 | 615.7 | 620.9 | 1.09x |
+
+Wave count at `B = 1`: 8 waves 16.1 us, 12 15.5, 16 15.5, 20 15.1, 24 15.4, 32 15.4 us
+(equal within noise; 16 is a power of two and within noise of the best of the chains
+below; 20 and more waves are 7 - 15% slower at `B = 2 - 4`: 20 waves 35.8 vs 31.1 us at
+`B = 2`).
+
+**One decode step's attention in a single CUDA graph** (40 sliding + 8 full visits,
+`[5 sliding, 1 full] x 8`, distinct cold caches per visit, TP=1 shapes), us per step:
+
+| context | shipped | fused 12 | fused 16 | fused 24 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1100 | 1400 | 842.7 (-0.557 ms) | 872.5 (-0.528 ms) | 905.9 (-0.494 ms) |
+| 16385 | 2679.8 | 2081.1 (-0.599 ms) | 2085.9 (-0.594 ms) | -0.597 ms |
+| 65537 | 6148.4 | 5569.0 (-0.579 ms) | 5579.0 (-0.569 ms) | -0.570 ms |
+
+The 40 sliding visits go from 29.5 - 29.9 us to 14.4 - 14.9 us each; the 8 full visits
+are unchanged. Saved in the isolated chain: 0.53 - 0.60 ms per decode token; the end-to-end
+runs of section 11.5 measure 0.37 - 0.40 ms (-1.8 / -1.9% of the 20 ms step).
+
+Mode `2` data (full layer, `splits_decode = 0` vs the shipped policy, us per call, fused 16
+waves; the `B = 1` rows at 12 waves are within noise):
+
+| `L` | `B` | shipped | fused | shipped / fused |
+| ---: | ---: | ---: | ---: | ---: |
+| 4097 | 1 | 57.4 | 46.5 | 1.23x |
+| 16385 | 1 | 177.2 | 155.5 | 1.14x |
+| 65537 | 1 | 610.9 | 588.2 | 1.04x |
+| 163841 | 1 | 1496.5 | 1451.5 (462 GB/s) | 1.03x |
+| 4097 | 8 | 330.8 | 355.9 | 0.93x |
+| 16385 | 2 | 324.4 | 390.1 | 0.83x |
+| 16385 | 4 | 633.1 | 783.7 | 0.81x |
+| 65537 | 2 | 1206.8 | 2663.5 | 0.45x |
+| 65537 | 4 | 2377.7 | 5188.3 | 0.46x |
+
+### 11.5 Verification
+
+**What is and is not bit-identical.** The shipped kernels (`i2_decode_kernel`, the tile
+kernel and the combine math) were not edited: `splits_decode >= 1` is the shipped path
+and every output of the 30-case battery below is bit-identical to the unmodified
+library's. The fused kernel computes the same products and sums as `splits = 16` of the
+shipped kernel (the partition of the key range differs from the policy's `S = 32` and
+the merge is in-CTA), so it differs from the shipped output in the fp32 summation order
+only: in the battery 0 - 0.1% of the fp16 output elements differ, by one fp16 ulp. Its
+error against the fp64 oracle is equal to the shipped op's in every case.
+
+Oracle battery on the final source (`fused_check.py`, 30 cases: decode `nkv = 8 / 4 / 2`
+x both page layouts, mixed decode + tile batches with `(0, 2)` / `(0, 5)`, `g = 1 / 2 / 4`,
+block-outermost layout, prefill without decode rows, padded rows, 33 decode rows, sliding
+and full windows, plus flat-softmax worlds with window starts at every offset of a 16-key
+super-tile): 0 failing cases; `max_abs_err` 4.6e-4 - 1.4e-3 and rms error 2.6e-5 - 8.4e-5
+against the fp64 oracle (`worst / bound` 0.08 - 0.81 of the tolerance
+`8e-4 + 4e-3 * abs(ref)`), equal to the shipped op's value to the printed digits on every
+one of the 30 worlds.
+
+Hand mutants of the fused kernel (one exact-string change each, its own JIT library,
+the 30-case battery; every non-equivalent mutant must fail):
+
+| Mutant | Change | Failing cases of 30 |
+| --- | --- | ---: |
+| F1 | sink dropped from the merge denominator | 26 |
+| F2 | the last super-tile of every wave is not walked | 30 |
+| F3 | single-partial epilogue without the sink | 15 |
+| F4 | kv head of the CTA `hq / G` -> `hq % H_kv` | 28 |
+| F5 | sliding window ignored by the key range | 14 |
+| F6 | the weighted sum stops one partial early | 27 |
+| F7 | the octets of a wave are merged over lane bit 3 only (not bit 4) | 28 |
+| F8 | block-table row of the request ignored (request 0's pages) | 30 |
+| F9 | gate of row `t` read from row 0 | 28 |
+| F10 | padded request (`L <= 0`) writes no zero row | 13 |
+| F11 | no rescale of the accumulator when the running max changes | 28 |
+| F12 | running denominator without the rescale (`l + p`) | 28 |
+| F13 | keys below the window start (zero keys, score 0) not masked | 1 (only the flat-softmax world with the window start inside a super-tile: a spiky world drowns the extra `exp(-m)`) |
+| F14 | `i2_combine_kernel` without its `splits_a == 0` guard | 0, equivalent: the unguarded kernel divides by `splits_a == 0` and takes `n_active <= 1`, which returns early anyway; the guard stays to avoid the division by zero |
+
+F10 and F13 first survived (F10 was an equivalent mutant of a first version, F13 a gap of
+the test worlds); both are now caught.
+
+Tests (`tests/kernels/attention/test_inkling2_attn_rdna2.py`, 911 passed on the real
+build): `test_attention_decode_fused`, `test_attention_decode_window_start_inside_a_super_tile`
+(fused and split-K), `test_attention_fused_decode_needs_no_workspace`, the decode test with
+the policy and with explicit split-K, `(0, 1) / (0, 2) / (0, 5)` rows in the mixed-splits
+test, `(0, 2)` in the GQA-group test, the padded-rows, input-immutability and graph-replay
+tests parametrized with a fused split, `(0, 1)` in the 1M-token test, the split-policy tests
+for the three flag values and a bad-splits row `(-1, 1)`. Six hand mutants of the Python
+policy (`window > 0` -> `>= 0`, mode 2 for two requests, mode 2 without the sliding layers,
+the inverted result, flag `0` still fusing, the tile factor changed) are all killed by the
+split-policy tests (CPU only).
+
+**End to end** (`tools/rdna/inkling2/decode_check.py`, real checkpoint, TP=1, V620 HIP 5,
+`FULL_AND_PIECEWISE` graphs for all rows but E1): teacher-forced decode NLL (a prefix of
+1200 / 2200 / 3200 tokens of `inkling2-port-spec.md` is prefilled, then a logits processor
+makes each of the next 300 decode steps sample the next token of the text; the raw
+logprob of that token is the NLL of a `q_len == 1` step with a 1.2k - 3.5k context, so the
+sliding windows truncate; 897 decode steps per run), greedy decode of two prompts, and
+decode ms/token (wall of 97 tokens minus wall of 1 token of the same prompt, best of 3).
+A = flag `0`, B = flag `1`, C = flag `2`, E = flag `1` with `--cudagraph-mode eager`;
+run order A1 B A2 B2, then C2 and E1.
+
+| run | mean logp of the 897 forced steps | mean `\|dlogp\|` against A1 | decode ms/token at 1.7k | at 7k |
+| --- | ---: | ---: | ---: | ---: |
+| A1 (flag 0) | -1.09248 | | 19.89 | 20.45 |
+| A2 (flag 0) | -1.09415 | 0.04713 (the floor) | 19.89 | 20.38 |
+| B (flag 1) | -1.09239 | 0.04475 | 19.48 | 20.01 |
+| B2 (flag 1) | -1.09446 | 0.04521 | 19.57 | 20.03 |
+| C2 (flag 2) | -1.09295 | 0.04264 | 19.29 | 19.81 |
+| E1 (flag 1, eager) | -1.09346 | 0.04118 | | |
+
+The limit is `2 * floor + 0.01 = 0.1043` (the rule of `real_check.py --nll-against`): B,
+B2, C2 and E1 pass; their mean logp (-1.0924 to -1.0945) lies within 0.0004 of the range of
+the shipped pair (-1.0925 / -1.0942), the p99 / max of `|dlogp|` (0.43 - 0.51 / 0.73 - 1.11)
+are those of the shipped pair (0.50 / 0.90), and the signed mean difference against A1 is
+-0.0001 / +0.0020 / +0.0005 / +0.0010. The floor is large because two shipped runs already
+differ (the expert GEMMs add the eight expert outputs with fp16 atomics): this gate sees
+a gross error, not a one-ulp one; the oracle battery above is the sensitive gate.
+
+Greedy decode is reported, not gated: the two shipped runs already diverge after 83 / 96
+tokens of the numbered-facts prompt and after 5 / 96 of the text prompt, at near-ties
+(where inspected, the chosen token has probability 0.32 - 0.38). Against A1 the fused runs agree for
+96 / 39 / 83 / 83 (facts: B2 / B / C2 / E1) and 94 / 94 / 82 / 82 (text: B / B2 / C2 / E1)
+tokens, the same range.
+
+Decode speed (mean of the two runs of a flag, the two A runs agree within 0.07 ms):
+shipped 19.89 / 20.42 ms per token at 1.7k / 7k context; mode `1` 19.53 / 20.02 (-0.37 /
+-0.40 ms, -1.8 / -1.9%); mode `2` 19.29 / 19.81 (-0.60 / -0.61 ms, -3.0%; one run). The
+isolated 40 + 8 visit chain of section 11.4 predicts -0.53 to -0.60 ms for mode `1`; end
+to end each of the 40 sliding visits is worth 9 - 10 us, not 14 - 15 us (the graph
+neighbours of the real step are different kernels: [INFERENCE]).
+
+**At depth** (same tool, `--max-model-len 33024`, `--text` = the concatenated Inkling 2
+docs, `--cuts 12000:200,28000:200`, `--time-ctx 24000 --time-tokens 48 --time-reps 2`: 398
+forced decode steps at 12k - 28k context; the full layers attend all of it):
+
+| run | mean logp of the 398 forced steps | mean `\|dlogp\|` against A1d | decode ms/token at 24k |
+| --- | ---: | ---: | ---: |
+| A1d (flag 0) | -1.10914 | | 23.97 |
+| A2d (flag 0) | -1.10283 | 0.03757 (the floor) | 23.61 |
+| Bd (flag 1) | -1.10233 | 0.03623 | 23.45 |
+| Cd (flag 2) | -1.10851 | 0.04119 | 22.97 |
+
+The limit is `2 * floor + 0.01 = 0.0851`: Bd and Cd pass (p99 0.38 / 0.35, max 0.72 / 0.51
+against 0.33 / 0.61 of the shipped pair). Decode at 24k: shipped 23.79 ms (mean; the two
+shipped runs differ by 0.36 ms), mode `1` -0.34 ms (-1.4%), mode `2` -0.82 ms (-3.4%),
+single runs; the per-call numbers of section 11.4 predict about -0.4 ms (40 sliding
+visits) and a further -0.15 to -0.2 ms (8 full visits, one request) at this depth: the
+mode-`2` row is 0.2 - 0.25 ms above that prediction, less than the A / A spread of 0.36 ms
+[INFERENCE: noise].
+
+### 11.6 Limits and risks
+
+* The fused kernel is a decode-only path of a CTA with 16 waves: on a full layer with two
+  or more requests at depth it is slower than split-K (section 11.3); that is why the
+  default is the sliding layers only. At `B = 8` and `L = 1089` it ties the shipped
+  policy (1.01x); it is faster at every other measured `B` (1.04 - 1.94x).
+* A graph captured with `VLLM_INKLING2_DECODE_FUSED=1` has `splits_decode = 0` for every
+  sliding layer baked in: switching the flag needs a new process.
+* Run-to-run noise of the model (the fp16 CAS accumulation of the expert GEMMs, see
+  `inkling2-port-spec.md` and `inkling2-decode-glue.md`) is larger than the fp32-order
+  difference of this kernel; the end-to-end gate of section 11.5 therefore compares
+  against the shipped configuration's own run-to-run floor, which makes it blind to
+  anything smaller than a gross error. The oracle battery and the mutants are the
+  sensitive gates.
+* Greedy token equality cannot be gated for the same reason (two shipped runs already
+  diverge at near-ties).
+* Mode `2` was run end to end at 1.7k - 28k context only; its 64k+ evidence is the
+  per-call bench and the 1M-token oracle test (`(0, 1)` row).
+* The speculative-verify rows (`q_len` 2 - 5) do not use the fused kernel; the tile
+  kernel's verify path is untouched.
+* Timings come from a box with other users on it (load average 10 - 12): the per-call
+  and chain numbers are best-of-N with cold caches, the end-to-end rows best of three,
+  and the A / B pairs agree within 0.07 ms.

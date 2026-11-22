@@ -474,7 +474,8 @@ def print_markdown(rows):
         print(f"| {row['case']} | " + " | ".join(cells) + " |")
 
 
-SWEEP_DECODE = (1, 2, 4, 8, 16, 32, 64, 128, 256)  # splits_decode
+# splits_decode (0: the fused kernel)
+SWEEP_DECODE = (0, 1, 2, 4, 8, 16, 32, 64, 128, 256)
 SWEEP_TILE = (1, 2, 4, 8, 16)  # splits_tile
 
 

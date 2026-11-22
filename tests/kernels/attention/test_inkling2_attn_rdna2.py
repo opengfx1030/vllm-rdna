@@ -15,11 +15,16 @@ that reads anything it must not produces NaN.  In the sharp mode "spike" keys
 sit on both sides of the window / relative-bias boundary, so an off-by-one in a
 mask or in the bias index changes the output by far more than the tolerance.
 
+``splits_decode == 0`` selects the fused decode kernel (one CTA per (request, q
+head), the wave partials merged in LDS, no workspace rows); the cases tagged
+"fused" below run it against the same oracle and tolerance as the split-K kernel.
+
 Run: ``pytest tests/kernels/attention/test_inkling2_attn_rdna2.py`` on a
 gfx1030 GPU (the CPU oracle tests run everywhere).
 """
 
 import math
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -1304,10 +1309,60 @@ def _world(reqs, **kw):
 @pytest.mark.parametrize("window", [WINDOW, 0], ids=["sliding", "full"])
 @pytest.mark.parametrize("nkv", [8, 4, 2])
 @pytest.mark.parametrize("token_major", [True, False], ids=["bhc", "hbc"])
-def test_attention_decode(window, nkv, token_major):
+@pytest.mark.parametrize("splits", [None, (4, 1)], ids=["policy", "split-k"])
+def test_attention_decode(window, nkv, token_major, splits):
+    """``None``: the split policy (the fused kernel on the sliding layers while
+    ``VLLM_INKLING2_DECODE_FUSED`` is on); ``(4, 1)``: the split-K decode kernel +
+    combine launch on both window kinds."""
     w = AttnWorld([1] * len(DECODE_LENS), DECODE_LENS, nkv=nkv, window=window, seed=1)
-    out = run_attention(w, token_major=token_major)
-    check_attention(out, w.oracle(), f"decode nkv={nkv} window={window}")
+    out = run_attention(w, token_major=token_major, splits=splits)
+    check_attention(out, w.oracle(), f"decode nkv={nkv} window={window} {splits}")
+
+
+@requires_kernels
+@pytest.mark.parametrize("window", [WINDOW, 0], ids=["sliding", "full"])
+@pytest.mark.parametrize("nkv", [8, 4, 2])
+@pytest.mark.parametrize("token_major", [True, False], ids=["bhc", "hbc"])
+def test_attention_decode_fused(window, nkv, token_major):
+    """``splits_decode == 0``: every split of a (request, q head) in one CTA."""
+    w = AttnWorld([1] * len(DECODE_LENS), DECODE_LENS, nkv=nkv, window=window, seed=1)
+    out = run_attention(w, splits=(0, 1), token_major=token_major)
+    check_attention(out, w.oracle(), f"fused decode nkv={nkv} window={window}")
+
+
+@requires_kernels
+@pytest.mark.parametrize("splits", [(0, 1), (7, 1)], ids=["fused", "split-k"])
+def test_attention_decode_window_start_inside_a_super_tile(splits):
+    """Flat softmax (no spikes) and window starts at every offset of a 16-key
+    super-tile: a key before the window start that is read as a zero key (score
+    0) still adds ``exp(-m)`` to the denominator unless the kernel masks it."""
+    lens = [1039, 1040, 1041, 1048, 1055, 1087, 2063, 2064, 3000]
+    w = AttnWorld(
+        [1] * len(lens),
+        lens,
+        nkv=8,
+        window=WINDOW,
+        sharp=False,
+        with_gate=False,
+        seed=21,
+    )
+    out = run_attention(w, splits=splits)
+    check_attention(out, w.oracle(), f"window start inside a super-tile {splits}")
+
+
+@requires_kernels
+def test_attention_fused_decode_needs_no_workspace():
+    """A decode-only call of the fused kernel keeps no partial rows: it runs with
+    an empty workspace (the numel helper is the upper bound for mixed batches)."""
+    w = AttnWorld([1] * len(DECODE_LENS), DECODE_LENS, nkv=8, window=WINDOW, seed=1)
+    a = w.device_args()
+    out = torch.full(
+        (w.T, w.nh * HEAD_DIM), float("nan"), dtype=torch.float16, device="cuda"
+    )
+    empty = torch.empty(0, dtype=torch.float32, device="cuda")
+    launch_attention(w, a, out, empty, splits=(0, 1), max_query_len=1)
+    torch.accelerator.synchronize()
+    check_attention(out, w.oracle(), "fused decode with an empty workspace")
 
 
 @requires_kernels
@@ -1332,7 +1387,10 @@ def test_attention_block_outermost_layers(window, token_major):
 
 @requires_kernels
 @pytest.mark.parametrize("window", [WINDOW, 0], ids=["sliding", "full"])
-@pytest.mark.parametrize("splits", [(1, 1), (4, 2), (32, 5), (256, 16), None])
+@pytest.mark.parametrize(
+    "splits",
+    [(1, 1), (4, 2), (32, 5), (256, 16), (0, 1), (0, 2), (0, 5), None],
+)
 def test_attention_mixed_splits(window, splits):
     w = _world(MIXED_REQS, nkv=8, window=window, seed=3)
     out = run_attention(w, splits=splits)
@@ -1342,10 +1400,13 @@ def test_attention_mixed_splits(window, splits):
 @requires_kernels
 @pytest.mark.parametrize("g", [1, 2, 4])
 @pytest.mark.parametrize("window", [WINDOW, 0], ids=["sliding", "full"])
-def test_attention_group_sizes(g, window):
+@pytest.mark.parametrize("splits", [(3, 2), (0, 2)], ids=["split-k", "fused"])
+def test_attention_group_sizes(g, window, splits):
     w = _world(MIXED_REQS, nkv=2, g=g, window=window, seed=4)
     check_attention(
-        run_attention(w, splits=(3, 2)), w.oracle(), f"group g={g} window={window}"
+        run_attention(w, splits=splits),
+        w.oracle(),
+        f"group g={g} window={window} splits={splits}",
     )
 
 
@@ -1374,9 +1435,10 @@ def test_attention_small_rel_extent():
 
 
 @requires_kernels
-def test_attention_padded_rows_are_defined():
+@pytest.mark.parametrize("splits", [None, (0, 1)], ids=["policy", "fused"])
+def test_attention_padded_rows_are_defined(splits):
     w = AttnWorld([1, 1, 1], [0, 5, 0], nkv=2, seed=7)
-    out = run_attention(w)
+    out = run_attention(w, splits=splits)
     got = out.cpu().float()
     assert torch.count_nonzero(got[0]) == 0 and torch.count_nonzero(got[2]) == 0
     check_attention(out, w.oracle(), "padded rows")
@@ -1394,7 +1456,7 @@ def test_attention_checks_splits_and_workspace():
     with pytest.raises(RuntimeError, match="workspace"):
         launch_attention(w, a, out, short, splits=splits, max_query_len=max_q)
     exact = torch.zeros(need, dtype=torch.float32, device="cuda")
-    for bad in ((0, 1), (1, 0), (257, 1), (1, 257)):
+    for bad in ((-1, 1), (1, 0), (257, 1), (1, 257)):
         with pytest.raises(RuntimeError, match="splits"):
             launch_attention(w, a, out, exact, splits=bad, max_query_len=max_q)
     launch_attention(w, a, out, exact, splits=splits, max_query_len=max_q)
@@ -1402,12 +1464,12 @@ def test_attention_checks_splits_and_workspace():
 
 
 @requires_kernels
-def test_attention_leaves_its_inputs_alone():
+@pytest.mark.parametrize("splits", [(4, 2), (0, 2)], ids=["split-k", "fused"])
+def test_attention_leaves_its_inputs_alone(splits):
     """Only ``out`` and the workspace are written: every other argument,
     including the paged cache, comes back bit-identical."""
     w = _world(MIXED_REQS, nkv=8, window=0, seed=3)
     a = w.device_args()
-    splits = (4, 2)
     out = torch.zeros(w.T, w.nh * HEAD_DIM, dtype=torch.float16, device="cuda")
     ws = torch.zeros(
         _ops().inkling2_attention_workspace_numel(w.R, w.T, w.nh, *splits),
@@ -1464,7 +1526,7 @@ def test_ops_trace_under_fake_tensors():
 
 
 @requires_kernels
-@pytest.mark.parametrize("splits", [None, (16, 8), (128, 4)])
+@pytest.mark.parametrize("splits", [None, (16, 8), (128, 4), (0, 1)])
 def test_attention_million_tokens_full_layer(splits):
     """TP=4 full layer (2 kv heads) at the model's 1,048,576 context."""
     reqs = [(1, 1048576), (1, 1000003), (3, 1048576), (1, 70001)]
@@ -1474,14 +1536,14 @@ def test_attention_million_tokens_full_layer(splits):
 
 
 @requires_kernels
-def test_attention_cuda_graph_replay():
+@pytest.mark.parametrize("splits", [(4, 2), (0, 2)], ids=["split-k", "fused"])
+def test_attention_cuda_graph_replay(splits):
     """Metadata is read on device: replay a captured launch with new lengths."""
     reqs_a = [(1, 700), (1, 1025), (16, 600), (1, 70), (33, 2000)]
     reqs_b = [(1, 1100), (1, 33), (16, 1500), (1, 4000), (33, 90)]
     shape = dict(nkv=8, num_pages=140, max_blocks=70)
     wa = _world(reqs_a, seed=8, **shape)
     wb = _world(reqs_b, seed=9, **shape)
-    splits = (4, 2)
     a = wa.device_args()
     out = torch.full(
         (wa.T, wa.nh * HEAD_DIM), float("nan"), dtype=torch.float16, device="cuda"
@@ -1570,21 +1632,25 @@ def test_oracle_matches_repo_attend(window, monkeypatch):
 # split policy helpers (pure Python)
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("window", [WINDOW, 0], ids=["sliding", "full"])
-def test_split_policy_properties(window):
+@pytest.mark.parametrize("mode", ["0", "1", "2"])
+def test_split_policy_properties(window, mode, monkeypatch):
+    monkeypatch.setattr(_ops(), "_INKLING2_DECODE_FUSED", mode)
     split_fn = _ops().inkling2_attention_splits
     for nkv in (2, 4, 8):
         for ctx in (1, 17, 1024, 16384, 131072, 1048576):
             last_a = None
             for reqs in (1, 2, 4, 8, 16, 32, 128, 1024):
+                fused = mode != "0" and (window > 0 or (mode == "2" and reqs == 1))
                 for max_q in (1, 2, 16, 17, 64, 1024):
                     s_a, s_b = split_fn(reqs, nkv, window, ctx, max_q)
-                    assert 1 <= s_a <= 256 and 1 <= s_b <= 16
+                    assert (s_a == 0 if fused else 1 <= s_a <= 256) and 1 <= s_b <= 16
                     if max_q == 1:  # pure decode: no tile kernel, no tile partials
                         assert s_b == 1
                 s_a = split_fn(reqs, nkv, window, ctx, 1)[0]
-                if last_a is not None:  # more requests never ask for more splits
-                    assert s_a <= last_a
-                last_a = s_a
+                if not fused:
+                    if last_a is not None:  # more requests never ask for more splits
+                        assert s_a <= last_a
+                    last_a = s_a
     for nkv in (2, 8):
         for reqs in (1, 4, 64):
             by_ctx = [
@@ -1596,8 +1662,9 @@ def test_split_policy_properties(window):
                 assert len(set(by_ctx[1:])) == 1
 
 
-def test_split_policy_saturates_the_gpu_at_decode():
+def test_split_policy_saturates_the_gpu_at_decode(monkeypatch):
     """One request on a long full layer gets 256 waves, a big batch gets one split."""
+    monkeypatch.setattr(_ops(), "_INKLING2_DECODE_FUSED", "0")
     split_fn = _ops().inkling2_attention_splits
     assert split_fn(1, 8, 0, 131072, 1)[0] * 8 == 256
     assert split_fn(1, 2, 0, 1048576, 1)[0] * 2 == 256
@@ -1605,7 +1672,32 @@ def test_split_policy_saturates_the_gpu_at_decode():
     assert split_fn(1, 8, WINDOW, 131072, 1)[0] * 8 == 256
 
 
+def test_split_policy_fused_decode_modes(monkeypatch):
+    """``VLLM_INKLING2_DECODE_FUSED``: 0 = split-K everywhere, 1 = fused on the
+    sliding layers (the default), 2 = also on the full layers of one request."""
+    ops = _ops()
+    if "VLLM_INKLING2_DECODE_FUSED" not in os.environ:
+        assert ops._INKLING2_DECODE_FUSED == "1"  # on by default
+    tile: dict[tuple, int] = {}
+    for mode, sliding, full_one in (
+        ("0", False, False),
+        ("1", True, False),
+        ("2", True, True),
+    ):
+        monkeypatch.setattr(ops, "_INKLING2_DECODE_FUSED", mode)
+        for reqs in (1, 4, 64):
+            s_sliding = ops.inkling2_attention_splits(reqs, 8, WINDOW, 131072, 64)
+            s_full = ops.inkling2_attention_splits(reqs, 8, 0, 131072, 64)
+            assert (s_sliding[0] == 0) == sliding
+            assert (s_full[0] == 0) == (full_one and reqs == 1)
+            # only the decode factor depends on the mode
+            assert tile.setdefault((reqs, "sliding"), s_sliding[1]) == s_sliding[1]
+            assert tile.setdefault((reqs, "full"), s_full[1]) == s_full[1]
+
+
 def test_workspace_numel_formula():
     numel = _ops().inkling2_attention_workspace_numel
     assert numel(3, 20, 24, 4, 2) == (4 * 3 + 2 * 20) * 24 * 130
     assert numel(5, 5, 6, 1, 1) == (5 + 5) * 6 * 130
+    assert numel(3, 20, 24, 0, 2) == 2 * 20 * 24 * 130  # fused decode: no decode rows
+    assert numel(7, 7, 24, 0, 1) == 7 * 24 * 130
