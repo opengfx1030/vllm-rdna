@@ -1086,7 +1086,8 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 0,
                 cta_info=cta,
             )
-            if FUSE_GLUE and tc <= _FUSE_SWIGLU_MAX_TOKENS:  # the SwiGLU runs in the w2 GEMM's activation load
+            # the prefill (BM) kernels run both GEMMs themselves: the fused w2 is the decode-shaped kernel only
+            if FUSE_GLUE and not prefill and tc <= _FUSE_SWIGLU_MAX_TOKENS:  # the SwiGLU runs in the w2 GEMM's activation load
                 self._gemm_swiglu(
                     m.gu,
                     out,

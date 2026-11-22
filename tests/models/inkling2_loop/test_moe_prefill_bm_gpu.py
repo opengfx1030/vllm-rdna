@@ -61,7 +61,23 @@ COUNTED = (
     "moe_mxfp8_bm_rdna2",
     "moe_nvfp4_gemm_rdna2",
     "moe_mxfp8_gemm_rdna2",
+    "moe_nvfp4_gemm_swiglu_rdna2",
+    "moe_mxfp8_gemm_swiglu_rdna2",
 )
+# the decode-shaped expert GEMMs: w13 / w2 (and, for chunks of <= 16 tokens, w2 with the SwiGLU fused into its
+# activation load: VLLM_INKLING2_FUSE_GLUE, on by default)
+DECODE_GEMMS = (
+    "moe_nvfp4_gemm_rdna2",
+    "moe_mxfp8_gemm_rdna2",
+    "moe_nvfp4_gemm_swiglu_rdna2",
+    "moe_mxfp8_gemm_swiglu_rdna2",
+)
+
+
+def _decode_gemms(c):
+    return sum(c[n] for n in DECODE_GEMMS)
+
+
 NOT_WORSE = 1.1  # error against the reference: at most this x the decode kernels'
 INT8_TOL = 1.0  # W4A8 (experimental, quality-changing) must only stay bounded here
 
@@ -118,7 +134,7 @@ def _error(what, hv, ids, got):
 def test_flag_off_runs_only_the_decode_kernels(hv, n):
     ids = _prompts()[PROMPT_LENS.index(n)]
     _, c = _prefill(hv, ids, bm=False, min_tokens=1)
-    gemms = c["moe_nvfp4_gemm_rdna2"] + c["moe_mxfp8_gemm_rdna2"]
+    gemms = _decode_gemms(c)
     assert c["inkling2_glue_moe_route"] > 0
     assert gemms == 2 * c["inkling2_glue_moe_route"]
     for name in COUNTED[1:6]:
@@ -136,7 +152,7 @@ def test_dot2_prefill_is_not_worse_than_the_decode_kernels(hv, n):
     assert c["moe_prefill_cta_rdna2"] == routes
     assert c["moe_nvfp4_bm_rdna2"] + c["moe_mxfp8_bm_rdna2"] == 2 * routes
     assert c["moe_mxfp8_bm_rdna2"] > 0 and c["moe_nvfp4_bm_rdna2"] > 0
-    assert c["moe_nvfp4_gemm_rdna2"] + c["moe_mxfp8_gemm_rdna2"] == 0
+    assert _decode_gemms(c) == 0
     assert c["moe_nvfp4_bm_i8_rdna2"] == c["moe_prefill_act_quant_rdna2"] == 0
     _stats(f"{hv.name} n={n} dot2 against the decode kernels", on, off)
     e_off = _error(f"{hv.name} n={n} decode kernels", hv, ids, off)
@@ -150,10 +166,7 @@ def test_token_gate_keeps_small_chunks_on_the_decode_kernels(hv, n):
     ids = _prompts()[PROMPT_LENS.index(n)]
     _, c = _prefill(hv, ids, bm=True, min_tokens=n + 1)
     assert c["moe_prefill_cta_rdna2"] == 0
-    assert (
-        c["moe_nvfp4_gemm_rdna2"] + c["moe_mxfp8_gemm_rdna2"]
-        == 2 * (c["inkling2_glue_moe_route"])
-    )
+    assert _decode_gemms(c) == 2 * (c["inkling2_glue_moe_route"])
     _, c = _prefill(hv, ids, bm=True, min_tokens=n)
     assert c["moe_prefill_cta_rdna2"] == c["inkling2_glue_moe_route"] > 0
 
