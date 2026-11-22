@@ -1161,6 +1161,26 @@ def test_topk_log_softmax_parity(dtype, topk, vocab_size):
     assert_lse_close(a[0], b[0], "topk_log_softmax output")
 
 
+@pytest.mark.parametrize("vocab_size", [512, 1040, 1536, 2064, VOCAB])
+def test_topk_log_softmax_partial_last_block_is_not_read_past_vocab(vocab_size):
+    """fp32 vec4 path (vocab % 16 == 0, vocab % 1024 != 0): the second 512-group of a
+    partial last block must be masked. The row stride leaves large values after the
+    vocab columns so an out-of-vocab read changes the logsumexp."""
+    torch.manual_seed(83)
+    stride = vocab_size + 1024
+    buf = torch.full((NUM_TOKENS, stride), 50.0, dtype=torch.float32, device=DEVICE)
+    logits = buf[:, :vocab_size]
+    logits.copy_(torch.randn(NUM_TOKENS, vocab_size, device=DEVICE))
+    ids = torch.randint(
+        0, vocab_size, (NUM_TOKENS, 8), dtype=torch.int64, device=DEVICE
+    )
+    out = torch.full((NUM_TOKENS, 8), 12345.0, dtype=torch.float32, device=DEVICE)
+    hip_topk_log_softmax(out, logits, ids, 8, vocab_size)
+    sync()
+    ref = torch.log_softmax(logits.double(), dim=-1).gather(1, ids).float()
+    torch.testing.assert_close(out, ref, atol=2e-5, rtol=0)
+
+
 def test_topk_log_softmax_noncontiguous_rows():
     """Stride != vocab: Triton's mask/stride axis info drops to a scalar load."""
 
