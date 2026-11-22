@@ -604,6 +604,38 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk) -> ()");
   rocm_ops.impl("moe_mxfp8_gemm_rdna2", torch::kCUDA, &moe_mxfp8_gemm_rdna2);
 
+  // Prefill-sized variants (32-row blocks, whole K): work list + the two
+  // formats.
+  rocm_ops.def(
+      "moe_prefill_cta_rdna2(Tensor expert_ids, Tensor num_tokens_post_padded, "
+      "int num_experts, int block_size_m) -> Tensor");
+  rocm_ops.impl("moe_prefill_cta_rdna2", torch::kCUDA, &moe_prefill_cta_rdna2);
+
+  rocm_ops.def(
+      "moe_nvfp4_bm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_globals, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor cta_info, "
+      "int top_k, bool mul_topk_weight, int output_topk) -> ()");
+  rocm_ops.impl("moe_nvfp4_bm_rdna2", torch::kCUDA, &moe_nvfp4_bm_rdna2);
+
+  rocm_ops.def(
+      "moe_mxfp8_bm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor cta_info, "
+      "int top_k, bool mul_topk_weight, int output_topk) -> ()");
+  rocm_ops.impl("moe_mxfp8_bm_rdna2", torch::kCUDA, &moe_mxfp8_bm_rdna2);
+
+  rocm_ops.def("moe_prefill_act_quant_rdna2(Tensor a) -> (Tensor, Tensor)");
+  rocm_ops.impl("moe_prefill_act_quant_rdna2", torch::kCUDA,
+                &moe_prefill_act_quant_rdna2);
+
+  rocm_ops.def(
+      "moe_nvfp4_bm_i8_rdna2(Tensor a8, Tensor sa, Tensor! c, "
+      "Tensor b_q_weight, Tensor b_scales, Tensor b_globals, "
+      "Tensor topk_weights, Tensor sorted_token_ids, Tensor cta_info, "
+      "int top_k, bool mul_topk_weight, int output_topk) -> ()");
+  rocm_ops.impl("moe_nvfp4_bm_i8_rdna2", torch::kCUDA, &moe_nvfp4_bm_i8_rdna2);
+
   // Inkling-2-Mini attention core on RDNA2 (gfx1030): paged short convs,
   // K/V prep and attention with learned relative bias + sink logit.
   rocm_ops.def(

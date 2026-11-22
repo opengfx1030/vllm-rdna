@@ -1871,6 +1871,109 @@ def moe_mxfp8_gemm_rdna2(
     )
 
 
+def moe_prefill_cta_rdna2(
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    num_experts: int,
+    block_size_m: int,
+) -> torch.Tensor:
+    """Work list (int32 [blocks, 4]) of the prefill expert GEMMs below for a layout
+    padded to ``block_size_m`` rows per expert block."""
+    return torch.ops._rocm_C.moe_prefill_cta_rdna2(
+        expert_ids, num_tokens_post_padded, num_experts, block_size_m
+    )
+
+
+def moe_nvfp4_bm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_globals: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    cta_info: torch.Tensor,
+    top_k: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_nvfp4_bm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_globals,
+        topk_weights,
+        sorted_token_ids,
+        cta_info,
+        top_k,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+def moe_mxfp8_bm_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    cta_info: torch.Tensor,
+    top_k: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_mxfp8_bm_rdna2(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        topk_weights,
+        sorted_token_ids,
+        cta_info,
+        top_k,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+def moe_prefill_act_quant_rdna2(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """fp16 [rows, K] -> (int8 [rows, K], fp32 [rows, K / 32]): per (row, 32 K) absmax
+    / 127 scales, K permuted inside every 8-K word (input of moe_nvfp4_bm_i8_rdna2)."""
+    return torch.ops._rocm_C.moe_prefill_act_quant_rdna2(a)
+
+
+def moe_nvfp4_bm_i8_rdna2(
+    a8: torch.Tensor,
+    sa: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_globals: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    cta_info: torch.Tensor,
+    top_k: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_nvfp4_bm_i8_rdna2(
+        a8,
+        sa,
+        c,
+        b_q_weight,
+        b_scales,
+        b_globals,
+        topk_weights,
+        sorted_token_ids,
+        cta_info,
+        top_k,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
 _INKLING2_MAX_SPLITS = 256  # kI2MaxSplits of csrc/rocm/inkling2_attn_rdna2.cu
 
 
@@ -6293,6 +6396,80 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp8_gemm_
         num_tokens_post_padded: torch.Tensor,
         top_k: int,
         block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_prefill_cta_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_prefill_cta_rdna2")
+    def _moe_prefill_cta_rdna2_fake(
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        num_experts: int,
+        block_size_m: int,
+    ) -> torch.Tensor:
+        rows = 32 // block_size_m
+        return expert_ids.new_empty(
+            ((expert_ids.shape[0] + rows - 1) // rows + num_experts, 4)
+        )
+
+    @register_fake("_rocm_C::moe_nvfp4_bm_rdna2")
+    def _moe_nvfp4_bm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_globals: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        cta_info: torch.Tensor,
+        top_k: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::moe_mxfp8_bm_rdna2")
+    def _moe_mxfp8_bm_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        cta_info: torch.Tensor,
+        top_k: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::moe_prefill_act_quant_rdna2")
+    def _moe_prefill_act_quant_rdna2_fake(
+        a: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        rows, k = a.shape
+        return a.new_empty((rows, k), dtype=torch.int8), a.new_empty(
+            (rows, k // 32), dtype=torch.float32
+        )
+
+    @register_fake("_rocm_C::moe_nvfp4_bm_i8_rdna2")
+    def _moe_nvfp4_bm_i8_rdna2_fake(
+        a8: torch.Tensor,
+        sa: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_globals: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        cta_info: torch.Tensor,
+        top_k: int,
         mul_topk_weight: bool,
         output_topk: int,
     ) -> None:

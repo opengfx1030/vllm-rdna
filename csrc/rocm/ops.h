@@ -848,6 +848,42 @@ void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                           int64_t block_size_m, bool mul_topk_weight,
                           int64_t output_topk);
 
+// Prefill-sized (32-row blocks, whole K, no atomics for w13) variants of the
+// two kernels above, for token counts where an expert receives tens of rows.
+// The work list comes from moe_prefill_cta_rdna2 (once per layer visit) and
+// groups consecutive block_size_m-row blocks of one expert of the router's
+// layout (inkling2_glue_moe_route, block_size_m 8).  See
+// moe_prefill_bm_rdna2.cu.
+torch::Tensor moe_prefill_cta_rdna2(torch::Tensor expert_ids,
+                                    torch::Tensor num_tokens_post_padded,
+                                    int64_t num_experts, int64_t block_size_m);
+
+void moe_nvfp4_bm_rdna2(torch::Tensor a, torch::Tensor c,
+                        torch::Tensor b_q_weight, torch::Tensor b_scales,
+                        torch::Tensor b_globals, torch::Tensor topk_weights,
+                        torch::Tensor sorted_token_ids, torch::Tensor cta_info,
+                        int64_t top_k, bool mul_topk_weight,
+                        int64_t output_topk);
+
+void moe_mxfp8_bm_rdna2(torch::Tensor a, torch::Tensor c,
+                        torch::Tensor b_q_weight, torch::Tensor b_scales,
+                        torch::Tensor topk_weights,
+                        torch::Tensor sorted_token_ids, torch::Tensor cta_info,
+                        int64_t top_k, bool mul_topk_weight,
+                        int64_t output_topk);
+
+// W4A8 variant of the NVFP4 prefill kernel (OFF by default in the model path):
+// the activations are quantised to int8 per (row, 32 K) first.
+std::tuple<torch::Tensor, torch::Tensor> moe_prefill_act_quant_rdna2(
+    torch::Tensor a);
+
+void moe_nvfp4_bm_i8_rdna2(torch::Tensor a8, torch::Tensor sa, torch::Tensor c,
+                           torch::Tensor b_q_weight, torch::Tensor b_scales,
+                           torch::Tensor b_globals, torch::Tensor topk_weights,
+                           torch::Tensor sorted_token_ids,
+                           torch::Tensor cta_info, int64_t top_k,
+                           bool mul_topk_weight, int64_t output_topk);
+
 // Inkling-2-Mini attention core on RDNA2 (gfx1030): paged short convolutions,
 // K/V prep and paged attention with learned relative bias and sink logit.
 // See docs/rdna2/inkling2-attn-kernels.md.
