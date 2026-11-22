@@ -955,6 +955,84 @@ def test_argmax_unaligned_rows_use_the_scalar_path():
     assert torch.equal(out.cpu(), _argmax_ref(logits[:, :vocab]))
 
 
+def _partial_ref(logits: torch.Tensor, first: int):
+    """(value fp32, global id) of the first maximum per row, NaN as -inf."""
+    clean = logits.float().masked_fill(logits.isnan(), float("-inf"))
+    value, index = clean.max(dim=-1)  # the first index of the maximum
+    return value, index + first
+
+
+@pytest.mark.parametrize(
+    "rows,vocab,ld,first",
+    [(1, 100026, 100032, 100032), (7, 4099, 4112, 0), (32, 50016, 50016, 150048)],
+)
+def test_argmax_partial_is_the_value_and_the_global_id(rows, vocab, ld, first):
+    """part[r] = the fp32 maximum, part[rows + r] = first + the lowest index of it as
+    int32 bits; ties, an all -inf row (id ``first``), NaN and columns past the valid
+    ones included, and nothing past 2 * rows entries is written."""
+    ops = _ops()
+    gen = _gen(150 + rows)
+    logits = _randn(gen, rows, ld, scale=3.0).to(torch.float16)
+    logits[0, [vocab - 1, 11, 4097 % vocab]] = 20.0
+    if rows > 2:
+        logits[1, :] = float("-inf")
+        logits[2, :vocab] = float("nan")
+        logits[2, 5] = -3.0
+    if rows > 3:
+        logits[3, 100] = float("nan")
+        logits[3, vocab - 3] = 9.0
+        logits[3, vocab:] = 1e4  # the zero padding of the last shard: ignored
+    part = torch.full((2 * rows + 5,), -7.0, device="cuda")
+    ops.inkling2_dspark_argmax_partial(_cuda(logits), part, rows, vocab, first)
+    value, ident = _partial_ref(logits[:, :vocab], first)
+    got = part.cpu()
+    ids = got[rows : 2 * rows].view(torch.int32).long()
+    assert torch.equal(got[:rows], value), (got[:rows].tolist(), value.tolist())
+    assert torch.equal(ids, ident), (ids.tolist(), ident.tolist())
+    assert int(ids[0]) == first + 11
+    if rows > 2:  # all -inf: the lowest index; NaN never beats a finite value
+        assert got[1] == float("-inf") and int(ids[1]) == first
+        assert got[2] == -3.0
+    assert bool((got[2 * rows :] == -7.0).all())  # nothing past 2 * rows is written
+
+
+@pytest.mark.parametrize("tp", [2, 4])
+@pytest.mark.parametrize("rows", [1, 5, 32])
+def test_argmax_partials_of_vocabulary_shards_reduce_to_the_global_argmax(tp, rows):
+    """Every rank's partial over its shard, concatenated along the last dimension (what
+    the tensor-parallel all-gather of the ``[2 * rows, 1]`` buffers returns) and reduced
+    by ``inkling2_linear_argmax_reduce``, is the argmax of the whole row -- the lowest
+    id on a tie, also across shards -- and the padding of the last shard never wins."""
+    from vllm.models.inkling2_loop.amd.parallel import lm_head_shard
+
+    ops = _ops()
+    vocab = 200058
+    gen = _gen(160 + tp * 100 + rows)
+    full = _randn(gen, rows, vocab, scale=3.0).to(torch.float16)
+    # the maximum of row 0 appears in every shard: the lowest id has to win
+    tie = []
+    for r in range(tp):
+        lo, _, take = lm_head_shard(vocab, tp, r)
+        tie.append(lo + (r * 37 + 5) % take)
+        full[0, tie[-1]] = 25.0
+    want_ids = _argmax_ref(full)
+    parts = []
+    for r in range(tp):
+        lo, shard_rows, take = lm_head_shard(vocab, tp, r)
+        local = torch.full((rows, shard_rows), 1e4, dtype=torch.float16)  # padding wins
+        local[:, :take] = full[:, lo : lo + take]
+        part = torch.empty(2 * rows, device="cuda")
+        ops.inkling2_dspark_argmax_partial(_cuda(local), part, rows, take, lo)
+        parts.append(part)
+    gathered = torch.cat([p.view(2 * rows, 1) for p in parts], dim=-1).contiguous()
+    out = torch.empty(rows, dtype=torch.int64, device="cuda")
+    ops.inkling2_linear_argmax_reduce(
+        gathered[:rows], gathered[rows:].view(torch.int32), out
+    )
+    assert torch.equal(out.cpu(), want_ids), (out.cpu().tolist(), want_ids.tolist())
+    assert int(out[0]) == tie[0] == min(tie)
+
+
 # ---------------------------------------------------------------------------
 # DFlash / DSpark input preparation (port of the runner's Triton kernel)
 # ---------------------------------------------------------------------------

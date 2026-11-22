@@ -54,11 +54,13 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 from ..configs import Inkling2DSparkConfig
 from ..speculator_config import Inkling2DSparkSpeculatorConfig
+from .parallel import current_tensor_parallel, lm_head_shard
 from .state import Inkling2KVOwner
 
 logger = init_logger(__name__)
@@ -93,6 +95,28 @@ def _linear(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, rows: int) -> N
         ops.inkling2_dspark_gemv(x, w, out, None, rows, 0, 0)
     else:
         ops.inkling2_dspark_gemm(x, w, out, rows, _gemm_design(rows))
+
+
+def scheduled_draft_tokens(vllm_config: VllmConfig, drafted: int) -> int:
+    """Most of the ``drafted`` tokens of a block that any batch size verifies.
+
+    ``num_speculative_tokens_per_batch_size`` makes the scheduler verify the first
+    ``k(batch size)`` of the block's tokens.  The chain is sequential (token ``i``
+    never depends on a later one), so the Markov steps beyond the schedule's
+    largest ``k`` produce tokens nothing consumes.  Without a schedule every drafted
+    token can be verified.
+    """
+    schedule = getattr(
+        vllm_config.speculative_config, "num_speculative_tokens_per_batch_size", None
+    )
+    if not schedule:
+        return drafted
+    lookup = build_dynamic_sd_schedule_lookup(
+        schedule,
+        vllm_max_batch_size=vllm_config.scheduler_config.max_num_seqs,
+        vllm_num_speculative_tokens=drafted,
+    )
+    return max(1, max(lookup[1:]))
 
 
 def attention_splits(num_reqs: int) -> int:
@@ -330,6 +354,19 @@ class _Scratch:
         self.ctx_f = new(1, _HEAD_REQS, 3 * config.markov_rank, dtype=f32)
         self.state = new(_HEAD_REQS, config.markov_rank, dtype=f32)
         self.latent = new(_HEAD_REQS, config.markov_rank)
+        # tensor parallelism: this rank's (value, id) partial of the vocabulary shard
+        # and the gathered argmax; the anchor embedding rows of a chunk (looked up in
+        # the sharded table, then all-reduced) and the row -> anchor index the block
+        # embed kernel reads them with
+        self.part = new(2 * _HEAD_REQS, dtype=f32)
+        self.tok = new(_HEAD_REQS, dtype=torch.int64)
+        self.anchor_ids = new(chunk, dtype=torch.int32)
+        self.anchor_rows = new(chunk, hidden)
+        self.row_anchor = torch.div(
+            torch.arange(rows, dtype=torch.int32, device=device),
+            BLOCK,
+            rounding_mode="floor",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -412,16 +449,36 @@ class Inkling2DSparkModel(nn.Module):
                 f"{config.max_position_embeddings} positions; set --max-model-len to "
                 "at most that"
             )
+        tp = current_tensor_parallel()
+        if tp.enabled and spec.draft_sample_method != "greedy":
+            raise NotImplementedError(
+                "Inkling2 DSpark under tensor parallelism drafts greedily "
+                f"(draft_sample_method='greedy'), got {spec.draft_sample_method!r}: "
+                "the sampled draft needs the full-vocabulary logits on every rank"
+            )
         self.config = config
+        self._tp = tp
         self.model = Inkling2DSparkDecoder(config, f"{prefix}model")
         self.lm_head: nn.Module | None = None
+        # this rank's share of the vocabulary: the first id, the rows of its LM head
+        # and the rows holding real ids (the rest is the zero padding of the last
+        # shard, which must never win an argmax); all of it at TP=1
+        self._head_first, self._head_rows, self._head_take = lm_head_shard(
+            config.vocab_size, tp.size, tp.rank
+        )
+        # first id of this rank's rows of the (padded) embedding table
+        self._embed_first = lm_head_shard(config.padded_vocab_size, tp.size, tp.rank)[0]
         self._scratch = _Scratch(
             config,
             vllm_config.scheduler_config.max_num_seqs,
-            config.vocab_size,
+            self._head_rows,
             torch.get_default_device(),
         )
         self._eps = config.rms_norm_eps
+        # Markov steps per draft pass (the rest of the block's tokens are never used)
+        self._markov_steps = scheduled_draft_tokens(
+            vllm_config, spec.num_speculative_tokens
+        )
 
     # -- weights -----------------------------------------------------------
     def _route(self, name: str) -> tuple[str, slice | None]:
@@ -517,6 +574,12 @@ class Inkling2DSparkModel(nn.Module):
         into the head."""
         assert self.lm_head is not None, "the target LM head was not shared"
         assert self.model.embed_tokens is not None, "the target embedding is missing"
+        rows = self.lm_head.weight.shape[0]
+        if rows != self._head_rows:
+            raise ValueError(
+                f"the target's LM head has {rows} rows on this rank, the draft's "
+                f"vocabulary shard {self._head_rows}"
+            )
         self.model.embed_norm = target_model.model.embed_norm
         self.refresh_derived_weights()
 
@@ -684,9 +747,27 @@ class Inkling2DSparkModel(nn.Module):
         pos = positions[t0 : t0 + rows]
         resid, xn = s.resid[:rows], s.xn[:rows]
         layers = dec.layers
+        ids, table = input_ids[t0 : t0 + rows], dec.embed_tokens.weight
+        if self._tp.enabled:
+            # The table is vocabulary-sharded: look up the anchors this rank owns
+            # (zero rows for the ids of other ranks), one all-reduce adds the owner's
+            # row back (x + 0 is exact, so the rows equal the TP=1 ones), and the
+            # block embed reads row ``i`` of the reduced table for the anchor of
+            # request ``i``.
+            anchors = s.anchor_ids[:nr]
+            anchors.copy_(input_ids[t0 : t0 + rows : BLOCK])
+            ops.inkling2_glue_embed_lookup(
+                anchors,
+                table,
+                s.anchor_rows[:nr],
+                self._embed_first,
+                cfg.padded_vocab_size,
+            )
+            table = self._tp.all_reduce(s.anchor_rows[:nr])
+            ids = s.row_anchor[:rows]
         ops.inkling2_dspark_embed_block(
-            input_ids[t0 : t0 + rows],
-            dec.embed_tokens.weight,
+            ids,
+            table,
             dec.embed_norm.weight,
             dec.mask_embed,
             layers[0].input_ln_w,
@@ -769,9 +850,12 @@ class Inkling2DSparkModel(nn.Module):
         cfg, s = self.config, self._scratch
         head = self.model.markov_head
         steps = spec.num_speculative_steps
+        markov_steps = min(steps, self._markov_steps)  # ``steps`` stays the layout
         stride = spec.num_query_per_req
         weight = self.lm_head.weight
-        vocab = weight.shape[0]
+        vocab, take = weight.shape[0], self._head_take
+        # the folded head of the rows holding real ids (all of them at TP=1)
+        fold_w, fold_b = head.fold_w[:take], head.fold_b[:take]
         greedy = spec.draft_logits is None
         sample_rows = num_reqs * steps
         idx_map = spec.sample_idx_mapping[:sample_rows].view(num_reqs, steps)
@@ -796,7 +880,7 @@ class Inkling2DSparkModel(nn.Module):
             ops.inkling2_dspark_gemv(
                 spec.f_rnn[c0 : c0 + rc], head.rnn_wf, s.ctx_f[:, :rc], None, rc, 1, 0
             )
-            for i in range(steps):
+            for i in range(markov_steps):
                 if i == 0:  # the anchor token of each block
                     prev, prev_stride = (
                         spec.input_buffers.input_ids[c0 * stride :],
@@ -823,8 +907,8 @@ class Inkling2DSparkModel(nn.Module):
                 ops.inkling2_dspark_head_logits(
                     s.base,
                     s.latent,
-                    head.fold_w,
-                    head.fold_b,
+                    fold_w,
+                    fold_b,
                     s.logits,
                     rc,
                     i,
@@ -832,9 +916,7 @@ class Inkling2DSparkModel(nn.Module):
                     cfg.final_logit_softcapping,
                 )
                 out = spec.draft_tokens[c0 : c0 + rc, i]
-                if greedy:
-                    ops.inkling2_dspark_argmax(s.logits, out, rc, vocab)
-                else:
+                if not greedy:
                     out.copy_(
                         spec._sample_logits(
                             s.logits[:rc, :vocab],
@@ -843,7 +925,31 @@ class Inkling2DSparkModel(nn.Module):
                             i,
                         )
                     )
+                elif self._tp.enabled:
+                    out.copy_(self._argmax_across_ranks(rc))
+                else:
+                    ops.inkling2_dspark_argmax(s.logits, out, rc, vocab)
         return True
+
+    def _argmax_across_ranks(self, rows: int) -> torch.Tensor:
+        """Global argmax of the first ``rows`` rows of the logits (int64 ``[rows]``).
+
+        This rank's logits cover its vocabulary shard: its ``(value, global id)``
+        partial over the real rows is all-gathered with the other ranks' and reduced
+        by the kernel ``greedy_token_ids`` uses, so the tie rule (lowest id) is the
+        single-rank one and every rank ends with the same token.
+        """
+        s = self._scratch
+        part = s.part[: 2 * rows]
+        ops.inkling2_dspark_argmax_partial(
+            s.logits, part, rows, self._head_take, self._head_first
+        )
+        gathered = self._tp.all_gather(part.view(2 * rows, 1))  # [2 * rows, tp]
+        out = s.tok[:rows]
+        ops.inkling2_linear_argmax_reduce(
+            gathered[:rows], gathered[rows:].view(torch.int32), out
+        )
+        return out
 
 
 class Inkling2DSparkSpeculator(DSparkSpeculator):

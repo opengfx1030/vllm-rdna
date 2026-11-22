@@ -726,6 +726,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("inkling2_dspark_argmax", torch::kCUDA,
                 &inkling2_dspark_argmax);
   rocm_ops.def(
+      "inkling2_dspark_argmax_partial(Tensor logits, Tensor! part, int "
+      "num_rows, int vocab, int first_id) -> ()");
+  rocm_ops.impl("inkling2_dspark_argmax_partial", torch::kCUDA,
+                &inkling2_dspark_argmax_partial);
+  rocm_ops.def(
       "inkling2_dspark_prepare_inputs(Tensor! input_ids, Tensor! positions, "
       "Tensor! is_padding, Tensor! query_start_loc, Tensor! seq_lens, "
       "Tensor! query_slot_mapping, Tensor! context_positions, Tensor! "

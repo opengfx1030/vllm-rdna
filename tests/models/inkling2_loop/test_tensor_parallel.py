@@ -641,10 +641,14 @@ def test_tp_degree_other_than_the_checkpoint_heads_is_refused(variant):
         RankModel(variant.path, variant.tensors, torch.float32, ThreadTP(group, 0))
 
 
-def test_draft_model_refuses_tensor_parallelism(variant):
+def test_draft_taps_are_selectable_under_tensor_parallelism(variant):
+    """The DSpark draft is replicated on every rank and reads the replicated block
+    states of the target, so every rank can tap them (``test_dspark_tp.py``)."""
     _, ranks = _group(variant, 2)
-    with pytest.raises(NotImplementedError, match="DSpark"):
-        ranks[0].lm.set_aux_hidden_state_layers((1,))
+    for rank in ranks:
+        rank.lm.set_aux_hidden_state_layers((1,))
+        assert rank.lm.model.aux_hidden_state_layers == (1,)
+        assert rank.lm.model._tap_slots == {1: 0}
 
 
 # ---------------------------------------------------------------------------

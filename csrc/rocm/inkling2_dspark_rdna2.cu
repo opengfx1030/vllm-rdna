@@ -43,6 +43,8 @@
 
 namespace inkling2_dspark {
 
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+
 constexpr int kHead = 128;     // head_dim
 constexpr int kBlockRows = 8;  // queries (anchor + masks) per request
 constexpr int kQPerKv = 3;     // GQA group: 24 q heads / 8 kv heads
@@ -52,8 +54,6 @@ constexpr int kRank = 256;                   // Markov rank
 constexpr int kGateWidth = 3 * kRank;        // gate | candidate | output
 constexpr int kPartStride = kHead + 2;       // O[128], m, l per query and split
 constexpr float kHalfMax = 65504.0f;
-
-#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // ---------------------------------------------------------------------------
 // Small device helpers
@@ -961,10 +961,14 @@ __global__ __launch_bounds__(256) void fold_bias_kernel(
 // out[r * out_stride] = lowest index of the maximum of logits[r, 0:V] (fp16).
 // NaN counts as -inf and ties resolve to the lowest index, as
 // ``logits.masked_fill(logits.isnan(), -inf).argmax(-1)`` does.  One block per
-// row.
+// row.  With ``part`` (the partial of a vocabulary shard) ``out`` is not
+// written: part[r] = the maximum (fp32) and part[part_rows + r] = the int32
+// bits of
+// ``first_id`` + its index, the (value, id) pair a cross-rank reduction takes.
 __global__ __launch_bounds__(512) void argmax_rows_kernel(
     const __half* __restrict__ logits, long long ld, int V, bool vec,
-    long long* __restrict__ out, long long out_stride) {
+    long long* __restrict__ out, long long out_stride, float* __restrict__ part,
+    int part_rows, int first_id) {
   __shared__ float sv[16];
   __shared__ int si[16];
   const __half* row = logits + static_cast<long long>(blockIdx.x) * ld;
@@ -1016,7 +1020,14 @@ __global__ __launch_bounds__(512) void argmax_rows_kernel(
         bi = oi;
       }
     }
-    if (tid == 0) out[static_cast<long long>(blockIdx.x) * out_stride] = bi;
+    if (tid == 0) {
+      if (part == nullptr) {
+        out[static_cast<long long>(blockIdx.x) * out_stride] = bi;
+      } else {
+        part[blockIdx.x] = bv;
+        part[part_rows + blockIdx.x] = __int_as_float(first_id + bi);
+      }
+    }
   }
 }
 
@@ -1864,7 +1875,42 @@ void inkling2_dspark_argmax(torch::Tensor logits, torch::Tensor out,
   argmax_rows_kernel<<<dim3(static_cast<unsigned>(num_rows)), dim3(512), 0,
                        stream>>>(
       reinterpret_cast<const __half*>(logits.data_ptr()), logits.stride(0),
-      (int)vocab, vec, static_cast<long long*>(out.data_ptr()), out.stride(0));
+      (int)vocab, vec, static_cast<long long*>(out.data_ptr()), out.stride(0),
+      nullptr, 0, 0);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// The (value, id) partial of one vocabulary shard: part[r] = max logits[r,
+// :vocab] (fp32), part[num_rows + r] = the int32 bits of first_id + the lowest
+// index of that maximum (NaN as -inf).  `part` is fp32 with at least 2 *
+// num_rows entries; `part[:2 * num_rows]` viewed [2 * num_rows, 1] is what a
+// tensor-parallel all-gather concatenates along the last dimension, and
+// inkling2_linear_argmax_reduce(part[:R], part[R:].view(int32), out) turns the
+// gathered [2R, tp] into the global argmax (ties to the lowest id).
+void inkling2_dspark_argmax_partial(torch::Tensor logits, torch::Tensor part,
+                                    int64_t num_rows, int64_t vocab,
+                                    int64_t first_id) {
+  check_gpu(logits, "logits", torch::kHalf);
+  check_gpu(part, "part", torch::kFloat);
+  TORCH_CHECK(logits.dim() == 2 && logits.size(0) >= num_rows &&
+                  logits.size(1) >= vocab && logits.stride(1) == 1 &&
+                  vocab > 0 && vocab < (int64_t{1} << 31),
+              "logits must be [>= rows, >= vocab] with a unit column stride");
+  TORCH_CHECK(first_id >= 0 && first_id + vocab < (int64_t{1} << 31),
+              "first_id + vocab must fit an int32");
+  TORCH_CHECK(
+      part.is_contiguous() && part.numel() >= 2 * num_rows,
+      "part must be a contiguous fp32 tensor of >= 2 * num_rows entries");
+  if (num_rows == 0) return;
+  const at::cuda::OptionalCUDAGuard guard(device_of(logits));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  const bool vec = logits.stride(0) % 8 == 0 &&
+                   reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 == 0;
+  argmax_rows_kernel<<<dim3(static_cast<unsigned>(num_rows)), dim3(512), 0,
+                       stream>>>(
+      reinterpret_cast<const __half*>(logits.data_ptr()), logits.stride(0),
+      (int)vocab, vec, nullptr, 0, part.data_ptr<float>(), (int)num_rows,
+      (int)first_id);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

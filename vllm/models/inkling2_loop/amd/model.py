@@ -834,13 +834,6 @@ class Inkling2LoopTextForCausalLM(nn.Module):
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """Select the global layer visits whose entry block states are returned as
         auxiliary hidden states (the final normalized output is always appended)."""
-        if self.tp.enabled:
-            raise NotImplementedError(
-                "the Inkling-2 DSpark draft shares the target's full-vocabulary "
-                "lm_head and embedding, but with tensor_parallel_size > 1 the head is "
-                "vocabulary-sharded; speculative decoding needs tensor_parallel_size=1 "
-                "(docs/rdna2/inkling2-port-spec.md, tensor parallelism)"
-            )
         self.model.aux_hidden_state_layers = tuple(layers)
         self.model.configure_taps()
 
