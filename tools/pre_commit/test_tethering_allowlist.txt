@@ -67,6 +67,35 @@ tests/distributed/test_rdna_p2p.py  # fork-only RDNA P2P topology, CPU unit test
 tests/distributed/test_rdna_gather_allreduce.py  # fork-only P2P-less gather replacements, CPU gloo oracle; not in CI
 tests/models/qwen4_exp/test_offload_policy_sweep_tp4.py  # fork-only expert-offload TP4 sweep rank map, CPU unit test; not in CI
 tests/models/qwen4_exp/test_qualify_expert_copy_ranks.py  # fork-only expert-copy qualifier rank check, CPU unit test; not in CI
+tests/models/inkling2_loop/test_attention.py  # fork-only Inkling-2 dense-state attention vs transformers reference, CPU unit test; not in CI
+tests/models/inkling2_loop/test_blocks.py  # fork-only Inkling-2 blocks (attn-residual, gates, softcaps) vs reference, CPU unit test; not in CI
+tests/models/inkling2_loop/test_configs.py  # fork-only Inkling-2 config classes (the pinned transformers lacks inkling2_loop), CPU unit test; not in CI
+tests/models/inkling2_loop/test_conv_state_manager.py  # fork-only Inkling-2 conv-state KV cache manager (same-step prefix-hit deferral, page size, group packing) on the real KVCacheManager, CPU unit test; not in CI
+tests/models/inkling2_loop/test_dspark_model.py  # fork-only Inkling-2 DSpark draft vs the fp64 oracle on gfx1030 (random + real mtp.safetensors weights, HIP graph replay), CPU parts also run off-GPU; not in CI
+tests/models/inkling2_loop/test_dspark_oracle.py  # fork-only Inkling-2 DSpark fp64 oracle (loader names, attention window, Markov head, fp16 report), CPU unit test; not in CI
+tests/models/inkling2_loop/test_dspark_verifier.py  # fork-only exact-probability enumeration gate for the DSpark rejection path on a tiny vocabulary (CPU oracle + HIP rejection sampler on gfx1030); not in CI
+tests/models/inkling2_loop/test_dspark_target_taps.py  # fork-only Inkling-2 target tap hook (entry block states of the selected layer visits + final output) on the tiny checkpoints, CPU unit test; not in CI
+tests/models/inkling2_loop/test_dspark_tp.py  # fork-only Inkling-2 DSpark draft under tensor parallelism (vocabulary-shard geometry and the sampled-draft refusal on the CPU; thread-emulated TP=2/4 draft vs the single-rank draft on gfx1030); not in CI
+tests/models/inkling2_loop/test_serving_path_cpu.py  # fork-only Inkling-2 native-path selection, kernel shape gate, conv-state write rule, attention-workspace bound sweep and MoE scratch (no GPU needed); not in CI
+tests/models/inkling2_loop/test_serving_path_gpu.py  # fork-only Inkling-2 native HIP serving path vs its torch reference path on gfx1030 (layer-by-layer teacher forced, paged scenarios, prefix cache, no-allocation forward); skipped off-GPU, not in CI
+tests/models/inkling2_loop/test_serving_path_graph_gpu.py  # fork-only Inkling-2 FULL HIP-graph capture/replay of the native forward vs the eager step on gfx1030 (padded batches with poisoned padding, frozen split-K, fp16-CAS noise bound); skipped off-GPU, not in CI
+tests/models/inkling2_loop/test_loader.py  # fork-only Inkling-2 expert-format loader, CPU unit test; not in CI
+tests/models/inkling2_loop/test_moe.py  # fork-only Inkling-2 NVFP4/MXFP8 MoE vs fp32 reference; GPU cases need gfx1030 and the moe_*_rdna2 ops, not in CI
+tests/models/inkling2_loop/test_moe_prefill_bm_gpu.py  # fork-only Inkling-2 prefill expert kernels at the model level on gfx1030 (tiny router-stable checkpoints, kernels off / on / W4A8, op call counters prove which path ran); skipped off-GPU, not in CI
+tests/models/inkling2_loop/test_moe_prefill_flags.py  # fork-only Inkling-2 prefill expert kernel switches (defaults, rollback flag, token gate, K eligibility), CPU unit test; not in CI
+tests/kernels/core/test_inkling2_moe_rdna2.py  # fork-only Inkling-2 NVFP4/MXFP8 expert GEMM kernels (1/2/4/8 routed rows per block, up/down, K and N tails) vs an fp64 reference, every MXFP8 byte x scale exact; needs gfx1030 (I2_MOE_JIT=<.cu> runs mutants), not in CI
+tests/models/inkling2_loop/test_paged_model.py  # fork-only Inkling-2 paged model vs transformers reference on tiny checkpoints, CPU unit test; not in CI
+tests/models/inkling2_loop/test_paged_state.py  # fork-only Inkling-2 paged conv/KV state vs dense oracle, CPU unit test; not in CI
+tests/models/inkling2_loop/test_real_checkpoint_names.py  # fork-only Inkling-2 load_weights vs the real checkpoint header on the meta device (skipped without ~/hfcache/inkling2-mini) plus w13 gate/up layout, CPU unit test; not in CI
+tests/models/inkling2_loop/test_tensor_parallel.py  # fork-only Inkling-2 tensor-parallel sharding (TP=2/4: loader slices, per-rank weights, in-process thread ranks vs the transformers reference), CPU unit test; not in CI
+tests/models/inkling2_loop/test_vision_encoder.py  # fork-only Inkling-2 vision encoder vs the fp32 oracle / transformers on gfx1030 (tiny, real shapes, real checkpoint + images; skipped off-RDNA2), not in CI
+tests/models/inkling2_loop/test_vision_loader.py  # fork-only Inkling-2 vision batch geometry, chunking and model.visual.* weight loading (incl. the real checkpoint header on the meta device), CPU unit test; not in CI
+tests/models/inkling2_loop/test_vision_mixin.py  # fork-only Inkling-2 multimodal mixin: embed_multimodal contract, embedding merge, weight routing, tower switch, CPU unit test; not in CI
+tests/models/inkling2_loop/test_vision_processing.py  # fork-only Inkling-2 image preprocessing, placeholder expansion and golden token ids vs the real template / transformers processor (skipped without them), CPU unit test; not in CI
+tests/models/inkling2_loop/test_vision_text_stack.py  # fork-only Inkling-2 multimodal mixin composed with the real text stack on the tiny checkpoint (weights, embed_norm merge, hidden size), CPU unit test; not in CI
+tests/models/test_inkling2_loop_blocks.py  # fork-only Inkling-2 block parity against the transformers reference, CPU unit test; not in CI
+tests/models/test_inkling2_loop_moe.py  # fork-only Inkling-2 MoE routing/experts parity, GPU cases need gfx1030; not in CI
+tests/models/test_inkling2_tiny_harness.py  # fork-only Inkling-2 tiny checkpoint builder and reference harness, CPU unit test; not in CI
 tests/tools/rdna/test_rdna2_offload_ar_cli.py  # fork-only offload AR checker CLI, CPU unit test; not in CI
 tests/tools/rdna/test_serve_offload_topology.py  # fork-only offload launcher topology contract, CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_devices.py  # fork-only qualification-driver device pin, CPU unit test; not in CI
@@ -92,6 +121,7 @@ tests/tools/rdna/test_tunable_hi2.py  # fork-only 27B HI2 TunableOp shape formul
 tests/tools/rdna/test_hi2_tunableop_profile.py  # fork-only 27B HI2 TP=2 TunableOp profile registry / rows / recipe wiring (print mode, stub venv), CPU unit test; not in CI
 tests/tools/rdna/test_tunableop_rank_agree.py  # fork-only per-key agreement of the shipped TunableOp rank files and the tool that makes them agree (stdlib, reads tunableop/), CPU unit test; not in CI
 tests/tools/rdna/test_hi2_recipe_defaults.py  # fork-only 27B HI2 recipe switch defaults, opt-outs and MTP delta checked against the serving doc's switch table (print mode, stub venv), CPU unit test; not in CI
+tests/tools/rdna/test_inkling2_recipes.py  # fork-only Inkling-2-Mini serving recipes (graphs on the default grid, prefix caching, TP / length / all-reduce keys, the TP=2 KV margin floor; print mode, stub venv), CPU unit test; not in CI
 tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py  # fork-only opt-in routing statistics collector (CPU torch, AST zero-cost-off checks), CPU unit test; not in CI
 tests/model_executor/layers/fused_moe/test_rdna_eplb_stats.py  # fork-only opt-in lean-EPLB load counters (CPU collector and AST zero-cost-off checks, GPU parity tests need a gfx10 GPU), not in CI
 tests/models/qwen4_exp/test_amd_mono_rdna2_w4a8.py  # fork-only mono next to the W4A8 MoE prefill (meta-tensor layout, dispatch), CPU unit test; not in CI

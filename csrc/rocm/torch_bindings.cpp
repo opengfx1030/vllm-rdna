@@ -583,6 +583,222 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk) -> ()");
   rocm_ops.impl("moe_mxfp4_gemm_rdna2", torch::kCUDA, &moe_mxfp4_gemm_rdna2);
 
+  // Inkling-2-Mini expert formats on RDNA2 (gfx1030): modelopt NVFP4
+  // (E2M1 + E4M3 block scales + per-expert amax/2688) and MXFP8
+  // (E4M3 + UE8M0).  fp16 activations, on-the-fly dequant into V_DOT2.
+  rocm_ops.def(
+      "moe_nvfp4_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_globals, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_nvfp4_gemm_rdna2", torch::kCUDA, &moe_nvfp4_gemm_rdna2);
+
+  rocm_ops.def(
+      "moe_mxfp8_gemm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_mxfp8_gemm_rdna2", torch::kCUDA, &moe_mxfp8_gemm_rdna2);
+
+  // Prefill-sized variants (32-row blocks, whole K): work list + the two
+  // formats.
+  rocm_ops.def(
+      "moe_prefill_cta_rdna2(Tensor expert_ids, Tensor num_tokens_post_padded, "
+      "int num_experts, int block_size_m) -> Tensor");
+  rocm_ops.impl("moe_prefill_cta_rdna2", torch::kCUDA, &moe_prefill_cta_rdna2);
+
+  rocm_ops.def(
+      "moe_nvfp4_bm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_globals, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor cta_info, "
+      "int top_k, bool mul_topk_weight, int output_topk) -> ()");
+  rocm_ops.impl("moe_nvfp4_bm_rdna2", torch::kCUDA, &moe_nvfp4_bm_rdna2);
+
+  rocm_ops.def(
+      "moe_mxfp8_bm_rdna2(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor cta_info, "
+      "int top_k, bool mul_topk_weight, int output_topk) -> ()");
+  rocm_ops.impl("moe_mxfp8_bm_rdna2", torch::kCUDA, &moe_mxfp8_bm_rdna2);
+
+  rocm_ops.def("moe_prefill_act_quant_rdna2(Tensor a) -> (Tensor, Tensor)");
+  rocm_ops.impl("moe_prefill_act_quant_rdna2", torch::kCUDA,
+                &moe_prefill_act_quant_rdna2);
+
+  rocm_ops.def(
+      "moe_nvfp4_bm_i8_rdna2(Tensor a8, Tensor sa, Tensor! c, "
+      "Tensor b_q_weight, Tensor b_scales, Tensor b_globals, "
+      "Tensor topk_weights, Tensor sorted_token_ids, Tensor cta_info, "
+      "int top_k, bool mul_topk_weight, int output_topk) -> ()");
+  rocm_ops.impl("moe_nvfp4_bm_i8_rdna2", torch::kCUDA, &moe_nvfp4_bm_i8_rdna2);
+
+  rocm_ops.def(
+      "moe_nvfp4_gemm_swiglu_rdna2(Tensor gate_up, Tensor! c, "
+      "Tensor b_q_weight, Tensor b_scales, Tensor b_globals, "
+      "Tensor topk_weights, Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk, float gate_cap, float up_cap) -> ()");
+  rocm_ops.impl("moe_nvfp4_gemm_swiglu_rdna2", torch::kCUDA,
+                &moe_nvfp4_gemm_swiglu_rdna2);
+
+  rocm_ops.def(
+      "moe_mxfp8_gemm_swiglu_rdna2(Tensor gate_up, Tensor! c, "
+      "Tensor b_q_weight, Tensor b_scales, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk, float gate_cap, float up_cap) -> ()");
+  rocm_ops.impl("moe_mxfp8_gemm_swiglu_rdna2", torch::kCUDA,
+                &moe_mxfp8_gemm_swiglu_rdna2);
+
+  // Inkling-2-Mini attention core on RDNA2 (gfx1030): paged short convs,
+  // K/V prep and attention with learned relative bias + sink logit.
+  rocm_ops.def(
+      "inkling2_sconv_static(Tensor x, Tensor weight, Tensor! out, "
+      "Tensor! conv_cache, Tensor block_table, Tensor seq_idx, "
+      "Tensor query_start_loc, Tensor seq_lens, int stream_offset, "
+      "int num_kv_heads, int block_size, bool write_state) -> ()");
+  rocm_ops.impl("inkling2_sconv_static", torch::kCUDA, &inkling2_sconv_static);
+
+  rocm_ops.def(
+      "inkling2_sconv_dynamic(Tensor x, Tensor static_weight, Tensor dyn, "
+      "Tensor! out, Tensor! conv_cache, Tensor block_table, "
+      "Tensor seq_idx, Tensor query_start_loc, Tensor seq_lens, "
+      "int stream_offset, int num_kv_heads, int block_size, "
+      "bool write_state) -> ()");
+  rocm_ops.impl("inkling2_sconv_dynamic", torch::kCUDA,
+                &inkling2_sconv_dynamic);
+
+  rocm_ops.def(
+      "inkling2_conv_state_write(Tensor x, Tensor! conv_cache, "
+      "Tensor block_table, Tensor seq_idx, Tensor query_start_loc, "
+      "Tensor seq_lens, int stream_offset, int num_kv_heads, "
+      "int block_size) -> ()");
+  rocm_ops.impl("inkling2_conv_state_write", torch::kCUDA,
+                &inkling2_conv_state_write);
+
+  rocm_ops.def(
+      "inkling2_kv_prep(Tensor xk, Tensor xv, Tensor k_weight, "
+      "Tensor v_weight, Tensor? k_dyn, Tensor? v_dyn, Tensor! conv_cache, "
+      "Tensor conv_block_table, Tensor seq_idx, "
+      "Tensor query_start_loc, Tensor seq_lens, Tensor! kv_cache, "
+      "Tensor kv_slot_mapping, int k_stream_offset, int v_stream_offset, "
+      "int conv_block_size, bool write_state, "
+      "float k_clip, float rms_eps) -> ()");
+  rocm_ops.impl("inkling2_kv_prep", torch::kCUDA, &inkling2_kv_prep);
+
+  rocm_ops.def(
+      "inkling2_attention(Tensor q, Tensor rel, Tensor sink, Tensor? gate, "
+      "Tensor q_scale, Tensor rel_scale, Tensor rel_proj_t, Tensor positions, "
+      "Tensor kv_cache, Tensor block_table, Tensor seq_lens, "
+      "Tensor query_start_loc, Tensor! out, Tensor! workspace, int window, "
+      "int rel_extent, bool log_scale, float log_alpha, float log_n_floor, "
+      "float q_clip, float rel_clip, int max_query_len, "
+      "int splits_decode, int splits_tile) -> ()");
+  rocm_ops.impl("inkling2_attention", torch::kCUDA, &inkling2_attention);
+
+  // Inkling-2-Mini DSpark draft kernels (csrc/rocm/inkling2_dspark_rdna2.cu).
+  rocm_ops.def(
+      "inkling2_dspark_store_taps(Tensor[] srcs, Tensor! dst, int num_rows) "
+      "-> ()");
+  rocm_ops.impl("inkling2_dspark_store_taps", torch::kCUDA,
+                &inkling2_dspark_store_taps);
+  rocm_ops.def(
+      "inkling2_dspark_mix_rms(Tensor taps, Tensor fuse_weight, Tensor "
+      "norm_w, Tensor! out, Tensor? qsl, Tensor? num_rejected, int num_rows, "
+      "int alpha_row0, float eps) -> ()");
+  rocm_ops.impl("inkling2_dspark_mix_rms", torch::kCUDA,
+                &inkling2_dspark_mix_rms);
+  rocm_ops.def(
+      "inkling2_dspark_embed_block(Tensor ids, Tensor embed, Tensor "
+      "embed_norm_w, Tensor mask_embed, Tensor in_norm_w, Tensor! resid, "
+      "Tensor! xn, int num_rows, int block, float eps) -> ()");
+  rocm_ops.impl("inkling2_dspark_embed_block", torch::kCUDA,
+                &inkling2_dspark_embed_block);
+  rocm_ops.def(
+      "inkling2_dspark_add_rmsnorm(Tensor! resid, Tensor delta, Tensor "
+      "norm_w, Tensor! out, int num_rows, int splits, float eps) -> ()");
+  rocm_ops.impl("inkling2_dspark_add_rmsnorm", torch::kCUDA,
+                &inkling2_dspark_add_rmsnorm);
+  rocm_ops.def(
+      "inkling2_dspark_silu_mul(Tensor gu, Tensor! out, int num_rows) -> ()");
+  rocm_ops.impl("inkling2_dspark_silu_mul", torch::kCUDA,
+                &inkling2_dspark_silu_mul);
+  rocm_ops.def(
+      "inkling2_dspark_gather_rows(Tensor src, Tensor idx, Tensor! dst, int "
+      "num_rows) -> ()");
+  rocm_ops.impl("inkling2_dspark_gather_rows", torch::kCUDA,
+                &inkling2_dspark_gather_rows);
+  rocm_ops.def(
+      "inkling2_dspark_gemv(Tensor x, Tensor w, Tensor! out, Tensor? "
+      "x_index, int num_rows, int splits, int variant) -> ()");
+  rocm_ops.impl("inkling2_dspark_gemv", torch::kCUDA, &inkling2_dspark_gemv);
+  rocm_ops.def(
+      "inkling2_dspark_gemm(Tensor x, Tensor w, Tensor! out, int num_rows, "
+      "int design) -> ()");
+  rocm_ops.impl("inkling2_dspark_gemm", torch::kCUDA, &inkling2_dspark_gemm);
+  rocm_ops.def(
+      "inkling2_dspark_qkv_prep(Tensor qkv, Tensor positions, Tensor slots, "
+      "Tensor q_norm_w, Tensor k_norm_w, Tensor inv_freq, Tensor!? q_out, "
+      "Tensor! kv_cache, int num_tokens, int q_heads, int kv_heads, float "
+      "eps) -> ()");
+  rocm_ops.impl("inkling2_dspark_qkv_prep", torch::kCUDA,
+                &inkling2_dspark_qkv_prep);
+  rocm_ops.def(
+      "inkling2_dspark_attention(Tensor q, Tensor kv_cache, Tensor "
+      "block_table, Tensor seq_lens, Tensor! out, Tensor! part, int "
+      "num_reqs, int window, int splits) -> ()");
+  rocm_ops.impl("inkling2_dspark_attention", torch::kCUDA,
+                &inkling2_dspark_attention);
+  rocm_ops.def(
+      "inkling2_dspark_markov_step(Tensor prev, int prev_stride, Tensor! "
+      "state, Tensor w1, Tensor wt, Tensor bias, Tensor ctx_h, Tensor ctx_f, "
+      "Tensor! latent, int num_reqs, int step, int nsteps, bool first) -> "
+      "()");
+  rocm_ops.impl("inkling2_dspark_markov_step", torch::kCUDA,
+                &inkling2_dspark_markov_step);
+  rocm_ops.def(
+      "inkling2_dspark_head_logits(Tensor base, Tensor latent, Tensor "
+      "fold_w, Tensor fold_b, Tensor! logits, int num_reqs, int step, int "
+      "nsteps, float softcap) -> ()");
+  rocm_ops.impl("inkling2_dspark_head_logits", torch::kCUDA,
+                &inkling2_dspark_head_logits);
+  rocm_ops.def(
+      "inkling2_dspark_fold_bias(Tensor head, Tensor b, Tensor! out) -> ()");
+  rocm_ops.impl("inkling2_dspark_fold_bias", torch::kCUDA,
+                &inkling2_dspark_fold_bias);
+  rocm_ops.def(
+      "inkling2_dspark_argmax(Tensor logits, Tensor! out, int num_rows, int "
+      "vocab) -> ()");
+  rocm_ops.impl("inkling2_dspark_argmax", torch::kCUDA,
+                &inkling2_dspark_argmax);
+  rocm_ops.def(
+      "inkling2_dspark_argmax_partial(Tensor logits, Tensor! part, int "
+      "num_rows, int vocab, int first_id) -> ()");
+  rocm_ops.impl("inkling2_dspark_argmax_partial", torch::kCUDA,
+                &inkling2_dspark_argmax_partial);
+  rocm_ops.def(
+      "inkling2_dspark_prepare_inputs(Tensor! input_ids, Tensor! positions, "
+      "Tensor! is_padding, Tensor! query_start_loc, Tensor! seq_lens, "
+      "Tensor! query_slot_mapping, Tensor! context_positions, Tensor! "
+      "context_slot_mapping, Tensor! sample_indices, Tensor! sample_pos, "
+      "Tensor! sample_idx_mapping, Tensor! out_temperature, Tensor! "
+      "out_seeds, Tensor target_positions, Tensor target_query_start_loc, "
+      "Tensor idx_mapping, Tensor last_sampled, Tensor next_prefill_tokens, "
+      "Tensor num_sampled, Tensor num_rejected, Tensor temperature, Tensor "
+      "seeds, Tensor block_table, int block_size, int "
+      "parallel_drafting_token_id, int num_query_per_req, int "
+      "num_speculative_steps, int max_num_reqs, int max_num_tokens, int "
+      "max_model_len, int num_reqs, int max_tokens_per_req, bool "
+      "sample_from_anchor) -> ()");
+  rocm_ops.impl("inkling2_dspark_prepare_inputs", torch::kCUDA,
+                &inkling2_dspark_prepare_inputs);
+
   // W4A4 MXFP4 dense (non-MoE) GEMM kernel for RDNA2 (gfx1030).
   // Used for MXFP4 attention and shared experts.
   rocm_ops.def(
@@ -825,6 +1041,137 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "-> Tensor");
   rocm_ops.impl("bilinear_pos_embed_rdna2", torch::kCUDA,
                 &bilinear_pos_embed_rdna2);
+
+  // Inkling-2-Mini vision encoder (csrc/rocm/inkling2_vit_rdna2.cu).
+  rocm_ops.def(
+      "inkling2_vit_gather_patches(Tensor raw, Tensor! out, int mode) -> ()");
+  rocm_ops.impl("inkling2_vit_gather_patches", torch::kCUDA,
+                &inkling2_vit_gather_patches);
+  rocm_ops.def(
+      "inkling2_vit_gemm(Tensor a, Tensor w, Tensor! out, Tensor? bias, "
+      "int epilogue) -> ()");
+  rocm_ops.impl("inkling2_vit_gemm", torch::kCUDA, &inkling2_vit_gemm);
+  rocm_ops.def(
+      "inkling2_vit_gemm_residual(Tensor a, Tensor w, Tensor bias, "
+      "Tensor gamma, Tensor! res) -> ()");
+  rocm_ops.impl("inkling2_vit_gemm_residual", torch::kCUDA,
+                &inkling2_vit_gemm_residual);
+  rocm_ops.def(
+      "inkling2_vit_embed(Tensor emb, Tensor pos, Tensor cls, Tensor ln_w, "
+      "Tensor ln_b, Tensor meta, Tensor! h, float eps) -> ()");
+  rocm_ops.impl("inkling2_vit_embed", torch::kCUDA, &inkling2_vit_embed);
+  rocm_ops.def(
+      "inkling2_vit_layernorm(Tensor h, Tensor w, Tensor b, Tensor! out, "
+      "float eps) -> ()");
+  rocm_ops.impl("inkling2_vit_layernorm", torch::kCUDA,
+                &inkling2_vit_layernorm);
+  rocm_ops.def(
+      "inkling2_vit_rope_tables(Tensor meta, Tensor inv_freq, Tensor! cs) "
+      "-> ()");
+  rocm_ops.impl("inkling2_vit_rope_tables", torch::kCUDA,
+                &inkling2_vit_rope_tables);
+  rocm_ops.def("inkling2_vit_rope_qk(Tensor! qkv, Tensor cs) -> ()");
+  rocm_ops.impl("inkling2_vit_rope_qk", torch::kCUDA, &inkling2_vit_rope_qk);
+  rocm_ops.def(
+      "inkling2_vit_attention(Tensor qkv, Tensor! out, Tensor meta, "
+      "Tensor blk_prefix, int num_qblocks) -> ()");
+  rocm_ops.impl("inkling2_vit_attention", torch::kCUDA,
+                &inkling2_vit_attention);
+  rocm_ops.def("inkling2_vit_pool(Tensor h, Tensor meta, Tensor! out) -> ()");
+  rocm_ops.impl("inkling2_vit_pool", torch::kCUDA, &inkling2_vit_pool);
+
+  // Inkling-2-Mini dense linears (csrc/rocm/inkling2_linear_rdna2.cu).
+  rocm_ops.def(
+      "inkling2_linear_grouped(Tensor[] xs, Tensor w, Tensor(a!)[] outs, "
+      "int[] seg_x, int[] seg_n, int[] seg_act, float[] seg_p, "
+      "int[] seg_valid, int variant=-1) -> ()");
+  rocm_ops.impl("inkling2_linear_grouped", torch::kCUDA,
+                &inkling2_linear_grouped);
+  rocm_ops.def(
+      "inkling2_linear_f32w(Tensor[] xs, Tensor w, Tensor(a!)[] outs, "
+      "int[] seg_x, int[] seg_n, int[] seg_act, int variant=-1) -> ()");
+  rocm_ops.impl("inkling2_linear_f32w", torch::kCUDA, &inkling2_linear_f32w);
+  rocm_ops.def(
+      "inkling2_linear_lm_head(Tensor x, Tensor w, Tensor!? logits, "
+      "Tensor!? part_val, Tensor!? part_idx, float softcap, int n_valid, "
+      "int col_base, int variant=-1) -> ()");
+  rocm_ops.impl("inkling2_linear_lm_head", torch::kCUDA,
+                &inkling2_linear_lm_head);
+  rocm_ops.def(
+      "inkling2_linear_argmax_partial(Tensor logits, Tensor! part_val, "
+      "Tensor! part_idx, int n, int col_base) -> ()");
+  rocm_ops.impl("inkling2_linear_argmax_partial", torch::kCUDA,
+                &inkling2_linear_argmax_partial);
+  rocm_ops.def(
+      "inkling2_linear_argmax_reduce(Tensor part_val, Tensor part_idx, "
+      "Tensor! out) -> ()");
+  rocm_ops.impl("inkling2_linear_argmax_reduce", torch::kCUDA,
+                &inkling2_linear_argmax_reduce);
+
+  // Inkling-2-Mini glue kernels (csrc/rocm/inkling2_glue_rdna2.cu).
+  rocm_ops.def(
+      "inkling2_glue_attn_res(Tensor! blocks, int n_blocks, Tensor x0, "
+      "Tensor? x1, Tensor!? partial_out, Tensor? append, Tensor query, "
+      "Tensor? norm_w, Tensor! out, float eps, float norm_eps) -> ()");
+  rocm_ops.impl("inkling2_glue_attn_res", torch::kCUDA,
+                &inkling2_glue_attn_res);
+  // Inkling-2-Mini attention-chain node fusions
+  // (csrc/rocm/inkling2_fuse_attn_rdna2.cu).
+  rocm_ops.def(
+      "inkling2_fuse_attn_res_conv(Tensor! blocks, int n_blocks, Tensor? x0, "
+      "Tensor conv_x, Tensor conv_w, Tensor! conv_cache, Tensor block_table, "
+      "Tensor seq_idx, Tensor query_start_loc, Tensor seq_lens, "
+      "int stream_offset, int num_kv_heads, int block_size, Tensor!? x1_out, "
+      "Tensor!? partial_out, Tensor? append, Tensor query, Tensor? norm_w, "
+      "Tensor! out, float eps, float norm_eps) -> ()");
+  rocm_ops.impl("inkling2_fuse_attn_res_conv", torch::kCUDA,
+                &inkling2_fuse_attn_res_conv);
+  rocm_ops.def(
+      "inkling2_fuse_msgs_fill(Tensor blocks, int n_blocks, Tensor x0, "
+      "Tensor x1, Tensor queries, Tensor! out, float eps) -> ()");
+  rocm_ops.impl("inkling2_fuse_msgs_fill", torch::kCUDA,
+                &inkling2_fuse_msgs_fill);
+  rocm_ops.def(
+      "inkling2_glue_msg_gate_down(Tensor h, Tensor m, Tensor wd, "
+      "Tensor! d, float eps) -> ()");
+  rocm_ops.impl("inkling2_glue_msg_gate_down", torch::kCUDA,
+                &inkling2_glue_msg_gate_down);
+  rocm_ops.def(
+      "inkling2_glue_msg_gate_mix(Tensor h, Tensor m, Tensor d, Tensor wf, "
+      "Tensor wg, Tensor? norm_w, Tensor! out, Tensor!? scratch, "
+      "Tensor!? partials, Tensor!? counters, float norm_eps) -> ()");
+  rocm_ops.impl("inkling2_glue_msg_gate_mix", torch::kCUDA,
+                &inkling2_glue_msg_gate_mix);
+  rocm_ops.def(
+      "inkling2_glue_rms_norm(Tensor x, Tensor? x1, Tensor? weight, "
+      "Tensor! out, Tensor!? sum_out, float eps, bool round_fp16) -> ()");
+  rocm_ops.impl("inkling2_glue_rms_norm", torch::kCUDA,
+                &inkling2_glue_rms_norm);
+  rocm_ops.def(
+      "inkling2_glue_embed_norm(Tensor ids, Tensor table, Tensor weight, "
+      "Tensor! out, float eps) -> ()");
+  rocm_ops.impl("inkling2_glue_embed_norm", torch::kCUDA,
+                &inkling2_glue_embed_norm);
+  rocm_ops.def(
+      "inkling2_glue_embed_lookup(Tensor ids, Tensor table, Tensor! out, "
+      "int vocab_first, int vocab_total) -> ()");
+  rocm_ops.impl("inkling2_glue_embed_lookup", torch::kCUDA,
+                &inkling2_glue_embed_lookup);
+  rocm_ops.def(
+      "inkling2_glue_moe_route(Tensor x, Tensor gate_w, Tensor bias, "
+      "Tensor! logits, Tensor! topk_weights, Tensor! topk_ids, "
+      "Tensor! sorted_ids, Tensor! expert_ids, Tensor! post_pad, "
+      "Tensor! counters, Tensor!? zero1, Tensor!? zero2, "
+      "int block_size_m, float route_scale) -> ()");
+  rocm_ops.impl("inkling2_glue_moe_route", torch::kCUDA,
+                &inkling2_glue_moe_route);
+  rocm_ops.def(
+      "inkling2_glue_swiglu(Tensor gate_up, Tensor! out, float gate_cap, "
+      "float up_cap) -> ()");
+  rocm_ops.impl("inkling2_glue_swiglu", torch::kCUDA, &inkling2_glue_swiglu);
+  rocm_ops.def("inkling2_glue_copy_states(Tensor src, Tensor! dst) -> ()");
+  rocm_ops.impl("inkling2_glue_copy_states", torch::kCUDA,
+                &inkling2_glue_copy_states);
 
   // Qwen4Exp PLE dilated short-conv HIP (opt-in: VLLM_RDNA_PLE_CONV_HIP=1).
   rocm_ops.def(

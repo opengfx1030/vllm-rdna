@@ -21,7 +21,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker import extensible_kv_cache
 from vllm.v1.worker.extensible_kv_cache import (
+    KV_CACHE_MARGIN_FLOOR_BYTES,
     ExtensibleKVCache,
+    kv_cache_margin_floor_bytes,
     measure_kv_cache_bytes,
     pad_kv_cache_segments,
 )
@@ -190,6 +192,33 @@ def test_measure_kv_cache_bytes():
     )
     # The result never goes negative.
     assert measure_kv_cache_bytes(requested_memory=2 * gib, **common) == 0
+
+
+def test_margin_floor_env_override(monkeypatch):
+    """VLLM_KV_CACHE_MARGIN_FLOOR_MIB replaces the platform floor of the margin; an
+    explicit `margin_floor_bytes` still wins over it, and 0 is a floor, not unset."""
+    gib = 1 << 30
+    common = dict(
+        init_free_memory=20 * gib,
+        free_memory=10 * gib,
+        committed_bytes=0,
+        requested_memory=30 * gib,
+        margin_fraction=0.0,
+    )
+    monkeypatch.delenv("VLLM_KV_CACHE_MARGIN_FLOOR_MIB", raising=False)
+    assert kv_cache_margin_floor_bytes() == KV_CACHE_MARGIN_FLOOR_BYTES
+    assert measure_kv_cache_bytes(**common) == 10 * gib - KV_CACHE_MARGIN_FLOOR_BYTES
+    monkeypatch.setenv("VLLM_KV_CACHE_MARGIN_FLOOR_MIB", "")
+    assert kv_cache_margin_floor_bytes() == KV_CACHE_MARGIN_FLOOR_BYTES
+
+    monkeypatch.setenv("VLLM_KV_CACHE_MARGIN_FLOOR_MIB", "2560")
+    assert kv_cache_margin_floor_bytes() == 2560 << 20
+    assert measure_kv_cache_bytes(**common) == 10 * gib - (2560 << 20)
+    assert measure_kv_cache_bytes(margin_floor_bytes=gib, **common) == 9 * gib
+
+    monkeypatch.setenv("VLLM_KV_CACHE_MARGIN_FLOOR_MIB", "0")
+    assert kv_cache_margin_floor_bytes() == 0
+    assert measure_kv_cache_bytes(**common) == 10 * gib
 
 
 @requires_cuda

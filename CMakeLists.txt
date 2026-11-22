@@ -1805,6 +1805,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/gdn_prefill_o_rdna2.cu"
       "csrc/rocm/mxfp4_dot2_moe.cu"
       "csrc/rocm/mxfp4_dot2_dense.cu"
+      "csrc/rocm/moe_lowp_dot2_rdna2.cu"
+      "csrc/rocm/moe_prefill_bm_rdna2.cu"
+      "csrc/rocm/inkling2_attn_rdna2.cu"
+      "csrc/rocm/inkling2_dspark_rdna2.cu"
       "csrc/rocm/moe_w8a16_rdna2.cu"
       "csrc/rocm/moe_unquantized_rdna2.cu"
       "csrc/rocm/q_gemm_w8a16_fp8_rdna2.cu"
@@ -1821,6 +1825,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/v1_topk_topp_rdna2.cu"
       "csrc/rocm/qsa_metadata_rdna2.cu"
       "csrc/rocm/vit_pos_embed_rdna2.cu"
+      "csrc/rocm/inkling2_vit_rdna2.cu"
+      "csrc/rocm/inkling2_linear_rdna2.cu"
+      "csrc/rocm/inkling2_glue_rdna2.cu"
+      "csrc/rocm/inkling2_fuse_attn_rdna2.cu"
       # DeepSeek-V4 RDNA kernels (csrc/rocm/rdna/<feature>/ layout).
       "csrc/rocm/rdna/dsv4/indexer_mqa_logits.cu"
       "csrc/rocm/rdna/dsv4/kv_insert.cu"
@@ -1873,9 +1881,12 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     # The dense prefill GEMM designs were swept with hipcc -O3
     # (tools/rdna/rdna_hint_flex/gemm_sweep); build the shipped kernels with the
     # same flag so the register allocation and instruction mix that were measured
-    # are the ones that run (RelWithDebInfo would give -O2).
+    # are the ones that run (RelWithDebInfo would give -O2). The Inkling-2 vision
+    # kernels (GEMM, attention) were measured with -O3 too.
     set_source_files_properties(
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.hip"
+      "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/inkling2_vit_rdna2.hip"
+      "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/inkling2_linear_rdna2.hip"
       PROPERTIES COMPILE_OPTIONS "-O3")
   endif()
   

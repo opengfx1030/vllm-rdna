@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
@@ -598,6 +599,42 @@ class TestSlidingWindowBucketCap:
         assert sorted(n for g in swa_groups for n in g.layer_names) == sorted(
             f"layers.{i}.swa" for i in range(43)
         )
+
+    @pytest.mark.parametrize(
+        ("heads", "group_sizes"),
+        [
+            # 6 per-rank pages beside 2 replicated ones: three groups, round-robin.
+            ([4] * 6 + [8] * 2, [2, 3, 3]),
+            # The cap asks for three groups but the bucket has only two repeats.
+            ([8, 8, 4], [1, 2]),
+        ],
+    )
+    def test_unbalanced_sliding_window_bucket_keeps_every_layer(
+        self, heads, group_sizes
+    ):
+        """One sliding-window bucket with two page sizes in unequal counts (a
+        target's per-rank pages beside a replicated draft's, e.g. Inkling2 with
+        a DSpark draft at TP=2). Splitting it must neither drop the layers of
+        the longer page-size list nor emit empty groups."""
+        config = _mock_vllm_config("BLNHC")
+        config.speculative_config = None
+        specs: dict[str, KVCacheSpec] = {"full": _full()}
+        for i, num_kv_heads in enumerate(heads):
+            specs[f"swa.{i}"] = SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=num_kv_heads,
+                head_size=128,
+                dtype=torch.float16,
+                sliding_window=64,
+            )
+
+        groups = _get_packed_kv_cache_groups(config, specs)
+
+        assert groups is not None
+        assert all(group.layer_names for group in groups)
+        assert sorted(name for g in groups for name in g.layer_names) == sorted(specs)
+        swa_groups = [g for g in groups if g.layer_names[0].startswith("swa.")]
+        assert sorted(len(g.layer_names) for g in swa_groups) == group_sizes
 
 
 class TestDensePacking:
