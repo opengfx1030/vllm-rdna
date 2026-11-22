@@ -227,6 +227,36 @@ def test_mxfp8_dequant_is_exact_for_every_byte_and_supported_scale(ops, block_m)
     assert torch.equal(out.cpu(), expected)
 
 
+@pytest.mark.parametrize("block_m", [1, 2, 4, 8])
+def test_nvfp4_dequant_is_exact_for_every_nibble_and_scale_class(ops, block_m):
+    """One expert, one-hot activations: the output is the dequantised weight itself, for all 16 E2M1
+    nibbles and scale bytes of every e4m3 class (subnormals 0x01-0x07, negatives, small / unit / large
+    normals): the kernel's bit-spread nibble expansion and its subnormal scale path are bit exact."""
+    k, n = 32, 8
+    nib = (torch.arange(k)[:, None] + 3 * torch.arange(n)[None, :]) % 16  # [K, N]
+    words = nib.reshape(k // 8, 8, n)
+    q = sum(words[:, i] << (4 * i) for i in range(8))
+    q = ((q + 2**31) % 2**32 - 2**31).to(torch.int32)[None]  # [1, K / 8, N]
+    scale_bytes = torch.tensor(
+        [
+            [0x01, 0x03, 0x05, 0x07, 0x08, 0x10, 0x30, 0x38],
+            [0x41, 0x50, 0x60, 0x6A, 0x81, 0x85, 0xB8, 0xC0],
+        ]
+    )
+    scales = scale_bytes.to(torch.uint8)[None]  # [1, K / 16, N]
+    glob = torch.tensor([0.037])
+    expected = _nvfp4_dequant(q, scales, glob)[0]  # [K, N] float64: the fp16 weights
+    ids = torch.zeros(k, 1, dtype=torch.int32)  # token r -> expert 0
+    sorted_ids, expert_ids, ntpp = moe_align_for(ids, block_m)
+    a = torch.eye(k, dtype=torch.float16, device=DEV)  # token r reads K position r
+    out = torch.zeros(k, n, dtype=torch.float16, device=DEV)
+    tw = torch.empty(0, dtype=torch.float32, device=DEV)
+    ops.moe_nvfp4_gemm_rdna2(
+        a, out, q.to(DEV), scales.to(DEV), glob.to(DEV), tw, sorted_ids, expert_ids, ntpp, 1, block_m, False, 0
+    )
+    assert torch.equal(out.cpu().double(), expected)
+
+
 def moe_align_for(ids: torch.Tensor, block_m: int):
     from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
         moe_align_block_size,

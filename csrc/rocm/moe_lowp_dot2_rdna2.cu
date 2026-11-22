@@ -66,6 +66,37 @@ __device__ __forceinline__ float ue8m0_to_f32(unsigned int b) {
   return __uint_as_float(b << 23);  // 2^(b - 127)
 }
 
+// ---- cheaper exact variants for the NVFP4 decode loop (bit-identical results; the ALU work of the loop, not the
+// DRAM stream, is what the 8-expert launches wait on) ----
+
+// 8 E2M1 nibbles -> 4 fp16 pairs scaled by ``scale2``: the same bits as vllm::mxfp4_dot2::dequant_e2m1_8_fp16 (nibble
+// 2i is the low, 2i + 1 the high half of dq[i]).  The sign and 3-bit magnitude of four nibbles at once are spread to
+// one byte each (the high byte of the fp16 value x 2^-14: sign at bit 7, magnitude at bits 3..1), v_perm_b32 then
+// puts those bytes at bits 15..8 / 31..24 of each pair: 19 VALU ops per word instead of ~48.
+__device__ __forceinline__ void dequant_e2m1_8_fp16_fast(uint32_t qa, half2 scale2,
+                                                         half2 (&dq)[4]) {
+  const uint32_t ev = qa & 0x0F0F0F0Fu;         // nibbles 0, 2, 4, 6 (one per byte)
+  const uint32_t od = (qa >> 4) & 0x0F0F0F0Fu;  // nibbles 1, 3, 5, 7
+  const uint32_t hb_e = ((ev << 4) & 0x80808080u) | ((ev << 1) & 0x0E0E0E0Eu);
+  const uint32_t hb_o = ((od << 4) & 0x80808080u) | ((od << 1) & 0x0E0E0E0Eu);
+  // selector bytes 0..3 pick bytes of the second operand, 4..7 of the first, 0x0C is the constant 0
+  dq[0] = __hmul2(__builtin_bit_cast(half2, __builtin_amdgcn_perm(hb_o, hb_e, 0x040C000Cu)), scale2);
+  dq[1] = __hmul2(__builtin_bit_cast(half2, __builtin_amdgcn_perm(hb_o, hb_e, 0x050C010Cu)), scale2);
+  dq[2] = __hmul2(__builtin_bit_cast(half2, __builtin_amdgcn_perm(hb_o, hb_e, 0x060C020Cu)), scale2);
+  dq[3] = __hmul2(__builtin_bit_cast(half2, __builtin_amdgcn_perm(hb_o, hb_e, 0x070C030Cu)), scale2);
+}
+
+// e4m3fn scale byte -> float, bit-identical to e4m3_to_f32 and cheaper: a normal number is the float with the
+// exponent and mantissa bits moved up and the bias changed by 120, ((b & 0x7F) << 20) + (120 << 23); only the
+// e == 0 subnormals (m * 2^-9, magnitude < 8) need the converted integer.
+__device__ __forceinline__ float e4m3_scale_to_f32(uint32_t b) {
+  const uint32_t mag = b & 0x7Fu;
+  const float normal = __uint_as_float((mag << 20) + 0x3C000000u);
+  const float sub = static_cast<float>(mag) * 0.001953125f;  // 2^-9
+  const uint32_t bits = __float_as_uint(mag < 8u ? sub : normal);
+  return __uint_as_float(bits | ((b & 0x80u) << 24));
+}
+
 // epilogue shared by both formats: router weight, optional top-k reduction,
 // packed-fp16 CAS atomic add into the pre-zeroed output.
 template <typename T, int BLOCK_SIZE_M>
@@ -191,15 +222,16 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
     for (int j = 0; j < 4; ++j) block_c[m][j] = 0.0f;
 
   int k = offset_k;
+  const float g14 = global * 16384.0f;  // x 2^14 is exact: (e * global) * 2^14 == e * (global * 2^14) bit for bit
   while (k < end_k) {
-    // Two 16-K scale rows x 4 columns.
-    const uint8_t* s0 = s_ptr;
-    const uint8_t* s1 = (k + 16 < size_k) ? s_ptr + size_n : s_ptr;
+    // Two 16-K scale rows x 4 columns: one aligned 32-bit load per row (n is a multiple of 4, size_n of 8).
+    const uint32_t sw0 = *(const uint32_t*)s_ptr;
+    const uint32_t sw1 = *(const uint32_t*)((k + 16 < size_k) ? s_ptr + size_n : s_ptr);
     half2 sc[4][2];
   #pragma unroll
     for (int j = 0; j < 4; ++j) {
-      sc[j][0] = __float2half2_rn(e4m3_to_f32(s0[j]) * global * 16384.0f);
-      sc[j][1] = __float2half2_rn(e4m3_to_f32(s1[j]) * global * 16384.0f);
+      sc[j][0] = __float2half2_rn(e4m3_scale_to_f32((sw0 >> (8 * j)) & 0xFFu) * g14);
+      sc[j][1] = __float2half2_rn(e4m3_scale_to_f32((sw1 >> (8 * j)) & 0xFFu) * g14);
     }
     s_ptr += 2 * size_n;
 
@@ -215,22 +247,22 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
       const half2 s_col0 = sc[0][j / 2], s_col1 = sc[1][j / 2];
       const half2 s_col2 = sc[2][j / 2], s_col3 = sc[3][j / 2];
       half2 dq[4];
-      dequant_e2m1_8_fp16((uint32_t)b_w[j].x, s_col0, dq);
+      dequant_e2m1_8_fp16_fast((uint32_t)b_w[j].x, s_col0, dq);
   #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m)
         block_c[m][0] +=
             dot22_8_f(dq, reinterpret_cast<const half*>(&block_a[m][a_off]));
-      dequant_e2m1_8_fp16((uint32_t)b_w[j].y, s_col1, dq);
+      dequant_e2m1_8_fp16_fast((uint32_t)b_w[j].y, s_col1, dq);
   #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m)
         block_c[m][1] +=
             dot22_8_f(dq, reinterpret_cast<const half*>(&block_a[m][a_off]));
-      dequant_e2m1_8_fp16((uint32_t)b_w[j].z, s_col2, dq);
+      dequant_e2m1_8_fp16_fast((uint32_t)b_w[j].z, s_col2, dq);
   #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m)
         block_c[m][2] +=
             dot22_8_f(dq, reinterpret_cast<const half*>(&block_a[m][a_off]));
-      dequant_e2m1_8_fp16((uint32_t)b_w[j].w, s_col3, dq);
+      dequant_e2m1_8_fp16_fast((uint32_t)b_w[j].w, s_col3, dq);
   #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m)
         block_c[m][3] +=

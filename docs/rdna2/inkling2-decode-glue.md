@@ -169,11 +169,76 @@ step over 44 NVFP4 visits, -34 us (1.5 ms) at 4 rows.  The kernels run at only
 270 - 326 GB/s on these sets (53 - 64% of the 512 GB/s peak): the expert
 GEMMs are the biggest remaining lever in a verify step, see section 6.
 
-### 3.4 Tried and dropped
+### 3.4 NVFP4 decode expert GEMM: VALU-bound loop, exact cheaper dequant
+
+The 8-expert launches (`w13` 71.6 us, `w2` 37.0 us) read their weights at only
+~330 GB/s of the 512 GB/s peak.  Diagnostics on real expert sets (cold
+rotating weights, graph-timed, `w13 + w2` per visit, us;
+`moe_rows_var.py`):
+
+| variant (diagnostic; output is wrong unless noted) | 1 row | 3 rows |
+|---|---|---|
+| shipped loop | 118.9 | 244 |
+| CAS atomic add replaced by a plain store | 118.1 | - |
+| dequant + dot2 replaced by an xor of the loaded words (memory only) | 98.9 | 199.0 |
+| depth-1 software-pipelined weight loads (exact) | -2% | -6% |
+
+The atomics are not the limit and pipelining buys 2 - 6%; the loop is
+ALU-bound.  The ISA has ~990 VALU instructions per thread and iteration, ~48
+per packed word for the E2M1 dequant (704 of them) and ~100 for the scale
+decode, against 64 `v_dot2`; `[INFERENCE]` ~44 us of VALU time in each 74 us
+`w13` launch.
+
+`dequant_e2m1_8_fp16_fast` (`moe_lowp_dot2_rdna2.cu`) spreads the sign and 3
+magnitude bits of 4 nibbles into one byte each and places those bytes with
+`v_perm_b32` at the high byte of each fp16 value x 2^-14: 19 VALU ops per
+word instead of ~48; the multiply by the scale pair is unchanged.  The scale
+bytes are loaded as one dword per 4 columns, `e4m3_scale_to_f32` decodes a
+normal e4m3 byte by moving its exponent and mantissa bits up (bias +120; the
+subnormals below 8 take the converted integer) and `global * 16384` is
+hoisted (`(e * global) * 2^14 == e * (global * 2^14)` bit for bit: a power
+of two scaling).  Every dequantised fp16 value is bit-identical to the
+shipped one.
+
+| rows (bm) | shipped us/visit | fast us/visit | delta |
+|---|---|---|---|
+| 1 (1) | 119.3 | 104.6 | -12.3% |
+| 3 (1) | 246.8 | 208.0 | -15.7% |
+| 5 (1) | 377.0 | 288.6 | -23.4% |
+| 1 (2) | 124.5 | 106.5 | -14.5% |
+| 3 (2) | 233.8 | 208.4 | -10.9% |
+| 5 (2) | 335.9 | 288.5 | -14.1% |
+
+(300 -> 342 GB/s at 1 row, 311 -> 369 at 3 rows, 292 -> 381 at 5 rows;
+`out/moe_fast_rows.log`.)  End to end with the rebuilt ops (b=1, graphs,
+`out/e2e_e3_{off,on}.log`) the microbench projection of 44 NVFP4 visits x
+14.7 us = 0.65 ms came out as 0.648 ms of graph replay:
+
+| config | graph replay min (ms) | e2e ms/token (tok/s) |
+|---|---|---|
+| shipped | 18.425 | 19.30 (51.8) |
+| fast dequant, `FUSE_GLUE=0` | 17.776 | 18.65 (53.6) |
+| fast dequant + glue levers (default) | 17.010 | 18.07 (55.3) |
+
+Gates: the dequantised weights are identical, so the fp64-oracle error is
+unchanged.  The 163 oracle / bit-identity tests of the moe suite pass on the
+new kernel; the new `test_nvfp4_dequant_is_exact_for_every_nibble_and_scale_class`
+(one expert, one-hot activations: the kernel output must equal the fp16
+dequantised weight exactly, for all 16 E2M1 nibbles and scale bytes of every
+e4m3 class including subnormals and negatives, block_m 1/2/4/8) passes; 4
+hand mutants are killed (selector byte, magnitude mask, subnormal threshold,
+wrong scale row; the subnormal-threshold mutant survives the random-scale
+oracle tests and is killed by the exactness test only).  NLL, real ops with
+the default flags against the shipped run: mean |dlogp| 0.0477 vs run-to-run
+floor 0.0504 (p99 0.3653 vs 0.3612, max 0.7664 vs 0.4929), PASS.
+
+### 3.5 Tried and dropped
 
 Prefetching the gate_down and router weights before the activation staging
 (`PF` variants) was bit-identical but gave nothing at T=1 (route 13.81 vs
 13.87 us) and was slower at T=3 (gate_down +1.2 - 1.5 us): removed.
+Software pipelining of the NVFP4 weight loads (-2 to -6% at bm=1, +3 to -1%
+at bm=2) is not worth the registers.
 
 ## 4. Correctness evidence
 
