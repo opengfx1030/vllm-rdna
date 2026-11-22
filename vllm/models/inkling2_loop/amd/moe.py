@@ -564,7 +564,7 @@ class Inkling2LoopSparseMoeBlock(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Serving module (one layer, TP=1)
+# Serving module (one layer; under tensor parallelism one rank's shard of it)
 # ---------------------------------------------------------------------------
 
 
@@ -579,17 +579,17 @@ class _MoEGate(Inkling2LoopTopKRouter):
         self.e_score_correction_bias = nn.Parameter(bias, requires_grad=False)
 
 
-def _assert_tp1() -> None:
-    from vllm.distributed import parallel_state
-
-    if parallel_state.model_parallel_is_initialized():
-        tp = parallel_state.get_tensor_model_parallel_world_size()
-        assert tp == 1, f"Inkling2LoopMoE supports tensor parallel size 1, got {tp}"
-
-
 class Inkling2LoopMoE(_ExpertsKernel):
     """One Inkling-2-Mini MoE layer: fp32 sigmoid router + NVFP4 / MXFP8
     experts on the gfx1030 kernels.  ``forward`` takes flat ``[T, H]`` fp16.
+
+    Under tensor parallelism (``tp_size > 1``) the router is replicated and every
+    expert holds this rank's ``intermediate_size / tp_size`` units of the fused gate /
+    up (``[gate; up]`` rows) and of the down projection's K; ``forward`` /
+    ``forward_hip`` return this rank's *partial* output, which the caller all-reduces
+    (the sum over ranks of the expert outputs is the TP=1 output).  Which slice a rank
+    holds is decided by the loader (``loader.local_slice``); the module only needs the
+    size.
 
     Lifecycle: the constructor creates the parameters in checkpoint layout
     (N-first).  Fill them with :meth:`load_expert_group` / :meth:`load_gate_bias`
@@ -607,11 +607,18 @@ class Inkling2LoopMoE(_ExpertsKernel):
         config: Any,
         quant_format: Literal["nvfp4", "mxfp8"],
         prefix: str = "",
+        tp_size: int = 1,
     ) -> None:
         if quant_format not in ("nvfp4", "mxfp8"):
             raise ValueError(f"unsupported quant_format {quant_format!r}")
-        _assert_tp1()
         super().__init__(config)
+        if config.intermediate_size % tp_size:
+            raise ValueError(
+                f"intermediate_size {config.intermediate_size} is not divisible by "
+                f"tensor parallel size {tp_size}"
+            )
+        self.tp_size = tp_size
+        self.intermediate_dim = config.intermediate_size // tp_size
         self.quant_format = quant_format
         self.prefix = prefix
         self.top_k = config.num_experts_per_tok

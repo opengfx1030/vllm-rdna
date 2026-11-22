@@ -327,7 +327,14 @@ gpu_only = pytest.mark.skipif(
     not _gpu_ready(), reason="needs gfx1030 with moe_nvfp4/mxfp8_gemm_rdna2 kernels"
 )
 
-GPU_CFGS = [(256, 128, 8, 2), (2304, 1152, 16, 8)]  # (H, I, E, top_k)
+# (H, I, E, top_k); the last two are the per-rank intermediate sizes of the real
+# checkpoint at TP=2 and TP=4 (1152 / 2, 1152 / 4: K tiles of 256 with a 64 / 32 tail)
+GPU_CFGS = [
+    (256, 128, 8, 2),
+    (2304, 1152, 16, 8),
+    (2304, 576, 16, 8),
+    (2304, 288, 16, 8),
+]
 TOKENS = [1, 4, 8, 64]
 
 

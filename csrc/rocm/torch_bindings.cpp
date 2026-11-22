@@ -1080,6 +1080,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("inkling2_glue_embed_norm", torch::kCUDA,
                 &inkling2_glue_embed_norm);
   rocm_ops.def(
+      "inkling2_glue_embed_lookup(Tensor ids, Tensor table, Tensor! out, "
+      "int vocab_first, int vocab_total) -> ()");
+  rocm_ops.impl("inkling2_glue_embed_lookup", torch::kCUDA,
+                &inkling2_glue_embed_lookup);
+  rocm_ops.def(
       "inkling2_glue_moe_route(Tensor x, Tensor gate_w, Tensor bias, "
       "Tensor! logits, Tensor! topk_weights, Tensor! topk_ids, "
       "Tensor! sorted_ids, Tensor! expert_ids, Tensor! post_pad, "

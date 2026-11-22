@@ -619,10 +619,10 @@ Real checkpoint, first-step top-8 after the chat template, torch path -> HIP pat
   `compute_logits` and `greedy_token_ids` allocate; `ws.bind(T)` views have to be created
   per captured size before capture.  `greedy_token_ids` is not wired into the sampler yet
   (runner-owned).
-* TP: o_proj emits an fp32 partial and needs an all-reduce, `lm_head` shards the vocab
-  (`inkling2_linear_pack_lm_head(tp_size, tp_rank)`), the router is replicated,
-  `Inkling2LoopMoE` asserts TP = 1, `q_scale` / `rel_scale` need per-rank slices, the KV
-  and conv owners split by KV head.
+* TP: done for the eager path (`inkling2-tensor-parallel.md`, the section "tensor
+  parallelism" below): o_proj fp32 partial + all-reduce, `lm_head` and embedding
+  vocabulary shards, replicated router, MoE intermediate split, per-rank `q_scale` /
+  `rel_scale` slices, KV and conv owners by KV head.  Left: DSpark and graphs at TP > 1.
 * Long context: `check_kernel_shapes` and the workspace bound (`attention_workspace_numel`)
   were validated up to `max_model_len` 2048; TP = 1 maximum length and TP = 2/4 at
   1,048,576 need the split count and the workspace re-derived for those lengths.
@@ -906,3 +906,64 @@ HIP_VISIBLE_DEVICES=3 python tools/rdna/inkling2/long_context_check.py \
     --max-model-len Y --frac 0.9 \
     --vram-file /sys/bus/pci/devices/0000:dc:00.0/mem_info_vram_used
 ```
+
+## 2026-11-22 — tensor parallelism: TP=2 and TP=4 on the HIP path (eager)
+
+`--tensor-parallel-size 2` and `4` serve the real checkpoint on the same HIP kernels (one
+new kernel, the vocabulary-shard embedding lookup; no torch compute in the forward);
+layout, validation and every table are in `inkling2-tensor-parallel.md`.  Run with
+`VLLM_RDNA_AR=1` (one-shot HIP all-reduce below 64 KiB, RCCL above; `VLLM_RDNA_AR_MAX_KB`
+/ `_ONESHOT_KB` = 256 helps at batch 16).
+
+* **Sharding**: by KV-head group (12 + 4 heads at TP=2, 6 + 2 at TP=4); `o_proj` emits an
+  fp32 partial that is all-reduced; the MoE intermediate is split (1152 -> 576 / 288) with
+  an fp16 all-reduce; `lm_head` and the embedding by vocabulary (padded to 64; the
+  embedding lookup gives zero rows for other ranks' ids, one fp16 all-reduce adds the
+  owner's row back exactly); the router, residual stream, norms, the short convolutions
+  of the attention / MLP outputs and their conv state and the vision tower are
+  replicated.  97 all-reduces per decode step.  `parallel.check_supported` refuses TP=8;
+  the DSpark draft at TP > 1 raises `NotImplementedError` (it shares the full-vocabulary
+  head and embedding).
+* **Real checkpoint** (eager, fp16, `max_model_len` 8,192, chunk 1,024; indicative: box
+  load 7 - 13, the other agents' jobs ran on the neighbouring cards):
+
+| | TP=1 | TP=2 | TP=4 |
+|---|---:|---:|---:|
+| model memory per GPU | 18.08 GiB | 9.26 GiB (9.69 before the embedding shard) | 4.84 GiB (5.49 before) |
+| decode step, batch 1 / batch 4 | 23.40 / 36.86 ms | 18.92 / 26.96 ms | 16.77 / 21.58 ms (chunk 256) |
+| prefill, one 1000-token prompt | 1316 ms | 753 ms (replicated embedding) | 488 ms (replicated embedding) |
+| KV blocks held (chunk 1,024) | 3,744 | 14,960 | 19,872 |
+| longest single request, planner | 179,136 | 847,808 | 2,334,592 |
+| config maximum 1,048,576 (blocks needed at chunk 256 / 1,024) | no | **yes with `--max-num-batched-tokens 64`**: boots, answers, also with prefix caching (96 boots, 112 is 256 tokens short); 16,885 / 18,097 | yes, booted at chunk 256 (21,216 blocks, 2.45x concurrency): 8,643 / 9,825 |
+
+* **Correctness**: CPU `test_tensor_parallel.py` 128 tests, 582 with the existing suite
+  (thread-per-rank model against the fp32 reference <= 1.7e-4; 12 of 12 mutants killed);
+  GPU MoE shard shapes 16 tests; the lookup kernel 17 tests, 10 of 10 mutants killed,
+  six-architecture compile, the whole glue test file 212 passed; tiny engine checks at
+  TP=2 / 4 (greedy ids equal, mean |dlogp| at the TP=1 level).  Real TP=2: both answers
+  identical to TP=1, teacher-forced logprobs of 799 positions mean |dlogp| 0.0425 against
+  the TP=1 run-to-run floor 0.0399, prefix caching (1,510 tokens: 1.17 s cold, 0.08 s
+  warm) and an image request answered.  Real TP=4 (sharded embedding): prompt 0 ids 32 /
+  32 equal to TP=1, prompt 1 diverges at token 16 (the near-tie that also separates the
+  TP=1 runs A and B).  Its first-step top-8 differs from TP=1 by 0.33 - 0.38 on prompt 0
+  (limit 0.245) but so do TP=1 repeats (0.43 and 0.34 against run A; the limit came from
+  the single pair A / B) and two TP=4 runs differ from each other by 0.63 on that step:
+  noise.  The teacher-forced comparison over 799 positions: TP=4 against TP=1 mean
+  |dlogp| 0.0331 - 0.0515 (8 pairs, average 0.0468), TP=1 against TP=1 0.0399 - 0.0519 (6
+  pairs, average 0.0470), TP=4 against TP=4 0.0356, limit 0.0898; no bisect or fp32 MoE
+  reduction was needed.
+* **Findings**: (1) `rdna_ar` costs 1.77 ms per decode step at TP=2 (96 calls) against
+  2.92 ms for RCCL (3.26 ms at TP=4), and sums in fp32 in a fixed order.  (2) The first
+  sharded `compute_logits` held three copies of the logits at the profiling peak (1.91 GiB
+  against 0.77 GiB at TP=1); it now gathers 64-row blocks into the final buffer: +2,000
+  KV blocks at TP=2.  (3) `gpu_memory_utilization` 0.99 adds no KV block at any TP (the
+  3 GiB `KV_CACHE_MARGIN_FLOOR_BYTES` and the profiling transient decide); a smaller
+  chunk does, and the conv groups need window plus one chunk, so chunk 256 -> 64 lowers
+  what a 1M request needs by 0.3 GiB (TP=2).  (4) The conv state (about 1.5 GiB per
+  request) does not shrink with TP.  (5) The embedding shard saves 0.43 GiB per rank at
+  TP=2 (+448 blocks) and, with chunk 64, is what lets TP=2 reach 1,048,576 (the gap was
+  0.93 GiB at chunk 256 before it; an earlier note of 2.1 GiB compared different chunks).
+* **Open**: DSpark and FULL / PIECEWISE graphs at TP > 1 (the collectives are
+  capture-safe, graph replay measured in `bench_tp_comm.py`); TP=4 prefix-cache and image
+  runs with the shard; attention kernels at lengths beyond 2,048 tokens (the
+  long-context check, not this work); prefill speed at chunk 64.

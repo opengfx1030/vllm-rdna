@@ -194,13 +194,15 @@ sigmoid); `sink` is `[T, nh]`; `dyn_k` / `dyn_v` are `[T, n_kv * 4]`.
 
 `o_proj` is K-sharded: every rank multiplies its heads' attention output by its
 `[2304, nh_local * 128]` slice and writes the fp32 partial (`out_dtype=float32`);
-the all-reduce stays outside the op (fp32, then the residual add in the glue
-kernel). `lm_head` is vocab-sharded: the padded vocabulary (200058 -> 200064, a
-multiple of 64) is divided by the TP size, rank `r` owns rows `[r * rows,
-(r + 1) * rows)` (the last rank's tail is zero padding), `LMHeadPack.n_valid`
+the all-reduce stays outside the op (`TensorParallel.all_reduce` of the fp32 `[T, H]`
+partial, `amd/parallel.py`) and its fp32 sum feeds `inkling2_sconv_static`, which
+takes fp32 or fp16 input. `lm_head` is vocab-sharded: the padded vocabulary (200058
+-> 200064, a multiple of 64) is divided by the TP size, rank `r` owns rows `[r *
+rows, (r + 1) * rows)` (the last rank's tail is zero padding), `LMHeadPack.n_valid`
 masks the padding to `-inf` and `LMHeadPack.col_base = r * rows` offsets the
-argmax indices. The K and N tails of every shape (`K % 8 == 0` is the only
-requirement) are handled in the kernels.
+argmax indices (`greedy_token_ids` gathers the per-rank partial maxima and ids,
+`compute_logits` the fp32 logits shards). The K and N tails of every shape (`K % 8
+== 0` is the only requirement) are handled in the kernels.
 
 ## 5. Kernel design
 

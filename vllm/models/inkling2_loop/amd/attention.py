@@ -24,6 +24,7 @@ from vllm.forward_context import get_forward_context
 
 from ..configs import Inkling2LoopTextConfig
 from . import blocks
+from .parallel import NO_TP, TensorParallel
 from .state import (
     STREAM_K,
     STREAM_V,
@@ -147,23 +148,35 @@ class _RelBias(nn.Module):
 
 
 class Inkling2Attention(nn.Module):
-    def __init__(self, config: Inkling2LoopTextConfig, layer_idx: int) -> None:
+    """One attention layer.  Under tensor parallelism the module holds only its rank's
+    KV-head groups (``num_heads`` / ``num_kv_heads`` are the local counts, the GQA
+    ``groups`` is unchanged) and ``o_proj`` is the column slice of those heads: the
+    output of ``forward`` / ``forward_hip`` is a *partial* that the caller reduces."""
+
+    def __init__(
+        self,
+        config: Inkling2LoopTextConfig,
+        layer_idx: int,
+        tp: TensorParallel = NO_TP,
+    ) -> None:
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+        self.tp = tp
         self.is_sliding = config.is_sliding_layer(layer_idx)
-        self.num_heads = (
-            config.swa_num_attention_heads
-            if self.is_sliding
-            else (config.num_attention_heads)
-        )
-        self.num_kv_heads = (
+        self.num_kv_heads = tp.local(
             config.swa_num_key_value_heads
             if self.is_sliding
-            else (config.num_key_value_heads)
+            else config.num_key_value_heads,
+            f"layer {layer_idx} KV heads",
         )
+        self.groups = (
+            config.swa_num_attention_heads // config.swa_num_key_value_heads
+            if self.is_sliding
+            else config.num_attention_heads // config.num_key_value_heads
+        )
+        self.num_heads = self.num_kv_heads * self.groups
         self.head_dim = config.swa_head_dim if self.is_sliding else config.head_dim
-        self.groups = self.num_heads // self.num_kv_heads
         self.window = config.sliding_window_size if self.is_sliding else None
         self.rel_extent = (
             config.sliding_window_size if self.is_sliding else config.rel_extent
@@ -335,7 +348,12 @@ class Inkling2Attention(nn.Module):
             self.v_proj.linear.weight,
             *dyn,
         )
-        self._o_pack = lp.inkling2_linear_pack_o_proj(self.o_proj.linear.weight)
+        # under tensor parallelism o_proj is a K-shard: its fp32 partial is summed by
+        # the all-reduce (and feeds the post-attention short conv in fp32 afterwards)
+        self._o_pack = lp.inkling2_linear_pack_o_proj(
+            self.o_proj.linear.weight,
+            out_dtype=torch.float32 if self.tp.enabled else torch.float16,
+        )
         self._rel_proj_t = rb.proj.detach().t().contiguous().half()
         self._q_scale = q.norm.scale.detach().float().contiguous()
         self._rel_scale = rb.norm.scale.detach().float().contiguous()
@@ -387,9 +405,10 @@ class Inkling2Attention(nn.Module):
     ) -> torch.Tensor:
         """Fused input projections, k / v short convs + KV write, attention, o_proj.
 
-        ``hq`` / ``hk`` / ``hv`` are the fp16 ``[T, H]`` streams, ``o_out`` the fp16
+        ``hq`` / ``hk`` / ``hv`` are the fp16 ``[T, H]`` streams, ``o_out`` the
         ``[T, H]`` buffer that receives the o_proj output (the input of the
-        post-attention short conv).
+        post-attention short conv): fp16 at TP=1, the fp32 *partial* of this rank's
+        heads under tensor parallelism (``Inkling2GlueWorkspace(tp_size=...)``).
         """
         from vllm import _custom_ops as ops
 
