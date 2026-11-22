@@ -622,7 +622,8 @@ Real checkpoint, first-step top-8 after the chat template, torch path -> HIP pat
 * TP: done for the eager path (`inkling2-tensor-parallel.md`, the section "tensor
   parallelism" below): o_proj fp32 partial + all-reduce, `lm_head` and embedding
   vocabulary shards, replicated router, MoE intermediate split, per-rank `q_scale` /
-  `rel_scale` slices, KV and conv owners by KV head.  Left: DSpark and graphs at TP > 1.
+  `rel_scale` slices, KV and conv owners by KV head.  Left then: DSpark and graphs at
+  TP > 1 (both done on the merged tree: `inkling2-serving.md`, `inkling2-dspark.md`).
 * Long context: `check_kernel_shapes` and the workspace bound (`attention_workspace_numel`)
   were validated up to `max_model_len` 2048; TP = 1 maximum length and TP = 2/4 at
   1,048,576 need the split count and the workspace re-derived for those lengths.
@@ -922,8 +923,8 @@ layout, validation and every table are in `inkling2-tensor-parallel.md`.  Run wi
   owner's row back exactly); the router, residual stream, norms, the short convolutions
   of the attention / MLP outputs and their conv state and the vision tower are
   replicated.  97 all-reduces per decode step.  `parallel.check_supported` refuses TP=8;
-  the DSpark draft at TP > 1 raises `NotImplementedError` (it shares the full-vocabulary
-  head and embedding).
+  the DSpark draft at TP > 1 raised `NotImplementedError` here (it shares the
+  full-vocabulary head and embedding); the merged tree runs it (`inkling2-dspark.md`).
 * **Real checkpoint** (eager, fp16, `max_model_len` 8,192, chunk 1,024; indicative: box
   load 7 - 13, the other agents' jobs ran on the neighbouring cards):
 
@@ -963,7 +964,8 @@ layout, validation and every table are in `inkling2-tensor-parallel.md`.  Run wi
   request) does not shrink with TP.  (5) The embedding shard saves 0.43 GiB per rank at
   TP=2 (+448 blocks) and, with chunk 64, is what lets TP=2 reach 1,048,576 (the gap was
   0.93 GiB at chunk 256 before it; an earlier note of 2.1 GiB compared different chunks).
-* **Open**: DSpark and FULL / PIECEWISE graphs at TP > 1 (the collectives are
+* **Open then** (both done on the merged tree): DSpark and FULL / PIECEWISE graphs at
+  TP > 1 (the collectives are
   capture-safe, graph replay measured in `bench_tp_comm.py`); TP=4 prefix-cache and image
   runs with the shard; attention kernels at lengths beyond 2,048 tokens (the
   long-context check, not this work); prefill speed at chunk 64.
@@ -1299,8 +1301,9 @@ profiled).  The same two-point fit gives about 1,650 s (28 minutes) for a full
   blocks to spare at mnbt 184 (16,530 held, 16,508 - 16,529 needed).  Choices: TP=2 +
   vision at about 1.0M, lower `KV_CACHE_MARGIN_FLOOR_BYTES` (3 GiB on ROCm, all models),
   or TP=4 (8.2 GiB needed at 1M; booted with the vision tower, 2.10x).
-* **Eager only.**  FULL_AND_PIECEWISE graphs and the DSpark draft at TP > 1 belong to the
-  graphs / DSpark branch and were not run on this tree; every decode number above is
+* **Eager only (when this section was written).**  FULL_AND_PIECEWISE graphs and the
+  DSpark draft at TP > 1 belonged to the graphs / DSpark branch and were not run on this
+  tree; both ran after the merge (below); every decode number above is
   eager (26 - 36 ms/token).  Graph memory comes out of the same KV budget, which at
   TP=2 and 1M is 17 blocks (MiB) wide at mnbt 184 (16,530 held, 16,513 needed) and 58 at
   mnbt 160 [INFERENCE: the capture sizes or the chunk will have to shrink].
@@ -2003,10 +2006,16 @@ batch of other shapes).
 
 ### Open risks and next steps (after this section)
 
-* **DSpark at TP > 1** still raises `NotImplementedError` (the draft shares the full-vocab head and embedding;
-  it needs a vocab-shard-aware head gathering per-rank partials); the recipes keep it off. At TP = 1 the
-  Inkling2Spec branch drafts with the ring sized `3 + k` rows (`FULL_AND_PIECEWISE` boots and captures on this
-  tree with its scratch predicate, which is the predicate merged here).
+* **DSpark** runs on this tree (Inkling2Spec, `inkling2-dspark.md`, "Merged tree") at TP = 1 and at TP = 2
+  with `FULL_AND_PIECEWISE` graphs and prefix caching: greedy drafting only (the sampled draft raises
+  `NotImplementedError` at TP > 1), the draft replicated on every rank with a vocabulary-shard head, the conv
+  ring sized `3 + 7` rows. K = 2 gives 1.24x / 1.11x at TP = 1 and 1.29x / 1.14x at TP = 2 for one / two
+  requests, loses from three, and its output equals the no-draft output within the run-to-run floor. It takes
+  context: the draft's K/V is replicated (4 KiB per token and rank), so the 1,048,576-token TP = 2 recipe
+  needs 20.18 GiB against 16.14 GiB (about 790,000 tokens fit at SEQS 2, 737,088 at SEQS 8) and TP = 1 fits
+  125,824 tokens at SEQS 2 with K = 2 (51,072 at SEQS 16 with K = 3, graph memory); the recipes keep it off and carry opt-in
+  `SPEC_CONFIG` lines. TP = 4 was not run with the draft; a window on the draft's full-attention layer (the
+  way back to 1,048,576 tokens at TP = 2) is not built.
 * **Full-length prompts were run once each** (one needle at depth 0.5, tower loaded): 1,046,914 tokens prefill in
   50.0 minutes at TP = 2 and 25.3 minutes at TP = 4. Other depths, several long prompts at once and a vision
   prompt at that length were not run.

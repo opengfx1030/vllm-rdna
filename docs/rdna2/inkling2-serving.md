@@ -175,10 +175,66 @@ Against the earlier eager tree on the same 942,628-token prompt (TP=2 343 tok/s 
 depth, so the 50 and 25 minutes are not extrapolations of the 261k rates. The KFD `evicted_ms` counter read 0 for
 every process of the 942,628 and 1,046,914-token runs.
 
+## Speculative decoding (DSpark, opt-in)
+
+The model's own draft (`mtp.safetensors`: three layers, a block of 8 rows, a Markov head) runs on native
+HIP kernels under the same `FULL_AND_PIECEWISE` graphs, with prefix caching, at TP=1 and TP=2; TP=4 shares
+the TP=2 code path and was not run through the engine. **It is not in the recipe defaults**: at this
+model's MoE row cost it pays at one or two requests only, and it takes context length. Switch it on with
+the launcher key `SPEC_CONFIG`; the model requires `num_speculative_tokens` 7, and the schedule decides
+how many of the 7 drafted tokens the engine verifies per step (2 for one or two requests, none above):
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1 MODEL=/path/to/inkling2-mini VENV=/path/to/venv \
+  HIP_VISIBLE_DEVICES=3 SEQS=2 MAXLEN=125000 \
+  SPEC_CONFIG='{"method":"dspark","num_speculative_tokens":7,"num_speculative_tokens_per_batch_size":[[1,2,2]]}'
+```
+
+TP=2: `RECIPE=inkling2-mini-tp2 HIP_VISIBLE_DEVICES=4,5 SEQS=2 MAXLEN=780000`. With more slots keep the
+tail of the schedule: `[[1,2,2],[3,8,0]]`.
+
+Decode ms per token of one request (graph replay, 24 chat prompts x 128 tokens, speed-up over no draft in
+brackets; the TP=2 rows are one session on the same two cards):
+
+| | b1 | b2 | b3 | b4 | b8 |
+|---|---|---|---|---|---|
+| TP=1 no draft | 19.11 | 23.40 | 27.38 | 31.11 | 43.22 |
+| TP=1 K=2 | 15.43 (1.24x) | 21.09 (1.11x) | 28.69 (0.95x) | 32.81 (0.95x) | 41.16 (1.05x) |
+| TP=1 K=3 | 15.63 (1.22x) | 21.43 (1.09x) | 29.14 (0.94x) | 32.32 (0.96x) | 42.72 (1.01x) |
+| TP=2 no draft | 14.03 | 16.17 | - | - | - |
+| TP=2 K=2 | 10.90 (1.29x) | 14.15 (1.14x) | - | - | - |
+| TP=2 K=3 | 10.68 (1.31x) | 14.45 (1.12x) | - | - | - |
+
+An earlier TP=2 session with 8 slots: no draft 14.12 / 16.32 / 20.63 / 28.54 at b = 1 / 2 / 4 / 8, K=3
+10.90 / 14.98 / 23.03 / 29.19 (1.30x, 1.09x, 0.90x, 0.98x). The greedy output equals the no-draft output
+within the run-to-run floor (teacher-forced gaps at TP=1 and TP=2; cold, hit and duplicate prefix-cache
+requests included): `docs/rdna2/inkling2-dspark.md`.
+
+The TP=1 rows were measured in a 4,096-token, 8-slot engine. Booted with the recipe's own settings (SEQS 2,
+125,000 tokens, vision tower, K=2) the same prompts run at 15.65 / 21.28 ms at b1 / b2 (1.22x / 1.10x); the
+TP=2 K=2 row is the recipe engine (SEQS 2, 780,000 tokens).
+
+What the draft costs (the engine's own KV planner with the recipe flags; longest context in tokens):
+
+| | no draft | with the draft |
+|---|---|---|
+| TP=1, SEQS 2 | 194,368 | 125,824 with K=2 (125,000 booted), 131,392 with K=3 |
+| TP=1, SEQS 8 | - | 96,512 |
+| TP=1, SEQS 16 | 180,986 | 51,072 |
+| TP=2, SEQS 8 | 1,062,736 (1,048,576 fit) | 737,088 |
+| TP=2, SEQS 2 | 1,073,339 | about 790,000 (780,000 booted) |
+
+The draft adds 0.8 - 0.9 GiB of weights per rank, 4 KiB of KV per token and rank (its full-attention layer
+is replicated at TP > 1) and graph memory that grows with SEQS (0.68 GiB at SEQS 2 to 3.44 GiB at SEQS 16 at
+TP=1, against 0.70 GiB without the draft). A window on the draft's full-attention layer would give the
+full context back at TP=2; it is not built (`docs/rdna2/inkling2-dspark.md`).
+
 ## Known limits
 
-- **Speculative decoding (DSpark / MTP) is not in these recipes.** The draft exists for TP=1 on the
-  Inkling2Spec branch; at TP > 1 it raises `NotImplementedError` (the draft shares the full-vocab head).
+- **Speculative decoding (DSpark) is opt-in and not in the recipe defaults.** It speeds one or two requests
+  up (TP=1 1.24x / 1.11x, TP=2 1.29x / 1.14x), loses from three, and costs context length (section above);
+  the 1,048,576-token TP=2 / TP=4 recipes keep it off. The sampled (non-greedy) draft raises
+  `NotImplementedError` at TP > 1; TP=4 was not run with the draft.
 - **One image per prompt** in the recipes (`--limit-mm-per-prompt {"image":1}`); the Inkling processor takes
   no `--mm-processor-kwargs`, so the launcher's `vision-cap` feature is not used.
 - **Graphs cover decode steps of up to `min(16, SEQS)` requests and mixed steps of up to 32 tokens.**
@@ -277,4 +333,5 @@ ran on it, the suites were not re-run on the rebuilt library. Pre-commit clean.
 - [`inkling2-attn-kernels.md`](inkling2-attn-kernels.md): the attention and conv-ring kernels and their tests.
 - [`inkling2-tensor-parallel.md`](inkling2-tensor-parallel.md): the TP=2 / TP=4 layout.
 - [`inkling2-vision.md`](inkling2-vision.md): the vision tower and its kernels.
-- [`inkling2-dspark.md`](inkling2-dspark.md): the draft model (TP=1 only).
+- [`inkling2-dspark.md`](inkling2-dspark.md): the draft model, its kernels, the K sweep, TP=2, equality
+  and the memory it costs.

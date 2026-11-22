@@ -3,8 +3,9 @@
 `Inkling2LoopForConditionalGeneration` serves with `--tensor-parallel-size 2` and `4` on
 the same native kernels as TP=1 (`csrc/rocm/inkling2_*_rdna2.cu`, the expert GEMMs); the
 only new kernel is the vocabulary-shard embedding lookup (`inkling2_glue_embed_lookup`),
-no torch compute in the forward.  Eager only so far; FULL / PIECEWISE graphs and the
-DSpark draft at TP > 1 are open (see "Open items").  Code:
+no torch compute in the forward.  FULL / PIECEWISE graphs at TP = 2 / 4 and the DSpark
+draft at TP = 2 were added on the merged tree (`inkling2-serving.md`,
+`inkling2-dspark.md`); the text below is the eager-era record.  Code:
 `vllm/models/inkling2_loop/amd/{parallel,loader,attention,moe,glue,linear_pack,model}.py`,
 tests `tests/models/inkling2_loop/test_tensor_parallel.py`, tools
 `tools/rdna/inkling2/{tiny_vllm_check,real_check,tp_step_bench,bench_tp_comm}.py`.
@@ -59,10 +60,10 @@ other ranks' ids, exact copy of fp16 rows) into a workspace buffer, the all-redu
 `inkling2_glue_rms_norm(..., round_fp16=True)`, which is bit-identical to the fused
 `inkling2_glue_embed_norm` of TP=1 (tested).  TP=1 keeps the fused op.
 
-Refused / not done at TP > 1: `set_aux_hidden_state_layers` (the DSpark draft shares the
-full-vocabulary `lm_head` and the embedding of the target) raises `NotImplementedError`;
-the vision tower is replicated (every rank encodes the image, 0.41 GiB per rank at every
-TP degree).
+Refused / not done at TP > 1: the probabilistic (sampled) DSpark draft raises
+`NotImplementedError` (greedy drafting is vocabulary-shard aware, see "DSpark at TP > 1"
+below); the vision tower is replicated (every rank encodes the image, 0.41 GiB per rank at
+every TP degree).
 
 ### KV and conv state
 
@@ -375,15 +376,17 @@ of the scheduled sequences instead of every token of the chunk (runner code).
   step times (chunk 256), the planner (chunks 1,024 and 256) and the 1,048,576 boot.  The
   rank-0 profile table above and the no-all-reduce column are of the replicated-embedding
   build.
-* **DSpark at TP > 1** raises `NotImplementedError`: the draft shares the target's
-  full-vocabulary `lm_head` and embedding (Markov head, fold weights, an argmax over the
-  full vocabulary).  It needs a vocabulary-shard-aware head: gather the per-rank partials
-  as `greedy_token_ids` does, full-vocabulary draft logits for the probabilistic path.
-* **Graphs**: the collectives are capture-safe (the benchmark replays both backends from
-  a graph, results correct), the model code allocates nothing around them except the
-  output of the engine's all-reduce op (allocated per call, fine under capture); the
-  FULL graph itself belongs to the graph work, which has to capture two all-reduces per
-  layer visit plus the embedding's.
+* **DSpark at TP > 1** (greedy draft) is implemented in `amd/dspark.py`: the draft's
+  weights, K/V and taps are replicated on every rank, the anchors' embedding is the shard
+  lookup above plus one all-reduce of the `[rows, hidden]` block, and the folded head runs
+  over this rank's vocabulary rows: `inkling2_dspark_argmax_partial` feeds an all-gather
+  and the reduce kernel of `greedy_token_ids` (ties to the lowest id).  Its engine runs
+  with graphs are in `inkling2-dspark.md` ("Merged tree").  The sampled draft would need
+  the full-vocabulary draft logits on every rank and still raises
+  `NotImplementedError`.
+* **Graphs**: done on the merged tree (`inkling2-serving.md`): the collectives are
+  capture-safe, and the FULL / PIECEWISE graphs capture the two all-reduces per layer
+  visit plus the embedding's.
 * The step is launch- and wait-bound at TP=4 (rank 0 kernels without the all-reduce add
   up to 10.8 ms of the 17.5 ms wall step): a graph is where TP=4 gains most.
 * Vision at TP > 1 works (image request answered at TP=2) but encodes the image on every

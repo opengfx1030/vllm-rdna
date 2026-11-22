@@ -14,13 +14,13 @@ fp64 oracle in tests and tools.  Numbers below are copied from runs on the box
 | Draft model, loader, speculator (`amd/dspark.py`) | written; HIP-vs-fp64-oracle run on the REAL `mtp.safetensors` + real target head passes (numbers below) |
 | 15 native ops (`inkling2_dspark_*`) plus one Python helper | written, registered (ops.h, torch_bindings.cpp, CMake whitelist, `_custom_ops.py`), reference-tested on b4 |
 | Exact-probability gate of the rejection path | CPU oracle + negative controls pass; the production HIP rejection sampler passes on b4 (4 GPU cases) |
-| Mutation checks of the kernels | 10 of 10 mutants killed (table in Results) |
+| Mutation checks of the kernels | 10 of 10 mutants killed (table in Results); `argmax_partial` 6 of 6 ("Gates on the merged tree") |
 | Official `build_lq.sh` build of the new TU | built (exit 0 after 804 s, official `-O2` flags); all 15 ops register in the official `_rocm_C`; on that build (plain pytest on the in-tree `_rocm_C.abi3.so`, b4 HIP 2) `test_inkling2_dspark_rdna2.py` gives 130 passed (48.19 s) and `test_dspark_model.py` + `test_dspark_verifier.py` give 31 passed (37.93 s) with the same draft-vs-oracle errors as the dev `-O3` build |
 | Target tap hook in `amd/model.py` | applied and run on the real target through the runner's EAGLE3 interface (part B): `supports_eagle3` was false because the class lacked the `SupportsEagleBase` flags, and the draft config listed the final-output id 48 as a layer to tap (the hook raised); both fixed, CPU tests added |
 | Runner-owned Triton (`prepare_dflash_inputs`) | HIP op written and tested against a Python port of the kernel; the dispatch is applied in `dflash/speculator.py` and gated by `DFlashSpeculator.uses_hip_prepare_inputs` (True only for `Inkling2DSparkSpeculator`), so every other DFlash / DSpark draft keeps the Triton kernel |
 | V2 runner end-to-end (model load + `propose` through `LLM(...)`) | **run** on the real checkpoint, `FULL_AND_PIECEWISE`, `num_speculative_tokens=7`, TP=1: acceptance, speed and greedy equality in "Part B: the draft on the V2 runner" of `inkling2-port-spec.md` |
 | FULL HIP-graph capture inside the runner | done: `DFlashCudaGraphManager` captures the draft step (graph memory 1.95 GiB with the target graphs) |
-| TP > 1 | written and unit-tested, **not run through the engine**: the draft is replicated on every rank, the embedding of the anchors is the target's vocabulary-shard lookup plus one all-reduce, the head's argmax is a per-rank partial plus an all-gather (greedy drafting only); thread-emulated TP=2/4 drafts equal the single-rank draft (29 passed); the engine run waited for the cards (see "Merged tree") |
+| TP > 1 | **run through the engine at TP = 2** (`FULL_AND_PIECEWISE`, the collectives inside the graphs): the draft is replicated on every rank, the embedding of the anchors is the target's vocabulary-shard lookup plus one all-reduce, the head's argmax is a per-rank partial plus an all-gather (greedy drafting only); K = 3 gives 1.30x at batch 1 and 1.09x at batch 2 over no draft and the greedy output stays inside the no-draft floor; the draft's replicated K/V does not fit the 1,048,576-token recipe (20.18 GiB needed, 16.14 GiB available: 836,672 tokens fit); TP = 4 was not run through the engine (see "Merged tree") |
 
 ## What the draft is
 
@@ -347,7 +347,8 @@ bf16 weights are converted at load).
   no-draft speed from batch 2 up.  Part B2 (`inkling2-port-spec.md`) changed the two causes the
   profile found for the fifth-row cost (the row policy picked the 8-row MoE instance from 5
   tokens, and the old mxfp8 kernel spilled registers; per-launch numbers there): the K table
-  above was measured before it, and its engine-level re-measurement is not in this document.
+  above was measured before it; the re-measurement on the merged tree is in "Merged tree"
+  below (K = 2 is the best verified width there, 1.24x at batch 1).
 * `draft_logits.py` (`_assign_rows_kernel` / `_stale_drafts_kernel`) is runner-owned Triton
   used only for probabilistic drafting; greedy drafting (default) does not touch it.
 * Prefix-cache hits: the draft K/V blocks are cached with the target's, so a hit reads
@@ -357,111 +358,247 @@ bf16 weights are converted at load).
 * The sliding-window manager may free the block holding key `P-1024`; the kernel then reads
   the null block (finite zeros), a one-key mismatch for that single key.
 * The dense GEMM design table (`_gemm_design`) is not tuned for the draft's shapes.
-* TP > 1: no engine run yet (see "Merged tree"); `max_model_len` is capped at the draft's
-  1,048,576 positions by the model, and the draft's full-attention layer keeps its K/V
-  replicated on every rank (about 4 KiB per token and rank, 4 GiB at 1,048,576 tokens
-  `[INFERENCE: 8 kv heads x 128 x 2 B x 2]`), so DSpark at TP=2 does not leave the 1M
-  context the room it has without it; the long-context draft cost is measured only up to
-  the contexts in Results.
+* TP > 1: the draft's full-attention layer keeps its K/V replicated on every rank, 4 KiB per
+  token and rank (`[INFERENCE: 8 kv heads x 128 x 2 B x 2]`; measured through the engine: the
+  TP = 2 recipe engine at 1,048,576 tokens needs 20.18 GiB of KV against 16.13 GiB without the
+  draft, 4.05 GiB more, with 16.14 GiB available, so the longest context with the draft is
+  836,672 tokens).  Sharding that layer by KV head would halve the cost (about 18.2 GiB,
+  still above the 16.14 GiB the 1M engine has); only a window on that layer (the draft then
+  sees the last W tokens of the context, a change of the draft's numerics that needs its own
+  acceptance measurement) reaches the full context, and it is not built.  The draft's attention
+  reads the whole context at every pass (about 1.1 ms at 130k tokens and 7 ms at 800k from the
+  4 KiB per token at 450 GB/s `[INFERENCE]`); the long-context draft cost was not measured.
 
-## Merged tree (conv ring + TP + graphs): DSpark on `feat/inkling2-merge` b94fb11a56
+## Merged tree (conv ring + TP + graphs): DSpark on `feat/inkling2-merge` 0722fa5075
 
-What was run: the real checkpoint, TP = 1, `FULL_AND_PIECEWISE`, prefix caching on,
-`max_model_len` 4096, `max_num_batched_tokens` 1024, `max_num_seqs` 8,
-`speculative_config={"method": "dspark", "num_speculative_tokens": 7,
+What was run: the real checkpoint on a box tree equal to `0722fa5075`, `FULL_AND_PIECEWISE`,
+prefix caching on, `speculative_config={"method": "dspark", "num_speculative_tokens": 7,
 "num_speculative_tokens_per_batch_size": [[1, 8, K]]}` (the model requires
 `num_speculative_tokens == 7`, so every configuration drafts 7 and the schedule picks how
 many are verified), 24 chat prompts x 128 tokens, 2 repetitions
-(`tools/rdna/inkling2/dspark_bench.py --bench --spec-k 7 --schedule '[[1,8,K]]'`; the
-box was shared with other agents, so the times are indicative).  The draft boots (30 s),
-captures its FULL graphs for 1..8 requests, the conv ring has `3 + 7 = 10` rows, and the
-KV cache with the draft holds 20,430 tokens against 42,142 without it (K = 5 boot).
+(`tools/rdna/inkling2/dspark_bench.py --bench --spec-k 7 --schedule '[[1,8,K]]'`).  The box
+was shared with other agents, so the times are indicative (the same engine on two cards
+differed by about 1%).  The draft boots in 30 - 40 s at TP = 1 (60 s at TP = 2), captures
+its FULL graphs for 1..`max_num_seqs` requests, and the conv ring has `3 + 7 = 10` rows.
 
-Milliseconds per generated token of one request (speed-up over no draft):
+### Speed at TP = 1
+
+`max_model_len` 4096, `max_num_batched_tokens` 1024, `max_num_seqs` 8.  Milliseconds per
+generated token of one request (speed-up over no draft); K is the number of drafted tokens
+verified per step:
+
+| | b1 | b2 | b3 | b4 | b8 |
+| --- | --- | --- | --- | --- | --- |
+| no draft | 19.11 | 23.40 | 27.38 | 31.11 | 43.22 |
+| K = 1 | 17.19 (1.11x) | 22.73 (1.03x) | 30.38 (0.90x) | 34.39 (0.90x) | 42.52 (1.02x) |
+| K = 2 | **15.43 (1.24x)** | **21.09 (1.11x)** | 28.69 (0.95x) | 32.81 (0.95x) | 41.16 (1.05x) |
+| K = 3 | 15.63 (1.22x) | 21.43 (1.09x) | 29.14 (0.94x) | 32.32 (0.96x) | 42.72 (1.01x) |
+| K = 4 | 15.52 (1.23x) | 22.82 (1.03x) | 28.91 (0.95x) | 34.15 (0.91x) | 46.77 (0.92x) |
+| K = 6 | 17.08 (1.12x) | 25.06 (0.93x) | 32.94 (0.83x) | 38.41 (0.81x) | 54.99 (0.79x) |
+| K = 5, earlier run (no cap) | 16.31 (1.17x) | 24.08 (0.97x) | - | 35.83 (0.87x) | 49.00 (0.88x) |
+| K = 7, earlier run | 17.75 (1.07x) | 25.42 (0.92x) | - | 39.27 (0.79x) | 55.92 (0.77x) |
+
+The two earlier rows have their own no-draft run (19.04 / 23.40 / - / 31.06 / 43.09) and
+were measured before the Markov cap and before the second ring fix below.  Accepted drafted
+tokens per step at batch 1 (the other batch sizes are within 0.03): K = 1 0.636; K = 2 1.026,
+cumulative per position `[0.640, 0.386]`; K = 3 1.235, `[0.630, 0.379, 0.225]`; K = 5 1.390;
+K = 7 1.474.  The step of the bench (ms/token x (1 + accepted)) is 28.1 ms (K = 1), 31.3 ms
+(K = 2) and 34.9 ms (K = 3) against 19.1 ms for a plain step: each verified row costs 3.2 -
+3.6 ms and buys 0.39 (second token) and 0.21 (third token) accepted tokens per step.
+
+Policy these numbers support: **K = 2 for one or two requests, no draft above**
+(`[[1, 2, 2], [3, 8, 0]]`: 1.24x and 1.11x; drafting three or four requests anyway loses
+5%).  K = 3 is within 1.5% of K = 2 at batch 1 and 2 (the policy of the earlier tree,
+`[[1, 2, 3], [3, 8, 0]]`); K = 4 ties at batch 1 and loses from batch 2 on (1.03x, 0.95x,
+0.91x).  K = 2 at batch 8 measures 1.05x and K = 3
+1.01x, inside the spread of two repetitions, and batch 5 - 7 were not run, so the schedule
+stops at batch 2.
+
+The Markov cap (the chain stops at the schedule's largest verified K,
+`scheduled_draft_tokens`) against the uncapped chain, K = 3: 15.63 / 21.43 / 32.32 / 42.72 ms
+at b1 / b2 / b4 / b8 against 15.83 / 21.87 / 32.60 / 44.01 (0.2 - 1.3 ms, 1 - 3%; the
+profile predicts 0.5 ms per step, 0.2 ms per token at b1).
+
+### Speed at TP = 2
+
+`FULL_AND_PIECEWISE` with the two all-reduces per layer visit inside the graphs
+(`VLLM_RDNA_AR=1`), K = 3, `max_model_len` 4096, `max_num_seqs` 8, HIP 4, 5, one session with
+its own no-draft baseline (the code of this tree before the merge; the merge changed the graph
+guards and the KV planner, not the draft):
 
 | | b1 | b2 | b4 | b8 |
 | --- | --- | --- | --- | --- |
-| no draft | 19.04 | 23.40 | 31.06 | 43.09 |
-| K = 3 | **15.83 (1.20x)** | **21.87 (1.07x)** | 32.60 (0.95x) | 44.01 (0.98x) |
-| K = 5 | 16.31 (1.17x) | 24.08 (0.97x) | 35.83 (0.87x) | 49.00 (0.88x) |
-| K = 7 | 17.75 (1.07x) | 25.42 (0.92x) | 39.27 (0.79x) | 55.92 (0.77x) |
+| no draft | 14.12 | 16.32 | 20.63 | 28.54 |
+| K = 3 | **10.90 (1.30x)** | **14.98 (1.09x)** | 23.03 (0.90x) | 29.19 (0.98x) |
 
-K = 1, 2, 4, 6 are not measured on this tree.  Accepted drafted tokens per step at batch 1
-(the other batch sizes are within 0.02): K = 3 1.239, cumulative per position
-`[0.632, 0.378, 0.228]`; K = 5 1.390, `[0.620, 0.353, 0.207, 0.125, 0.085]`; K = 7 1.474,
-`[0.605, 0.363, 0.212, 0.125, 0.084, 0.050, 0.034]`.  The effective step of the bench is
-`ms/token x (1 + accepted)`: 35.4 ms (K = 3), 39.0 ms (K = 5), 43.9 ms (K = 7) at batch 1.
-Policy these numbers support: `[[1, 2, 3], [3, 8, 0]]` (K = 3 for one or two requests, no
-draft above).  Batch 1 and 2 are measured with K = 3; batch 3 is not measured and the
-neighbours (1.07x at b2, 0.95x at b4) put it at break-even `[INFERENCE]`; K = 1 and 2 at
-b2 / b4 could still win and were not run.  The earlier tree measured K = 1, 2, 3, 4, 7 at
-batch 1 only (K = 3 best, 1.21x).
+Accepted per step 1.201 / 1.212 / 1.235 / 1.221 at b1 / b2 / b4 / b8, cumulative
+`[0.62, 0.364, 0.216]`.  The first TP = 2 boot with the draft stopped in the KV planner (the
+sliding-window bucket mixed the target's 4-head pages with the draft's replicated 8-head pages);
+the fix is in `kv_cache_planning.py` of the merge (`inkling2-port-spec.md`, defect 4).
 
-Where a verification step goes (`profile_decode.py --spec-k 7`, async scheduling off,
-random prompts, so the numbers are of a K = 7 step, 8 rows per request): batch 1 clean step
-37.7 ms (36.8 ms in a second run), GPU kernels 33.2 / 36.4 ms; the draft is 3.6 ms of the
-profiler's per-step mean and 4.7 ms in the traced step (68 kernels, 5.2 ms from the first
-to the last).  Within a traced draft pass: the base-logits sweep of the LM head 2.15 ms
-(one 922 MB read, 429 GB/s), the three layers 1.7 ms (qkv 71 - 78 us, o_proj 54 - 61 us,
-gate/up 212 - 216 us, down 128 - 129 us per layer), seven Markov steps about 0.13 ms each
-(`markov_step` 16 us, `head_logits` 62 us after a 249 us cold first one, `argmax` 21 us,
-launch gaps), the context path 0.2 ms.  The target's verification of 8 rows is 29.7 ms
-(MoE NVFP4 13.3 ms, dense GEMV 8.4 ms, its own LM head 2.1 ms).  At batch 4 the step is
-69.5 ms and the draft's kernels 11.0 ms (the 28-row base GEMV and the backbone on
-`gemv_kernel<32>`: 8.3 ms), which only matters where the policy drafts.  The bench's
-effective step at K = 7 and batch 1 (43.9 ms) is 6 - 7 ms above the profile's clean step;
-where that goes is open (`dspark_bench.py --async-scheduling off` switches the engine's
-async scheduling to compare).  The profiler traces show 5 - 7 ms gaps inside a step that
-clean steps do not have (busy / wall 98.9% in the second run) `[INFERENCE: profiler
-artifact]`.
+On the merged tree, the opt-in recipe engine (HIP 2, 3; `max_num_seqs` 2, the vision tower, 184
+tokens per step; no draft and K = 3 at 800,000 tokens, K = 2 at 780,000), same session and cards:
+
+| | b1 | b2 |
+| --- | --- | --- |
+| no draft | 14.03 | 16.17 |
+| K = 2 | **10.90 (1.29x)** | **14.15 (1.14x)** |
+| K = 3 | 10.68 (1.31x) | 14.45 (1.12x) |
+
+Accepted per step at b1 / b2: K = 2 1.001 / 1.022, K = 3 1.235 / 1.224.  K = 2 and K = 3 are
+within 2% of each other at TP = 2 (K = 3 ahead at b1, K = 2 at b2), so the recipe takes K = 2 as
+at TP = 1; batch 3 and above were not run at TP = 2 on the merged tree (the 8-slot session above:
+0.90x at b4 with K = 3).
+
+### Equality with no draft
+
+The expert GEMMs accumulate in fp16 with atomics, so two runs of the same engine already
+diverge at near-ties.  The floor is no draft against no draft (A vs A2); a speculative run is
+judged against it with `dspark_bench.py --gen`, `--compare` (identical / diverged / diverged
+at a near-tie, the gap being the no-draft engine's top-1 logprob minus the other token's) and
+`--teacher` (every generated token scored by the no-draft engine).  TP = 1, 96 generations x
+96 tokens, K = 3 as B:
+
+| pair | identical | diverged | at a near-tie | not near-tie | largest gap there |
+| --- | --- | --- | --- | --- | --- |
+| A vs A2 (no draft twice) | 55 | 41 | 31 | 10 | 0.245 |
+| A vs B | 51 | 45 | 31 | 14 | 0.276 |
+| A2 vs B | 56 | 40 | 28 | 12 | 0.345 |
+
+| teacher pass, 4608 positions | not top-1 | mean gap | max gap | gap > 0.1 | gap > 0.3 |
+| --- | --- | --- | --- | --- | --- |
+| A | 34 | 4.9e-4 | 0.594 | 5 | 2 |
+| A2 | 29 | 4.0e-4 | 0.427 | 6 | 1 |
+| B (K = 3) | 26 | 3.3e-4 | 0.236 | 6 | 0 |
+
+TP = 2 (HIP 4, 5), 96 generations x 64 tokens, K = 3 as B:
+
+| pair | identical | diverged | at a near-tie | not near-tie | largest gap there |
+| --- | --- | --- | --- | --- | --- |
+| A vs A2 (no draft twice) | 66 | 30 | 22 | 8 | 0.302 |
+| A vs B | 68 | 28 | 18 | 10 | 0.193 |
+| A2 vs B | 70 | 26 | 16 | 10 | 0.378 |
+
+| teacher pass, 3072 positions | not top-1 | mean gap | max gap | gap > 0.1 |
+| --- | --- | --- | --- | --- |
+| A | 21 | 4.8e-4 | 0.383 | 4 |
+| A2 | 19 | 2.5e-4 | 0.122 | 1 |
+| B (K = 3) | 16 | 3.1e-4 | 0.137 | 3 |
+
+The speculative output is not distinguishable from the no-draft output beyond the floor, at
+TP = 1 and TP = 2 (the verifier's accept rule keeps the target's argmax; what differs is the
+fp16-atomic noise of a different row count per step).
+
+### Prefix cache (`dspark_bench.py --prefix-check`, TP = 1, K = 3)
+
+A 942-token prompt pair (a, b) run cold, again (hit) and four requests (a, a', b, b') in one
+step.  Cached tokens: cold 0, hit 896, same step `[0, 896, 896, 896]` (the same counts without
+the draft).  Accepted per step: cold a 1.474, hit a 1.474 (and the hit's generation is
+identical to the cold one), cold b 1.350, hit b 1.400, same step 1.098.  The other hits and
+duplicates diverge from their cold run at near-ties or at gaps of 0.05 - 0.20 nats, and the
+no-draft control does the same (gaps up to 0.165), so a hit does not add a difference beyond
+the floor; the draft K/V of a cached block is the one written when the block was produced and
+the acceptance of a hit does not drop.
+
+### What the draft costs in memory
+
+The engine's own KV planner (`ValueError: ... estimated maximum model length`), the recipes'
+flags (vision tower loaded, `max_num_batched_tokens` 1024 at TP = 1 and 184 at TP = 2, K = 3
+schedule unless a row says K = 2; the graphs of a K = 2 schedule take 0.19 GiB more than K = 3):
+
+| | weights per rank | graphs | longest context |
+| --- | --- | --- | --- |
+| TP = 1, no draft (`inkling2-serving.md`) | 18.68 GiB | 0.70 GiB (SEQS 16) | 180,986 (SEQS 16), 194,368 (SEQS 2) |
+| TP = 1, SEQS 2 | 19.57 GiB | 0.68 GiB | 131,392 (130,000 booted: 131,202 tokens) |
+| TP = 1, SEQS 2, K = 2 | 19.57 GiB | 0.87 GiB | 125,824 (125,000 booted: 125,706 tokens; 15.65 / 21.28 ms per token at b1 / b2, 1.22x / 1.10x) |
+| TP = 1, SEQS 4 | 19.58 GiB | 1.08 GiB | 119,808 |
+| TP = 1, SEQS 8 | 19.58 GiB | 1.88 GiB | 96,512 |
+| TP = 1, SEQS 16 | 19.59 GiB | 3.44 GiB | 51,072 |
+| TP = 2, no draft (`inkling2-serving.md`) | 9.6 GiB | 0.19 GiB | 1,062,736 (1,048,576 needs 16.1 GiB) |
+| TP = 2, SEQS 8, 1,048,576 asked | 10.38 GiB | - | refused before the graphs: 20.18 GiB needed, 16.14 GiB available, 836,672 would fit |
+| TP = 2, SEQS 8, 800,000 asked | 10.38 GiB | 1.59 GiB | refused: 15.44 GiB needed, 14.24 GiB available, 737,088 fit |
+| TP = 2, SEQS 2, 800,000 asked | 10.37 GiB | 0.38 GiB | 800,632 tokens (booted); a K = 2 boot of the same settings estimated 790,592 |
+| TP = 2, SEQS 2, K = 2, 780,000 asked | 10.37 GiB | - | 790,494 tokens (booted; 10.90 / 14.15 ms per token at b1 / b2) |
+
+Three costs: 0.8 - 0.9 GiB of draft weights per rank; 4 KiB of KV per token and rank for the
+draft's full-attention layer (replicated at TP > 1: 20.18 - 16.13 = 4.05 GiB at 1,048,576
+tokens); and graph memory that grows with `max_num_seqs` (the draft's graphs and the
+verification graphs; `[INFERENCE]` the engine captures verification graphs for the full block
+width of 8 rows per request count, and a list limited to the widths the schedule produces would
+take less; not built).  Sharding the draft's attention by KV head would halve the second cost
+(about 18.2 GiB at 1,048,576 tokens, against 16.14 GiB available) and still not reach the full
+context; a window on that layer would, and it changes the draft's numerics (acceptance at long
+context not measured), so it is not built.  The 1,048,576-token recipes therefore keep DSpark
+off; the recipes carry opt-in lines with the longest context that was booted.  TP = 4 was not run
+through the engine (`[INFERENCE]` the cache needs 12 KiB per token and rank there, 12.3 GiB at
+1,048,576 tokens, against a pool of 17.2 GiB without the draft).
+
+### Where a verification step goes
+
+`profile_decode.py --spec-k 7`, async scheduling off, random prompts, so the numbers are of a
+K = 7 step, 8 rows per request: batch 1 clean step 37.7 ms (36.8 ms in a second run), GPU
+kernels 33.2 / 36.4 ms; the draft is 3.6 ms of the profiler's per-step mean and 4.7 ms in the
+traced step (68 kernels, 5.2 ms from the first to the last).  Within a traced draft pass: the
+base-logits sweep of the LM head 2.15 ms (one 922 MB read, 429 GB/s), the three layers 1.7 ms
+(qkv 71 - 78 us, o_proj 54 - 61 us, gate/up 212 - 216 us, down 128 - 129 us per layer), seven
+Markov steps about 0.13 ms each (`markov_step` 16 us, `head_logits` 62 us after a 249 us cold
+first one, `argmax` 21 us, launch gaps), the context path 0.2 ms.  The target's verification of
+8 rows is 29.7 ms (MoE NVFP4 13.3 ms, dense GEMV 8.4 ms, its own LM head 2.1 ms).  At batch 4
+the step is 69.5 ms and the draft's kernels 11.0 ms (the 28-row base GEMV and the backbone on
+`gemv_kernel<32>`: 8.3 ms), which only matters where the policy drafts.  The bench's effective
+step at K = 7 and batch 1 (43.9 ms) is 6 - 7 ms above the profile's clean step; where that goes
+is open (`dspark_bench.py --async-scheduling off` switches the engine's async scheduling to
+compare).  The profiler traces show 5 - 7 ms gaps inside a step that clean steps do not have
+(busy / wall 98.9% in the second run) `[INFERENCE: profiler artifact]`.
 
 Levers, by what the trace shows.  Done: the Markov chain stops at the schedule's largest
-verified K (`scheduled_draft_tokens`, `_markov_steps`; the tokens after it are never
-read: the runner passes `draft_tokens[:, :num_spec_tokens]` on), 0.13 ms per skipped step
-(0.5 ms, 1.4% of a K = 3 step); CPU tests pass, the GPU oracle test
-(`test_the_markov_chain_stops_at_the_largest_verified_token`) is written and **not run**.
-Not done: an 8-bit copy of the LM head for the base sweep (about -1 ms per step, 3%, costs
-0.46 GB and acceptance risk `[INFERENCE]`), a frequency-pruned draft vocabulary (about
--1.7 ms; needs an acceptance measurement on real outputs).  The sweep is at the memory
-roofline, the layers are at 250 - 395 GB/s: the draft is about 14% of a K = 7 step and the
-K = 3 gain is bounded by the verification rows, not the draft.
+verified K (`scheduled_draft_tokens`, `_markov_steps`; the tokens after it are never read: the
+runner passes `draft_tokens[:, :num_spec_tokens]` on), 0.13 ms per skipped step (measured
+above); its GPU oracle test (`test_the_markov_chain_stops_at_the_largest_verified_token`)
+passes.  Not done: an 8-bit copy of the LM head for the base sweep (about -1 ms per step, 3%,
+costs 0.46 GB and acceptance risk `[INFERENCE]`), a frequency-pruned draft vocabulary (about
+-1.7 ms; needs an acceptance measurement on real outputs), graph capture limited to the widths
+the schedule produces (memory only).  The sweep is at the memory roofline, the layers are at
+250 - 395 GB/s: the draft is about 14% of a K = 7 step and the K = 2 / 3 gain is bounded by the
+verification rows, not the draft.
 
-Bugs found on the merged tree: FULL capture of the draft (verify batches of 8 rows with
-the capture's dummy metadata, `seq_lens = 1`, zero block tables) made the conv ring write
-a negative row (`Memory Fault ... i2_state_write_kernel`): `i2_ring_keeps` accepted
-`p < 0`, and padded PIECEWISE tokens read as request 0 and wrote its ring.  The merge
-worktree fixes both (`csrc/rocm/inkling2_attn_rdna2.cu`: `0 <= p < p1`, no write to block
-0; `amd/state.py`: `seq_idx = -1` for padded tokens); the K = 3 / 5 / 7 runs above ran with
-the first fix only (the other kernels in `_rocm_C` rebuilt from that tree).
+Bugs found on the merged tree: FULL capture of the draft (verify batches of 8 rows with the
+capture's dummy metadata, `seq_lens = 1`, zero block tables) made the conv ring write a negative
+row (`Memory Fault ... i2_state_write_kernel`): `i2_ring_keeps` accepted `p < 0`, and padded
+PIECEWISE tokens read as request 0 and wrote its ring.  The merge fixes both
+(`csrc/rocm/inkling2_attn_rdna2.cu`: `0 <= p < p1`, no write to block 0; `amd/state.py`:
+`seq_idx = -1` for padded tokens); the K = 1, 2, 3 rows above ran on the merged tree, the
+earlier K = 5 / 7 rows with the first fix only.
 
-DSpark at TP > 1 (`amd/dspark.py`, `tests/models/inkling2_loop/test_dspark_tp.py`):
-the draft weights, its K/V and the taps are replicated, so no draft collective sits inside
-the layers.  The anchors' embedding rows come from the target's vocabulary shard
+DSpark at TP > 1 (`amd/dspark.py`, `tests/models/inkling2_loop/test_dspark_tp.py`): the draft
+weights, its K/V and the taps are replicated, so no draft collective sits inside the layers.
+The anchors' embedding rows come from the target's vocabulary shard
 (`inkling2_glue_embed_lookup`) and one all-reduce of the `[rows, hidden]` block (at most
 64 KiB); the folded head runs over this rank's vocabulary rows and
-`inkling2_dspark_argmax_partial` (new op: value and global id of the best row of the
-shard, padding rows excluded) feeds an all-gather and `inkling2_linear_argmax_reduce` (ties
-to the lowest id, as at TP = 1).  Greedy drafting only: the probabilistic draft raises
-`NotImplementedError`.  `Inkling2DSparkModel` no longer refuses TP > 1.  The TP = 2
-no-draft engine on `FULL_AND_PIECEWISE` (collectives inside the graphs) was measured as
-the baseline: 14.63 / 17.22 / 21.28 / 29.69 ms per token at batch 1 / 2 / 4 / 8.  The
-draft at TP = 2 / 4 through the engine, its speed-up and its equality with no draft were
-**not run** (HIP 4, 5 were in another agent's session).
+`inkling2_dspark_argmax_partial` (value and global id of the best row of the shard, padding rows
+excluded) feeds an all-gather and `inkling2_linear_argmax_reduce` (ties to the lowest id, as at
+TP = 1).  Greedy drafting only: the probabilistic draft raises `NotImplementedError`.
 
-Gates run on the box (HIP 2): `test_inkling2_dspark_rdna2.py` 139 passed (130 + 9 for the
-new op); `test_dspark_tp.py` + `test_dspark_model.py` 29 passed (thread-emulated TP = 2 / 4
-drafts equal the single-rank draft); `test_dspark_model.py -k markov_steps` on the CPU
-7 passed.  Six-arch compile of the TU (gfx90a, gfx942, gfx950, gfx1030, gfx1100,
-gfx1200): exit 0 and no errors on all six (34 kernels on gfx1030, none elsewhere by
-design); gfx1100 failed first on five unused constants of the RDNA2-only block, which now
-sit inside its guard.  Mutation check of `argmax_partial`: baseline 133 passed (its 6
-failures are, `[INFERENCE]`, the six cross-shard reduce cases, whose op is not in the dev library); the
-mutant `partial_drops_first_id` was killed; the other five (`partial_value_row_zero`,
-`partial_id_row_overlaps_values`, `partial_scans_the_shard_padding`,
-`partial_ties_to_higher_index`, `partial_first_id_off_by_one`) were **not run**.  Not run:
-equality of the draft with no draft on this tree (the earlier tree: 20 of 26 identical,
-`|dlogp|` <= 0.081 against a floor of 0.082), the prefix-cache cold / hit / duplicate
-check (`dspark_bench.py --prefix-check`; the sweeps above ran with prefix caching on and
-accepted as before), and the remaining K values.  No-draft `FULL_AND_PIECEWISE` against
-eager (6 prompts, 64 tokens): 13 of 24 identical, the divergences at index >= 10 on
-near-ties of at most 0.17 nats.
+### Gates on the merged tree
+
+Box (HIP 2): `test_inkling2_dspark_rdna2.py` + `test_dspark_model.py` + `test_dspark_tp.py`
+together 178 passed in 99.5 s (139 kernel tests including 9 for `argmax_partial`; 39 model /
+TP tests, thread-emulated TP = 2 / 4 drafts equal to the single-rank draft, the Markov-cap
+oracle test).  `test_dspark_model.py -k markov_steps` on the CPU 7 passed.  Six-arch compile
+of the TU (gfx90a, gfx942, gfx950, gfx1030, gfx1100, gfx1200): exit 0 and no errors on all six
+(34 kernels on gfx1030, none elsewhere by design).  No-draft `FULL_AND_PIECEWISE` against eager
+(6 prompts, 64 tokens): 13 of 24 identical, the divergences at index >= 10 on near-ties of at
+most 0.17 nats.
+
+Mutation check of `inkling2_dspark_argmax_partial` (scratch tree, dev library built with the
+torch JIT at `-O3`, tests through the card lock): three workers, each with its own baseline
+(6 failed, 133 passed in 49 - 51 s: the six cross-shard cases
+`test_argmax_partials_of_vocabulary_shards_reduce_to_the_global_argmax[{1,5,32}-{2,4}]`, whose
+reduce op is not in the dev library `[INFERENCE]`), then one mutant at a time with those six
+deselected.  All six mutants are **killed**: `partial_drops_first_id` (first run);
+`partial_value_row_zero` and `partial_first_id_off_by_one` (1 failed, 112 passed, first failing
+`test_argmax_partial_is_the_value_and_the_global_id[1-100026-100032-100032]`);
+`partial_id_row_overlaps_values` and `partial_scans_the_shard_padding` (1 failed, 113 passed,
+`test_argmax_partial_is_the_value_and_the_global_id[7-4099-4112-0]`);
+`partial_ties_to_higher_index` (4 sites, 1 failed, 109 passed,
+`test_argmax_matches_reference[1-200058-200064]`).
