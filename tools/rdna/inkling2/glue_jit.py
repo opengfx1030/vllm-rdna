@@ -11,8 +11,8 @@ decode-latency kernels are run) and as a compile check:
 
 The extension exposes the ops the decode-latency variants change (``msg_gate_down``,
 ``msg_gate_mix``, ``moe_route``) with the positional signature of ``torch.ops._rocm_C``,
-plus ``swiglu``.  ``VLLM_INKLING2_FUSE_GLUE`` is read by the kernel host code of the build.
-``I2_JIT_DIR`` (default ``~/.cache/vllm_inkling2_jit``) holds the build trees.
+plus ``swiglu``.  ``VLLM_INKLING2_FUSE_GLUE`` is read by the kernel host code of the
+build.  ``I2_JIT_DIR`` (default ``~/.cache/vllm_inkling2_jit``) holds the build trees.
 """
 
 from __future__ import annotations

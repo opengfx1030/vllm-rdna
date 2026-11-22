@@ -229,9 +229,10 @@ def test_mxfp8_dequant_is_exact_for_every_byte_and_supported_scale(ops, block_m)
 
 @pytest.mark.parametrize("block_m", [1, 2, 4, 8])
 def test_nvfp4_dequant_is_exact_for_every_nibble_and_scale_class(ops, block_m):
-    """One expert, one-hot activations: the output is the dequantised weight itself, for all 16 E2M1
-    nibbles and scale bytes of every e4m3 class (subnormals 0x01-0x07, negatives, small / unit / large
-    normals): the kernel's bit-spread nibble expansion and its subnormal scale path are bit exact."""
+    """One expert, one-hot activations: the output is the dequantised weight itself,
+    for all 16 E2M1 nibbles and scale bytes of every e4m3 class (subnormals
+    0x01-0x07, negatives, small / unit / large normals): the kernel's bit-spread
+    nibble expansion and its subnormal scale path are bit exact."""
     k, n = 32, 8
     nib = (torch.arange(k)[:, None] + 3 * torch.arange(n)[None, :]) % 16  # [K, N]
     words = nib.reshape(k // 8, 8, n)
@@ -252,15 +253,28 @@ def test_nvfp4_dequant_is_exact_for_every_nibble_and_scale_class(ops, block_m):
     out = torch.zeros(k, n, dtype=torch.float16, device=DEV)
     tw = torch.empty(0, dtype=torch.float32, device=DEV)
     ops.moe_nvfp4_gemm_rdna2(
-        a, out, q.to(DEV), scales.to(DEV), glob.to(DEV), tw, sorted_ids, expert_ids, ntpp, 1, block_m, False, 0
+        a,
+        out,
+        q.to(DEV),
+        scales.to(DEV),
+        glob.to(DEV),
+        tw,
+        sorted_ids,
+        expert_ids,
+        ntpp,
+        1,
+        block_m,
+        False,
+        0,
     )
     assert torch.equal(out.cpu().double(), expected)
 
 
 def _tie_pairs(count: int = 8):
-    """(e4m3 scale byte, fp32 global) pairs whose fp16 scale differs between the shipped rounding (the fp32
-    product e * global, times 2^14, then fp16: two roundings) and a single rounding of the exact product (what a
-    compiler-fused multiply + convert gives): ~6e-5 of all pairs, one fp16 ulp of the scale."""
+    """(e4m3 scale byte, fp32 global) pairs whose fp16 scale differs between the
+    shipped rounding (the fp32 product e * global, times 2^14, then fp16: two
+    roundings) and a single rounding of the exact product (what a compiler-fused
+    multiply + convert gives): ~6e-5 of all pairs, one fp16 ulp of the scale."""
     import numpy as np
 
     gl = np.exp2(np.random.default_rng(1).uniform(-11, -4, 300000)).astype(np.float32)
@@ -280,8 +294,9 @@ def _tie_pairs(count: int = 8):
 
 @pytest.mark.parametrize("block_m", [1, 2])
 def test_nvfp4_scale_keeps_the_shipped_double_rounding_on_tie_cases(ops, block_m):
-    """The fp16 scale is RNE16(RNE32(e * global) * 2^14).  On the pairs where that differs from a single rounding
-    of the exact product the kernel must still give the shipped value (a fused multiply + convert does not)."""
+    """The fp16 scale is RNE16(RNE32(e * global) * 2^14).  On the pairs where that
+    differs from a single rounding of the exact product the kernel must still give
+    the shipped value (a fused multiply + convert does not)."""
     k, n = 32, 8
     nib = (torch.arange(k)[:, None] + 3 * torch.arange(n)[None, :]) % 16
     words = nib.reshape(k // 8, 8, n)
@@ -296,8 +311,19 @@ def test_nvfp4_scale_keeps_the_shipped_double_rounding_on_tie_cases(ops, block_m
         expected = _nvfp4_dequant(q, scales, glob)[0]
         out = torch.zeros(k, n, dtype=torch.float16, device=DEV)
         ops.moe_nvfp4_gemm_rdna2(
-            torch.eye(k, dtype=torch.float16, device=DEV), out, q.to(DEV), scales.to(DEV), glob.to(DEV), tw,
-            sorted_ids, expert_ids, ntpp, 1, block_m, False, 0,
+            torch.eye(k, dtype=torch.float16, device=DEV),
+            out,
+            q.to(DEV),
+            scales.to(DEV),
+            glob.to(DEV),
+            tw,
+            sorted_ids,
+            expert_ids,
+            ntpp,
+            1,
+            block_m,
+            False,
+            0,
         )
         assert torch.equal(out.cpu().double(), expected), (hex(byte), g)
 
@@ -377,9 +403,7 @@ def test_moe_swiglu_gemm_matches_fp64(ops, fmt, block_m, tokens):
     act = _ref_swiglu(gu, GATE_CAP, UP_CAP).half().double()
     weights = torch.rand(pairs, generator=g)
     per_pair = _per_pair(act, ids.reshape(-1).long(), w)
-    ref = (
-        (per_pair * weights.double()[:, None]).reshape(tokens, TOP_K_ROUTE, N).sum(1)
-    )
+    ref = (per_pair * weights.double()[:, None]).reshape(tokens, TOP_K_ROUTE, N).sum(1)
     out = torch.zeros(tokens, N, dtype=torch.float16, device=DEV)
     args = (gu.to(DEV), out, q.to(DEV), scales.to(DEV))
     if fmt == "nvfp4":
@@ -448,7 +472,9 @@ def test_moe_swiglu_gemm_rejects_bad_arguments(ops, fmt):
         fused(gu, out, *head, *tail, 0.0, UP_CAP)
     with pytest.raises(RuntimeError, match="softcaps"):
         fused(gu, out, *head, *tail, GATE_CAP, -1.0)
-    with pytest.raises(RuntimeError):  # K from the weights is 288, rows are 2 * 256 wide
+    with pytest.raises(
+        RuntimeError
+    ):  # K from the weights is 288, rows are 2 * 256 wide
         fused(gu[:, : 2 * K - 64], out, *head, *tail, GATE_CAP, UP_CAP)
 
 
@@ -465,10 +491,10 @@ _BLOCK_M_ON = {
 @pytest.mark.parametrize("fuse", [False, True])
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
 def test_block_m_tables(monkeypatch, fmt, fuse):
-    """Rows per expert block by token count.  Without ``VLLM_INKLING2_FUSE_GLUE`` the tuned
-    uniform-routing table is untouched; with it the real routing of verify steps (adjacent rows
-    share ~44% of their experts) uses two-row NVFP4 blocks from 2 tokens on, one row stays
-    single."""
+    """Rows per expert block by token count.  Without ``VLLM_INKLING2_FUSE_GLUE`` the
+    tuned uniform-routing table is untouched; with it the real routing of verify
+    steps (adjacent rows share ~44% of their experts) uses two-row NVFP4 blocks from
+    2 tokens on, one row stays single."""
     import types
 
     from vllm.models.inkling2_loop.amd import moe as moe_mod
@@ -477,4 +503,6 @@ def test_block_m_tables(monkeypatch, fmt, fuse):
     probe = types.SimpleNamespace(quant_format=fmt)
     expect = (_BLOCK_M_ON if fuse else _BLOCK_M_OFF)[fmt]
     for tokens, rows in expect.items():
-        assert moe_mod.Inkling2LoopMoE._default_block_size_m(probe, tokens, 8) == rows, (fmt, fuse, tokens)
+        assert (
+            moe_mod.Inkling2LoopMoE._default_block_size_m(probe, tokens, 8) == rows
+        ), (fmt, fuse, tokens)

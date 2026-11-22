@@ -29,11 +29,12 @@ from ..configs import Inkling2LoopTextConfig
 #: the ``T * K <= 8192`` limit of ``inkling2_glue_moe_route``)
 MAX_MOE_TOKENS = 1024
 
-#: ``VLLM_INKLING2_FUSE_GLUE`` (default on, ``0`` restores the shipped kernels and tables): the
-#: decode-latency variants of the glue kernels (``docs/rdna2/inkling2-decode-glue.md``): the
-#: SwiGLU fused into the second expert GEMM (bit-identical to the two-launch path), and (same
-#: variable, read once by the kernel host code) the R-split ``gate_mix`` for a few tokens with
-#: fp32 gate weights (only the fp32 summation order of the rank sum changes).
+#: ``VLLM_INKLING2_FUSE_GLUE`` (default on, ``0`` restores the shipped kernels and
+#: tables): the decode-latency variants of the glue kernels
+#: (``docs/rdna2/inkling2-decode-glue.md``): the SwiGLU fused into the second expert
+#: GEMM (bit-identical to the two-launch path), and (same variable, read once by the
+#: kernel host code) the R-split ``gate_mix`` for a few tokens with fp32 gate
+#: weights (only the fp32 summation order of the rank sum changes).
 FUSE_GLUE = os.environ.get("VLLM_INKLING2_FUSE_GLUE", "1") not in ("", "0")
 
 #: ``inkling2_attention`` keeps split-K partial rows only for the requests / tokens

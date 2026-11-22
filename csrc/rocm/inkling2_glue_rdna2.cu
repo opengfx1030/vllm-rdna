@@ -1466,8 +1466,9 @@ void row_launch_shape(int64_t H, const char* who, int& iter, int& block) {
   block = (int)(((V + iter - 1) / iter + kWave - 1) / kWave * kWave);
 }
 
-// VLLM_INKLING2_FUSE_GLUE (default on, ``0`` or empty turns it off): the decode-latency variant of
-// the glue kernels (split-R gate_mix for a few tokens with fp32 weights).  Read once.
+// VLLM_INKLING2_FUSE_GLUE (default on, ``0`` or empty turns it off): the
+// decode-latency variant of the glue kernels (split-R gate_mix for a few tokens
+// with fp32 weights).  Read once.
 bool fuse_glue() {
   static const bool on = [] {
     const char* e = std::getenv("VLLM_INKLING2_FUSE_GLUE");
@@ -1844,8 +1845,7 @@ void inkling2_glue_msg_gate_mix(const at::Tensor& h, const at::Tensor& m,
   a.inv_h = 1.0f / (float)H;
 
   // a handful of tokens with fp32 weights: the R-split kernel (opt-in)
-  const bool split =
-      fuse_glue() && !w16 && T <= 4 && R == kMixWaves * kMixRpw;
+  const bool split = fuse_glue() && !w16 && T <= 4 && R == kMixWaves * kMixRpw;
   const int tb = split ? gate_tb(T, 4) : gate_mix_tb(T, G * a.C, w16 ? 16 : 8);
   const int64_t ntiles = (T + tb - 1) / tb;
   if (norm) {

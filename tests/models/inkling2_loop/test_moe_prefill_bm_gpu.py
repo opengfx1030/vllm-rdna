@@ -91,8 +91,8 @@ COUNTED = (
     "moe_nvfp4_gemm_swiglu_rdna2",
     "moe_mxfp8_gemm_swiglu_rdna2",
 )
-# the decode-shaped expert GEMMs: w13 / w2 (and, for chunks of <= 16 tokens, w2 with the SwiGLU fused into its
-# activation load: VLLM_INKLING2_FUSE_GLUE, on by default)
+# the decode-shaped expert GEMMs: w13 / w2 (and, for chunks of <= 16 tokens, w2 with
+# the SwiGLU fused into its activation load: VLLM_INKLING2_FUSE_GLUE, on by default)
 DECODE_GEMMS = (
     "moe_nvfp4_gemm_rdna2",
     "moe_mxfp8_gemm_rdna2",

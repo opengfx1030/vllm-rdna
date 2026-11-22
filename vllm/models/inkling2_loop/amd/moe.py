@@ -609,21 +609,25 @@ _BLOCK_M_BY_TOKENS = {
 }
 _BLOCK_M_WIDE = 8
 
-#: ``VLLM_INKLING2_FUSE_GLUE``: with the real routing of speculative verify steps (adjacent
-#: rows share ~44% of their experts: 12.4 / 16.3 / 19.7 / 22.3 distinct experts for 2 / 3 / 4 /
-#: 5 rows, against 15.5 / 22.5 / 29.1 / 35.3 for uniform routing) two-row blocks stream a shared
-#: expert once and are faster than one-row blocks from 2 rows on (NVFP4 w13 + w2 per layer
-#: visit, ``docs/rdna2/inkling2-decode-glue.md``: 2 rows 174 vs 181 us, 3 rows 225 vs 238 us,
-#: 4 rows 268 vs 302 us, 5 rows 313 vs 362 us); a single row stays in one-row blocks.
+#: ``VLLM_INKLING2_FUSE_GLUE``: with the real routing of speculative verify steps
+#: (adjacent rows share ~44% of their experts: 12.4 / 16.3 / 19.7 / 22.3 distinct
+#: experts for 2 / 3 / 4 / 5 rows, against 15.5 / 22.5 / 29.1 / 35.3 for uniform
+#: routing) two-row blocks stream a shared expert once and are faster than one-row
+#: blocks from 2 rows on (NVFP4 w13 + w2 per layer visit,
+#: ``docs/rdna2/inkling2-decode-glue.md``: 2 rows 174 vs 181 us, 3 rows 225 vs
+#: 238 us, 4 rows 268 vs 302 us, 5 rows 313 vs 362 us); a single row stays in
+#: one-row blocks.
 _BLOCK_M_BY_TOKENS_SPEC = {
     "nvfp4": ((1, 1), (12, 2), (64, 4)),
     "mxfp8": ((4, 1), (48, 2)),
 }
 
-#: ``VLLM_INKLING2_FUSE_GLUE``: chunks of at most this many tokens run the SwiGLU inside the w2 GEMM
-#: (``moe_*_gemm_swiglu_rdna2``).  The fused load recomputes the activation once per N tile, which saves
-#: a launch and an activation round trip at decode / verify sizes (-4.1 us per layer visit at 1 row) but
-#: costs +1.1% at 64 tokens, +5.5% at 256 and +7.1% at 1000 tokens per NVFP4 w2 launch (``moe_lab_big``).
+#: ``VLLM_INKLING2_FUSE_GLUE``: chunks of at most this many tokens run the SwiGLU
+#: inside the w2 GEMM (``moe_*_gemm_swiglu_rdna2``).  The fused load recomputes the
+#: activation once per N tile, which saves a launch and an activation round trip at
+#: decode / verify sizes (-4.1 us per layer visit at 1 row) but costs +1.1% at 64
+#: tokens, +5.5% at 256 and +7.1% at 1000 tokens per NVFP4 w2 launch
+#: (``moe_lab_big``).
 _FUSE_SWIGLU_MAX_TOKENS = 16
 
 
@@ -1086,8 +1090,11 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 0,
                 cta_info=cta,
             )
-            # the prefill (BM) kernels run both GEMMs themselves: the fused w2 is the decode-shaped kernel only
-            if FUSE_GLUE and not prefill and tc <= _FUSE_SWIGLU_MAX_TOKENS:  # the SwiGLU runs in the w2 GEMM's activation load
+            # the prefill (BM) kernels run both GEMMs themselves: the fused w2 is the
+            # decode-shaped kernel only
+            if (
+                FUSE_GLUE and not prefill and tc <= _FUSE_SWIGLU_MAX_TOKENS
+            ):  # the SwiGLU runs in the w2 GEMM's activation load
                 self._gemm_swiglu(
                     m.gu,
                     out,
