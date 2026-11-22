@@ -90,9 +90,20 @@ class SeqIdxScratch:
 
     ``torch.ops._rocm_C.build_qsa_metadata_rdna2`` is the engine's device-side
     request-of-token search; with ``compress_ratio=1`` and no ring it only writes
-    ``token_to_req`` (tokens past the mapped ones read as request 0, which is harmless:
-    padded tokens carry ``slot_mapping = -1`` and the conv / KV ops skip them) plus two
-    per-token scratch arrays that Inkling-2 does not use.
+    ``token_to_req`` plus two per-token scratch arrays that Inkling-2 does not use.
+
+    The map covers every token of the forward pass *including the padding the runner
+    adds for a CUDA graph* (``c.slot_mapping`` is the runner's padded buffer, one slot
+    per token of the graph).  Padded tokens read as request 0 and carry
+    ``slot_mapping = -1``: the conv / KV kernels compute them from rows of request 0
+    that exist (``sr >= 0`` taps read ``x``, history reads stay inside request 0's own
+    blocks) and write nothing to any cache, so a graph captured for ``T`` tokens
+    replays any batch of up to ``T`` of them.  A PIECEWISE segment bakes ``T`` as the
+    length of this map at capture time; refreshing all ``T`` entries at every step is
+    what makes that safe (a stale tail of an earlier, larger batch would index
+    requests of a batch that is gone).  The padded *requests* of a FULL graph own no
+    token (``seq_lens = 0``, ``query_start_loc`` repeats the token count), so nothing
+    maps to them.
     """
 
     def __init__(self, max_tokens: int, device: torch.device | str) -> None:
@@ -110,7 +121,8 @@ class SeqIdxScratch:
         self._slots = torch.empty(max_tokens, dtype=torch.int64, device=device)
 
     def fill(self, c: CommonAttentionMetadata) -> torch.Tensor:
-        num_tokens = c.num_actual_tokens
+        """``token_to_req[:T]`` with ``T`` the padded token count of the step."""
+        num_tokens = c.slot_mapping.shape[0]
         if num_tokens > self.max_tokens:
             raise ValueError(
                 f"{num_tokens} tokens exceed the {self.max_tokens} the metadata "
@@ -146,7 +158,12 @@ def make_metadata(
     c: CommonAttentionMetadata, scratch: SeqIdxScratch | None
 ) -> Inkling2Metadata:
     """Per-group metadata of one step.  ``scratch`` (HIP path) fills the persistent
-    ``seq_idx`` buffer on the device; without it (reference path) torch builds it."""
+    ``seq_idx`` buffer on the device; without it (reference path) torch builds it.
+
+    Every tensor is a view of a buffer that outlives the step (the runner's
+    persistent input buffers, the builder's ``seq_idx`` scratch), so the metadata of
+    a captured graph is refreshed by building the next step's metadata: same
+    addresses, new contents."""
     num_reqs = c.num_reqs
     num_tokens = c.num_actual_tokens
     qsl = c.query_start_loc[: num_reqs + 1]
@@ -157,11 +174,13 @@ def make_metadata(
             q_lens,
             output_size=num_tokens,
         )
+        slot_mapping = c.slot_mapping[:num_tokens]
     else:
         seq_idx = scratch.fill(c)
+        slot_mapping = c.slot_mapping[: seq_idx.shape[0]]
     return Inkling2Metadata(
         block_table=c.block_table_tensor[:num_reqs],
-        slot_mapping=c.slot_mapping[:num_tokens],
+        slot_mapping=slot_mapping,
         seq_lens=c.seq_lens[:num_reqs],
         query_start_loc=qsl,
         seq_idx=seq_idx,
@@ -173,9 +192,40 @@ def make_metadata(
 
 
 class Inkling2MetadataBuilder(AttentionMetadataBuilder[Inkling2Metadata]):
-    # No graph capture yet: the HIP ops are capturable but the metadata tensors the
-    # runner hands over are not persistent (see docs/rdna2/inkling2-port-spec.md).
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    """Metadata of one KV-cache group.
+
+    FULL graphs (``UNIFORM_BATCH``: every request of the batch has the same query
+    length, 1 for decode, ``1 + k`` for the verification step of speculative decoding)
+    capture the whole forward around the metadata *tensors*; everything the kernels
+    read from them is refreshed in place by the next ``build`` (the engine's gathered
+    block tables, slot mappings, ``seq_lens`` and ``query_start_loc`` are persistent
+    buffers, ``seq_idx`` is ``SeqIdxScratch``).  The host-side numbers of the metadata
+    (``num_reqs``, ``max_query_len``, ``max_seq_len`` and the split-K factors derived
+    from them) are frozen into the launch parameters at capture; the engine captures
+    with the padded request count of the graph, the uniform query length and
+    ``max_seq_len = max_model_len``, which bound every batch the graph replays
+    (``docs/rdna2/inkling2-attn-kernels.md``, "CUDA-graph capture").  Padded requests
+    have ``seq_lens = 0``, padded tokens ``slot_mapping = -1`` (see ``SeqIdxScratch``).
+
+    Mixed batches never take a FULL graph (that would need ``ALWAYS``: the grid of the
+    attention kernel depends on the longest query of the batch): they run in PIECEWISE
+    graphs whose attention op is an eager break (``attend_hip``).
+    """
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        # the torch reference path (``VLLM_INKLING2_PATH=reference``) loops over
+        # requests on the host: it is never captured
+        device = getattr(vllm_config.device_config, "device", None)
+        if not use_hip_ops(device):
+            return AttentionCGSupport.NEVER
+        return cls._cudagraph_support
 
     def __init__(
         self,

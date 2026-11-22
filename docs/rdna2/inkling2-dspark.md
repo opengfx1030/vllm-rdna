@@ -16,11 +16,11 @@ fp64 oracle in tests and tools.  Numbers below are copied from runs on the box
 | Exact-probability gate of the rejection path | CPU oracle + negative controls pass; the production HIP rejection sampler passes on b4 (4 GPU cases) |
 | Mutation checks of the kernels | 10 of 10 mutants killed (table in Results) |
 | Official `build_lq.sh` build of the new TU | built (exit 0 after 804 s, official `-O2` flags); all 15 ops register in the official `_rocm_C`; on that build (plain pytest on the in-tree `_rocm_C.abi3.so`, b4 HIP 2) `test_inkling2_dspark_rdna2.py` gives 130 passed (48.19 s) and `test_dspark_model.py` + `test_dspark_verifier.py` give 31 passed (37.93 s) with the same draft-vs-oracle errors as the dev `-O3` build |
-| Target tap hook in `amd/model.py` | applied (inert unless the runner asks for taps); 4 CPU tests on the tiny checkpoints; **never run on the real target** |
-| Runner-owned Triton (`prepare_dflash_inputs`) | HIP op written, tested against a Python port of the kernel; with the dispatch below the runner's own `test_dflash_prepare_inputs.py` passes (6 passed) on b4; the dispatch is **not applied** to the repo |
-| V2 runner end-to-end (model load + `propose` through `LLM(...)`) | **not run** (needs the tap hook, the registry entry and the dispatch patch; see "What remains") |
-| FULL HIP-graph capture inside the runner | **not run**; capture + replay of the whole draft step is tested bit-exact on b4 in the harness |
-| TP > 1 | **not tested** (draft is replicated, the head is vocab-shard aware) `[INFERENCE]` |
+| Target tap hook in `amd/model.py` | applied and run on the real target through the runner's EAGLE3 interface (part B): `supports_eagle3` was false because the class lacked the `SupportsEagleBase` flags, and the draft config listed the final-output id 48 as a layer to tap (the hook raised); both fixed, CPU tests added |
+| Runner-owned Triton (`prepare_dflash_inputs`) | HIP op written and tested against a Python port of the kernel; the dispatch is applied in `dflash/speculator.py` and gated by `DFlashSpeculator.uses_hip_prepare_inputs` (True only for `Inkling2DSparkSpeculator`), so every other DFlash / DSpark draft keeps the Triton kernel |
+| V2 runner end-to-end (model load + `propose` through `LLM(...)`) | **run** on the real checkpoint, `FULL_AND_PIECEWISE`, `num_speculative_tokens=7`, TP=1: acceptance, speed and greedy equality in "Part B: the draft on the V2 runner" of `inkling2-port-spec.md` |
+| FULL HIP-graph capture inside the runner | done: `DFlashCudaGraphManager` captures the draft step (graph memory 1.95 GiB with the target graphs) |
+| TP > 1 | **not tested** here (draft is replicated, the head is vocab-shard aware) `[INFERENCE]` |
 
 ## What the draft is
 
@@ -211,7 +211,7 @@ is not in the `-O3` list of `CMakeLists.txt`.
    It covers token-wise verification; block verification is not covered.
 5. **Hand mutations** of the kernels (table in Results).
 
-## Wiring that is NOT in the repo (patches for files outside the contract)
+## Wiring outside the model files (all applied in the repo)
 
 ### 1. Registry (`vllm/model_executor/models/registry.py`, `_SPECULATIVE_DECODING_MODELS`)
 
@@ -225,7 +225,11 @@ is not in the `-O3` list of `CMakeLists.txt`.
 
 ### 2. `prepare_dflash_inputs` HIP dispatch (`vllm/v1/worker/gpu/spec_decode/dflash/speculator.py`)
 
-Applied only in the box tree copy; the diff below is the script's exact output.
+Applied in part B and gated: the condition in the repo is `if hip_kernel and _ON_RDNA2 and
+cp_size == 1:`, `prepare_dflash_inputs(..., hip_kernel=self.uses_hip_prepare_inputs)` and
+`Inkling2DSparkSpeculator` is the only class that sets `uses_hip_prepare_inputs = True`.
+The diff below is the first, ungated version.  The runner's own
+`tests/v1/spec_decode/test_dflash_prepare_inputs.py` therefore runs the Triton kernel again.
 
 ```diff
 @@ -7,12 +7,14 @@
@@ -309,26 +313,47 @@ output is the last tap) when the set is non-empty.  `Inkling2LoopForConditionalG
 gets `supports_eagle3 = True`, `set_aux_hidden_state_layers`,
 `get_eagle3_default_aux_hidden_state_layers() -> (5, 23, 41)` and returns
 `(hidden, taps)` from `forward` when taps were requested.  The structural
-`SupportsEagle3` check of the runner has not been exercised.
+`SupportsEagle3` check of the runner needs `has_own_lm_head` / `has_own_embed_tokens` as
+well (the protocol is runtime-checkable over every member; added in part B), and
+`Inkling2DSparkConfig.eagle_aux_hidden_state_layer_ids` is `target_layer_ids[:-1]` =
+(5, 23, 41): the target appends the final output itself and the id 48 is not a layer.
 
 ### 4. Test tethering (`tools/pre_commit/test_tethering_allowlist.txt`) - APPLIED
 
 Four fork-only entries (`test_dspark_model.py`, `test_dspark_oracle.py`,
 `test_dspark_verifier.py`, `test_dspark_target_taps.py`).
 
+### 5. Draft quantization (`vllm/v1/worker/gpu/spec_decode/dspark/config.py`) - APPLIED
+
+`DSparkSpeculatorConfig.default_model` copied the target's `modelopt_fp4` to the draft
+(DeepSeek DSpark ships its weights inside the quantized target checkpoint).
+`mtp.safetensors` is bf16, so `get_draft_quant_config` tried to parse a ModelOpt config
+for it and failed (`Missing 'quant_algo'`).  Like Mistral Large 4, an `inkling2_loop` target
+leaves the draft unquantized; the draft dtype needs nothing (fp16 like the target, the
+bf16 weights are converted at load).
+
 ## What remains / risks
 
-* The V2 runner has not run this draft end to end: apply the registry and dispatch
-  patches above (the tap hook is already in), then
-  `LLM(model=~/hfcache/inkling2-mini, dtype="float16", speculative_config={"method":"dspark",
-  "num_speculative_tokens":7})`.  Open questions that only that run answers: the draft KV
-  owners' registration in `static_forward_context` and the KV-cache config, the draft
-  `ModelConfig` dtype (bf16 checkpoint vs fp16 target), `spec.quantization` propagation,
-  FULL-graph capture in `DFlashCudaGraphManager`, and the acceptance length.
+* Measured on the V2 runner (`inkling2-port-spec.md`, part B): the draft is correct (the
+  acceptance is far above chance and the greedy output of a speculative run stays inside
+  the run-to-run floor of the target), but with all 7 draft tokens verified the step costs
+  2.4x a plain decode step (48.2 ms against 20 ms at batch 1: every verified row runs the
+  MoE kernels, 8 rows pay the 8-row instance), so `num_speculative_tokens=7` alone gives
+  0.98x at batch 1 over eight prompts and loses from batch 4.  The scheduler's dynamic
+  speculative decoding verifies fewer tokens while the draft still proposes 7 (the model
+  requires `num_speculative_tokens = 7`, the draft block is 8 rows):
+  `num_speculative_tokens_per_batch_size=[[1, 1, 3], [2, 8, 0]]` measured 1.21x at batch 1
+  (16.50 ms per token against 20.03 ms; K = 1, 2, 4, 7: 1.11x, 1.11x, 1.03x, 0.98x) and the
+  no-draft speed from batch 2 up.  Part B2 (`inkling2-port-spec.md`) changed the two causes the
+  profile found for the fifth-row cost (the row policy picked the 8-row MoE instance from 5
+  tokens, and the old mxfp8 kernel spilled registers; per-launch numbers there): the K table
+  above was measured before it, and its engine-level re-measurement is not in this document.
 * `draft_logits.py` (`_assign_rows_kernel` / `_stale_drafts_kernel`) is runner-owned Triton
   used only for probabilistic drafting; greedy drafting (default) does not touch it.
-* Prefix-cache hits on blocks written without DSpark leave the draft context K/V stale
-  (quality only, never correctness of the output).
+* Prefix-cache hits: the draft K/V blocks are cached with the target's, so a hit reads
+  K/V written when the block was produced; the acceptance of a warm run equals that of the
+  cold run (part B).  Blocks produced by a run without DSpark would be stale (quality
+  only, never correctness).
 * The sliding-window manager may free the block holding key `P-1024`; the kernel then reads
   the null block (finite zeros), a one-key mismatch for that single key.
 * The dense GEMM design table (`_gemm_design`) is not tuned for the draft's shapes.

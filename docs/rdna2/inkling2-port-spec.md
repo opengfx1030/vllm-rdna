@@ -626,3 +626,469 @@ Real checkpoint, first-step top-8 after the chat template, torch path -> HIP pat
 * Speed: the step is GPU-bound (93.9% busy); [INFERENCE] a graph gains at most ~6% of a
   batch-1 decode step, so the next gains are kernel time (attention input GEMV 27.6%,
   expert GEMMs 31%, `lm_head` 9.5%).
+
+## 2026-11-22 — integration part B: HIP graphs (FULL_AND_PIECEWISE) and the DSpark draft on the V2 runner
+
+Branch `feat/inkling2-mini-hip`.  Real checkpoint, TP = 1, one V620 (HIP 2) unless a tiny
+checkpoint is named.  The neighbouring cards ran other jobs at the same time, so absolute
+times are indicative; the modes are compared inside the same session.  Tools:
+`tools/rdna/inkling2/graph_check.py` (engine-level eager / graph / speculative runs and
+`--compare`, which is CPU-only), `profile_decode.py --cudagraph-mode ... [--spec-k 7]`
+(kernel counts, GPU-busy time), and the test file
+`tests/models/inkling2_loop/test_serving_path_graph_gpu.py`.
+
+### What `FULL_AND_PIECEWISE` does for a model that is not torch.compile'd
+
+* The model is not compiled, so there is no piecewise compilation.  The fork's breakable
+  CUDA graphs (`vllm/compilation/breakable_cudagraph.py`) record the *eager* forward as a
+  chain of graph segments separated by eager breaks.  An architecture opts in through
+  `default_breakable_cudagraph_architectures` (`vllm/config/vllm.py`, one line for
+  `Inkling2LoopForConditionalGeneration`); without the entry the config silently downgrades
+  `FULL_AND_PIECEWISE` to `FULL_DECODE_ONLY`.
+* FULL graphs serve the uniform batches: decode (q = 1) and speculative verify (q = 1 + k).
+  The non-speculative default sizes are 1, 2, 4, 8 requests (`decode_cudagraph_capture_request_sizes`).
+* Breakable (PIECEWISE) graphs serve prefill, chunked prefill and mixed batches, per padded
+  token count (`prefill_cudagraph_capture_token_sizes`; the default is 1, 2, 4, 8, 16
+  without a draft and 1, 2, 4, 8, 16, 24 .. 128 with one).  The one eager break per layer
+  visit is `attend_hip` (`@eager_break_during_piecewise_capture`): its grid depends on the
+  longest query and the live split-K plan of the step.  48 layer visits give 49 graph
+  segments; `BreakableCUDAGraphCapture.replay` runs the segments and the eager calls in order.
+* A FULL graph for a mixed batch is infeasible for the same reason (the attention grid and
+  the split-K plan are data dependent).  A batch above the largest captured size runs eager.
+* The V2 runner captures `forward` only; `embed_input_ids`, `compute_logits` and the greedy
+  sampler run eagerly around it, so their allocations never meet a capture.
+
+### Capture contract (the part-A list "What part B must handle")
+
+| Part-A item | Part B |
+|---|---|
+| `Inkling2MetadataBuilder._cudagraph_support = NEVER` | `UNIFORM_BATCH`; the classmethod `get_cudagraph_support` still answers `NEVER` when the HIP ops are not used (reference path) |
+| persistent metadata buffers, fixed splits / workspace | the V2 runner owns the persistent buffers.  Capture records `max_seq_len = max_model_len` and `max_query_len = q`, so the grids, split-K plan and workspace are frozen at capture; the live lengths, slots and sequence indices are device tensors read at replay |
+| padded requests need `seq_lens = 0`, `slot_mapping = -1`, `seq_idx = -1` | padded tokens map to request 0 (`SeqIdxScratch.fill` covers the padded token count, `make_metadata` slices `slot_mapping` to it); the conv and KV writers act only for `slot >= 0`; the router is NaN-hardened; `Inkling2GlueWorkspace.attn_out` is zero-initialised |
+| `conv_passes` double launch | isolated in `attention.conv_passes(md)`: 2 for `max_query_len > 1` and while tracing a breakable graph, else 1 (a q = 1 FULL decode graph runs the kernel pair once).  The clean fix is a write / read-phase split inside the kernel (csrc, not done) |
+| FULL graphs around `forward` only | confirmed, see above |
+
+Splits frozen at `max_model_len` are the one place where a graph differs from eager: the
+attention kernel is documented as split-dependent to its tolerance, and the measured
+difference (below) is of that order.
+
+### Measurements
+
+Decode, real checkpoint, `max_model_len` 2048, prefix caching on, `graph_check.py` bench: ms per
+generated token of one request, `(t_64 - t_1) / 63`, median of 3, b1 = one prompt, b4 / b8 =
+4 / 8 distinct prompts, tok/s is the total over the batch.
+
+| mode | b1 | b4 | b8 | graph memory | KV cache |
+|---|---|---|---|---|---|
+| eager (runs A / B) | 21.07 / 21.06 ms (47.5 tok/s) | 34.79 / 34.82 ms (115.0 tok/s) | 56.30 / 55.86 ms (142.1 / 143.2 tok/s) | 0 | 4,409 tokens |
+| `FULL_DECODE_ONLY` | 20.02 ms (49.9 tok/s) | 33.96 ms (117.8 tok/s) | 55.21 ms (144.9 tok/s) | 0.09 GiB | 4,352 tokens |
+| `FULL_AND_PIECEWISE` | 20.03 ms (49.9 tok/s) | 33.93 ms (117.9 tok/s) | 54.95 ms (145.6 tok/s) | 0.57 GiB | 4,070 tokens |
+| `FULL_AND_PIECEWISE`, prefill sizes 1 .. 1024, `max_model_len` 8192 | 20.01 ms (50.0 tok/s) | 33.99 ms | 55.17 ms | 1.16 GiB | 13,441 tokens |
+
+The graphs save 1.0 ms of a 21 ms step (4.9% at batch 1), 0.9 ms at batch 4 (2.5%) and about
+1 ms at batch 8 (1.2 - 1.9%).  Boot takes 37 - 41 s with graphs (26 - 37 s eager).
+
+Kernel view (`profile_decode.py`, async scheduling off, 22-token random prompts, GPU-busy
+from the profiler):
+
+| | eager | `FULL_AND_PIECEWISE`, prefill grid 1 .. 1024 (doubling) | `FULL_AND_PIECEWISE`, grid 1, 2, 4, 8, 16, 24 .. 128, 256, 512, 1024 |
+|---|---|---|---|
+| decode b1 | 23.1 ms wall, 22.3 ms GPU, 779 kernels | 21.1 ms, 18.9 ms GPU, 788 kernels | 21.1 ms, 788 kernels |
+| decode b4 | 35.1 ms, 33.3 ms GPU, 779 kernels | 33.3 ms, 29.3 ms GPU, 788 kernels | 33.2 ms, 29.8 ms GPU, 788 kernels |
+| prefill b1 (22 tokens) | 74.6 ms (978 kernels) | 97.1 ms (padded) | 80.9 ms (padded to 24, 976 kernels) |
+| prefill b4 (88 tokens) | 169.0 ms | 222.0 ms (padded to 128) | 167.7 ms (exact size, 973 kernels) |
+| prefill 1000 tokens | 1259 ms (794 tok/s) | 1300 ms | 1290 ms (padded to 1024) |
+
+* The GPU time of a decode step falls by 15% under the graph (22.3 to 18.9 ms at batch 1:
+  the launch gaps disappear) and the wall time by 1 - 2 ms.  The step is GPU-bound: the
+  eager step is 94% busy, so a graph cannot give more than the gaps. `[INFERENCE]`
+* **The only cost of the breakable graphs is padding.**  Padded rows go through the full MoE
+  and dense work, so a padded step costs the time of the padded token count (1000 tokens
+  padded to 1024: 1259 ms eager, 1290 ms replayed, +2.4%; 88 tokens padded to 128: +31%; the
+  same 88 tokens on a grid that has the exact size: 167.7 ms against 169.0 ms eager).
+  The 49 segments themselves are free: a throw-away probe (not in the repo) of 833 tiny kernels
+  took 2.76 ms as 49 segments with eager breaks, 5.45 ms eager and 2.53 ms as one FULL graph.
+* So PIECEWISE gives no speed-up for this model; it is kept because the recipe policy is
+  `FULL_AND_PIECEWISE` and because it is correct (below).  Do not add a prefill grid finer
+  than the traffic needs: every captured size costs graph memory (0.57 GiB default, 1.16 GiB for
+  1 .. 1024 doubling) and an off-grid batch pays its padding.
+
+Numerics (`graph_check.py --compare`, greedy 24 tokens, logprobs top-2 near-tie gaps):
+
+| comparison | identical generations | max `|dlogp|` before the first divergence |
+|---|---|---|
+| tiny8 engine, mixed batches with 96-token chunked prefill (25 generations): eager vs eager | 25 / 25 | 0.045 (CAS noise floor) |
+| tiny8: `PIECEWISE` vs eager | 25 / 25 | 0.0000 |
+| tiny8: `FULL_DECODE_ONLY` / `FULL_AND_PIECEWISE` vs eager | 21 / 25 | 0.027 (the divergences are at near-ties of 0.019 - 0.053 nats) |
+| real, 26 generations: eager A vs eager B (the floor) | 17 / 26 | 0.082 |
+| real: eager B vs `FULL_AND_PIECEWISE` | 17 / 26 | 0.056 |
+| real: eager B vs `FULL_DECODE_ONLY` | 19 / 26 | 0.076 |
+
+* The real checkpoint's run-to-run floor is the fp16 CAS accumulation of the expert GEMMs
+  (top-8 order dependent) plus the batch-dependent split-K plan; the graph and eager runs
+  stay inside it.
+* `test_serving_path_graph_gpu.py` (5 tests, tiny checkpoints on HIP 2): a replay is bitwise equal to the
+  same frozen eager step; padded eager equals unpadded eager (0.0); the split-K plan frozen
+  at capture (`max_seq_len = max_model_len`) differs from the live plan by 2.3e-2 on tiny1
+  (logit scale 19.4) and 7.9e-2 on tiny8 (scale 22.4), the only graph-vs-eager difference
+  `[INFERENCE]`; with top-8 experts the CAS noise is 0.198 eager vs eager, 0.188 graph vs
+  eager and 0.187 graph vs graph (scale 19.8), so graph replay adds nothing measurable.
+* Prefix caching with graphs, 1510-token prompt, `max_model_len` 2048: cold 2.34 s, warm 0.44 s
+  (eager: 2.37 s and 0.46 s).  `FULL_AND_PIECEWISE`: cold, cold again and warm generate the same
+  tokens; `FULL_DECODE_ONLY`: no divergence, max `|dlogp|` 0.039 (cold vs cold again) and 0.089
+  (cold vs warm); eager: 0.093 and 0.106.  A 6002-token prompt at `max_model_len` 8192 takes
+  8.59 s cold and 0.50 s warm; cold vs warm and cold vs cold again both flip at token 2 on
+  a near-tie (top-2 -0.62 / -0.77 against -0.49 / -0.95), the same place, so it is the run-to-run
+  floor and not the cache.
+* Maximum length at TP = 1 was not re-derived in part B: 8192 boots and serves (KV cache 13,441
+  tokens beside 8.99 GiB of KV memory, 1.16 GiB of graphs); the largest fitting length remains
+  the open item of the long-context work.
+
+### Cost of a decode step by row count (eager, real checkpoint)
+
+`graph_check.py --batches 1,2,...,8 --tokens 64`, `b` distinct prompts per batch, ms per
+generated token of one request = the step time with `b` rows, median of 2:
+
+| rows | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| step ms | 21.07 | 25.50 | 30.98 | 34.81 | 45.28 | 48.99 | 53.04 | 56.13 |
+
+An extra row costs 3 - 5.5 ms, except the fifth: +10.5 ms.  A verification of `1 + k` tokens is the
+same work as `1 + k` decode rows, so it costs the row count's step time plus the draft.
+
+Where the fifth row's time goes (`profile_decode.py --batch 5` against `--batch 4`, eager decode,
+random-token prompts, GPU ms per step; the step medians are 35.1 and 45.1 ms):
+
+| kernel | launches / step | batch 1 | batch 4 | batch 5 |
+|---|---|---|---|---|
+| `moe_gemm_nvfp4_kernel_rdna2<half, M>` | 88 | 5.33 ms (M = 1, 60.6 us per launch) | 11.21 ms (M = 4, 127.3 us) | 13.82 ms (M = 8, 157.1 us) |
+| `moe_gemm_mxfp8_kernel_rdna2<half, M>` | 8 | 1.62 ms (M = 1, 202.2 us) | 5.90 ms (M = 4, 737.0 us) | 11.72 ms (M = 8, 1464.9 us) |
+| `inkling2_linear::gemv_kernel` | 97 | not read | 10.43 ms (107.5 us) | 10.59 ms (109.2 us) |
+
+The MoE kernels are templated on the row count (instances 1, 2, 4, 8) and the policy picked the
+instance by the token count (1 -> 1, 2 -> 2, 3 - 4 -> 4, 5 and above -> 8), so a 5-row batch ran
+the 8-row instance, and the mxfp8 kernel cost about 184 us per row and launch at both M = 4 and M =
+8.  This paragraph first explained that with "the kernel does not amortise the weight
+dequantisation over the rows".  That was wrong: a block already dequantises each weight once for all
+its rows.  The cause was the policy and the register spills of the old mxfp8 kernel (part B2
+below).  The kernel is what set the price of a speculative verification: an 8-row batch ran the
+same 8-row instance `[INFERENCE]`, so 11.7 ms of its step were the mxfp8 kernel and 13.8 ms the
+nvfp4 one.  The step times also vary with the routing (min 29.7 ms, max 43.3 ms at batch 4, same
+prompts).
+
+### Decode capture sizes: a padded row is real work
+
+`graph_check.py --decode-sizes`, 64 tokens, ms per generated token of one request = the step time of
+`b` rows (b = 1, 2, 4, 8 are exact sizes of the default grid and need no comparison):
+
+| rows | eager | `FULL_AND_PIECEWISE`, default decode sizes 1, 2, 4, 8 | `FULL_AND_PIECEWISE`, `decode_cudagraph_capture_request_sizes` 1 .. 8 |
+|---|---|---|---|
+| 3 | 30.98 ms | 35.44 ms (+14%, padded to 4) | 30.81 ms (-0.5%) |
+| 5 | 45.28 ms | 61.04 ms (+35%, padded to 8) | 43.78 ms (-3.3%) |
+| 6 | 48.99 ms | 60.70 ms (+24%, padded to 8) | 47.65 ms (-2.7%) |
+| 7 | 53.04 ms | 58.51 ms (+10%, padded to 8) | 51.59 ms (-2.7%) |
+
+The padded rows of a FULL decode graph run the whole MoE and dense work, so a batch between two
+captured sizes is *slower* than eager (up to 35% here) and a dense grid costs nothing: the graph
+memory is 0.57 GiB for both grids.  The recipe for `max_num_seqs` 8 is
+`--compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE",
+"decode_cudagraph_capture_request_sizes": [1, 2, 3, 4, 5, 6, 7, 8]}'`; with a larger
+`max_num_seqs`, list every request count the traffic reaches (counts above 8 were not measured).
+
+### The DSpark draft on the V2 runner
+
+`LLM(speculative_config={"method": "dspark", "num_speculative_tokens": 7},
+compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"}, enable_prefix_caching=True)`,
+real checkpoint, TP = 1, greedy.  What it took (no csrc change; the details are in
+`inkling2-dspark.md`):
+
+* The taps: `Inkling2DSparkConfig.eagle_aux_hidden_state_layer_ids` is the three entry visits
+  (5, 23, 41); it also listed the final-output id 48 and `configure_taps` raised.  The target
+  appends the final output as the fourth tap itself.
+* `Inkling2LoopTextForCausalLM.has_own_lm_head = False` and `has_own_embed_tokens = False`: the
+  runtime-checkable `SupportsEagle3` protocol needs every member, without them the runner said
+  "Model does not support EAGLE3 interface".
+* Draft dtype and quantization: the draft is the bf16 `mtp.safetensors`, converted to fp16 at
+  load like the target (weight report `max_abs 38.5`, no overflow).
+  `DSparkSpeculatorConfig.default_model` copied the target's NVFP4 `quantization` to it, which
+  made `get_draft_quant_config` raise `Missing 'quant_algo'`; an `inkling2_loop` target leaves
+  the draft unquantized.
+* The HIP `prepare_dflash_inputs` is dispatched only for `Inkling2DSparkSpeculator`
+  (`uses_hip_prepare_inputs`); every other DFlash / DSpark draft keeps the Triton kernel.
+* Draft KV owner registration, the draft FULL graph (`DFlashCudaGraphManager`: "Capturing model
+  for Inkling2 DSpark speculator"; graph memory 1.95 GiB for the target and the draft, KV cache
+  8.17 GiB at `max_model_len` 2048) and the verify batches (`1 + 7` rows, FULL graphs) boot and
+  replay without further change.  Boot 33 s.
+* Stale draft K/V after prefix-cache hits: the draft K/V sits in the same hybrid cache blocks
+  as the target's, so a hit block carries the K/V written when it was produced; the
+  acceptance of a warm run is that of a cold one (1510-token prompt, 128 tokens: 41 / 42 / 42
+  drafts, mean accepted 2.10 cold, 2.02 cold again, 2.02 warm, same per-position profile) and
+  the three runs generate the same tokens (max `|dlogp|` 0.061 and 0.084).  Blocks cached by
+  a run without DSpark would carry no draft K/V (quality only) `[INFERENCE]`.
+
+Acceptance, `k = 7`, 8 chat-templated prompts, each alone at batch 1, 192 tokens: 639 drafts,
+mean accepted 1.41 per step (2.41 tokens per step), cumulative per position
+`[0.50, 0.30, 0.20, 0.16, 0.10, 0.08, 0.06]`; per prompt 0.75 - 3.04 (an arithmetic question
+accepts 3.04, open-ended answers 0.75 - 0.80).  Over the first 128 tokens of the same prompts
+(the speed bench below): 361 drafts, 1.85 accepted per step (2.85 tokens per step),
+`[0.60, 0.39, 0.29, 0.21, 0.16, 0.12, 0.10]`.
+
+Speed, `FULL_AND_PIECEWISE`, same bench and session (ms per generated token of one request, 128
+tokens, prompts as in the table above, b = 1 over all 8 prompts alone; tok/s is the total):
+
+| batch | no draft | draft `k = 7` for batch 1, plain decode above (`num_speculative_tokens_per_batch_size=[[1,1,7],[2,8,0]]`) | ratio |
+|---|---|---|---|
+| 1 | 20.03 ms (49.9 tok/s) | 20.36 ms (49.1 tok/s) | 0.98x |
+| 2 | 25.07 ms (79.8 tok/s) | 25.60 ms (78.1 tok/s) | 0.98x |
+| 4 | 35.29 ms (113.3 tok/s) | 35.47 ms (112.8 tok/s) | 0.99x |
+| 8 | 58.47 ms (136.8 tok/s) | 58.02 ms (137.9 tok/s) | 1.01x |
+
+and with `k = 7` at every batch size (first 64 tokens, one prompt at b1, 4 / 8 distinct prompts
+at b4 / b8; the first 64 tokens of the first prompt accept 2.15 per step, so this is the
+optimistic case):
+
+| batch | no draft | `k = 7` | ratio | mean accepted per step |
+|---|---|---|---|---|
+| 1 | 20.01 ms (50.0 tok/s) | 17.13 ms (58.4 tok/s) | 1.17x | 2.15 (20 drafts) |
+| 4 | 33.93 ms (117.9 tok/s) | 43.54 ms (91.9 tok/s) | 0.78x | 1.93 (89 drafts) |
+| 8 | 54.95 ms (145.6 tok/s) | 62.84 ms (127.3 tok/s) | 0.87x | 1.75 (190 drafts) |
+
+* The engine step (`profile_decode.py --spec-k 7`, async scheduling off, random-token prompts) is
+  48.2 ms at batch 1 (41.5 - 55.6) and 99.8 ms at batch 4, against 21.1 / 33.3 ms without a
+  draft: the verification of 8 rows (about the 56 ms of an 8-row decode) plus the draft
+  (about 5 ms).  The break-even is 2.4 accepted tokens per step; the measured 2.41 (192 tokens)
+  and 2.85 (128 tokens) sit on it, and the effective step of the bench is 20.36 x 2.85 =
+  58 ms, 10 ms above the profile's step (host work the profile does not count
+  `[INFERENCE]`).  **DSpark at `k = 7` is therefore not a net gain on this stack**: +17% on a
+  high-acceptance start of an answer, 0.98x over 8 different prompts at batch 1, a loss at batch >= 4.
+* The scheduler's dynamic speculative decoding (`num_speculative_tokens_per_batch_size`, entries
+  `[first batch, last batch, verified draft tokens]`) works with the DSpark speculator: the draft
+  always proposes 7 tokens (the model requires `num_speculative_tokens = 7`, the draft block is
+  8 rows), the scheduler verifies as many as the batch size allows, and with 0 above batch 1 the
+  engine runs at the speed of the no-draft engine (table above, within 1.5%).  Verified tokens `K`
+  at batch 1 (`[[1, 1, K], [2, 8, 0]]`, same bench, 8 prompts x 128 tokens; no draft: 20.03 ms):
+
+  | K verified | 1 | 2 | 3 | 4 | 7 |
+  |---|---|---|---|---|---|
+  | ms per token (tok/s) | 18.07 (55.3) | 18.12 (55.2) | **16.50 (60.6)** | 19.51 (51.3) | 20.36 (49.1) |
+  | speed-up | 1.11x | 1.11x | **1.21x** | 1.03x | 0.98x |
+  | mean accepted per step | 0.67 | 0.90 | 1.23 | 1.55 | 1.85 |
+  | rows of the verification | 2 | 3 | 4 | 5 | 8 |
+
+  `K = 3` is the best: its 4 rows run the 4-row MoE instance and the fifth row of `K = 4` costs
+  the step of the 8-row instance (the kernel table above) `[INFERENCE]`.  A second schedule,
+  `[[1, 1, 3], [2, 2, 1], [3, 8, 0]]`, gave 16.25 ms at batch 1 (61.5 tok/s, 1.23x) but nothing at
+  batch 2 (25.09 ms against 25.07 ms: two requests with one verified token each pay what they
+  gain), and 36.66 ms at batch 3 because the default grid pads 3 rows to 4 (see the capture sizes).
+* Recipe for one V620, TP = 1: the compilation config above and
+  `--speculative-config '{"method": "dspark", "num_speculative_tokens": 7,
+  "num_speculative_tokens_per_batch_size": [[1, 1, 3], [2, 8, 0]]}'`: 1.21x for a single stream,
+  the speed of the no-draft engine from batch 2 up (a dense decode grid together with a draft was
+  not measured; the graph memory with the draft is 1.94 GiB).
+* Greedy equality (26 generations x 24 tokens, `--compare`): speculative vs eager B 19 / 26
+  identical, max `|dlogp|` before the first divergence 0.064, the divergences at positions 16 and
+  23 on near-ties of 0.012 - 0.061 nats; speculative vs no-draft `FULL_AND_PIECEWISE` 20 / 26
+  (0.081).  The floor of the checkpoint on this box (eager A vs eager B) is 17 / 26 (0.082).
+
+### Gates run
+
+| command | result |
+|---|---|
+| CPU: `tests/models/inkling2_loop` + `tests/models/test_inkling2_loop_blocks.py`, `test_inkling2_loop_moe.py`, `test_inkling2_tiny_harness.py` | 522 passed, 77 skipped in 410 s (part A: 519 passed, 76 skipped; +3 new CPU tests) |
+| GPU (HIP 2): `tests/models/inkling2_loop/test_serving_path_graph_gpu.py` | 5 passed in 5.57 s |
+| GPU (HIP 2): `tests/models/inkling2_loop/test_serving_path_gpu.py` | 116 passed in 136.08 s |
+| GPU (HIP 2): `tests/v1/spec_decode/test_dflash_prepare_inputs.py` (the runner's Triton path, which every non-Inkling draft keeps) | 6 passed in 5.08 s (6 failed first: `propose` reads the new `uses_hip_prepare_inputs`, and the test's speculator stand-in got that one attribute) |
+
+### Open items after part B
+
+* `conv_passes` still launches `kv_prep` / `sconv_static` twice for `q > 1` and while tracing a
+  breakable graph (needs a write / read-phase split inside the kernel, csrc).
+* The breakable graphs give no speed-up for this model; their cost is the padding.  The default
+  decode grid is dense since part B2 (`dense_decode_cudagraph_architectures`): the recipe needs no
+  `decode_cudagraph_capture_request_sizes`.
+* DSpark: the fifth-row cliff of a verification step is removed at the kernel level in part B2 (the
+  row policy and the register spills of the mxfp8 kernel, microbenchmarks and tests there).  The
+  `K = 1 .. 7` table above (best `K = 3`, 1.21x at batch 1) was measured before that change; its
+  engine-level re-measurement (decode ms per row count, the K table with the dense default grid, the
+  per-launch engine profile) was queued on the box (`final_chain.sh` of the GraphDspark work
+  directory, results in `out/fin_*`) and is not in this document.
+* TP = 1 maximum length (8192 served; the largest length that fits is not measured) and TP =
+  2 / 4 at 1,048,576 are not covered by part B; neither is TP > 1 with graphs.
+* `vllm serve` itself was not started: the runs use `LLM(...)` with the same
+  `compilation_config` dictionary.
+
+## 2026-11-22 — integration part B2: the cost of a verification row (MoE) and the default decode grid
+
+Part B left a fifth decode row at +10.5 ms (eager, 45.3 ms against 34.8 ms), an mxfp8 MoE kernel at
+0.74 ms (M = 4) and 1.46 ms (M = 8) per launch, a best DSpark verification of 3 tokens (the 4-row
+instance) and a decode grid that pads unless the recipe lists every size.  This part removes the
+first three causes and the fourth.  Files: `csrc/rocm/moe_lowp_dot2_rdna2.cu` (the mxfp8 kernel),
+`vllm/models/inkling2_loop/amd/moe.py` (the row policy and a loader guard), `vllm/config/vllm.py`
+(the default grid), `tests/kernels/core/test_inkling2_moe_rdna2.py`,
+`tools/rdna/inkling2/{moe_rows_bench,moe_jit}.py`.
+
+### Where the cliff came from
+
+* **The policy.**  A kernel block holds the routed rows of ONE expert (`block_size_m` of them, padded).
+  A chunk of `T` tokens routes `8 T` rows over 128 experts, so up to a few dozen tokens nearly every
+  block holds a single row and a wider block only adds padded rows of dot2 work.
+  `Inkling2LoopMoE._default_block_size_m` chose the width 1 / 2 / 4 / 8 by the token count (1, 2, 3 - 4,
+  5 and more): every step of 5 - 8 rows (a decode batch of five, a verification of `K >= 4`) ran the
+  8-row instance.  The kernels themselves have no cliff (bench below).
+* **The old mxfp8 kernel spilled registers.**  `-Rpass-analysis=kernel-resource-usage` on gfx1030, old
+  against new source (`moe_jit.py --resource-usage`):
+
+  | instance | old VGPRs / spilled VGPRs / scratch B per lane / waves per SIMD | new |
+  |---|---|---|
+  | mxfp8 M = 1 | 128 / 121 / 256 / 8 | 85 / 0 / 0 / 10 |
+  | mxfp8 M = 2 | 128 / 158 / 336 / 8 | 93 / 0 / 0 / 10 |
+  | mxfp8 M = 4 | 128 / 229 / 496 / 8 | 128 / 2 / 12 / 8 |
+  | mxfp8 M = 8 | 128 / 396 / 1108 / 8 | 124 / 0 / 0 / 8 |
+  | nvfp4 M = 1 / 2 / 4 / 8 (unchanged) | 99 / 99 / 80 / 112 VGPRs, no spills, 9 / 9 / 12 / 9 waves | same |
+
+  The dequantisation `e4m3 -> f32 -> * 2^(scale - 127) -> f16` of 4 columns x 32 K per thread kept
+  more values live than 128 registers hold, and every row added accumulators and activation reads.
+
+### The new mxfp8 kernel
+
+`moe_gemm_mxfp8_kernel_rdna2` dequantises on the 16-bit integer pipe: the 7 magnitude bits of an e4m3
+byte moved to fp16 bits 13..7 are the fp16 encoding of `value * 2^-8` (normals and subnormals alike),
+one `half2` multiply by `2^(scale - 119)` per 32-K block gives `value * 2^(scale - 127)` rounded to
+fp16 once (two `v_perm_b32` and a few logic ops per 4 bytes instead of the float conversion chain),
+and the activations of all `M` rows are read from LDS once per 8-K group as one `uint4` each.  The
+accumulation order of the four `v_dot2` calls, the fp16 CAS accumulation and `write_out` are
+unchanged.
+
+* **Exactness.**  The result of the dequantisation is bit for bit the old `__float2half_rn(e4m3_to_f32(b)
+    * 2^(scale - 127))` for scale bytes 95..134 (where `2^(scale - 119)` is an fp16 number);
+  `test_mxfp8_dequant_is_exact_for_every_byte_and_supported_scale`checks all 256 byte values, spread
+  over eight columns with the scales 95, 104, 105, 118, 120, 127, 130, 134, with one-hot activations
+  for each of the four instances.  The loader refuses other scales (`MXFP8_SCALE_RANGE` in
+  `repack_mxfp8`); the real checkpoint's four mxfp8 layers span 113..118 (checked over every tensor).
+* **The nvfp4 kernel is unchanged** and does not need to change: it already shares the dequantisation
+  of a block among its rows (bench: 52 -> 77 us for M = 1 -> 8 at one token) and from 5 tokens on it is
+  at the memory stream rate (T = 8, M = 1: 64 expert blocks x 2.98 MB = 191 MB in 402 us, 475 GB/s
+  against the 512 GB/s of the card `[INFERENCE: spec figure of 256-bit GDDR6 at 16 Gbps, not measured]`).
+* **Code objects (gfx1030, `llvm-objdump -d --symbolize-operands` of the two builds, per kernel):** the four
+  nvfp4 instances (M = 1 / 2 / 4 / 8) are **identical** (1176 / 1414 / 1870 / 2776 instructions in both);
+  the four mxfp8 instances **changed on purpose**: 2981 -> 778, 3364 -> 1017, 4073 -> 1479 and
+  5735 -> 2388 instructions.  No instance was added.  The kernels have templates for 1 / 2 / 4 / 8 rows
+  and `inkling2_glue_moe_route` (the router and aligner, `inkling2_glue_rdna2.cu`) refuses other
+  widths, so 3 / 5 / 6 / 7 would be dead instances; the table below shows they are not needed.
+* **Six architectures.**  `python tools/rdna/inkling2/moe_jit.py --archs
+  "gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1200" --resource-usage` compiles old and new source
+  with exit 0 (no errors): gfx1030 builds the kernels, the other five the stubs inside the
+  `lowp_dot2` namespace (40 stub blocks, no registers, the same as before).
+
+### The row policy
+
+`_BLOCK_M_BY_TOKENS` in `moe.py`, per expert format, by the token count of a chunk:
+
+| tokens | 1 - 4 | 5 - 12 | 13 - 48 | 49 - 64 | 65 and more |
+|---|---|---|---|---|---|
+| NVFP4 layers (0 - 19) | 1 | 2 | 4 | 4 | 8 |
+| MXFP8 layers (20 - 23) | 1 | 2 | 2 | 8 | 8 |
+
+(old policy for both formats: 1 row for 1 token, 2 for 2, 4 for 3 - 4 and 8 for 5 and more).  Chosen from the bench
+below as the fastest width at every measured token count or within 3% of it.
+
+### Per-launch numbers (`moe_rows_bench.py`, real layer shapes, V620, HIP 2)
+
+Hidden 2304, expert width 1152, 128 experts, top 8, one launch of the up (w13: K = 2304, N = 2304) and
+down (w2: K = 1152, N = 2304) GEMM, microseconds, uniform random routing, 50 iterations per cell.
+The weights of one launch are re-read every iteration, so the cells where they fit the 128 MB
+infinity cache (one token: 24 MB) are cache-warm and faster than in the engine
+`[INFERENCE: not isolated]`.  Old kernel -> new kernel, per instance M = 1 / 2 / 4 / 8:
+
+| format / stage / tokens | M = 1 | M = 2 | M = 4 | M = 8 |
+|---|---|---|---|---|
+| mxfp8 w13, 1 token | 213 -> 35 | 257 -> 37 | 360 -> 40 | 639 -> 56 |
+| mxfp8 w13, 5 tokens | 1097 -> 470 | 1142 -> 471 | 1538 -> 487 | 2590 -> 482 |
+| mxfp8 w13, 8 tokens | 1740 -> 629 | 1893 -> 630 | 2501 -> 649 | 4224 -> 642 |
+| mxfp8 w13, 16 tokens | 3328 -> 1098 | 2988 -> 1092 | 3568 -> 1126 | 5984 -> 1103 |
+| mxfp8 w13, 64 tokens | not run -> 1994 | 8899 -> 1674 | 7793 -> 1673 | 10120 -> 1648 |
+| mxfp8 w13, 128 tokens | not run -> 3461 | 16380 -> 2421 | 13064 -> 1947 | 14425 -> 1832 |
+| mxfp8 w2, 5 tokens | 534 -> 63 | 613 -> 66 | 843 -> 83 | 1484 -> 118 |
+| mxfp8 w2, 8 tokens | 869 -> 238 | 906 -> 237 | 1234 -> 263 | 2067 -> 244 |
+| nvfp4 w13, 1 token (unchanged) | 48 / 52 | 49 / 49 | 59 / 59 | 76 / 77 |
+| nvfp4 w13, 5 tokens (unchanged) | 183 / 171 | 158 / 150 | 187 / 180 | 252 / 246 |
+| nvfp4 w13, 8 tokens (unchanged) | 398 / 402 | 397 / 401 | 400 / 400 | 514 / 510 |
+| nvfp4 w13, 64 tokens (unchanged) | - | 1616 / 1663 | 1286 / 1300 | 1311 / 1284 |
+| nvfp4 w2, 5 tokens (unchanged) | 93 / 92 | 96 / 91 | 111 / 105 | 150 / 141 |
+
+(nvfp4 rows: two measurements of the same code, before / after, to show the noise: within 5%.)
+What the engine pays per layer visit at the token counts of a verification (w13 + w2, old policy and
+kernel -> new policy and kernel):
+
+| tokens | mxfp8 layer | nvfp4 layer |
+|---|---|---|
+| 1 | 326 -> 58 us (M = 1) | 84 -> 84 us (M = 1, same instance) |
+| 4 | 1988 -> 348 us (M = 4 -> 1) | 235 -> 203 us (M = 4 -> 1) |
+| 5 | 4074 -> 537 us (M = 8 -> 2) | 387 -> 241 us (M = 8 -> 2) |
+| 8 | 6291 -> 867 us (M = 8 -> 2) | 713 -> 535 us (M = 8 -> 2) |
+
+### Tests and mutation checks
+
+`tests/kernels/core/test_inkling2_moe_rdna2.py` (117 tests, HIP 2): both formats x up / down x
+`block_size_m` 1 / 2 / 4 / 8 x tokens 1, 2, 3, 5, 8, 13, 40 (every row of the output against an fp64
+reference built from the dequantised weights; K = 288 and N = 1056 so both tails are covered; 4
+routed experts per token, experts with more rows than one block holds), the exactness test above,
+and the rejection of a block width of 3.  The old kernel passes 117 (68 s), the new 117 (105 s with
+the JIT build).  `I2_MOE_JIT=<path to a .cu>` runs the same tests on a JIT build of that file
+(`moe_jit.py`): fifteen mutants of the new source were each run that way and **all fifteen are killed**
+(first failing case in brackets): mxfp8 sign bit dropped, exponent top bit dropped, factor `2^(s -
+120)` instead of `2^(s - 119)`, bytes 0/1 taken from lanes 2/3, lanes swapped, every row reading row
+0's activations (`mxfp8-up-2-3`), the last row not accumulated, scale row stride doubled, 8-K group
+offset not advanced (all `mxfp8-up-1-1`); nvfp4 block-global scale dropped, second scale row
+replaced (`nvfp4-up-1-1`); router weight dropped (`nvfp4-down-1-1`), output row divided by the wrong
+top-k (`nvfp4-down-1-2`), expert id read from the wrong block, K tail dropped (`nvfp4-up-1-1`).
+CPU tests (`test_serving_path_cpu.py`): the policy table (widths in {1, 2, 4, 8}, never narrower with more
+tokens, 1 up to 4 tokens, 2 for 5 - 8), the loader guard, and the default decode grid below.
+
+### The default decode grid
+
+`dense_decode_cudagraph_architectures()` (`vllm/config/vllm.py`; Inkling-2 on RDNA only, every other
+architecture and Inkling-2 off RDNA keep the shared-size default) makes the default
+`decode_cudagraph_capture_request_sizes` every request count up to 16
+(`DENSE_DECODE_CUDAGRAPH_REQUESTS`) united with `decode_cudagraph_capture_grid(max_num_seqs)`, up to
+`max_num_seqs`.  The sizes are request counts, so plain decode and the verification batches of a
+draft (query length `1 + K`) both get the dense counts; an explicit list still wins.  Part B measured
+what this avoids: 3 rows replayed in the 4-row graph 35.4 ms against 30.8 ms in an exact graph, 5 rows
+in the 8-row graph 61.0 ms against 43.8 ms.  CPU tests (`test_serving_path_cpu.py`): the default sizes
+for `k = 0` and `k = 7` at `max_num_seqs` 8 (1 .. 8) and 64 (1 .. 16 then the grid), the gating
+(another architecture, Inkling-2 off RDNA: 1, 2, 4, 8 as before) and the explicit override.
+
+### Engine: decode with the new kernel, policy and default grid
+
+`graph_check.py --mode FULL_AND_PIECEWISE --max-model-len 2048 --prefix-caching --batches 1,2,...,8
+--tokens 128 --reps 2 --skip-outputs`, real checkpoint, TP = 1, HIP 2, **no** `compilation_config`
+sizes (the default grid is dense), `_rocm_C` rebuilt from the new `.cu`; ms per generated token of
+one request (= the step time of `b` rows), tok/s is the total over the batch.  The part B columns
+are the numbers in the tables above (eager and default-grid rows of the 64-token bench; b = 1, 2 from
+the 128-token no-draft bench), so the comparison is not token-for-token the same bench; the longer
+sequences of the new run should cost slightly more per step, i.e. the comparison is conservative
+`[INFERENCE]`:
+
+| rows | part B eager | part B `FULL_AND_PIECEWISE`, default grid 1, 2, 4, 8 | part B2 `FULL_AND_PIECEWISE`, default (dense) grid | tok/s total (B2) |
+|---|---|---|---|---|
+| 1 | 21.07 | 20.03 | 18.97 | 52.7 |
+| 2 | 25.50 | 25.07 | 22.93 | 87.2 |
+| 3 | 30.98 | 35.44 (padded to 4) | 26.71 | 112.3 |
+| 4 | 34.81 | 33.93 | 30.09 | 133.0 |
+| 5 | 45.28 | 61.04 (padded to 8) | 32.53 | 153.7 |
+| 6 | 48.99 | 60.70 (padded to 8) | 34.71 | 172.9 |
+| 7 | 53.04 | 58.51 (padded to 8) | 37.62 | 186.1 |
+| 8 | 56.13 | 54.95 | 40.24 | 198.8 |
+
+The fifth row now costs +2.4 ms (30.09 -> 32.53 ms) instead of +10.5 ms, and every row count is
+replayed in its own graph (3 rows no longer pay the 4-row graph).  Graph memory 0.50 GiB (0.57 GiB
+with the part B default grid).  Not measured in this document: the eager column with the new
+kernel, the engine profile per launch, and the DSpark `K` table (queued on the box, see the open
+items).
+
+Gates on the rebuilt `_rocm_C` (HIP 2): `test_inkling2_moe_rdna2.py` 117 passed (67.5 s);
+`test_serving_path_gpu.py` + `test_serving_path_graph_gpu.py` + `inkling2_loop/test_moe.py` +
+`test_inkling2_loop_moe.py` 186 passed (204.8 s); CPU `test_real_checkpoint_names.py` +
+`test_serving_path_cpu.py` 51 passed, 4 skipped (the full CPU suite gave 521 passed, 77 skipped and 7
+errors before the meta-tensor fix of the MXFP8 scale guard, which the two files above then
+cleared; the full suite was not repeated).

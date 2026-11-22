@@ -29,6 +29,7 @@ from paged_harness import text_config  # noqa: E402
 from vllm import _custom_ops as ops  # noqa: E402
 from vllm.models.inkling2_loop.amd import attention as attention_mod  # noqa: E402
 from vllm.models.inkling2_loop.amd import glue as glue_mod  # noqa: E402
+from vllm.models.inkling2_loop.amd import moe as moe_mod  # noqa: E402
 from vllm.models.inkling2_loop.amd import state as state_mod  # noqa: E402
 from vllm.models.inkling2_loop.configs import Inkling2LoopTextConfig  # noqa: E402
 
@@ -211,3 +212,119 @@ def test_workspace_moe_scratch_is_per_chunk():
     assert ws.moe_views(glue_mod.MAX_MOE_TOKENS, 8) is views  # memoised
     # a step of 4096 tokens is routed as four chunks of the same scratch
     assert ws.f32["logits"].numel() == glue_mod.MAX_MOE_TOKENS * ws.E
+
+
+# ---------------------------------------------------------------------------
+# expert GEMM block rows, MXFP8 scale range, default decode graph sizes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
+def test_moe_block_rows_policy(fmt):
+    def policy(tokens):
+        return moe_mod.Inkling2LoopMoE._default_block_size_m(
+            SimpleNamespace(quant_format=fmt), tokens, 8
+        )
+
+    rows = [policy(t) for t in range(1, 2049)]
+    assert set(rows) <= {1, 2, 4, 8}  # the widths the router and the kernels have
+    assert rows == sorted(rows)  # more tokens never narrow the blocks
+    assert rows[0] == 1 and rows[-1] == 8
+    assert {policy(t) for t in range(1, 5)} == {1}  # a verify step of up to 4 rows
+    # 5..8 rows (a 4-way draft step, five or more requests) were 8-row blocks: the
+    # 5 -> 8 cliff
+    assert {policy(t) for t in range(5, 9)} == {2}
+
+
+def test_repack_mxfp8_refuses_scales_outside_the_exact_range():
+    lo, hi = moe_mod.MXFP8_SCALE_RANGE
+    w = torch.zeros(1, 8, 32, dtype=torch.uint8)
+    for scale in (lo, 118, hi):
+        moe_mod.repack_mxfp8(w, torch.full((1, 8, 1), scale, dtype=torch.uint8))
+    for scale in (0, lo - 1, hi + 1, 255):
+        with pytest.raises(ValueError, match="MXFP8 scale bytes"):
+            moe_mod.repack_mxfp8(w, torch.full((1, 8, 1), scale, dtype=torch.uint8))
+
+
+def _default_decode_sizes(
+    monkeypatch, architectures, *, rdna=True, max_num_seqs=8, k=0, **compilation
+):
+    """`decode_cudagraph_capture_request_sizes` resolved for a model of
+    ``architectures`` (and, with ``k``, a draft of k tokens) without explicit sizes."""
+    from unittest.mock import MagicMock
+
+    from vllm.config import CompilationConfig, CUDAGraphMode, SchedulerConfig
+    from vllm.config import vllm as vllm_config_mod
+    from vllm.config.vllm import VllmConfig
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: rdna)
+    monkeypatch.setattr("vllm.platforms.rdna.on_rdna_family", lambda: rdna)
+    vllm_config_mod.dense_decode_cudagraph_architectures.cache_clear()
+    try:
+        compilation_config = CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE, **compilation
+        )
+        config = MagicMock(spec=VllmConfig)
+        config.compilation_config = compilation_config
+        config.scheduler_config = SchedulerConfig.default_factory(
+            max_num_seqs=max_num_seqs, max_num_batched_tokens=2048
+        )
+        config.model_config = MagicMock()
+        config.model_config.enforce_eager = False
+        config.model_config.architectures = list(architectures)
+        config.model_config.hf_text_config = None
+        config.performance_mode = None
+        config.diffusion_config = None
+        config.speculative_config = (
+            SimpleNamespace(
+                method="eagle3",
+                num_speculative_tokens=k,
+                num_speculative_tokens_per_batch_size=None,
+                uses_dynamic_speculative_decoding=lambda: False,
+                use_multi_module_mtp=lambda: False,
+                use_gemma4_mtp=lambda: False,
+                enable_adaptive_verification=False,
+            )
+            if k
+            else None
+        )
+        config.num_speculative_tokens = k
+        config.uniform_decode_query_len = 1 + k
+        config.get_decode_cudagraph_query_lens = lambda q: (
+            VllmConfig.get_decode_cudagraph_query_lens(config, q)
+        )
+        config.get_draft_decode_cudagraph_request_sizes = lambda: (
+            VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
+        )
+        config._split_cudagraph_capture_sizes = lambda *args: (
+            VllmConfig._split_cudagraph_capture_sizes(config, *args)
+        )
+        VllmConfig._set_cudagraph_sizes(config)
+        return compilation_config.decode_cudagraph_capture_request_sizes
+    finally:
+        vllm_config_mod.dense_decode_cudagraph_architectures.cache_clear()
+
+
+_INKLING = ["Inkling2LoopForConditionalGeneration"]
+
+
+@pytest.mark.parametrize("k", [0, 7])
+def test_inkling2_default_decode_graph_sizes_are_dense(monkeypatch, k):
+    # a padded row runs a whole expert row: no 5-in-8 padding by default
+    assert _default_decode_sizes(monkeypatch, _INKLING, k=k) == list(range(1, 9))
+    wide = _default_decode_sizes(monkeypatch, _INKLING, max_num_seqs=64, k=k)
+    assert wide[:16] == list(range(1, 17)) and wide == sorted(set(wide))
+    assert wide[-1] == 64 and len(wide) < 40
+
+
+def test_inkling2_default_decode_graph_sizes_are_gated(monkeypatch):
+    # other architectures, and Inkling-2 off RDNA, keep the shared-size defaults
+    for architectures, rdna in ((["LlamaForCausalLM"], True), (_INKLING, False)):
+        sizes = _default_decode_sizes(monkeypatch, architectures, rdna=rdna)
+        assert 5 not in sizes and sizes == [1, 2, 4, 8]
+    # explicit sizes win
+    explicit = _default_decode_sizes(
+        monkeypatch, _INKLING, decode_cudagraph_capture_request_sizes=[1, 4]
+    )
+    assert explicit == [1, 4]

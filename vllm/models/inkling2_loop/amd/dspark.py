@@ -855,6 +855,7 @@ class Inkling2DSparkSpeculator(DSparkSpeculator):
     """
 
     _speculator_name = "Inkling2 DSpark"
+    uses_hip_prepare_inputs = True  # the HIP port of the runner's Triton input prep
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)

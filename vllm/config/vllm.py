@@ -156,12 +156,51 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
             # cudagraph capture (host-VA page-not-present on unallocated
             # scratch); keep it eager via @eager_break_during_capture.
             archs |= {"Qwen3_5ForCausalLM", "Qwen3_5MoeForCausalLM"}
+            # Inkling-2 serves on native HIP kernels, not a torch.compile'd graph:
+            # without breakable graphs FULL_AND_PIECEWISE falls back to
+            # FULL_DECODE_ONLY. Its attention op breaks out of PIECEWISE segments
+            # (``attend_hip``), everything else is captured.
+            archs.add("Inkling2LoopForConditionalGeneration")
         return frozenset(archs)
     if current_platform.is_cuda():
         # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
         # platforms keep the torch.compile path.
         return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
+
+
+#: Request counts up to this many get their own FULL decode graph on architectures
+#: whose padded decode rows are real work (see `dense_decode_cudagraph_architectures`).
+DENSE_DECODE_CUDAGRAPH_REQUESTS = 16
+
+
+@lru_cache
+def dense_decode_cudagraph_architectures() -> frozenset[str]:
+    """Architectures whose default decode CUDA graph sizes are dense.
+
+    A padded row of a FULL decode graph runs the whole forward, and on a model whose
+    experts are streamed per routed row (Inkling-2 on RDNA2: one expert block per row,
+    ~4 ms per row at batch 1 - 8) that is as expensive as a real row: a 5-row batch
+    replayed in the 8-row graph measured 61.0 ms against 45.3 ms eager and 43.8 ms in
+    its own graph.  Their default grid is every request count up to
+    `DENSE_DECODE_CUDAGRAPH_REQUESTS`, then the usual request-count grid.
+    """
+    if current_platform.is_rocm():
+        from vllm.platforms.rdna import on_rdna_family
+
+        if on_rdna_family():
+            return frozenset({"Inkling2LoopForConditionalGeneration"})
+    return frozenset()
+
+
+def uses_dense_decode_cudagraph_grid(model_config) -> bool:
+    """Whether `model_config` is of an architecture with dense default decode sizes."""
+    if model_config is None:
+        return False
+    architectures = set(model_config.architectures)
+    text_config = getattr(model_config, "hf_text_config", None)
+    architectures.update(getattr(text_config, "architectures", None) or ())
+    return bool(architectures & dense_decode_cudagraph_architectures())
 
 
 class OptimizationLevel(IntEnum):
@@ -2694,6 +2733,14 @@ class VllmConfig:
                 max_num_seqs
                 if max_decode_requests is None
                 else min(max_decode_requests, max_num_seqs)
+            )
+        elif uses_dense_decode_cudagraph_grid(self.model_config):
+            # every request count up to DENSE_DECODE_CUDAGRAPH_REQUESTS (the sizes
+            # are request counts: each query length, plain decode and speculative
+            # verification, captures the counts its batches reach), then the grid
+            dense = range(1, min(DENSE_DECODE_CUDAGRAPH_REQUESTS, max_num_seqs) + 1)
+            decode_sizes = sorted(
+                {*dense, *decode_cudagraph_capture_grid(max_num_seqs)}
             )
         else:
             # The request counts each target query length rounds the shared sizes

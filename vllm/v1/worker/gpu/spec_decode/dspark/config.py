@@ -44,10 +44,12 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
                 target, load_config.download_dir if load_config else None
             )
         # DeepSeek DSpark can ship the weights inside the target checkpoint.
-        # Mistral Large 4 DSpark drafts ship in BF16.
+        # Mistral Large 4 DSpark drafts ship in BF16, and so does the Inkling-2 draft
+        # (`mtp.safetensors`) next to its NVFP4 target.
         if (
             not spec.quantization
             and target.hf_text_config.model_type != "mistral_large_4"
+            and target.hf_config.model_type != "inkling2_loop"
         ):
             spec.quantization = target.quantization
         return target.model

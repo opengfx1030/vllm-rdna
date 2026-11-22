@@ -217,10 +217,15 @@ class Inkling2GlueWorkspace:
         return buf
 
     def attn_out(self, width: int) -> torch.Tensor:
-        """fp16 ``[max_tokens, width]`` attention output (input of ``o_proj``)."""
+        """fp16 ``[max_tokens, width]`` attention output (input of ``o_proj``).
+
+        Zero-initialised: the attention kernel writes the rows of the tokens that
+        belong to a request only, so the padded rows of a CUDA graph keep what the
+        buffer held (zeros, or finite attention outputs of an earlier step), never
+        uninitialised memory."""
         buf = self._attn_out.get(width)
         if buf is None:
-            buf = torch.empty(self.T, width, dtype=torch.float16, device=self.device)
+            buf = torch.zeros(self.T, width, dtype=torch.float16, device=self.device)
             self._attn_out[width] = buf
         return buf
 

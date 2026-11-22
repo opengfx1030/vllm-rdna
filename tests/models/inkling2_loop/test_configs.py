@@ -64,3 +64,38 @@ def test_composite_config_exposes_the_real_vocabulary():
     again = cfgs.Inkling2LoopConfig.from_dict(cfg.to_dict())
     assert again.vocab_size == 500
     assert again.get_text_config().padded_vocab_size == 512
+
+
+_MTP_CONFIG = {
+    "hidden_size": 2304,
+    "num_hidden_layers": 3,
+    "num_attention_heads": 24,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+    "intermediate_size": 9216,
+    "max_position_embeddings": 1048576,
+    "torch_dtype": "bfloat16",
+    "q_bias": False,
+    "o_bias": False,
+    "rms_norm_eps": 1e-06,
+    "rope_theta": 1000000.0,
+    "local_layer_ids": [0, 2],
+    "sliding_window_size": 1024,
+    "block_size": 8,
+    "markov_rank": 256,
+    "markov_head_type": "rnn_hidden",
+    "target_layer_ids": [5, 23, 41, 48],
+}
+
+
+def test_draft_config_asks_the_target_for_the_entry_taps_only():
+    """The draft reads four taps, but the runner taps only the three layer entries: the
+    target appends its final output itself, and the last id (the number of layer
+    visits) is not a layer the target could tap."""
+    target = cfgs.Inkling2LoopConfig.from_dict(
+        {"model_type": "inkling2_loop", "mtp_config": _MTP_CONFIG}
+    )
+    draft = cfgs.Inkling2DSparkConfig.from_target(target)
+    assert target.text_config.total_num_hidden_layers == 48
+    assert draft.target_layer_ids == [5, 23, 41, 48]
+    assert draft.eagle_aux_hidden_state_layer_ids == [5, 23, 41]
