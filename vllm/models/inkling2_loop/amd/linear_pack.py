@@ -16,6 +16,8 @@ import torch
 
 from vllm import _custom_ops as ops
 
+from .parallel import lm_head_shard
+
 ACT_NONE = 0
 ACT_SIGMOID = 1
 ACT_TANH = 2
@@ -246,25 +248,15 @@ def inkling2_linear_pack_lm_head(
 ) -> LMHeadPack:
     """Rank ``tp_rank`` of a vocab-parallel ``lm_head`` (fp16 ``[V_ckpt, K]``).
 
-    TP=1 keeps exactly ``vocab_size`` rows (fp32 logits ``[M, vocab_size]``, the
-    layout the V2 sampler reads). TP>1 follows ``VocabParallelEmbedding``: the
-    vocabulary is padded to a multiple of 64, then split evenly, so every rank
-    writes ``[M, padded // tp]`` logits whose rows past ``vocab_size`` are
-    ``-inf``.
+    The rows and the padding follow :func:`lm_head_shard`; the padding rows of the
+    shard are zero and their logits are written as ``-inf``.
     """
-    if not 0 <= tp_rank < tp_size:
-        raise ValueError(f"tp_rank {tp_rank} outside [0, {tp_size})")
+    lo, rows, take = lm_head_shard(vocab_size, tp_size, tp_rank)
     if weight.shape[0] < vocab_size:
         raise ValueError(f"lm_head has {weight.shape[0]} rows < vocab {vocab_size}")
     if tp_size == 1:
         return LMHeadPack(weight[:vocab_size].contiguous(), vocab_size, 0)
-    padded = -(-vocab_size // 64) * 64
-    if padded % tp_size:
-        raise ValueError(f"padded vocab {padded} not divisible by tp {tp_size}")
-    per = padded // tp_size
-    lo, hi = tp_rank * per, (tp_rank + 1) * per
-    shard = weight.new_zeros(per, weight.shape[1])
-    take = min(hi, vocab_size) - lo
+    shard = weight.new_zeros(rows, weight.shape[1])
     if take > 0:
         shard[:take] = weight[lo : lo + take]
-    return LMHeadPack(shard, max(take, 0), lo)
+    return LMHeadPack(shard, take, lo)

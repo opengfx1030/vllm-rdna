@@ -495,6 +495,9 @@ Other measurements on the same kernel:
   `slot_mapping = -1` / `seq_idx = -1` (they produce zero rows and write nothing).
 * **TP > 1**: pass each rank's slice of `q_scale` `[nh_local, 128]`,
   `rel_scale` `[nh_local, 16]`; `rel_proj_t` is replicated (it is shared by the heads).
+  The serving model shards by KV-head group (`amd/loader.py:local_slice`: rank `r`
+  takes heads `[r * nkv / tp, (r + 1) * nkv / tp)` and their `g = 3` q heads; the KV
+  pages and the conv owners hold the local heads only).
 * **Deviations** (section 6): fp16 probabilities in the tiled kernel (about `5e-4`
   relative on prefill / verify rows), `__expf` / `rsqrtf`; documented, covered by the
   tolerance of the tests, not hidden.

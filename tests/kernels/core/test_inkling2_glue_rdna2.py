@@ -650,6 +650,110 @@ def test_embed_norm_strided_table_and_odd_vocab():
 
 
 # ---------------------------------------------------------------------------
+# embed_lookup: this rank's rows of a vocabulary-sharded embedding
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("idt", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "first,rows", [(0, 4099), (1, 1), (1000, 1500), (4098, 1), (3000, 1099)]
+)
+def test_embed_lookup_shard(idt, first, rows):
+    """A shard returns its rows bit for bit and zeros for every other id; ids are
+    clamped to the vocabulary before the ownership test (like embed_norm)."""
+    g = _gen(40 + first)
+    total, H, T = 4099, 2304, 48
+    table_c = _randn(g, total, H, mag=0.05).to(torch.float16)
+    # a view of the full table: a read past the end of the shard would see the next row
+    table = table_c.to(DEV)
+    shard = table[first : first + rows]
+    ids = torch.randint(0, total, (T,), generator=g, dtype=torch.int64)
+    edge = [0, total - 1, first, first + rows - 1, first - 1, first + rows]
+    edge += [-7, total + 123]
+    ids[: len(edge)] = torch.tensor(edge)
+    out = torch.full((T, H), PAD_FILL, dtype=torch.float16, device=DEV)
+    ops.inkling2_glue_embed_lookup(ids.to(idt).to(DEV), shard, out, first, total)
+    torch.accelerator.synchronize()
+    clamped = ids.clamp(0, total - 1)
+    own = (clamped >= first) & (clamped < first + rows)
+    zero = torch.zeros((), dtype=torch.float16)
+    want = torch.where(own[:, None], table_c[clamped], zero)
+    assert torch.equal(out.cpu(), want)
+
+
+@pytest.mark.parametrize("size", [2, 3, 4])
+def test_embed_lookup_shards_add_up_to_the_full_gather(size):
+    """What the all-reduce relies on: the owner's row plus zeros is the row, also with
+    a zero-padded last shard."""
+    g = _gen(50)
+    total, H, T = 4099, 256, 64
+    per = -(-total // size)
+    table_c = _randn(g, total, H, mag=0.5).to(torch.float16)
+    padded = torch.zeros(per * size, H, dtype=torch.float16)
+    padded[:total] = table_c
+    padded = padded.to(DEV)
+    ids = torch.randint(0, total, (T,), generator=g, dtype=torch.int64)
+    ids[:3] = torch.tensor([0, total - 1, per])
+    ids = ids.to(DEV)
+    acc = torch.zeros(T, H, dtype=torch.float16, device=DEV)
+    for r in range(size):
+        part = torch.full((T, H), PAD_FILL, dtype=torch.float16, device=DEV)
+        ops.inkling2_glue_embed_lookup(
+            ids, padded[r * per : (r + 1) * per], part, r * per, total
+        )
+        acc += part
+    torch.accelerator.synchronize()
+    assert torch.equal(acc.cpu(), table_c[ids.cpu()])
+
+
+@pytest.mark.parametrize("odt", ["f16", "f32"])
+def test_embed_lookup_then_rms_norm_is_embed_norm(odt):
+    """The tensor-parallel embedding (lookup, all-reduce, norm) is bit-identical to
+    the fused TP=1 op: same normalisation code on the same rows."""
+    g = _gen(52)
+    V, H, T = 4099, 2304, 33
+    table = _randn(g, V, H, mag=0.05).to(torch.float16).to(DEV)
+    w = (1.0 + 0.3 * _randn(g, H)).to(torch.float16).to(DEV)
+    ids = torch.randint(0, V, (T,), generator=g, dtype=torch.int64).to(DEV)
+    fused = torch.empty(T, H, dtype=_tdt(odt), device=DEV)
+    ops.inkling2_glue_embed_norm(ids, table, w, fused, EPS)
+    rows = torch.empty(T, H, dtype=torch.float16, device=DEV)
+    ops.inkling2_glue_embed_lookup(ids, table, rows, 0, V)
+    split = torch.empty(T, H, dtype=_tdt(odt), device=DEV)
+    ops.inkling2_glue_rms_norm(rows, split, weight=w, eps=EPS, round_fp16=True)
+    torch.accelerator.synchronize()
+    assert torch.equal(fused, split)
+
+
+def test_embed_lookup_strided_rows_and_empty_batch():
+    g = _gen(51)
+    total, H = 1000, 256
+    table_c = _randn(g, total, H, mag=0.1).to(torch.float16)
+    table, tbuf = _padded(table_c)
+    out, obuf = _padded(torch.full((5, H), PAD_FILL, dtype=torch.float16))
+    ids = torch.tensor([999, 0, 500, 1, 998], dtype=torch.int32, device=DEV)
+    ops.inkling2_glue_embed_lookup(ids, table, out, 0, total)
+    torch.accelerator.synchronize()
+    assert torch.equal(out.cpu(), table_c[ids.cpu().long()])
+    assert _pad_intact(obuf, H) and _pad_intact(tbuf, H)
+    ops.inkling2_glue_embed_lookup(ids[:0], table, out[:0], 0, total)  # T = 0
+    torch.accelerator.synchronize()
+
+
+def test_embed_lookup_rejects_bad_arguments():
+    H = 256
+    ids = torch.zeros(3, dtype=torch.int32, device=DEV)
+    table = torch.zeros(10, H, dtype=torch.float16, device=DEV)
+    out = torch.zeros(3, H, dtype=torch.float16, device=DEV)
+    with pytest.raises(RuntimeError, match="table must be"):
+        ops.inkling2_glue_embed_lookup(ids, table.float(), out, 0, 10)
+    with pytest.raises(RuntimeError, match="out must be"):
+        ops.inkling2_glue_embed_lookup(ids, table, out[:2], 0, 10)
+    with pytest.raises(RuntimeError, match="vocab_total"):
+        ops.inkling2_glue_embed_lookup(ids, table, out, 0, 0)
+    with pytest.raises(RuntimeError, match="multiple of 8"):
+        ops.inkling2_glue_embed_lookup(ids, table[:, :4], out[:, :4], 0, 10)
+
+
+# ---------------------------------------------------------------------------
 # swiglu
 # ---------------------------------------------------------------------------
 def ref_swiglu(gate_up, gc, uc):

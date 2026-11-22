@@ -94,13 +94,19 @@ def check_kernel_shapes(cfg: Inkling2LoopTextConfig) -> None:
 
 
 class Inkling2GlueWorkspace:
-    """Static buffers of the HIP path for up to ``max_tokens`` tokens per step."""
+    """Static buffers of the HIP path for up to ``max_tokens`` tokens per step.
+
+    ``tp_size > 1`` sizes the per-rank buffers for the rank's share: the intermediate
+    dimension of the experts, the attention workspace of the local heads, and an fp32
+    ``o_out`` that receives the ``o_proj`` partial the all-reduce sums.
+    """
 
     def __init__(
         self,
         cfg: Inkling2LoopTextConfig,
         max_tokens: int,
         device: torch.device | str,
+        tp_size: int = 1,
     ) -> None:
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be positive, got {max_tokens}")
@@ -108,7 +114,12 @@ class Inkling2GlueWorkspace:
         self.device = torch.device(device)
         T, H, R = max_tokens, cfg.hidden_size, cfg.loop_gate_rank
         E, K = cfg.n_routed_experts, cfg.num_experts_per_tok
-        inter = cfg.intermediate_size
+        if cfg.intermediate_size % tp_size:
+            raise ValueError(
+                f"intermediate_size {cfg.intermediate_size} is not divisible by "
+                f"tensor parallel size {tp_size}"
+            )
+        inter = cfg.intermediate_size // tp_size  # this rank's share of every expert
         # block states: one per layer whose index is a multiple of the attn-res block
         S = -(-cfg.num_hidden_layers // cfg.n_layers_per_attn_res_block)
         C = -(-H // 128)
@@ -167,13 +178,16 @@ class Inkling2GlueWorkspace:
         # by every layer; the output / o_proj buffers and the split-K workspace too
         self._segments: dict[tuple[str, int], torch.Tensor] = {}
         self._attn_out: dict[int, torch.Tensor] = {}
-        heads = {
-            (cfg.swa_num_attention_heads, cfg.swa_num_key_value_heads),
-            (cfg.num_attention_heads, cfg.num_key_value_heads),
+        heads = {  # this rank's heads (attention is sharded by KV-head group)
+            (
+                cfg.swa_num_attention_heads // tp_size,
+                cfg.swa_num_key_value_heads // tp_size,
+            ),
+            (cfg.num_attention_heads // tp_size, cfg.num_key_value_heads // tp_size),
         }
         numel = max(attention_workspace_numel(nh, nkv) for nh, nkv in heads)
         self.attn_ws = torch.empty(numel, **f32)
-        self.o_out = torch.empty(T, H, **f16)
+        self.o_out = torch.empty(T, H, **(f32 if tp_size > 1 else f16))
 
         # DSpark taps (``ensure_taps``): fp32 copies of the partial block at the
         # entry of the selected layer visits, plus the final fp32 normalised output

@@ -155,6 +155,24 @@ ops.inkling2_glue_embed_norm(ids, table, weight, out, eps=1e-6)
 to the table), `table` fp16 `[V, H]` (row stride aligned), `out` fp16 or fp32
 `[T, H]`.  Multimodal `inputs_embeds` go through `rms_norm(..., round_fp16=True)`.
 
+### 2.5a `inkling2_glue_embed_lookup`
+
+```python
+ops.inkling2_glue_embed_lookup(ids, table, out, vocab_first, vocab_total)
+```
+
+This rank's rows of a vocabulary-sharded embedding (tensor parallelism,
+`inkling2-tensor-parallel.md`):
+`out[t] = table[clamp(ids[t], 0, vocab_total - 1) - vocab_first]` when that row is in
+the shard (`table` holds the ids `[vocab_first, vocab_first + rows)`), zeros
+otherwise.  `ids` int32 / int64, `table` and `out` fp16 with 16-byte aligned rows
+(`H % 8 == 0`).  One CTA per token copies 16-byte vectors.  The rows are an exact copy,
+so the all-reduce of the group (one
+non-zero contributor per row, `x + 0 = x`) rebuilds the full lookup, and
+`rms_norm(rows, out, weight=embed_norm, round_fp16=True)` then equals
+`inkling2_glue_embed_norm` bit for bit (same code on the same values; tested by
+`test_embed_lookup_then_rms_norm_is_embed_norm`).
+
 ### 2.6 `inkling2_glue_moe_route`
 
 ```python
@@ -812,6 +830,29 @@ bound in `csrc/rocm/torch_bindings.cpp` (`rocm_ops.def` + `impl` on
 path (`torch.utils.cpp_extension` with the repo flags); the full CMake build was
 not run.
 
+### 7.5 `inkling2_glue_embed_lookup` (tensor-parallel embedding)
+
+Added for the vocabulary-sharded embedding (`inkling2-tensor-parallel.md`); built into
+`_rocm_C` with the rest (CMake build of the TP tree, 157 steps, 846 s) and bound like the
+other ops, no new source file.
+
+* **Reference**: the output is an exact copy of fp16 rows, so the oracle is bit equality
+  with `table[clamp(ids)]` masked by shard ownership (no tolerance).  Tests
+  (`tests/kernels/core/test_inkling2_glue_rdna2.py`, 17 cases): five shards of a 4,099
+  row table (first / last / single-row / middle shards, int32 and int64 ids, ids on both
+  sides of every boundary, below 0 and above the vocabulary), the shards of TP = 2 / 3 / 4
+  add up to the full gather (zero-padded last shard), `lookup + all-reduce + rms_norm(...,
+  round_fp16=True)` is bit-identical to `inkling2_glue_embed_norm` (fp16 and fp32 `out`),
+  strided table / output rows with intact padding and `T = 0`, argument checks.
+* **Mutation checks** (JIT build of each mutated source, the 17 tests on HIP 4): 10 of 10
+  killed: row offset + 1, `r <= rows` (reads past the shard), `r > 0` (first row lost),
+  `r >= -1` (reads before the shard), no upper clamp, no lower clamp, upper clamp to
+  `total - 2`, misses not zeroed, table row stride `H`, output row stride `H`.
+* **Six architectures** (`gfx1030, gfx1100, gfx90a, gfx942, gfx950, gfx1200`, one JIT build
+  of the whole glue source with the repo flags): compiles; gfx1030 8 VGPRs, 26 SGPRs,
+  no scratch, no LDS, occupancy 16 waves per SIMD; the other five arches hold the empty
+  stub of the kernel (0 VGPRs, no scratch, no LDS) like the other glue kernels.
+
 ## 8. Risks and limits
 
 * **Last-arriver protocol** (`gate_mix` with norm, `moe_route`): a CTA publishes
@@ -845,6 +886,10 @@ not run.
 * **Build.**  The kernels were compiled by the JIT path with the flags of the
   repo build and for six architectures (section 7); the full CMake build of the
   fork was not run by this change.
-* **Tensor parallel.**  `Inkling2LoopMoE` still asserts TP = 1; these ops are
-  per-rank and need no change when the MoE is sharded, but the router weights
-  must then be replicated.
+* **Tensor parallel.**  The MoE shards the intermediate dimension (`I / tp` per rank,
+  `Inkling2LoopMoE(tp_size=...)`), the router and the gate weights are replicated,
+  and these ops run per rank unchanged on the local shapes; the partial MoE output is
+  all-reduced before the post-MLP conv (`docs/rdna2/inkling2-port-spec.md`, "tensor
+  parallelism").  `Inkling2GlueWorkspace(tp_size=...)` sizes `gu` / `act` for the
+  local intermediate size and gives `o_out` the fp32 `[T, H]` shape of the `o_proj`
+  partial.

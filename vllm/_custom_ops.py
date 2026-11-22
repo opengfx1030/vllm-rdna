@@ -2708,6 +2708,21 @@ def inkling2_glue_embed_norm(
     torch.ops._rocm_C.inkling2_glue_embed_norm(ids, table, weight, out, eps)
 
 
+def inkling2_glue_embed_lookup(
+    ids: torch.Tensor,
+    table: torch.Tensor,
+    out: torch.Tensor,
+    vocab_first: int,
+    vocab_total: int,
+) -> None:
+    """``out[t] = table[clamp(ids[t], 0, vocab_total - 1) - vocab_first]`` when that
+    row is in the shard ``table`` (the ids ``[vocab_first, vocab_first + rows)``),
+    zeros otherwise: this rank's part of a vocabulary-sharded embedding (fp16)."""
+    torch.ops._rocm_C.inkling2_glue_embed_lookup(
+        ids, table, out, vocab_first, vocab_total
+    )
+
+
 def inkling2_glue_moe_route_sizes(
     num_tokens: int, num_experts: int, top_k: int, block_size_m: int
 ) -> tuple[int, int, int]:
@@ -6645,6 +6660,16 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_glue_s
         weight: torch.Tensor,
         out: torch.Tensor,
         eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_embed_lookup")
+    def _inkling2_glue_embed_lookup_fake(
+        ids: torch.Tensor,
+        table: torch.Tensor,
+        out: torch.Tensor,
+        vocab_first: int,
+        vocab_total: int,
     ) -> None:
         return
 

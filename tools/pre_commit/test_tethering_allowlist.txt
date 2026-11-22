@@ -81,6 +81,7 @@ tests/models/inkling2_loop/test_moe.py  # fork-only Inkling-2 NVFP4/MXFP8 MoE vs
 tests/models/inkling2_loop/test_paged_model.py  # fork-only Inkling-2 paged model vs transformers reference on tiny checkpoints, CPU unit test; not in CI
 tests/models/inkling2_loop/test_paged_state.py  # fork-only Inkling-2 paged conv/KV state vs dense oracle, CPU unit test; not in CI
 tests/models/inkling2_loop/test_real_checkpoint_names.py  # fork-only Inkling-2 load_weights vs the real checkpoint header on the meta device (skipped without ~/hfcache/inkling2-mini) plus w13 gate/up layout, CPU unit test; not in CI
+tests/models/inkling2_loop/test_tensor_parallel.py  # fork-only Inkling-2 tensor-parallel sharding (TP=2/4: loader slices, per-rank weights, in-process thread ranks vs the transformers reference), CPU unit test; not in CI
 tests/models/inkling2_loop/test_vision_encoder.py  # fork-only Inkling-2 vision encoder vs the fp32 oracle / transformers on gfx1030 (tiny, real shapes, real checkpoint + images; skipped off-RDNA2), not in CI
 tests/models/inkling2_loop/test_vision_loader.py  # fork-only Inkling-2 vision batch geometry, chunking and model.visual.* weight loading (incl. the real checkpoint header on the meta device), CPU unit test; not in CI
 tests/models/inkling2_loop/test_vision_mixin.py  # fork-only Inkling-2 multimodal mixin: embed_multimodal contract, embedding merge, weight routing, tower switch, CPU unit test; not in CI

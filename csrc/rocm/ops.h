@@ -1314,6 +1314,11 @@ void inkling2_glue_embed_norm(const torch::Tensor& ids,
                               const torch::Tensor& weight,
                               const torch::Tensor& out, double eps);
 
+void inkling2_glue_embed_lookup(const torch::Tensor& ids,
+                                const torch::Tensor& table,
+                                const torch::Tensor& out, int64_t vocab_first,
+                                int64_t vocab_total);
+
 void inkling2_glue_moe_route(
     const torch::Tensor& x, const torch::Tensor& gate_w,
     const torch::Tensor& bias, const torch::Tensor& logits,

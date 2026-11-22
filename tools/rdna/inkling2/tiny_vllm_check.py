@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM engine vs the transformers reference on a tiny Inkling-2 checkpoint (one GPU).
+"""vLLM engine vs the transformers reference on a tiny Inkling-2 checkpoint (one GPU, or
+``--tensor-parallel-size`` GPUs).
 
 Boots ``vllm.LLM`` offline on a checkpoint of ``make_tiny_checkpoint.py`` (no tokenizer,
-eager, fp16, TP=1) and compares it with what ``tiny_reference.py`` left next to the
+eager, fp16) and compares it with what ``tiny_reference.py`` left next to the
 weights: ``ref_logits.npy`` ``[P, V]`` (last-position logits), ``ref_logits_decode.npy``
 ``[P, N, V]`` (the logits that produced each greedy token) and the greedy ids in
 ``ref_logits.json``.  The engine returns the whole vocabulary as logprobs
@@ -35,10 +36,22 @@ The prompts are the ones of the tiny harness (``torch.randint(0, 500)`` with see
 5 / 40 / 70 tokens); the 70-token one exceeds the sliding window (16) and the relative
 position extent (32).
 
+Tensor parallelism: ``--tensor-parallel-size 2|4`` shards the model (the checkpoint's
+KV heads, 8 for ``--num-heads 24 --num-kv-heads 8``, must divide by it, and the MoE
+intermediate size by 32 per rank); ``--ar-backend rdna`` selects the one-shot HIP
+all-reduce (``VLLM_RDNA_AR=1``, ``--ar-max-kb`` its gate), ``rccl`` the stock one.
+``--dump FILE`` saves the engine's logprobs of every scenario and ``--against FILE``
+compares them with such a dump of another run (TP=1 against TP=1 measures the run to
+run noise of the expert GEMM's fp16 atomics, which is zero when a token routes to at
+most two experts, TP=1 against TP=2 / 4 the sharding); the ``against/*`` checks
+fail above ``--tol-against`` (mean |dlogp|) or on a different top-1.
+
 Usage (``HIP_VISIBLE_DEVICES`` must select exactly the GPU you were assigned)::
 
     HIP_VISIBLE_DEVICES=2 python tiny_vllm_check.py --ckpt DIR [--chunked] \
-        [--prefix-caching] [--json out.json]
+        [--prefix-caching] [--json out.json] [--dump run.npz] [--against other.npz]
+    HIP_VISIBLE_DEVICES=4,5 python tiny_vllm_check.py --ckpt DIR \
+        --tensor-parallel-size 2 --ar-backend rdna
 
 Thresholds: the reference runs fp32 with exactly dequantised experts, the engine fp16
 activations on the W4A16 / W8A16 kernels, so the comparison is statistical.  A random
@@ -142,7 +155,33 @@ def main() -> int:
         help="VLLM_INKLING2_PATH: the torch reference or the native HIP kernels "
         "(default: the HIP kernels on a GPU)",
     )
+    ap.add_argument("--tensor-parallel-size", type=int, default=1)
+    ap.add_argument(
+        "--ar-backend",
+        choices=["rccl", "rdna"],
+        default="rccl",
+        help="all-reduce of the tensor-parallel group: RCCL (stock) or the one-shot "
+        "HIP push all-reduce (VLLM_RDNA_AR=1; RCCL above its size gate)",
+    )
+    ap.add_argument(
+        "--ar-max-kb",
+        type=int,
+        help="VLLM_RDNA_AR_MAX_KB / ONESHOT_KB (the default gate is 64 KiB)",
+    )
+    ap.add_argument("--dump", help="save this run's logprobs (npz)")
+    ap.add_argument("--against", help="compare with a --dump of another run (npz)")
+    ap.add_argument(
+        "--tol-against",
+        type=float,
+        default=0.05,
+        help="max allowed mean |dlogp| against the --against run",
+    )
     args = ap.parse_args()
+    if args.ar_backend == "rdna":
+        os.environ["VLLM_RDNA_AR"] = "1"
+        if args.ar_max_kb:
+            os.environ["VLLM_RDNA_AR_MAX_KB"] = str(args.ar_max_kb)
+            os.environ["VLLM_RDNA_AR_ONESHOT_KB"] = str(args.ar_max_kb)
     if args.path:
         os.environ["VLLM_INKLING2_PATH"] = args.path
 
@@ -162,7 +201,7 @@ def main() -> int:
         skip_tokenizer_init=True,
         enforce_eager=True,
         dtype="float16",
-        tensor_parallel_size=1,
+        tensor_parallel_size=args.tensor_parallel_size,
         max_model_len=256,
         gpu_memory_utilization=args.gpu_memory_utilization,
         seed=0,
@@ -218,6 +257,8 @@ def main() -> int:
 
     report: dict = {
         "ckpt": str(ckpt),
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "ar_backend": args.ar_backend,
         "chunked": args.chunked,
         "prefix_caching": args.prefix_caching,
         "checks": {},
@@ -407,6 +448,68 @@ def main() -> int:
             same and worst < args.tol_batch,
             f"67 shared tokens + a new tail: ids equal {same}, max |dlogp| {worst:.5f}",
         )
+
+    dump = {
+        "last": np.stack([r["lp"][0] for r in last]),
+        "dec_ids": np.array([r["ids"] for r in dec]),
+        "dec_lp": np.stack([r["lp"] for r in dec]),
+        "batch_ids": np.array([r["ids"] for r in batch]),
+        "batch_lp": np.stack([r["lp"] for r in batch]),
+    }
+    if args.dump:
+        np.savez(args.dump, **dump)
+    if args.against:
+        other = np.load(args.against)
+        # ``last``: the same prefill, so every position is comparable
+        d = np.abs(dump["last"] - other["last"])
+        report["against_last"] = {
+            "max_abs": float(d.max()),
+            "mean_abs": float(d.mean()),
+            "top1": bool((dump["last"].argmax(-1) == other["last"].argmax(-1)).all()),
+        }
+        a = report["against_last"]
+        print(
+            f"  against last: top1={a['top1']} max|dlogp|={a['max_abs']:.4f} "
+            f"mean|dlogp|={a['mean_abs']:.5f}",
+            flush=True,
+        )
+        check(
+            "against/last",
+            a["top1"] and a["mean_abs"] < args.tol_against,
+            f"max {a['max_abs']:.4f} mean {a['mean_abs']:.5f} (tol {args.tol_against})",
+        )
+        # decode / batch: while the generated ids agree, the logprobs are comparable
+        for key in ("dec", "batch"):
+            ids_a, ids_b = dump[f"{key}_ids"], other[f"{key}_ids"]
+            worst, mean, agree = 0.0, [], []
+            for i in range(len(ids_a)):
+                n = 0
+                while n < steps and ids_a[i][n] == ids_b[i][n]:
+                    n += 1
+                agree.append(n)
+                if n:
+                    d = np.abs(dump[f"{key}_lp"][i][:n] - other[f"{key}_lp"][i][:n])
+                    worst = max(worst, float(d.max()))
+                    mean.append(float(d.mean()))
+            report[f"against_{key}"] = {
+                "agree": agree,
+                "max_abs": worst,
+                "mean_abs": float(np.mean(mean)) if mean else None,
+            }
+            print(
+                f"  against {key}: ids equal for {agree} of {steps} steps, max|dlogp|="
+                f"{worst:.4f} mean|dlogp|="
+                f"{report[f'against_{key}']['mean_abs']}",
+                flush=True,
+            )
+            m = report[f"against_{key}"]["mean_abs"]
+            check(
+                f"against/{key}",
+                m is None or m < args.tol_against,
+                f"ids agree {agree} of {steps} steps; max {worst:.4f} mean {m} "
+                f"(tol {args.tol_against}); a greedy flip ends the comparison of that "
+                "prompt",
+            )
 
     report["pass"] = ok
     print("RESULT", "PASS" if ok else "FAIL", flush=True)

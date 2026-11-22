@@ -810,6 +810,42 @@ __global__ void __launch_bounds__(256) rms_norm_kernel(const RmsArgs a) {
 }
 
 // ---------------------------------------------------------------------------
+// embed_lookup: the rows of a vocabulary-sharded embedding table that this rank
+// owns.  The ids of the other ranks give zero rows; the all-reduce of the
+// tensor-parallel group adds the owner's row back (exactly: x + 0 = x).
+// ---------------------------------------------------------------------------
+struct LookupArgs {
+  const uint4* table;  // [rows, H / 8] 16-byte units: this rank's shard
+  const void* ids;     // [T] int32 / int64
+  int ids_i64;
+  int64_t first;   // vocabulary id of the shard's row 0
+  int64_t rows;    // rows of the shard
+  int64_t total;   // ids are clamped to [0, total) like embed_norm
+  int64_t t_row8;  // table row stride in 16-byte units
+  uint4* out;      // [T, H / 8] fp16
+  int64_t o_row8;
+  int H8;
+};
+
+__global__ void __launch_bounds__(256) embed_lookup_kernel(const LookupArgs a) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  const int64_t t = blockIdx.x;
+  int64_t id = a.ids_i64 ? reinterpret_cast<const int64_t*>(a.ids)[t]
+                         : (int64_t)reinterpret_cast<const int32_t*>(a.ids)[t];
+  id = id < 0 ? 0 : (id >= a.total ? a.total - 1 : id);
+  const int64_t r = id - a.first;
+  uint4* dst = a.out + t * a.o_row8;
+  if (r >= 0 && r < a.rows) {
+    const uint4* src = a.table + r * a.t_row8;
+    for (int i = threadIdx.x; i < a.H8; i += blockDim.x) dst[i] = src[i];
+  } else {
+    for (int i = threadIdx.x; i < a.H8; i += blockDim.x)
+      dst[i] = make_uint4(0u, 0u, 0u, 0u);
+  }
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // swiglu: softcapped SwiGLU between the two expert GEMMs
 // ---------------------------------------------------------------------------
 struct SwigluArgs {
@@ -1786,6 +1822,50 @@ void inkling2_glue_embed_norm(const at::Tensor& ids, const at::Tensor& table,
   const hipStream_t stream = at::cuda::getCurrentCUDAStream();
   if (T == 0) return;
   launch_rms(T, H, a, who, stream);
+}
+
+// ---------------------------------------------------------------------------
+// inkling2_glue_embed_lookup
+// ---------------------------------------------------------------------------
+void inkling2_glue_embed_lookup(const at::Tensor& ids, const at::Tensor& table,
+                                const at::Tensor& out, int64_t vocab_first,
+                                int64_t vocab_total) {
+  const char* who = "inkling2_glue_embed_lookup";
+  check_gpu(ids, who, "ids");
+  check_gpu(table, who, "table");
+  check_gpu(out, who, "out");
+  TORCH_CHECK(ids.dim() == 1 && (ids.scalar_type() == at::kInt ||
+                                 ids.scalar_type() == at::kLong),
+              who, ": ids must be a 1-D int32 / int64 tensor");
+  TORCH_CHECK(ids.stride(0) == 1, who, ": ids must be contiguous");
+  check_dtype(table, who, "table", at::kHalf);
+  check_dtype(out, who, "out", at::kHalf);
+  TORCH_CHECK(table.dim() == 2 && table.size(0) > 0, who,
+              ": table must be a non-empty [rows, H]");
+  const int64_t T = ids.size(0), H = table.size(1);
+  TORCH_CHECK(out.dim() == 2 && out.size(0) == T && out.size(1) == H, who,
+              ": out must be [T, H]");
+  check_vec_rows(table, who, "table", 8);
+  check_vec_rows(out, who, "out", 8);
+  TORCH_CHECK(vocab_first >= 0 && vocab_total > 0, who,
+              ": vocab_first must be >= 0 and vocab_total > 0");
+  LookupArgs a{};
+  a.table = reinterpret_cast<const uint4*>(table.data_ptr());
+  a.ids = ids.data_ptr();
+  a.ids_i64 = ids.scalar_type() == at::kLong ? 1 : 0;
+  a.first = vocab_first;
+  a.rows = table.size(0);
+  a.total = vocab_total;
+  a.t_row8 = table.stride(0) / 8;
+  a.out = reinterpret_cast<uint4*>(out.data_ptr());
+  a.o_row8 = out.stride(0) / 8;
+  a.H8 = (int)(H / 8);
+  const at::cuda::OptionalCUDAGuard guard(device_of(table));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (T == 0) return;
+  inkling2_glue::
+      embed_lookup_kernel<<<dim3((unsigned)T), dim3(256), 0, stream>>>(a);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // ---------------------------------------------------------------------------

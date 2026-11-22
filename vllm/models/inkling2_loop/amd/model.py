@@ -38,6 +38,13 @@ from .attention import (
 )
 from .moe import Inkling2LoopMoE
 from .multimodal import Inkling2MultiModalMixin, register_inkling2_processor
+from .parallel import (
+    NO_TP,
+    TensorParallel,
+    check_supported,
+    current_tensor_parallel,
+    lm_head_shard,
+)
 from .state import (
     STREAM_ATTN,
     STREAM_MLP,
@@ -53,6 +60,9 @@ if TYPE_CHECKING:
     from .linear_pack import LMHeadPack
 
 logger = init_logger(__name__)
+
+# rows of logits one all-gather moves when a vocabulary-sharded head serves many rows
+LOGITS_GATHER_ROWS = 64
 
 
 def _gate_weights(w: torch.Tensor, fp16: bool) -> torch.Tensor:
@@ -97,9 +107,11 @@ class Inkling2DecoderLayer(nn.Module):
         layer_idx: int,
         quant_format: loader.ExpertFormat,
         prefix: str,
+        tp: TensorParallel = NO_TP,
     ) -> None:
         super().__init__()
         self.config = config
+        self.tp = tp
         self.layer_idx = layer_idx
         H = config.hidden_size
         self.is_full = not config.is_sliding_layer(layer_idx)
@@ -115,8 +127,10 @@ class Inkling2DecoderLayer(nn.Module):
             else None
         )
         self.mlp_input = blocks.BlockAttentionResidual(config)
-        self.self_attn = Inkling2Attention(config, layer_idx)
-        self.mlp = Inkling2LoopMoE(config, quant_format, prefix=f"{prefix}.mlp")
+        self.self_attn = Inkling2Attention(config, layer_idx, tp)
+        self.mlp = Inkling2LoopMoE(
+            config, quant_format, prefix=f"{prefix}.mlp", tp_size=tp.size
+        )
         if self.is_full:
             self.q_input_layernorm = blocks.Inkling2RMSNorm(H, eps)
             self.k_input_layernorm = blocks.Inkling2RMSNorm(H, eps)
@@ -222,6 +236,7 @@ class Inkling2DecoderLayer(nn.Module):
             attn = self.self_attn(
                 hq, hk, hv, positions, kv_owner, conv_owner, kv_md, conv_md
             )
+            attn = self.tp.all_reduce(attn)  # o_proj is a K-shard: sum the partials
         attn = self._static_conv(
             self.post_attention_convolution,
             attn,
@@ -240,7 +255,7 @@ class Inkling2DecoderLayer(nn.Module):
         h = self.mlp_input(block_states, h)[0]
         if messages is not None:
             h = self.mlp_message_gate(h, mm)
-        h = self.mlp(self.post_attention_layernorm(h).to(dtype))
+        h = self.tp.all_reduce(self.mlp(self.post_attention_layernorm(h).to(dtype)))
         h = self._static_conv(
             self.post_mlp_convolution, h, STREAM_MLP, positions, conv_owner, conv_md
         )
@@ -351,6 +366,9 @@ class Inkling2DecoderLayer(nn.Module):
             attn = self.self_attn.forward_hip(
                 hq, hk, hv, positions, kv_owner, conv_owner, kv_md, conv_md, v.o_out
             )
+            # TP > 1: ``attn`` is the fp32 o_proj partial of this rank's heads; the
+            # sum (fp32, rank order) feeds the short conv, which reads fp32 or fp16
+            attn = self.tp.all_reduce(attn)
             static_conv_hip(
                 self.post_attention_convolution,
                 attn,
@@ -382,7 +400,7 @@ class Inkling2DecoderLayer(nn.Module):
             )  # fmt: skip
 
         # ---- MoE (route, gemm1, swiglu, gemm2) + post-mlp short convolution
-        moe = self.mlp.forward_hip(hq, ws, v.moe_out)
+        moe = self.tp.all_reduce(self.mlp.forward_hip(hq, ws, v.moe_out))
         if conv_md is None:
             ops.inkling2_glue_rms_norm(moe, v.hk, sum_out=v.mlp_c, eps=eps)
         else:
@@ -403,17 +421,28 @@ class Inkling2Model(nn.Module):
         config: Inkling2LoopTextConfig,
         quant_formats: list[loader.ExpertFormat],
         prefix: str,
+        tp: TensorParallel = NO_TP,
     ) -> None:
         super().__init__()
         self.config = config
         H = config.hidden_size
+        self.tp = tp
+        # vocabulary-sharded like the lm_head: this rank holds the rows of the ids
+        # [embed_first, embed_first + rows); the ids of the other ranks give zero rows
+        # and the all-reduce in ``embed_input_ids`` / ``forward_hip`` adds the owner's
+        # row back (x + 0 is exact)
+        self.embed_first, embed_rows, _ = lm_head_shard(
+            config.padded_vocab_size, tp.size, tp.rank
+        )
         self.embed_tokens = nn.Module()
         self.embed_tokens.weight = nn.Parameter(
-            torch.empty(config.padded_vocab_size, H), requires_grad=False
+            torch.empty(embed_rows, H), requires_grad=False
         )
         self.embed_norm = blocks.Inkling2RMSNorm(H, config.rms_norm_eps)
         self.layers = nn.ModuleList(
-            Inkling2DecoderLayer(config, i, quant_formats[i], f"{prefix}.layers.{i}")
+            Inkling2DecoderLayer(
+                config, i, quant_formats[i], f"{prefix}.layers.{i}", tp
+            )
             for i in range(config.num_hidden_layers)
         )
         self.norm = blocks.Inkling2RMSNorm(H, config.rms_norm_eps)
@@ -432,26 +461,38 @@ class Inkling2Model(nn.Module):
 
         This is what the reference ``NormedEmbedding`` returns: the vision mixin
         overwrites the image rows of this tensor and ``forward`` takes it as
-        ``inputs_embeds`` unchanged.
+        ``inputs_embeds`` unchanged.  With a tensor-parallel group the ranks look up
+        the rows they own (zeros elsewhere), an all-reduce adds the owner's row back
+        and ``embed_norm`` runs on the complete rows.
         """
+        eps, weight = self.config.rms_norm_eps, self.embed_norm.weight
+        table = self.embed_tokens.weight
         if self.serving:
             from vllm import _custom_ops as ops
 
             out = torch.empty(
                 input_ids.shape[0],
                 self.config.hidden_size,
-                dtype=self.embed_norm.weight.dtype,
+                dtype=weight.dtype,
                 device=input_ids.device,
             )
-            ops.inkling2_glue_embed_norm(
-                input_ids,
-                self.embed_tokens.weight,
-                self.embed_norm.weight,
-                out,
-                self.config.rms_norm_eps,
+            if self.tp.size == 1:
+                ops.inkling2_glue_embed_norm(input_ids, table, weight, out, eps)
+                return out
+            rows = torch.empty_like(out, dtype=table.dtype)
+            ops.inkling2_glue_embed_lookup(
+                input_ids, table, rows, self.embed_first, self.config.padded_vocab_size
+            )
+            ops.inkling2_glue_rms_norm(
+                self.tp.all_reduce(rows), out, weight=weight, eps=eps, round_fp16=True
             )
             return out
-        return self.embed_norm(F.embedding(input_ids, self.embed_tokens.weight))
+        if self.tp.size == 1:
+            return self.embed_norm(F.embedding(input_ids, table))
+        rel = input_ids - self.embed_first
+        own = (rel >= 0) & (rel < table.shape[0])
+        rows = F.embedding(rel.clamp(0, table.shape[0] - 1), table)
+        return self.embed_norm(self.tp.all_reduce(rows.masked_fill(~own[:, None], 0)))
 
     def forward_reference(
         self,
@@ -571,9 +612,22 @@ class Inkling2Model(nn.Module):
 
         if inputs_embeds is None:
             assert input_ids is not None
-            ops.inkling2_glue_embed_norm(
-                input_ids, self.embed_tokens.weight, self.embed_norm.weight, v.hid, eps
-            )
+            table = self.embed_tokens.weight
+            if self.tp.size == 1:
+                ops.inkling2_glue_embed_norm(
+                    input_ids, table, self.embed_norm.weight, v.hid, eps
+                )
+            else:  # this rank's rows (zeros elsewhere), all-reduce, then embed_norm
+                ops.inkling2_glue_embed_lookup(
+                    input_ids, table, v.moe_out, self.embed_first, cfg.padded_vocab_size
+                )
+                ops.inkling2_glue_rms_norm(
+                    self.tp.all_reduce(v.moe_out),
+                    v.hid,
+                    weight=self.embed_norm.weight,
+                    eps=eps,
+                    round_fp16=True,
+                )
         else:
             # the rows are final embeddings (``embed_input_ids`` applied embed_norm and
             # the vision mixin merged the image rows): widen them into the fp32 stream
@@ -725,11 +779,15 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         serving: bool | None = None,
+        tp: TensorParallel | None = None,
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         assert isinstance(config, Inkling2LoopConfig), type(config)
         self.config = config.text_config
+        # the engine's tensor-parallel group (the single-rank group outside a launch)
+        self.tp = current_tensor_parallel() if tp is None else tp
+        check_supported(self.config, self.tp)
         dtype = vllm_config.model_config.dtype
         if dtype != torch.float16:
             raise ValueError(
@@ -741,10 +799,16 @@ class Inkling2LoopTextForCausalLM(nn.Module):
             vllm_config.model_config.revision,
             self.config.num_hidden_layers,
         )
-        self.model = Inkling2Model(self.config, quant_formats, prefix=prefix + "model")
+        self.model = Inkling2Model(
+            self.config, quant_formats, prefix=prefix + "model", tp=self.tp
+        )
         self.lm_head = nn.Module()
+        # this rank's vocabulary rows (all ``vocab_size`` of them at TP=1)
+        _, head_rows, _ = lm_head_shard(
+            self.config.vocab_size, self.tp.size, self.tp.rank
+        )
         self.lm_head.weight = nn.Parameter(
-            torch.empty(self.config.vocab_size, self.config.hidden_size),
+            torch.empty(head_rows, self.config.hidden_size),
             requires_grad=False,
         )
         self._softcap = self.config.final_logit_softcapping
@@ -765,6 +829,13 @@ class Inkling2LoopTextForCausalLM(nn.Module):
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """Select the global layer visits whose entry block states are returned as
         auxiliary hidden states (the final normalized output is always appended)."""
+        if self.tp.enabled:
+            raise NotImplementedError(
+                "the Inkling-2 DSpark draft shares the target's full-vocabulary "
+                "lm_head and embedding, but with tensor_parallel_size > 1 the head is "
+                "vocabulary-sharded; speculative decoding needs tensor_parallel_size=1 "
+                "(docs/rdna2/inkling2-port-spec.md, tensor parallelism)"
+            )
         self.model.aux_hidden_state_layers = tuple(layers)
         self.model.configure_taps()
 
@@ -787,8 +858,9 @@ class Inkling2LoopTextForCausalLM(nn.Module):
             return hidden.to(dtype), taps
         return out.to(dtype)
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        """Soft-capped fp32 logits ``[M, vocab]`` of the hidden states ``[M, H]``."""
+    def _shard_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Soft-capped fp32 logits ``[M, rows]`` of this rank's vocabulary shard (all
+        ``vocab_size`` of them at TP=1)."""
         if self.serving:
             head = self._lm_head_pack()
             logits = torch.empty(
@@ -799,11 +871,33 @@ class Inkling2LoopTextForCausalLM(nn.Module):
             )
             head(hidden_states, logits, softcap=self._softcap)
             return logits
-        # ``lm_head`` holds exactly the ``vocab_size`` real ids (the checkpoint's
+        # ``lm_head`` holds this rank's real vocabulary ids (the checkpoint's
         # padding rows are dropped at load), as in the reference head.
         logits = F.linear(hidden_states, self.lm_head.weight).float()
-        logits = torch.tanh(logits / self._softcap) * self._softcap
-        return logits
+        return torch.tanh(logits / self._softcap) * self._softcap
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        """Soft-capped fp32 logits ``[M, vocab]`` of the hidden states ``[M, H]``.
+
+        Under tensor parallelism every rank computes the logits of its vocabulary shard
+        and the shards are all-gathered, so each rank returns the full ``[M, vocab]``
+        (a view that cuts the padding of the last shard)."""
+        if not self.tp.enabled:
+            return self._shard_logits(hidden_states)
+        vocab = self.config.vocab_size
+        rows = hidden_states.shape[0]
+        if rows <= LOGITS_GATHER_ROWS:
+            return self.tp.all_gather(self._shard_logits(hidden_states))[..., :vocab]
+        # many rows (prompt logprobs, the profiling pass of the engine): gather a block
+        # of rows at a time into the final contiguous ``[M, vocab]`` buffer (the layout
+        # of TP=1), so the peak is that buffer and one block instead of several copies
+        # of every row, and downstream code never copies the padded-view again
+        out = torch.empty(rows, vocab, dtype=torch.float32, device=hidden_states.device)
+        for lo in range(0, rows, LOGITS_GATHER_ROWS):
+            hi = lo + LOGITS_GATHER_ROWS
+            block = self.tp.all_gather(self._shard_logits(hidden_states[lo:hi]))
+            out[lo:hi] = block[..., :vocab]
+        return out
 
     def greedy_token_ids(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """``argmax`` of the soft-capped logits of every row, int64 ``[M]`` (the first
@@ -811,23 +905,34 @@ class Inkling2LoopTextForCausalLM(nn.Module):
 
         Up to 16 rows the lm_head GEMV reduces its own epilogue to one argmax partial
         per block and never writes the logits row of a token; more rows take the
-        tiled GEMM and a partial argmax over its logits.
+        tiled GEMM and a partial argmax over its logits.  Under tensor parallelism the
+        partials of the vocabulary shards (global ids, values in one buffer) are
+        all-gathered and reduced by the same kernel: the logits are never gathered.
         """
         from vllm import _custom_ops as ops
 
         head = self._lm_head_pack()
         M, device = hidden_states.shape[0], hidden_states.device
         parts = 64 if M <= 4 else self._argmax_parts
-        part_val = torch.empty(M, parts, dtype=torch.float32, device=device)
-        part_idx = torch.empty(M, parts, dtype=torch.int32, device=device)
+        # rows [0, M): partial maxima, rows [M, 2M): their ids as raw int32 bits; one
+        # buffer, so a tensor-parallel gather moves both in one collective
+        buf = torch.empty(2 * M, parts, dtype=torch.float32, device=device)
         out = torch.empty(M, dtype=torch.int64, device=device)
         logits = (
             None
             if M <= 16
             else torch.empty(M, head.rows, dtype=torch.float32, device=device)
         )
-        head(hidden_states, logits, part_val, part_idx, softcap=self._softcap)
-        ops.inkling2_linear_argmax_reduce(part_val, part_idx, out)
+        head(
+            hidden_states,
+            logits,
+            buf[:M],
+            buf[M:].view(torch.int32),
+            softcap=self._softcap,
+        )
+        if self.tp.enabled:
+            buf = self.tp.all_gather(buf)  # [2M, tp * parts], rank blocks in order
+        ops.inkling2_linear_argmax_reduce(buf[:M], buf[M:].view(torch.int32), out)
         return out
 
     def _lm_head_pack(self) -> LMHeadPack:
@@ -848,14 +953,20 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         glue.check_kernel_shapes(self.config)
         device = self.lm_head.weight.device
         before = torch.accelerator.memory_allocated(device)
-        ws = glue.Inkling2GlueWorkspace(self.config, self._max_tokens, device)
+        ws = glue.Inkling2GlueWorkspace(
+            self.config, self._max_tokens, device, tp_size=self.tp.size
+        )
         workspace = torch.accelerator.memory_allocated(device) - before
         for layer in self.model.layers:
             layer.prepare_hip(ws)
         self.model.prepare_hip(ws)
-        self._head = linear_pack.inkling2_linear_pack_lm_head(
-            self.lm_head.weight, self.config.vocab_size
-        )
+        lo, _, take = lm_head_shard(self.config.vocab_size, self.tp.size, self.tp.rank)
+        if self.tp.enabled:  # this rank's rows are the parameter itself (a view)
+            self._head = linear_pack.LMHeadPack(self.lm_head.weight.detach(), take, lo)
+        else:
+            self._head = linear_pack.inkling2_linear_pack_lm_head(
+                self.lm_head.weight, self.config.vocab_size
+            )
         self._argmax_parts = (
             8 * torch.cuda.get_device_properties(device).multi_processor_count
         )
@@ -908,6 +1019,38 @@ class Inkling2LoopTextForCausalLM(nn.Module):
                                 return f"model.layers.{layer}.{gate}.{dst}"
         return None
 
+    def _load_tensor(
+        self, name: str, dst: str, target: torch.Tensor, tensor: torch.Tensor
+    ) -> None:
+        """Copy this rank's share of checkpoint tensor ``name`` into ``target``."""
+        if dst == "model.embed_tokens.weight":
+            # the rows of this rank's vocabulary shard (zero rows where the last shard
+            # is padded); at TP=1 the whole table
+            lo, _, take = lm_head_shard(
+                self.config.padded_vocab_size, self.tp.size, self.tp.rank
+            )
+            target[:take].copy_(tensor[lo : lo + take].to(target.dtype))
+            target[take:].zero_()
+            return
+        if dst == "lm_head.weight":
+            # padded on disk; the head keeps the real ids of this rank's vocabulary
+            # shard (and zero rows where the last shard is padded)
+            lo, _, take = lm_head_shard(
+                self.config.vocab_size, self.tp.size, self.tp.rank
+            )
+            target[:take].copy_(tensor[lo : lo + take].to(target.dtype))
+            target[take:].zero_()
+            return
+        piece = loader.local_slice(dst, tensor, self.tp)
+        if _GATE_UP_RE.match(dst):
+            _check_expert(name, piece, target)
+            copy_gate_up_deinterleaved(target, piece)
+        elif ".mlp.w" in dst:
+            _check_expert(name, piece, target)
+            target.copy_(piece)
+        else:
+            target.copy_(piece.to(target.dtype).view_as(target))
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params = dict(self.named_parameters())
         buffers = dict(self.named_buffers())
@@ -931,19 +1074,7 @@ class Inkling2LoopTextForCausalLM(nn.Module):
             if target is None:
                 raise KeyError(f"{name!r} -> {dst!r}: no such parameter")
             with torch.no_grad():
-                if dst == "model.embed_tokens.weight":
-                    target.copy_(tensor.to(target.dtype))
-                elif dst == "lm_head.weight":
-                    # padded on disk; the reference head keeps the real ids only
-                    target.copy_(tensor[: target.shape[0]].to(target.dtype))
-                elif _GATE_UP_RE.match(dst):
-                    _check_expert(name, tensor, target)
-                    copy_gate_up_deinterleaved(target, tensor)
-                elif ".mlp.w" in dst:
-                    _check_expert(name, tensor, target)
-                    target.copy_(tensor)
-                else:
-                    target.copy_(tensor.to(target.dtype).view_as(target))
+                self._load_tensor(name, dst, target, tensor)
             loaded.add(dst)
         if len(cross) == 2:
             q = cross["model.llm.middle_cycle_cross_pass_queries"].float()
