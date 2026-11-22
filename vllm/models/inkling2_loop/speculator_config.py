@@ -4,10 +4,115 @@
 
 Kept apart from ``amd/dspark.py``: config modules are imported in every process and
 must not import the speculator, which is resolved by name on the GPU worker only.
+
+``speculator_options`` (opt-in):
+
+* ``{"adaptive_k": {}}`` makes the scheduler pick the number of drafts every step
+  verifies from the running acceptance of the batch
+  (``vllm/v1/spec_decode/dynamic/adaptive.py``); the batch-size schedule
+  (``num_speculative_tokens_per_batch_size``) bounds it.  The dict may override the
+  step cost model (``StepCostModel`` fields) and the estimator (``AdaptiveSpecTokens``
+  fields).
 """
 
+from collections.abc import Sequence
+from dataclasses import replace
+from typing import Any
+
+from vllm.v1.spec_decode.dynamic.adaptive import AdaptiveSpecTokens, StepCostModel
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+
+# Milliseconds per decode step on one V620 (gfx1030, TP=1, native weights,
+# FULL_AND_PIECEWISE), measured at batch 1 on real text (docs/rdna2/
+# inkling2-speculation-profile.md, section 3.3): the target forward of 1, 3, 5 and
+# 8 verified rows is 15.9, 23.0, 27.0 and 32.7 ms (+3.55 ms per row up to 3 rows,
+# +1.94 ms per row above: the expert union saturates); LM head 2.12; sampling and
+# gaps 0.11; the draft 4.15 + 0.13 per drafted token (Markov chain); host 0.4.
+_V620_STEP_COST = StepCostModel(
+    forward_ms=(15.90, 19.45, 22.99, 24.93, 26.87, 28.81, 30.75, 32.67),
+    forward_row_ms=1.94,
+    base_ms=2.23,
+    draft_ms=4.15,
+    draft_token_ms=0.13,
+    draft_request_ms=0.35,
+    host_ms=0.4,
+)
+_ESTIMATOR_OPTIONS = (
+    "decay",
+    "prior_accept",
+    "prior_weight",
+    "engine_decay",
+    "engine_weight",
+    "stop_margin",
+    "probe_interval",
+    "min_steps",
+    "k_tolerance",
+)
 
 
 class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
     speculator_class = "vllm.models.inkling2_loop.amd.dspark.Inkling2DSparkSpeculator"
+    supported_options = DSparkSpeculatorConfig.supported_options | {
+        "speculator_options"
+    }
+
+    @classmethod
+    def apply_options(cls, spec) -> None:
+        cls.validate_options(spec)
+        super().apply_options(spec)
+
+    @classmethod
+    def validate_options(cls, spec) -> None:
+        options = spec.speculator_options or {}
+        unknown = set(options) - {"adaptive_k"}
+        if unknown:
+            raise ValueError(
+                f"unknown Inkling-2 DSpark speculator_options {sorted(unknown)}; "
+                "supported: adaptive_k"
+            )
+        if spec.enable_adaptive_verification:
+            raise ValueError(
+                "the Inkling-2 DSpark draft does not support "
+                "enable_adaptive_verification (its Markov head keeps no per-position "
+                "draft distribution to estimate acceptance from); use "
+                'speculator_options={"adaptive_k": {}} instead'
+            )
+        adaptive = options.get("adaptive_k")
+        if adaptive is not None and not isinstance(adaptive, dict | bool):
+            raise ValueError("adaptive_k must be a bool or a dict of overrides")
+        if isinstance(adaptive, dict):
+            valid = set(StepCostModel.__dataclass_fields__) | set(_ESTIMATOR_OPTIONS)
+            if set(adaptive) - valid:
+                raise ValueError(
+                    f"unknown adaptive_k options {sorted(set(adaptive) - valid)}; "
+                    f"supported: {sorted(valid)}"
+                )
+
+    def _adaptive_options(self) -> dict[str, Any] | None:
+        adaptive = (self.spec_config.speculator_options or {}).get("adaptive_k")
+        if adaptive is None or adaptive is False:
+            return None
+        return adaptive if isinstance(adaptive, dict) else {}
+
+    @property
+    def uses_adaptive_num_tokens(self) -> bool:
+        return self._adaptive_options() is not None
+
+    def hash_factors(self) -> list[Any]:
+        return [*super().hash_factors(), self._adaptive_options() is not None]
+
+    def make_num_tokens_policy(
+        self, max_tokens: Sequence[int]
+    ) -> AdaptiveSpecTokens | None:
+        options = self._adaptive_options()
+        if options is None:
+            return None
+        cost = {k: v for k, v in options.items() if k not in _ESTIMATOR_OPTIONS}
+        if "forward_ms" in cost:
+            cost["forward_ms"] = tuple(cost["forward_ms"])
+        estimator = {k: options[k] for k in _ESTIMATOR_OPTIONS if k in options}
+        return AdaptiveSpecTokens(
+            cost=replace(_V620_STEP_COST, **cost),
+            max_tokens=max_tokens,
+            **estimator,
+        )

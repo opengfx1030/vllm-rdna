@@ -730,24 +730,33 @@ class VllmConfig:
         max_num_seqs = self.scheduler_config.max_num_seqs
         speculative_config = self.speculative_config
         num_new_sampled_tokens = decode_query_len - self.num_speculative_tokens
+        adaptive = (
+            speculative_config is not None
+            and speculative_config.speculator_config.uses_adaptive_num_tokens
+        )
         if (
             speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
+            or not (speculative_config.uses_dynamic_speculative_decoding() or adaptive)
             or num_new_sampled_tokens <= 0
         ):
             return {decode_query_len: max_num_seqs}
         from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 
-        dense_schedule = build_dynamic_sd_schedule_lookup(
-            speculative_config.num_speculative_tokens_per_batch_size,
-            vllm_max_batch_size=max_num_seqs,
-            vllm_num_speculative_tokens=self.num_speculative_tokens,
-        )
+        if speculative_config.uses_dynamic_speculative_decoding():
+            dense_schedule = build_dynamic_sd_schedule_lookup(
+                speculative_config.num_speculative_tokens_per_batch_size,
+                vllm_max_batch_size=max_num_seqs,
+                vllm_num_speculative_tokens=self.num_speculative_tokens,
+            )
+        else:
+            dense_schedule = [0] + [self.num_speculative_tokens] * max_num_seqs
         # By ascending batch size, so each query length keeps its widest batch.
+        # An adaptive step verifies any count up to its batch size's schedule.
         return {
-            k + num_new_sampled_tokens: batch_size
+            (k_step + num_new_sampled_tokens): batch_size
             for batch_size, k in enumerate(dense_schedule)
             if batch_size > 0
+            for k_step in (range(k + 1) if adaptive else (k,))
         }
 
     def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:

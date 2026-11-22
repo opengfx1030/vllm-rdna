@@ -296,6 +296,35 @@ def test_speculator_config_resolves_to_the_inkling2_speculator():
     assert issubclass(cls, DSparkSpeculator)
 
 
+def test_adaptive_verification_is_refused_with_a_pointer_to_adaptive_k():
+    from vllm.models.inkling2_loop.speculator_config import (
+        Inkling2DSparkSpeculatorConfig,
+    )
+
+    spec = types.SimpleNamespace(
+        speculator_options=None, enable_adaptive_verification=True
+    )
+    with pytest.raises(ValueError, match="adaptive_k"):
+        Inkling2DSparkSpeculatorConfig.validate_options(spec)
+    spec.enable_adaptive_verification = False
+    spec.speculator_options = {"adaptive_k": {}}
+    Inkling2DSparkSpeculatorConfig.validate_options(spec)
+    cfg = Inkling2DSparkSpeculatorConfig(spec)
+    assert cfg.uses_adaptive_num_tokens
+    policy = cfg.make_num_tokens_policy([0, 7, 7])
+    assert policy is not None and policy.choose(["r"]) >= 1
+    spec.speculator_options = {"adaptive_k": False}
+    assert not Inkling2DSparkSpeculatorConfig(spec).uses_adaptive_num_tokens
+    spec.speculator_options = {"adaptive_k": {"decay": 0.5, "draft_ms": 2.3}}
+    custom = Inkling2DSparkSpeculatorConfig(spec).make_num_tokens_policy([0, 7])
+    assert custom is not None
+    assert custom.decay == 0.5 and custom.cost.draft_ms == 2.3
+    for bad in ({"adaptive_k": {"nope": 1}}, {"other": 1}):
+        spec.speculator_options = bad
+        with pytest.raises(ValueError):
+            Inkling2DSparkSpeculatorConfig.validate_options(spec)
+
+
 # ---------------------------------------------------------------------------
 # gfx1030
 # ---------------------------------------------------------------------------

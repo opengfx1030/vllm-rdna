@@ -78,6 +78,7 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+from vllm.v1.spec_decode.dynamic.adaptive import AdaptiveSpecTokens
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -328,12 +329,21 @@ class Scheduler(SchedulerInterface):
         # lookahead slots.
         self.can_skip_drafts = self.num_lookahead_tokens > 0
         self.dynamic_sd_lookup: list[int] | None = None
+        self.spec_k_policy: AdaptiveSpecTokens | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
                     speculative_config.num_speculative_tokens_per_batch_size,
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
+                )
+            if speculative_config.speculator_config.uses_adaptive_num_tokens:
+                self.spec_k_policy = (
+                    speculative_config.speculator_config.make_num_tokens_policy(
+                        self.dynamic_sd_lookup
+                        or [0]
+                        + [self.num_spec_tokens] * self.scheduler_config.max_num_seqs
+                    )
                 )
             self.use_eagle = speculative_config.uses_target_hidden_states
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
@@ -1602,7 +1612,11 @@ class Scheduler(SchedulerInterface):
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
                     if (
-                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        (
+                            self.num_spec_tokens > 0
+                            and self.dynamic_sd_lookup is None
+                            and self.spec_k_policy is None
+                        )
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
@@ -2045,7 +2059,11 @@ class Scheduler(SchedulerInterface):
 
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
-        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
+        if self.spec_k_policy is not None:
+            num_spec_tokens_to_schedule = self.spec_k_policy.choose(
+                num_scheduled_tokens
+            )
+        elif self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
                 len(num_scheduled_tokens)
             ]
@@ -2721,6 +2739,8 @@ class Scheduler(SchedulerInterface):
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
+                if self.spec_k_policy is not None and not output_is_stale:
+                    self.spec_k_policy.observe(req_id, num_draft_tokens, num_accepted)
                 # Rejections roll back num_computed_tokens (and, under async
                 # scheduling, num_output_placeholders, which covers the spec
                 # tokens). A stale rejection count predates the preemption
@@ -3516,6 +3536,8 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
+        if self.spec_k_policy is not None:
+            self.spec_k_policy.forget(request_id)
 
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:

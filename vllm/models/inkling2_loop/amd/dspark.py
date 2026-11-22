@@ -967,7 +967,12 @@ class Inkling2DSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         config = self.draft_model_config.hf_config
         assert not self.sample_from_anchor
-        assert self._draft_topk is None and not self.enable_adaptive_verification
+        if self._draft_topk is not None or self.enable_adaptive_verification:
+            raise NotImplementedError(
+                "the Inkling-2 DSpark draft supports neither dspark_draft_topk nor "
+                "enable_adaptive_verification (its Markov head keeps no per-position "
+                "draft distribution); use speculator_options={'adaptive_k': {}}"
+            )
         taps = len(config.target_layer_ids)
         self.hidden_states = torch.zeros(
             self.max_num_tokens,

@@ -77,6 +77,16 @@ if [[ ! -r $recipe_file ]]; then
     exit 2
 fi
 
+# KEY=value arguments are already in effect while the recipe is sourced (it can
+# build a value from one, e.g. a path inside SPEC_CONFIG) and win again after it.
+if ((${#rdse_overrides[@]})); then
+    for _ov in "${rdse_overrides[@]}"; do
+        _key=${_ov%%=*}
+        [[ $_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || rdna_die "bad override '$_ov' (expected KEY=value)."
+        printf -v "$_key" '%s' "${_ov#*=}"
+    done
+fi
+
 # Caller-set variables win over recipe defaults, so snapshot every key the
 # recipe touches (values only, setness included) and re-apply after sourcing.
 # A recipe may build on another one with `source "$RDSE_RECIPES/<name>.env"`;
