@@ -497,7 +497,7 @@ Not levers: dense GEMM tuning (TunableOp/hi2/rocBLAS: nothing above 5 %), chunk 
 
 ## 13. Files, logs, raw data
 
-Scratch tooling (not in the repo): local `/Users/kletorch/Projects/infrastructure/gfx1030_optimized/Inkling2PrefillProfile/`
+Scratch tooling (not in the repo): the profiling agent's local work directory
 and the box `$P/scripts/`: `profile_prefill.py` (harness; `--moe-plugin file.py --plugin-arg k=v`, `--attn-variant`,
 `--attn-split-tile`, scenarios `capture,p1000,chunks,depth,acc`), `moe_plugin_v4.py`, `moe_v4.cu`, `moe_v4_bench.py`,
 `moe_variants_bench.py`, `make_attn_variants.py`, `attn_variants_bench.py`, `build_attn.py`, `build_isa.py`,

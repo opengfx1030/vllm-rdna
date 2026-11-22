@@ -229,7 +229,11 @@ def test_moe_block_rows_policy(fmt):
     assert set(rows) <= {1, 2, 4, 8}  # the widths the router and the kernels have
     assert rows == sorted(rows)  # more tokens never narrow the blocks
     assert rows[0] == 1 and rows[-1] == 8
-    assert {policy(t) for t in range(1, 5)} == {1}  # a verify step of up to 4 rows
+    # a verify step of up to 4 rows: one-row blocks, except that NVFP4 with
+    # VLLM_INKLING2_FUSE_GLUE (the default) uses two-row blocks from 2 rows on
+    two_row_from_2 = fmt == "nvfp4" and moe_mod.FUSE_GLUE
+    assert {policy(t) for t in range(2, 5)} == ({2} if two_row_from_2 else {1})
+    assert policy(1) == 1
     # 5..8 rows (a 4-way draft step, five or more requests) were 8-row blocks: the
     # 5 -> 8 cliff
     assert {policy(t) for t in range(5, 9)} == {2}
