@@ -1094,8 +1094,16 @@ def _get_packed_kv_cache_groups(
             groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
             continue
 
-        pattern_repeats = list(zip(*page_size_layers.values()))
-        for i in range(num_groups):
+        # One layer of each page size per repeat. An unbalanced bucket's shorter
+        # page-size lists run out first, so its later repeats hold only the
+        # longer lists' layers (a zip would drop them).
+        longest = max(map(len, page_size_layers.values()))
+        pattern_repeats = [
+            [names[r] for names in page_size_layers.values() if r < len(names)]
+            for r in range(longest)
+        ]
+        # A group past the last repeat would be empty.
+        for i in range(min(num_groups, len(pattern_repeats))):
             group_layer_names = [
                 name for repeat in pattern_repeats[i::num_groups] for name in repeat
             ]

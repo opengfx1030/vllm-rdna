@@ -3,10 +3,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Needle-in-a-haystack run of the real Inkling-2-Mini checkpoint at a long context.
 
-Boots the checkpoint (one GPU, or ``--tensor-parallel-size`` GPUs; eager, fp16, prefix
-caching) with ``--max-model-len`` (``-1``: the engine auto-fits the largest length the
-KV memory holds and logs it; use ``--boot-only`` to read it), renders a chat prompt of
-about ``--frac`` of it (or ``--prompt-tokens`` tokens: numbered filler facts with one
+Boots the checkpoint (one GPU, or ``--tensor-parallel-size`` GPUs; fp16, prefix
+caching; eager, or with ``--cudagraph-mode FULL_AND_PIECEWISE``) with
+``--max-model-len`` (``-1``: the engine auto-fits the largest length the KV memory
+holds and logs it; use ``--boot-only`` to read it), renders a chat prompt of about
+``--frac`` of it (or ``--prompt-tokens`` tokens: numbered filler facts with one
 passphrase hidden at ``--depth``) and prints
 
 * the prefill throughput of the cold prompt,
@@ -37,6 +38,8 @@ import os
 import threading
 import time
 from pathlib import Path
+
+from engine_args import add_graph_args, add_tp_args, apply_tp_env, graph_kwargs
 
 NEEDLE = "maple-quartz-47"
 
@@ -124,8 +127,8 @@ def main() -> int:
     ap.add_argument("--max-num-seqs", type=int, default=2)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.92)
     ap.add_argument("--boot-only", action="store_true")
-    ap.add_argument("--tensor-parallel-size", type=int, default=1)
-    ap.add_argument("--ar-backend", choices=["rccl", "rdna"], default="rccl")
+    add_tp_args(ap)
+    add_graph_args(ap)
     ap.add_argument(
         "--text-only",
         action="store_true",
@@ -147,8 +150,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if args.ar_backend == "rdna":
-        os.environ["VLLM_RDNA_AR"] = "1"
+    apply_tp_env(args.ar_backend, args.ar_max_kb)
 
     if args.kv_margin_gib is not None:
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -172,7 +174,7 @@ def main() -> int:
     llm = LLM(
         model=args.ckpt,
         dtype="float16",
-        enforce_eager=True,
+        **graph_kwargs(args.cudagraph_mode, args.prefill_sizes, args.decode_sizes),
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,

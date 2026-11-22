@@ -210,6 +210,16 @@ class ConvWorld:
     Raw inputs are fp16-representable (the serving path's conv inputs are fp16 GEMM
     outputs); ``exact_fp32`` keeps fp32 streams at full precision: the history is then
     read back rounded to fp16, the taps inside the chunk stay exact.
+
+    ``null_reqs``: requests whose block-table row is all zeros, the null block: the
+    dummy batch of a graph capture and of the memory profile.  They own no page, so no
+    op may write a ring row for them (page 0 stays NaN) and their outputs are not
+    compared.
+
+    ``pad_request0``: the tokens past the last chunk read as request 0, as the
+    engine's token -> request map has them (``build_qsa_metadata_rdna2``): positions
+    ``p >= p1`` that the request does not have.  Their raw rows are NaN, so any ring
+    row written for one shows in the state.
     """
 
     def __init__(
@@ -226,9 +236,12 @@ class ConvWorld:
         md_short=0,
         fill_ring=False,
         exact_fp32=False,
+        null_reqs=(),
+        pad_request0=False,
     ):
         gen = torch.Generator().manual_seed(seed)
         self.q_lens, self.seq_lens = list(q_lens), list(seq_lens)
+        self.null_reqs = tuple(null_reqs)
         self.nkv, self.streams, self.bs, self.ring = nkv, streams, bs, ring
         self.R = len(q_lens)
         self.n_valid = sum(q_lens)
@@ -249,6 +262,8 @@ class ConvWorld:
                 self.table[r, first[r] : nb[r]] = torch.tensor(
                     pool.take(nb[r] - first[r]), dtype=torch.int32
                 )
+        for r in null_reqs:
+            self.table[r].zero_()
         # dense raw inputs per stream: [L, nkv * width]; every third position is 4x
         # louder, so the k L2 clip (threshold 22.6) engages on those conv outputs
         # (norm ~ 50) and stays off on the others
@@ -284,6 +299,8 @@ class ConvWorld:
         for r in range(self.R):
             for i in range(q_lens[r]):
                 self.seq_idx[self.qsl[r] + i] = r
+        if pad_request0:
+            self.seq_idx[self.n_valid :] = 0
         self.qsl_t = torch.tensor(self.qsl, dtype=torch.int32)
         self.seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32)
         # chunk rows of the raw input (NaN rows for padding tokens)
@@ -338,6 +355,8 @@ class ConvWorld:
         """The cache after the chunks were written (``streams``: indices written)."""
         cache = self.cache0.clone()
         for r in range(self.R):
+            if r in self.null_reqs:
+                continue  # no page: nothing is written for it
             p0 = self.seq_lens[r] - self.q_lens[r]
             for p in range(p0, self.seq_lens[r]):
                 if not conv_keeps(p, self.seq_lens[r], self.bs, self.ring):
@@ -358,6 +377,15 @@ class ConvWorld:
             self.qsl_t.to(dev),
             self.seq_lens_t.to(dev),
         )
+
+    def real_rows(self) -> list[int]:
+        """Token rows of the requests that own pages."""
+        return [
+            t
+            for r in range(self.R)
+            if r not in self.null_reqs
+            for t in range(self.qsl[r], self.qsl[r + 1])
+        ]
 
 
 CONV_CASES = {
@@ -544,6 +572,164 @@ def test_conv_state_write(case, bs, ring, padding, token_major, layers):
 
 
 @requires_kernels
+@pytest.mark.parametrize("case", ["decode", "chunked"])
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+@pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
+def test_conv_state_write_skips_the_null_block(case, bs, ring, token_major):
+    """Requests on the null block (block 0: zeroed block-table rows, the dummy batch
+    of a graph capture and of the memory profile) write no ring row; page 0 keeps its
+    poison and the other requests write the rows the rule keeps."""
+    ops = _ops()
+    q_lens, seq_lens = CONV_CASES[case]
+    nkv = 4
+    cw = ConvWorld(
+        q_lens,
+        seq_lens,
+        nkv=nkv,
+        streams=[(0, 128, torch.float16)],
+        bs=bs,
+        ring=ring,
+        fill_ring=True,
+        null_reqs=(1, 3),
+        seed=13,
+    )
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
+    cache = to_device_cache(cw.cache0, token_major)
+    ops.inkling2_conv_state_write(
+        cw.x_rows[0].cuda(), cache, table, seq_idx, qsl, seq_lens_t, 0, nkv, bs
+    )
+    torch.accelerator.synchronize()
+    _assert_cache(cache, cw.expected_cache(), "state write")
+
+
+@requires_kernels
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+def test_sconv_static_fused_write_skips_the_null_block(bs, ring):
+    """The conv op that writes its own state (one token per request) skips the null
+    block as well, and the outputs of the requests that own pages are the oracle's."""
+    ops = _ops()
+    q_lens, seq_lens = CONV_CASES["decode"]
+    nkv, width, offset = 4, 576, 128
+    cw = ConvWorld(
+        q_lens,
+        seq_lens,
+        nkv=nkv,
+        streams=[(offset, width, torch.float16)],
+        bs=bs,
+        ring=ring,
+        fill_ring=ring > KSIZE - 1,
+        null_reqs=(2, 4),
+        seed=14,
+    )
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
+    cache = to_device_cache(cw.cache0, False)
+    x, wt = cw.x_rows[0].cuda(), cw.static_w[0].cuda()
+    out = torch.full((cw.T, nkv * width), float("nan"), device="cuda")
+    ops.inkling2_sconv_static(
+        x, wt, out, cache, table, seq_idx, qsl, seq_lens_t, offset, nkv, bs, True
+    )
+    torch.accelerator.synchronize()
+    real = cw.real_rows()
+    torch.testing.assert_close(
+        out.cpu().double()[real], cw.oracle(0, False)[real], rtol=2e-5, atol=2e-5
+    )
+    _assert_cache(cache, cw.expected_cache(), "fused write")
+
+
+@requires_kernels
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+@pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
+def test_conv_state_write_ignores_padding_that_reads_as_request_zero(
+    bs, ring, token_major
+):
+    """The engine's token -> request map gives the padding of a graph, the tokens past
+    the last chunk, to request 0: positions ``p1, p1 + 1, ...`` that it does not have.
+    Their raw rows are NaN, so any ring row written for one shows in the state (with a
+    64-token block they fall into the block request 0 owns)."""
+    ops = _ops()
+    nkv, width = 4, 128
+    cw = ConvWorld(
+        [1, 3, 2],
+        [10, 3, 40],
+        nkv=nkv,
+        streams=[(0, width, torch.float16)],
+        bs=bs,
+        ring=ring,
+        fill_ring=True,
+        pad_tokens=5,
+        pad_request0=True,
+        seed=15,
+    )
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
+    cache = to_device_cache(cw.cache0, token_major)
+    ops.inkling2_conv_state_write(
+        cw.x_rows[0].cuda(), cache, table, seq_idx, qsl, seq_lens_t, 0, nkv, bs
+    )
+    torch.accelerator.synchronize()
+    _assert_cache(cache, cw.expected_cache(), "state write")
+
+
+@requires_kernels
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+def test_sconv_static_fused_write_ignores_padding_that_reads_as_request_zero(bs, ring):
+    """The conv op that writes its own state (one token per request): the padded
+    tokens that read as request 0 write no ring row, the real rows are the oracle's."""
+    ops = _ops()
+    q_lens, seq_lens = CONV_CASES["decode"]
+    nkv, width, offset = 4, 576, 128
+    cw = ConvWorld(
+        q_lens,
+        seq_lens,
+        nkv=nkv,
+        streams=[(offset, width, torch.float16)],
+        bs=bs,
+        ring=ring,
+        fill_ring=ring > KSIZE - 1,
+        pad_tokens=5,
+        pad_request0=True,
+        seed=16,
+    )
+    table, seq_idx, qsl, seq_lens_t = cw.meta()
+    cache = to_device_cache(cw.cache0, False)
+    x, wt = cw.x_rows[0].cuda(), cw.static_w[0].cuda()
+    out = torch.full((cw.T, nkv * width), float("nan"), device="cuda")
+    ops.inkling2_sconv_static(
+        x, wt, out, cache, table, seq_idx, qsl, seq_lens_t, offset, nkv, bs, True
+    )
+    torch.accelerator.synchronize()
+    real = cw.real_rows()
+    torch.testing.assert_close(
+        out.cpu().double()[real], cw.oracle(0, False)[real], rtol=2e-5, atol=2e-5
+    )
+    _assert_cache(cache, cw.expected_cache(), "fused write")
+
+
+@requires_kernels
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+def test_conv_state_write_ignores_rows_shorter_than_their_query(bs, ring):
+    """The dummy batch of a graph capture for a verification step: six query tokens
+    per request, ``seq_len`` 1 and zeroed block tables, so the positions ``1 - 6 + i``
+    are negative.  They have no block and no ring row (a write would index the block
+    table below its first row and the ring at a negative row); the entries in front of
+    the table name a live page, so a write through them is visible."""
+    ops = _ops()
+    nkv, width, R, q = 2, 128, 3, 6
+    pages = torch.full(
+        (4, nkv, ring, width), float("nan"), dtype=torch.float16, device="cuda"
+    )
+    rows = torch.zeros(1 + R, 4, dtype=torch.int32)
+    rows[0] = 1  # block_table[0, -1] (and [0, -2]) read page 1
+    table = rows.cuda()[1:]
+    x = torch.randn(R * q, nkv * width, device="cuda").to(torch.float16)
+    seq_idx = torch.arange(R, dtype=torch.int32, device="cuda").repeat_interleave(q)
+    qsl = torch.arange(0, R * q + 1, q, dtype=torch.int32, device="cuda")
+    seq_lens = torch.ones(R, dtype=torch.int32, device="cuda")
+    ops.inkling2_conv_state_write(x, pages, table, seq_idx, qsl, seq_lens, 0, nkv, bs)
+    torch.accelerator.synchronize()
+    assert torch.isnan(pages).all()
+
+
+@requires_kernels
 @pytest.mark.parametrize("bs,ring", GEOMETRIES)
 @pytest.mark.parametrize("nkv,width", [(2, 128), (4, 576), (2, 1152)])
 def test_conv_state_rounds_fp32_inputs_to_fp16(bs, ring, nkv, width):
@@ -658,14 +844,17 @@ def test_rejected_draft_tokens_keep_the_history_of_the_accepted_prefix(
 # ---------------------------------------------------------------------------
 # kv_prep
 # ---------------------------------------------------------------------------
-@requires_kernels
-@pytest.mark.parametrize("case", list(CONV_CASES))
-@pytest.mark.parametrize("bs,ring", GEOMETRIES)
-@pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
-@pytest.mark.parametrize("nkv", [8, 2])
-@pytest.mark.parametrize("padding", PADDINGS)
-@pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
-def test_kv_prep(case, bs, ring, dynamic, nkv, padding, token_major):
+def _check_kv_prep(
+    case,
+    bs,
+    ring,
+    dynamic,
+    nkv,
+    padding,
+    token_major,
+    null_reqs=(),
+    pad_request0=False,
+):
     ops = _ops()
     q_lens, seq_lens = CONV_CASES[case]
     ko, vo = 0, 128
@@ -679,9 +868,12 @@ def test_kv_prep(case, bs, ring, dynamic, nkv, padding, token_major):
         fill_ring=ring > KSIZE - 1,
         pad_tokens=padding[0],
         md_short=padding[1],
+        null_reqs=null_reqs,
+        pad_request0=pad_request0,
         seed=5,
     )
-    # K|V cache (page size 64, its own table and slot mapping)
+    # K|V cache (page size 64, its own table and slot mapping; a dummy request's
+    # slots are -1)
     gen = torch.Generator().manual_seed(6)
     nbk = [_ceil_div(L, KV_BLOCK) for L in seq_lens]
     pool = PagePool(gen, sum(nbk) + 5)
@@ -691,6 +883,8 @@ def test_kv_prep(case, bs, ring, dynamic, nkv, padding, token_major):
     )
     kv_slot = torch.full((cw.T_md,), -1, dtype=torch.int64)
     for r, (ql, L) in enumerate(zip(q_lens, seq_lens)):
+        if r in null_reqs:
+            continue
         for i in range(ql):
             p = L - ql + i
             kv_slot[cw.qsl[r] + i] = (
@@ -718,6 +912,8 @@ def test_kv_prep(case, bs, ring, dynamic, nkv, padding, token_major):
     rows = torch.cat([k, v], dim=-1).to(torch.float16)
     expected = kv_cache0.clone()
     for r, (ql, L) in enumerate(zip(q_lens, seq_lens)):
+        if r in null_reqs:
+            continue
         for i in range(ql):
             p = L - ql + i
             expected[kv_table[r][p // KV_BLOCK], :, p % KV_BLOCK, :] = rows[
@@ -752,6 +948,37 @@ def test_kv_prep(case, bs, ring, dynamic, nkv, padding, token_major):
     run(False)
     if case == "decode":  # one token per request: kv_prep writes the state itself
         run(True)
+
+
+@requires_kernels
+@pytest.mark.parametrize("case", list(CONV_CASES))
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+@pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
+@pytest.mark.parametrize("nkv", [8, 2])
+@pytest.mark.parametrize("padding", PADDINGS)
+@pytest.mark.parametrize("token_major", [False, True], ids=["hbc", "bhc"])
+def test_kv_prep(case, bs, ring, dynamic, nkv, padding, token_major):
+    _check_kv_prep(case, bs, ring, dynamic, nkv, padding, token_major)
+
+
+@requires_kernels
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+@pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
+@pytest.mark.parametrize("case", ["decode", "chunked"])
+def test_kv_prep_skips_the_null_block(case, bs, ring, dynamic):
+    """Dummy requests (zeroed block-table rows, ``-1`` K / V slots) write neither
+    cache, in the compute-only call followed by the state write and in the fused
+    decode call."""
+    _check_kv_prep(case, bs, ring, dynamic, 2, (0, 0), False, null_reqs=(1, 4))
+
+
+@requires_kernels
+@pytest.mark.parametrize("bs,ring", GEOMETRIES)
+@pytest.mark.parametrize("dynamic", [False, True], ids=["static", "dynamic"])
+def test_kv_prep_ignores_padding_that_reads_as_request_zero(bs, ring, dynamic):
+    """The padded tokens that read as request 0 write no ring row (compute-only call
+    plus the state write, and the fused decode call) and no K / V slot (``-1``)."""
+    _check_kv_prep("decode", bs, ring, dynamic, 2, (5, 0), False, pad_request0=True)
 
 
 # ---------------------------------------------------------------------------

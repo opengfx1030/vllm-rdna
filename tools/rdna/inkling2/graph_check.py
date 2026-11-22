@@ -42,6 +42,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from engine_args import add_tp_args, apply_tp_env, graph_kwargs  # noqa: E402
+
 PROMPTS = (
     "What is the capital of France?",
     "Write one word: hello",
@@ -423,6 +425,7 @@ def main() -> int:
         default="",
         help="request counts of the uniform-decode (FULL) graphs, e.g. 1,2,4,8",
     )
+    add_tp_args(ap)
     ap.add_argument("--json")
     ap.add_argument(
         "--path", choices=["reference", "hip"], help="VLLM_INKLING2_PATH override"
@@ -432,6 +435,7 @@ def main() -> int:
         return compare(args.compare)
     if not args.ckpt:
         ap.error("--ckpt is required")
+    apply_tp_env(args.ar_backend, args.ar_max_kb)
     if args.path:
         os.environ["VLLM_INKLING2_PATH"] = args.path
 
@@ -458,6 +462,7 @@ def main() -> int:
     kwargs: dict = dict(
         model=args.ckpt,
         dtype="float16",
+        tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -472,19 +477,7 @@ def main() -> int:
     if args.tiny:
         kwargs["hf_overrides"] = {"vision_config": None}
         kwargs["max_logprobs"] = 500
-    if args.mode == "eager":
-        kwargs["enforce_eager"] = True
-    else:
-        cc: dict = {"cudagraph_mode": args.mode}
-        if args.prefill_sizes:
-            sizes = [int(s) for s in args.prefill_sizes.split(",")]
-            cc["prefill_cudagraph_capture_token_sizes"] = sizes
-            cc["max_prefill_cudagraph_capture_tokens"] = max(sizes)
-        if args.decode_sizes:
-            cc["decode_cudagraph_capture_request_sizes"] = [
-                int(s) for s in args.decode_sizes.split(",")
-            ]
-        kwargs["compilation_config"] = cc
+    kwargs.update(graph_kwargs(args.mode, args.prefill_sizes, args.decode_sizes))
     if args.spec_k:
         kwargs["speculative_config"] = {
             "method": "dspark",

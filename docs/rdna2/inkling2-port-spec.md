@@ -1364,7 +1364,7 @@ times are indicative; the modes are compared inside the same session.  Tools:
 |---|---|
 | `Inkling2MetadataBuilder._cudagraph_support = NEVER` | `UNIFORM_BATCH`; the classmethod `get_cudagraph_support` still answers `NEVER` when the HIP ops are not used (reference path) |
 | persistent metadata buffers, fixed splits / workspace | the V2 runner owns the persistent buffers.  Capture records `max_seq_len = max_model_len` and `max_query_len = q`, so the grids, split-K plan and workspace are frozen at capture; the live lengths, slots and sequence indices are device tensors read at replay |
-| padded requests need `seq_lens = 0`, `slot_mapping = -1`, `seq_idx = -1` | padded tokens map to request 0 (`SeqIdxScratch.fill` covers the padded token count, `make_metadata` slices `slot_mapping` to it); the conv and KV writers act only for `slot >= 0`; the router is NaN-hardened; `Inkling2GlueWorkspace.attn_out` is zero-initialised |
+| padded requests need `seq_lens = 0`, `slot_mapping = -1`, `seq_idx = -1` | padded tokens map to request 0 (`SeqIdxScratch.fill` covers the padded token count, `make_metadata` slices `slot_mapping` to it); the conv and KV writers act only for `slot >= 0`; the router is NaN-hardened; `Inkling2GlueWorkspace.attn_out` is zero-initialised.  **Superseded on the merged tree** (the conv ring is addressed by position, not by slot): padded tokens read as `seq_idx = -1` and the ring writers ignore positions outside `[0, p1)` and the null block, see "Merged tree: final results" |
 | `conv_passes` double launch | isolated in `attention.conv_passes(md)`: 2 for `max_query_len > 1` and while tracing a breakable graph, else 1 (a q = 1 FULL decode graph runs the kernel pair once).  The clean fix is a write / read-phase split inside the kernel (csrc, not done) |
 | FULL graphs around `forward` only | confirmed, see above |
 
@@ -1792,3 +1792,194 @@ Gates on the rebuilt `_rocm_C` (HIP 2): `test_inkling2_moe_rdna2.py` 117 passed 
 `test_serving_path_cpu.py` 51 passed, 4 skipped (the full CPU suite gave 521 passed, 77 skipped and 7
 errors before the meta-tensor fix of the MXFP8 scale guard, which the two files above then
 cleared; the full suite was not repeated).
+
+## 2026-11-22 — merged tree: final results (graphs at TP = 1 / 2 / 4, 1,048,576 tokens, vision, recipes)
+
+Branch `feat/inkling2-merge` (HEAD `b94fb11a56` plus the uncommitted changes of this section), built
+and run in the box tree `~/w4a8_runs/inkling2-work/Inkling2Final/tree`: the conv ring, tensor
+parallelism, the HIP graphs, the MXFP8 MoE kernel and the vision tower in one build. Real checkpoint
+`~/hfcache/inkling2-mini`, V620 cards: HIP 3 (TP = 1), HIP 4 + 5 (TP = 2), HIP 2 - 5 (TP = 4).
+Neighbouring cards ran other agents' jobs, so absolute times are indicative; a KFD `evicted_ms` monitor
+ran next to every job (one jump, on the kernel-test process of HIP 3, 9,939 ms; no timing table was taken
+in that window). The user guide with the measured tables is
+[`inkling2-serving.md`](inkling2-serving.md); this section is the engineering record and answers
+"Open risks and next steps (merged tree)" and "Open items after part B".
+
+### What the first merged build did wrong, and the fixes
+
+The merge was resolved without a build. Four defects surfaced once the graphs ran on the ring ops; the
+first two were latent in the part B capture contract ("padded requests need `seq_idx = -1` semantics with
+the ring ops, check"), the third was found by Inkling2Spec on its first q = 6 verification graph and the
+fourth on its first TP = 2 DSpark boot.
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| 1 | padded tokens of a graph write conv-ring rows of request 0 | `build_qsa_metadata_rdna2` maps the padding of a graph to request 0, and `SeqIdxScratch.fill` gave those tokens `seq_idx = 0` | tokens at or past `query_start_loc_cpu[num_reqs]` get `seq_idx = -1` (`vllm/models/inkling2_loop/amd/state.py`); test `test_seq_idx_of_a_graphs_padding_is_minus_one` |
+| 2 | the dummy batches of a capture, a warm-up and the memory profile (all-zero block tables) wrote ring rows into block 0, which is `BlockPool.null_block`, not a page | `i2_write_ring` had no rule for it | `i2_write_ring` returns for `blk <= 0` (the paged harness's invariant "the null block is never written" is kept); tests `*_skips_the_null_block` |
+| 3 | `Memory access fault` in the first FULL capture warm-up of a q = 6 verification graph | the dummy batch has `seq_len` < `q_len`, so `p = p1 - (q_end - t)` is negative and indexes `block_table[r, -1]` and ring row `p % ring` below 0 | `i2_ring_keeps` starts with `if (p < 0 \|\| p >= p1) return false;`: one guard for all three writers (`i2_sconv_kernel` fused write, `i2_state_write_kernel`, `i2_kv_prep_kernel`); it also drops padded tokens that read as request 0 (`p >= p1`) |
+| 4 | `StopIteration` in the engine's KV planner at a TP = 2 boot with the DSpark draft | the sliding-window bucket mixed the target's per-rank pages (4 KV heads) with the draft's replicated pages (8 KV heads): an unbalanced bucket. The state-bucket cap asks for more groups than the `zip` of its page-size lists has repeats, so the trailing groups were empty (`UniformTypeKVCacheSpecs.from_specs({})`) and the layers of the longer list were dropped | `_get_packed_kv_cache_groups` builds the repeats from the longest list and skips a group past the last repeat (`vllm/v1/core/kv_cache_planning.py`); balanced and single-size buckets are unchanged; test `test_unbalanced_sliding_window_bucket_keeps_every_layer` (both cases fail with `StopIteration` on git HEAD) |
+
+The conv block of the Rig world (`paged_harness`) is 4 tokens (the kernel size), so a model-level test
+cannot tell defect 1 from its kernel-level neutralisation (with the old fill plus the guards all 7 graph
+tests still pass); the unit test on `seq_idx` and the kernel tests with 64-token blocks carry the proof.
+
+### Gates on the final library
+
+| Gate | Result |
+|---|---|
+| build (`build_lq.sh`, all csrc: MXFP8 MoE rewrite, embed lookup, ring ops) | first full build 790 s (157 steps), incremental 119 - 120 s, exit 0 |
+| CPU suite (`tests/models/inkling2_loop`, `tests/v1/worker/test_extensible_kv_cache.py`, `tests/tools/rdna/test_inkling2_recipes.py`; `env HIP_VISIBLE_DEVICES=`, 8 threads) | 686 passed, 97 skipped, 0 failed (669 s), run on the final tree before the KV-planner fix below |
+| kernel suites, HIP 3: attention / glue + MoE + ViT + linear | 863 passed (381 s) / 1,075 passed (401 s) = 1,938 |
+| `test_serving_path_gpu.py` + `test_serving_path_graph_gpu.py`, HIP 3 | 146 passed (187.8 s) (139 + 7) |
+| `tests/tools/rdna/test_inkling2_recipes.py` + `test_extensible_kv_cache.py` (CPU, tree after the last recipe edits) | 26 passed, 26 skipped (14.7 s) |
+| KV planner (`tests/v1/core`: the 8 kv / packing files, CPU) | 314 passed, 31 failed. The same 31 fail with git HEAD's `_get_packed_kv_cache_groups` (30 in `test_leapquant_page_packing.py`, e.g. `'_StateLayer' object has no attribute 'state_alignment'`; 1 in `test_kv_cache_planning.py`); HEAD's planner gives 312 passed, 33 failed, the 2 extra being the new unbalanced-bucket tests (`StopIteration`) |
+| mutation checks of the ring guards (`ninja _rocm_C` only, a library per mutant, `-k "ignores_padding_that_reads_as_request_zero or ignores_rows_shorter or skips_the_null_block"`, HIP 3) | all killed: c9 (`p < p1` only) 3 failed / 42 passed, c10 (`0 <= p` only) 10 / 35, c11 (null-block guard removed) 30 / 15; the old `seq_idx` fill under a plugin: `test_seq_idx_of_a_graphs_padding_is_minus_one` fails; the real library's sha256 verified after the mutant builds |
+| six-arch compile of `inkling2_attn_rdna2.hip.o` (gfx90a gfx942 gfx950 gfx1030 gfx1100 gfx1200) | `compile_exit=0`; the object carries one code bundle per arch (gfx1030, gfx1100, gfx1200, gfx90a, gfx942, gfx950) |
+
+### Decode with HIP graphs (`graph_check.py`, ms per generated token of one request, = the step time of `b` rows)
+
+`--max-model-len 4096 --max-num-seqs 16 --prefix-caching --tokens 64 --reps 3`, default capture grid
+(decode graphs for 1 .. 16 requests, mixed graphs for 1, 2, 4, 8, 16, 24, 32 tokens), `FULL_AND_PIECEWISE`
+against `--enforce-eager`, same engine otherwise. TP > 1 uses the one-shot HIP all-reduce up to 256 KiB
+(`--ar-backend rdna --ar-max-kb 256`). TP = 1 and TP = 2 were measured on the build before the last two
+ring guards (one compare per ring write, off the decode critical path [INFERENCE]); the TP = 4 columns
+on the final library.
+
+| requests | TP=1 eager | TP=1 graph | ratio | TP=2 eager | TP=2 graph | ratio | TP=4 eager | TP=4 graph | ratio |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 20.09 | 19.12 | 0.952 | 16.21 | 14.16 | 0.873 | 16.94 | 11.54 | 0.681 |
+| 2 | 23.78 | 23.28 | 0.979 | 17.55 | 16.04 | 0.914 | 17.04 | 12.65 | 0.742 |
+| 3 | 27.20 | 26.53 | 0.976 | 19.35 | 18.00 | 0.930 | 18.77 | 13.76 | 0.733 |
+| 4 | 30.70 | 30.12 | 0.981 | 21.26 | 20.04 | 0.942 | 17.47 | 15.00 | 0.859 |
+| 5 | 32.87 | 32.08 | 0.976 | 22.46 | 21.32 | 0.949 | 16.92 | 15.54 | 0.918 |
+| 6 | 35.15 | 34.40 | 0.979 | 23.80 | 22.63 | 0.951 | 18.47 | 17.02 | 0.922 |
+| 7 | 38.42 | 37.29 | 0.971 | 25.80 | 24.50 | 0.950 | 20.00 | 18.60 | 0.930 |
+| 8 | 40.40 | 39.62 | 0.981 | 26.94 | 25.84 | 0.959 | 20.69 | 19.10 | 0.923 |
+| 12 | 47.73 | 46.65 | 0.977 | 31.48 | 30.30 | 0.962 | 24.38 | 22.90 | 0.939 |
+| 16 | 50.57 | 48.69 | 0.963 | 33.82 | 33.84 | 1.001 | 25.58 | 24.55 | 0.960 |
+
+Graph throughput (requests x tokens per second, all requests): 1 request TP=1 52.3, TP=2 70.6, TP=4 86.7;
+8 requests 201.9 / 309.6 / 418.8; 16 requests 328.6 / 472.8 / 651.6. The TP = 4 eager column is noisy (b = 3
+is slower than b = 4); the large TP = 4 gain at b <= 3 (0.68 - 0.74) is probably the host launch cost the graph
+removes [INFERENCE].
+
+* The part B2 TP = 1 graph numbers (18.97 / 22.93 / 26.71 / 30.09 / 32.53 / 34.71 / 37.62 / 40.24 for 1 .. 8
+  rows) reproduce on the merged tree within 1% (19.12 / 23.28 / 26.53 / 30.12 / 32.08 / 34.40 / 37.29 /
+  39.62): the ring and the TP work cost nothing at TP = 1.
+* Graphs help more the more launches a step has: 4.8% at TP = 1, 12.7% at TP = 2 for one request (eager 16.21 ->
+  graph 14.16 ms), and the gain shrinks to 0 - 4% at 16 requests where the step is GPU bound.
+* Capture takes 2 s and 0.70 GiB at TP = 1 (SEQS 16), 0.19 - 0.31 GiB per rank at TP = 2 (engine log "took");
+  the graph memory comes out of the KV budget (the extensible cache is sized after capture): -9.5% KV tokens
+  at TP = 1 (45,175 eager -> 40,876 at a 4,096-token engine), none at a 4,096-token TP = 2 engine (162,601 ->
+  165,143), 0.19 GiB of the 1M budget at TP = 2.
+* **Collectives inside the graphs.** At TP = 2 / 4 the two all-reduces per layer visit (fp32 after the
+  attention output projection, fp16 after the MoE) and the embedding all-reduce of the vocab-sharded lookup
+  run on `rdna_ar` (one-shot, up to 256 KiB = 28 decode tokens in fp32) and are captured in the FULL decode
+  graphs. The size-32 mixed graph would reduce 288 KiB in fp32, above that limit, so it should take RCCL for
+  that one [INFERENCE from the sizes, not checked inside the graph]. No decode step needed RCCL, so there is
+  no RCCL cost to report; what a decode step costs when `RDNA_AR=0` was not measured.
+
+### Correctness with graphs
+
+The CAS noise floor (two runs of the same eager engine) already makes 30 greedy continuations differ in
+about a third of the cases at near-ties, so the criterion is the teacher-forced NLL of `real_check.py`
+(mean |dlogp| of 799 positions against TP = 1 run A, limit = 2 x the A-vs-B floor + 0.01 = 0.1027).
+
+| Run | greedy continuations identical to eager (30) | max abs dlogp of the first divergence | NLL mean abs dlogp vs A | mean logp |
+|---|---:|---:|---:|---:|
+| eager A / eager B (floor) | 21 | 0.0649 | 0.0463 | -1.9824 / -1.9844 |
+| TP = 1 graphs | 20 (25 against a second eager run) | 0.0804 | 0.0463 PASS | -1.9829 |
+| TP = 2 eager (merge) / graphs | 25 | 0.1038 | 0.0437 PASS / 0.0450 PASS | -1.9829 / -1.9835 |
+| TP = 4 eager (merge) / graphs | 21 (graphs against the `g4_eager` run of this session) | 0.0954 | 0.0416 PASS / 0.0446 PASS | -1.9796 / -1.9853 |
+
+Every first divergence is at a near-tie (gap <= 0.25 nats at TP = 1, <= 0.08 at TP = 2, <= 0.23 at TP = 4). `real_check.py`
+still prints `PREFIX HIT FAIL` and exits 1 on every run (hit-vs-cold 0.18 against a cold-vs-cold of 0.49
+nats: the criterion compares two noisy numbers; a known false failure, not a graph effect).
+Prefix caching with graphs: a 1,301-token prompt cold / warm 1.53 / 0.39 s at TP = 1 (eager the same),
+0.97 / 0.28 s at TP = 2, identical ids; `cold_vs_warm` has no divergence. At TP = 4: 0.70 / 0.23 s (eager
+0.74 / 0.27); the warm run diverges from the cold one at token 5 by 0.053 nats, as two cold runs do (0.046;
+eager 0.042 and 0.042): noise, not a cache effect.
+
+### Long context with graphs (`long_context_check.py`, prefix caching, vision tower loaded)
+
+TP = 1 (HIP 3, `--max-model-len -1`, tower loaded, `--max-num-batched-tokens 1024`): the engine fits **180,928**
+tokens at `--max-num-seqs 16` and **194,368** at 2 (eager earlier tree: 201,600); graphs cost 0.70 GiB at
+SEQS 16. The needle at 90% of the fit (162,814 tokens, SEQS 16): prefill 251.1 s = **648 tok/s** (eager
+475), decode **31.9 ms/token** at that depth (eager 35.5), found, device peak 25.59 GiB.
+
+TP = 2 (HIP 4 + 5, SEQS 8, `--max-model-len 1048576`, graphs; the engine's refusal message gives the
+estimated maximum length):
+
+| Tower | `MAXBAT` | margin floor | KV blocks (GiB) / needed | Result |
+|---|---:|---:|---:|---|
+| none | 184 | 3 GiB | 16,338 (15.95) / 16.13 GiB | refused, estimated maximum 1,037,312 |
+| none | 160 | 3 GiB | 16,356 (15.97) / 16.12 | refused, 1,038,784 |
+| none | 96 | 3 GiB | 16,444 (16.06) / 16.11 | refused, 1,045,312 |
+| none | 88 | 3 GiB | 16,472 (16.08) / 16.11 | refused, 1,047,232 |
+| none | 184 | 2 GiB | 17,362 (16.96) / 16.1 | boots, 1,102,487 tokens, 1.05x |
+| loaded | 184 | 2 GiB | 16,736 (16.34) / 16.1 | boots, 1,062,736 tokens, 1.01x |
+
+The graphs cost 0.19 - 0.31 GiB of the budget (eager earlier tree: 16,530 blocks at 184, 16,513 needed),
+which is the margin the full context did not have. At 88 tokens the engine's estimate is still 1,344 tokens
+short, so the default floor would need a chunk of roughly 70 - 80 tokens [INFERENCE from the slope of the four
+boots, not booted]. With the floor at 2 GiB the 261,052-token needle (tower loaded,
+`MAXBAT` 184): prefill 321.8 s = **811 tok/s** (eager earlier tree 665), decode **24.4 ms/token** at that
+depth (eager 26.4), found, device peak 27.20 GiB on both cards.
+
+TP = 4 (HIP 2 - 5, SEQS 8, `MAXBAT` 4,096, graphs, default 3 GiB floor, `--max-model-len 1048576`): boots with
+the tower: 37,552 KV blocks at the warmup estimate (18.34 GiB), **2,250,192 tokens = 2.15x** of 1,048,576;
+text only 2,331,686 tokens (2.22x). Weights per rank 6.21 GiB with the tower (5.61 text only); the engine
+log's capture counter reads between -0.50 and 0.30 GiB across ranks and runs (below its resolution). The
+261,052-token needle with the tower: prefill 164.3 s = **1,589 tok/s**, decode **17.1 ms/token** at that
+depth, found, device peak 25.58 GiB of 29.98 on HIP 2. (Not comparable with the earlier tree's 682 tok/s,
+which is the average over 942,628 tokens: the rate falls with depth.)
+
+### Vision through the V2 runner with graphs (`vision_engine_check.py`)
+
+One image, the same image twice (the second request is a prefix hit: 128 of 134 prompt tokens, ids equal to
+the first answer), two different images in one batch, and a batch of two images plus a text prompt, against
+the eager answers of the same engine and the TP = 1 eager dump. TP = 1 graphs: `RESULT PASS`, every answer
+identical to eager except the three-request batch (first difference at token 39, the noise of a batch against
+its single answer). TP = 2 graphs: identical to the eager TP = 2 answers; TP = 2 graphs **at 1,048,576
+tokens** (`--max-num-batched-tokens 184`, floor 2048 MiB): `RESULT PASS`, 7 of 9 answers identical to TP = 1
+eager, the two others differ from token 39 / 41 of the three-request batch. TP = 4 graphs **at 1,048,576
+tokens** (`--max-num-batched-tokens 4096`): `RESULT PASS`, 8 of 9 answers identical to TP = 1 eager, the
+other (the disc inside the three-request batch) differs from token 39; the repeated image is a prefix hit
+(128 of 134 prompt tokens, ids equal).
+
+### Recipes and the KV margin floor
+
+`tools/rdna/recipes/inkling2-mini-tp{1,2,4}.env` (`serve_rdna.sh RECIPE=...`), the guide
+`docs/rdna2/inkling2-serving.md`, the plan test `tests/tools/rdna/test_inkling2_recipes.py` and the smoke
+client `tools/rdna/inkling2/serve_smoke.py` (text, image, prefix hit, streaming, four concurrent requests).
+Booted through the launcher: TP = 1 ready after 44 s, `max_model_len` 180,000, `RESULT PASS`; TP = 2 ready
+after 64 s, `max_model_len` 1,048,576, `RESULT PASS`; TP = 4 ready after 59 s, `max_model_len` 1,048,576,
+`RESULT PASS` (prefix of 1,736 tokens cold / warm 0.73 / 0.12 s, stream 89.5 chunks/s, four concurrent
+requests 255 tokens in 1.04 s).
+
+The engine keeps `max(3 GiB, 0.75 x transient peak)` free after sizing on ROCm
+(`KV_CACHE_MARGIN_FLOOR_BYTES`). At TP = 2 that is the whole difference between 1,048,576 tokens and
+1,037,312: with graphs captured and the default floor the full context is refused at every chunk size that
+prefills at a useful rate (table above). `VLLM_KV_CACHE_MARGIN_FLOOR_MIB` (new, `vllm/envs.py` and
+`vllm/v1/worker/extensible_kv_cache.py`; unset or empty keeps the platform default, so no other model
+changes) lowers the floor; the TP = 2 recipe sets 2048 MiB. Evidence that 2 GiB is enough here: the
+262,144-token needle with the tower loaded peaked at 27.20 GiB of 29.98 on both cards, i.e. 2.78 GiB free,
+and the TP = 1 needle of the earlier tree kept 3.74 GiB free; the floor was not touched in either run.
+Not proven: a 1M-token prompt (about 51 minutes of prefill at TP = 2) and workloads that allocate more
+than these two (a very long prompt-logprobs request, a multimodal batch of other shapes).
+
+### Open risks and next steps (after this section)
+
+* **DSpark at TP > 1** still raises `NotImplementedError` (the draft shares the full-vocab head and embedding;
+  it needs a vocab-shard-aware head gathering per-rank partials); the recipes keep it off. At TP = 1 the
+  Inkling2Spec branch drafts with the ring sized `3 + k` rows (`FULL_AND_PIECEWISE` boots and captures on this
+  tree with its scratch predicate, which is the predicate merged here).
+* **A 1,048,576-token prompt was not run end to end** (prefill about 51 minutes at TP = 2 [DERIVED from the
+  942,628-token run], 28 minutes at TP = 4 [INFERENCE]); the needles are 262,144 tokens (and 90% of the fit at
+  TP = 1).
+* **The TP = 2 recipe depends on the lowered margin floor** (2 GiB); with the default 3 GiB the full context
+  does not boot once graphs are captured. TP = 4 needs no change.
+* **Mixed graphs reach 32 tokens only**; a prefill chunk (184 - 4,096 tokens) runs eager, as before.
+* `real_check.py` first-step limit and `PREFIX HIT FAIL` remain false failures; use the NLL criterion.
+* The 31 failures of the KV-planner suites also occur with git HEAD's `_get_packed_kv_cache_groups` in this
+  tree (see the gates); they were not touched and their cause was not investigated.

@@ -564,6 +564,44 @@ def test_seq_idx_matches_the_torch_construction():
         assert torch.equal(got.cpu(), want.cpu()), lens
 
 
+def test_seq_idx_of_a_graphs_padding_is_minus_one():
+    """A CUDA graph's padding belongs to no request: tokens past the last request's
+    (a token-padded PIECEWISE segment, the tail of a FULL graph) and padded requests
+    (``seq_lens = 0``, ``query_start_loc`` repeats the token count).  The engine's
+    token -> request kernel answers request 0 for them; the conv / KV kernels skip only
+    ``seq_idx < 0`` and address the conv ring by position, so a padded token read as
+    request 0 writes the ring row that holds the oldest history tap of request 0's next
+    token."""
+    scratch = state_mod.SeqIdxScratch(512, "cuda")
+    rng = random.Random(1)
+    for pad_tokens, pad_reqs in [(0, 0), (3, 0), (0, 3), (5, 2), (31, 7), (1, 1)]:
+        reqs = rng.randint(1, 6)
+        lens = [rng.choice([1, 1, 2, 3, 8]) for _ in range(reqs)]
+        tokens = sum(lens)
+        qsl = [0, *torch.tensor(lens).cumsum(0).tolist()] + [tokens] * pad_reqs
+        scratch.token_to_req.fill_(7)  # the map of an earlier, larger batch
+        common = SimpleNamespace(
+            num_reqs=reqs + pad_reqs,
+            num_actual_tokens=tokens + pad_tokens,
+            query_start_loc=torch.tensor(qsl, dtype=torch.int32, device="cuda"),
+            query_start_loc_cpu=torch.tensor(qsl, dtype=torch.int32),
+            seq_lens=torch.tensor(
+                [n + 5 for n in lens] + [0] * pad_reqs, dtype=torch.int32, device="cuda"
+            ),
+            block_table_tensor=torch.zeros(
+                reqs + pad_reqs, 4, dtype=torch.int32, device="cuda"
+            ),
+            slot_mapping=torch.full(
+                (tokens + pad_tokens,), -1, dtype=torch.int64, device="cuda"
+            ),
+            max_query_len=max(lens),
+            max_seq_len=max(lens) + 5,
+        )
+        got = state_mod.make_metadata(common, scratch).seq_idx.cpu().tolist()
+        want = [r for r, n in enumerate(lens) for _ in range(n)] + [-1] * pad_tokens
+        assert got == want, (lens, pad_tokens, pad_reqs)
+
+
 def test_dspark_taps_match_the_reference_path(hv):
     pm_hip, pm_ref = _pm(hv, "hip"), _pm(hv, "reference")
     cfg = pm_hip.cfg

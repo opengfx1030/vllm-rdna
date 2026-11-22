@@ -203,6 +203,18 @@ inkling2_attention_splits(num_reqs, num_kv_heads, window, max_seq_len,
 * Slot mappings of the K\|V cache are int64 and follow vLLM's convention `slot = block
     * block_size + offset`,`-1` for padding. The conv ops take the block table and
   `seq_idx`instead (`-1` = padding) and derive the block and the row themselves.
+* **What the ring writers skip.**  A step writes the ring row of a position `p` of a
+  request (`p1` = its `seq_lens` entry) only if `0 <= p < p1` (`i2_ring_keeps`) and only
+  into a real page: block 0 is `BlockPool.null_block`, not a page (`i2_write_ring`).
+  Three kinds of token are therefore harmless although the engine builds them: the
+  padding of a graph, which the engine's token -> request map (`build_qsa_metadata_rdna2`)
+  gives to request 0 past the last chunk (`p >= p1`, and with a 64-token block that
+  position falls into a block request 0 owns); a capture's dummy batch whose `seq_len` is
+  shorter than its query (`seq_len` 1, `q_len` 6: `p < 0`, which would index the block
+  table below its first row and a negative ring row and fault); and the zeroed block
+  tables of the dummy batches of a capture, a warm-up and the memory profile (block 0).
+  The model side also gives padded tokens `seq_idx = -1` (`SeqIdxScratch.fill`), so the
+  kernel rules are a second line, not the only one.
 
 ## 4. Caller-side preparation (what the lead has to wire)
 
@@ -332,11 +344,10 @@ python tools/rdna/inkling2/bench_attn.py --sweep-splits --only attn --ctx 16384 
 
 ## 8. Verification
 
-`tests/kernels/attention/test_inkling2_attn_rdna2.py`: 668 tests (604 of them on the
-conv ops, 64 on attention), all passing on the real registered-ops build (no dev
-aliasing) on a V620 (HIP 3: `668 passed in 327 s`; the first full run after the
-conv-ring change had one failure, the fake-tensor trace test still calling the old
-op signatures, fixed).
+`tests/kernels/attention/test_inkling2_attn_rdna2.py`: 863 tests (the conv ops are the large
+majority, attention decode / prefill / mixed / layouts / long context / graph replay the rest),
+all passing on the real registered-ops build (no dev aliasing) on a V620 (HIP 3, merged tree,
+`863 passed in 381 s`; 45 of them are the padding and null-block tests listed below).
 Every GPU case compares against an fp64 CPU oracle built from the dense K / V (the
 oracle's prologue is bit-identical to `Inkling2Attention._scaled_clip`) and checks the
 poisoned memory: unused cache pages, padding rows and the split workspace are filled
@@ -347,6 +358,7 @@ with NaN, so a read of anything the kernel must not read fails the case.
 | CPU | oracle vs the repo modules (`_scaled_clip`, conv), split policy properties, workspace formula |
 | `sconv_static`, `sconv_dynamic`, `conv_state_write`, `kv_prep` | ring geometries `(block 4, ring 3)`, `(64, 3)`, `(16, 10)` x 4 request mixes (decode, prefill, chunked with history in earlier blocks, one with an empty request; blocks wholly below the history are the null block) x widths / dtypes / kv head counts x padded token / short-metadata cases x both page layouts; after every call the **whole** conv cache is compared bit for bit with the expected ring (the rule's rows written, everything else, NaN pages included, untouched), no input argument may change, every third conv input is 4x louder so the k L2 clip engages on some rows and not on others; each compute op is first run with `write_state = False` (the state must stay bit-identical), then followed by `inkling2_conv_state_write`, and for the one-token-per-request mix also with the fused `write_state = True`; `conv_state_write` puts two streams of different dtype and width into one page and runs with the page between four other layers' pages (`block5`) |
 | ring rollback | a `1 + drafts` token verify step of which 1 / 2 / 4 / 8 stay (`drafts` 4 / 7, block 4 / 16 / 64), the junk rows of the rejected tokens in the ring, then the next step reads its history from it: with `3 + drafts` rows the outputs equal the oracle, for a multi-token step and for one-token fused steps; fp32 inputs that are not fp16-representable are stored rounded (`conv_state_rounds_fp32_inputs_to_fp16`) |
+| padding / null block | `conv_state_write`, the fused `sconv_static` write and `kv_prep` on the ring geometries, 45 cases: a request whose block table is the null block (block 0 is `BlockPool.null_block`, not a page; its NaN page must stay NaN), padded tokens that the engine's token -> request map gives to request 0 past the last chunk (`p >= seq_len`; the NaN-poisoned rows of request 0 must stay NaN), and rows whose `seq_len` is shorter than their query (`seq_len` 1, `q_len` 6, zeroed block tables: positions below 0, which would index the table at row -1); after each call the whole cache is compared bit for bit with the expected ring |
 | `attention` decode / prefill / mixed | `q_len` 1, 2..1024, mixed batches with explicit splits, `g = 1..4`, gate / no gate, strided (fused-projection) inputs, int32 positions, small `rel_extent`, window 0 / 1024 |
 | long context | TP=4 full layer with 1,048,576 tokens (three split settings) |
 | cache layouts | head-major, token-major, and both interleaved with two other layers' NaN pages (block stride = 3 pages) |
@@ -414,7 +426,8 @@ third input row 4x louder, and the mutant fails (after 192 passing cases).
 again, with the same method (one exact-string change per mutant, its own op library, the
 conv tests `-k "test_sconv_static or test_sconv_dynamic or test_conv_state_write or
 test_kv_prep or test_rejected or test_conv_state_rounds"` with `-x`). All 8 ring mutants
-fail:
+fail (c9 - c11, the guards of the padding and null-block rules, were built and run as
+described after the table):
 
 | Mutant | Change | First failing test |
 | --- | --- | --- |
@@ -426,6 +439,17 @@ fail:
 | c6 | state write ignores the stream offset (`o0` -> 0) | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
 | c7 | history head stride `cs1` -> `cs2` | `sconv_static[hbc-padding0-8-288-dtype0-4-3-decode]` |
 | c8 | history row hard-coded to a 3-row ring (`sp % 3`) | `sconv_static[hbc-padding0-8-288-dtype0-16-10-decode]` after 8 passing cases: only the ring-10 geometry sees it |
+| c9 | keep predicate `0 <= p && p < p1` -> `p < p1` (a row below the first position of the request is written: the block-table index and the ring row go negative) | `conv_state_write_ignores_rows_shorter_than_their_query[4-3]`, 3 failures (one per geometry) |
+| c10 | keep predicate `0 <= p && p < p1` -> `0 <= p` (padding that reads as request 0 writes past its last position) | `conv_state_write_ignores_padding_that_reads_as_request_zero[hbc-64-3]`, 10 failures: `conv_state_write` (both layouts), the fused `sconv_static` write and `kv_prep` (static and dynamic) in the `(64, 3)` and `(16, 10)` geometries; the `(4, 3)` geometry does not see this mutant |
+| c11 | `i2_write_ring` without `if (blk <= 0) return;` (a request whose block table is the null block writes into block 0) | `conv_state_write_skips_the_null_block[hbc-4-3-decode]`, 30 failures: `conv_state_write` (12), `kv_prep` (12), the fused `sconv_static` write (3) and `conv_state_write_ignores_rows_shorter_than_their_query` (3: the zeroed tables of that test make the null block the target) |
+
+c9 - c11 are built from the mutated `.cu` with `ninja _rocm_C` only (its own library per mutant,
+the source restored after every build, the checksum of the real library verified at the end: OK) and run
+on a V620 with `-k "ignores_padding_that_reads_as_request_zero or ignores_rows_shorter or
+skips_the_null_block"` and no `-x`: c9 3 failed / 42 passed, c10 10 failed / 35 passed, c11 30 failed /
+15 passed. The Python side of the same defect (`SeqIdxScratch.fill` giving padded tokens `seq_idx = 0`)
+is killed by `test_seq_idx_of_a_graphs_padding_is_minus_one` under a plugin that restores the old fill
+(`seq_idx=[0, 1, 1, 1, 2, 2, 2, 0, 0, 0]`): 1 failed.
 
 The five mutation classes of the tap math (m9, m11, m14, m15, m16) were applied to the ring
 source too, by the same method; all 5 fail:
@@ -438,7 +462,7 @@ source too, by the same method; all 5 fail:
 | m15r | `kv_prep` drops the k L2 clip | `kv_prep[hbc-padding0-8-static-4-3-decode]` (after 411 passing cases) |
 | m16r | dynamic conv reads static weight row 2 for lag 1 | `sconv_dynamic[hbc-padding0-8-4-3-decode]` (after 144 passing cases) |
 
-So 13 of 13 conv mutants fail on the ring source (the part-A m10, "conv history read at
+So 16 of 16 conv mutants fail on the ring source (the part-A m10, "conv history read at
 position 0 dropped", is covered by c2, c3, c4 and c7).  The other 16 rows of the part-A
 table mutate the attention decode, prefill and split-combine kernels, which this change
 did not touch; they were not re-run.
@@ -593,7 +617,9 @@ Other measurements on the same kernel:
   below the history and never written). Two requests may not write the same block in
   one step: a request that would prefix-hit blocks another request writes in the same
   step has to wait a step (`Inkling2ConvStateManager`). fp32 inputs are stored rounded
-  to fp16.
+  to fp16.  Positions outside `[0, seq_len)` and block 0 are never written (section 3),
+  so a graph's padding and a capture's dummy batch need no special metadata beyond
+  `seq_idx = -1` for the padded tokens.
 * **TP > 1**: pass each rank's slice of `q_scale` `[nh_local, 128]`,
   `rel_scale` `[nh_local, 16]`; `rel_proj_t` is replicated (it is shared by the heads).
   The serving model shards by KV-head group (`amd/loader.py:local_slice`: rank `r`

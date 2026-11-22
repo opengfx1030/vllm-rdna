@@ -378,6 +378,34 @@ def test_graph_replay_ignores_what_the_padding_holds(stable):
     assert torch.isfinite(clean).all() and torch.equal(clean, dirty), name
 
 
+def _cache_bits(pm: PagedModel) -> list[torch.Tensor]:
+    """Every cache page of the world as raw 16-bit patterns (the NaN poison included, so
+    a row nothing may write has to keep the poison)."""
+    return [
+        owner.kv_cache.view(torch.int16).clone()
+        for g in pm.world.groups.values()
+        for owner in g.owners
+    ]
+
+
+def test_padding_writes_no_cache_row(stable):
+    """The caches after the padded steps are the caches after the unpadded ones, bit for
+    bit: the K / V pages (padded tokens carry ``slot_mapping = -1``) and the conv rings.
+    The ring is addressed by position and a padded token that read as request 0 would
+    write the position past the end of request 0's chunk into a ring row, the history
+    tap of the token that follows."""
+    name, pm = stable
+    # the prefill, 5 -> 8 requests twice, exactly 4, then 3 -> 4
+    steps = _schedule(_sequences())[:5]
+    _run(pm, steps, "eager")
+    want = _cache_bits(pm)
+    _run(pm, steps, "live")
+    got = _cache_bits(pm)
+    assert len(got) == len(want) > 0
+    for i, (a, b) in enumerate(zip(want, got)):
+        assert torch.equal(a, b), f"{name}: cache {i} differs after the padded steps"
+
+
 def test_graph_replay_under_the_cas_noise_of_eight_experts(tmp_path_factory):
     """With eight experts per token the expert GEMMs add into the output with fp16 CAS
     atomics in an order that varies from run to run (see

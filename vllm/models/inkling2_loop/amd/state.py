@@ -98,16 +98,19 @@ class SeqIdxScratch:
 
     The map covers every token of the forward pass *including the padding the runner
     adds for a CUDA graph* (``c.slot_mapping`` is the runner's padded buffer, one slot
-    per token of the graph).  Padded tokens read as request 0 and carry
-    ``slot_mapping = -1``: the conv / KV kernels compute them from rows of request 0
-    that exist (``sr >= 0`` taps read ``x``, history reads stay inside request 0's own
-    blocks) and write nothing to any cache, so a graph captured for ``T`` tokens
-    replays any batch of up to ``T`` of them.  A PIECEWISE segment bakes ``T`` as the
-    length of this map at capture time; refreshing all ``T`` entries at every step is
-    what makes that safe (a stale tail of an earlier, larger batch would index
-    requests of a batch that is gone).  The padded *requests* of a FULL graph own no
-    token (``seq_lens = 0``, ``query_start_loc`` repeats the token count), so nothing
-    maps to them.
+    per token of the graph).  A padded token belongs to no request: it reads ``-1``
+    (the engine's kernel gives such tokens request 0, which is replaced here) and
+    carries ``slot_mapping = -1``.  The conv / KV kernels skip ``seq_idx < 0`` tokens
+    completely: they read no history and write neither the KV cache nor a ring row.
+    The ring is addressed by position, not by slot, so a padded token that read as
+    request 0 would write the position past the end of request 0's chunk into one
+    of its ring rows, which are the history of request 0's next token.  A graph
+    captured for ``T`` tokens replays any batch of up to ``T`` of them.  A PIECEWISE
+    segment bakes ``T`` as the length of this map at capture time; refreshing all ``T``
+    entries at every step is what makes that safe (a stale tail of an earlier, larger
+    batch would index requests of a batch that is gone).  The padded *requests* of a
+    FULL graph own no token (``seq_lens = 0``, ``query_start_loc`` repeats the token
+    count), so nothing maps to them.
     """
 
     def __init__(self, max_tokens: int, device: torch.device | str) -> None:
@@ -134,6 +137,7 @@ class SeqIdxScratch:
             )
         num_reqs = c.num_reqs
         if num_tokens and num_reqs:
+            mapped = int(c.query_start_loc_cpu[num_reqs])
             torch.ops._rocm_C.build_qsa_metadata_rdna2(
                 c.query_start_loc[: num_reqs + 1],
                 c.seq_lens[:num_reqs],
@@ -145,7 +149,7 @@ class SeqIdxScratch:
                 self._slots,
                 None,
                 num_reqs,
-                int(c.query_start_loc_cpu[num_reqs]),
+                mapped,
                 num_tokens,
                 0,
                 math.ceil(math.log2(num_reqs)),
@@ -155,6 +159,8 @@ class SeqIdxScratch:
                 1,
                 0,
             )
+            if mapped < num_tokens:  # the graph's padding: no request owns these
+                self.token_to_req[mapped:num_tokens].fill_(-1)
         return self.token_to_req[:num_tokens]
 
 
@@ -209,7 +215,8 @@ class Inkling2MetadataBuilder(AttentionMetadataBuilder[Inkling2Metadata]):
     with the padded request count of the graph, the uniform query length and
     ``max_seq_len = max_model_len``, which bound every batch the graph replays
     (``docs/rdna2/inkling2-attn-kernels.md``, "CUDA-graph capture").  Padded requests
-    have ``seq_lens = 0``, padded tokens ``slot_mapping = -1`` (see ``SeqIdxScratch``).
+    have ``seq_lens = 0``, padded tokens ``slot_mapping = -1`` and ``seq_idx = -1``
+    (see ``SeqIdxScratch``).
 
     Mixed batches never take a FULL graph (that would need ``ALWAYS``: the grid of the
     attention kernel depends on the longest query of the batch): they run in PIECEWISE

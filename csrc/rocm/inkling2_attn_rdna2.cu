@@ -196,9 +196,14 @@ __device__ __forceinline__ void i2_gather_taps(float4 (&tap)[4],
 }
 
 // Whether position p of a request that ends this step at context length p1 is
-// one of the last `ring` positions of its block inside the chunk.
+// one of the last `ring` positions of its block inside the chunk.  Only the
+// positions 0 <= p < p1 exist.  A token that is not one writes nothing: the
+// padding of a graph that the engine's token -> request map gives to request 0
+// past the last chunk (p >= p1), and the rows of a capture's dummy batch whose
+// seq_len is shorter than its query (p < 0: no block, no ring row).
 __device__ __forceinline__ bool i2_ring_keeps(const I2ConvMeta& m, int p,
                                               int p1) {
+  if (p < 0 || p >= p1) return false;
   const int blk_end = ((p >> m.blk_shift) + 1) << m.blk_shift;
   return p + m.ring >= min(p1, blk_end);
 }
@@ -207,6 +212,10 @@ __device__ __forceinline__ void i2_write_ring(const I2ConvMeta& m, int r, int p,
                                               int h, int jch, int o0,
                                               float4 cur) {
   const int blk = m.block_table[(int64_t)r * m.bt_stride + (p >> m.blk_shift)];
+  // Block 0 is the null block (BlockPool.null_block), not a page: the dummy
+  // batches of a graph capture and of the memory profile have zeroed block
+  // tables and must write nothing, as their -1 slots do for the KV cache.
+  if (blk <= 0) return;
   _Float16* dst = m.cache + (int64_t)blk * m.cs0 + (int64_t)h * m.cs1 +
                   (int64_t)(p % m.ring) * m.cs2 + o0 + jch;
   *reinterpret_cast<uint2*>(dst) =

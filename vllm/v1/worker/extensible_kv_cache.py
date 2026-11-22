@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -72,6 +73,22 @@ KV_CACHE_NON_TORCH_RESERVE_BYTES = (2 if current_platform.is_rocm() else 1) << 2
 # Share of the headroom warmup leaves uncommitted, on top of the profiled
 # activation peak, for transients the profiling run does not exercise.
 KV_CACHE_WARMUP_RESERVE_FRACTION = 0.1
+
+
+def kv_cache_margin_floor_bytes() -> int:
+    """The floor of the margin: `KV_CACHE_MARGIN_FLOOR_BYTES`, or
+    `VLLM_KV_CACHE_MARGIN_FLOOR_MIB` MiB when that is set."""
+    floor_mib = envs.VLLM_KV_CACHE_MARGIN_FLOOR_MIB
+    if floor_mib is None:
+        return KV_CACHE_MARGIN_FLOOR_BYTES
+    logger.warning_once(
+        "VLLM_KV_CACHE_MARGIN_FLOOR_MIB=%d: the KV cache sizing keeps %s GiB of "
+        "device memory free beyond the measured transient peak instead of %s GiB.",
+        floor_mib,
+        format_gib(floor_mib << 20),
+        format_gib(KV_CACHE_MARGIN_FLOOR_BYTES),
+    )
+    return floor_mib << 20
 
 
 class ExtensibleKVCache:
@@ -292,7 +309,7 @@ class ExtensibleKVCache:
             int(headroom * KV_CACHE_WARMUP_RESERVE_FRACTION),
         )
         margin = max(
-            KV_CACHE_MARGIN_FLOOR_BYTES, int(reserve * KV_CACHE_MARGIN_FRACTION)
+            kv_cache_margin_floor_bytes(), int(reserve * KV_CACHE_MARGIN_FRACTION)
         )
         budget = headroom - margin - reserve
         return max(self.blocks_within(budget), self.num_committed_blocks)
@@ -597,7 +614,7 @@ def measure_kv_cache_bytes(
     requested_memory: int,
     transient_peak_bytes: int = 0,
     torch_reserve_growth_bytes: int = 0,
-    margin_floor_bytes: int = KV_CACHE_MARGIN_FLOOR_BYTES,
+    margin_floor_bytes: int | None = None,
     margin_fraction: float = KV_CACHE_MARGIN_FRACTION,
 ) -> int:
     """Bytes the KV cache may occupy given the memory measured after warmup.
@@ -612,6 +629,8 @@ def measure_kv_cache_bytes(
     """
     non_kv_used = init_free_memory - free_memory - committed_bytes
     headroom = free_memory + committed_bytes
+    if margin_floor_bytes is None:
+        margin_floor_bytes = kv_cache_margin_floor_bytes()
     margin = max(margin_floor_bytes, int(transient_peak_bytes * margin_fraction))
     available = min(requested_memory - non_kv_used, headroom - margin)
     available -= max(transient_peak_bytes, torch_reserve_growth_bytes)

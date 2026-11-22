@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Offline vLLM run of the real Inkling-2-Mini checkpoint (one GPU, or
-``--tensor-parallel-size`` GPUs; eager, fp16).
+``--tensor-parallel-size`` GPUs; fp16; eager unless ``--cudagraph-mode`` names a graph
+mode: the serving recipe is ``FULL_AND_PIECEWISE``).
 
 Renders each prompt exactly like ``ref_checkpoint.py`` (chat template file,
 ``add_generation_prompt``), prints the first-step top-8 tokens with their raw
@@ -47,6 +48,8 @@ import json
 import os
 import time
 from pathlib import Path
+
+from engine_args import add_graph_args, add_tp_args, apply_tp_env, graph_kwargs
 
 
 def render(tok, template, text: str) -> list[int]:
@@ -178,13 +181,8 @@ def main() -> int:
         help="boot with the vision tower (needs the tokenizer / processor), then send "
         "one synthetic image request after the text prompts",
     )
-    ap.add_argument("--tensor-parallel-size", type=int, default=1)
-    ap.add_argument("--ar-backend", choices=["rccl", "rdna"], default="rccl")
-    ap.add_argument(
-        "--ar-max-kb",
-        type=int,
-        help="VLLM_RDNA_AR_MAX_KB / ONESHOT_KB (the default gate is 64 KiB)",
-    )
+    add_tp_args(ap)
+    add_graph_args(ap)
     ap.add_argument("--max-num-seqs", type=int, default=2)
     ap.add_argument("--dump", help="save the first-step top-8 and ids of every prompt")
     ap.add_argument("--against", help="--dump of the run to compare with")
@@ -199,11 +197,7 @@ def main() -> int:
         "--nll-floor", help="--nll-dump of a second run of the --nll-against run"
     )
     args = ap.parse_args()
-    if args.ar_backend == "rdna":
-        os.environ["VLLM_RDNA_AR"] = "1"
-        if args.ar_max_kb:
-            os.environ["VLLM_RDNA_AR_MAX_KB"] = str(args.ar_max_kb)
-            os.environ["VLLM_RDNA_AR_ONESHOT_KB"] = str(args.ar_max_kb)
+    apply_tp_env(args.ar_backend, args.ar_max_kb)
     if args.path:
         os.environ["VLLM_INKLING2_PATH"] = args.path
 
@@ -223,7 +217,7 @@ def main() -> int:
     llm = LLM(
         model=args.ckpt,
         dtype="float16",
-        enforce_eager=True,
+        **graph_kwargs(args.cudagraph_mode, args.prefill_sizes, args.decode_sizes),
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
