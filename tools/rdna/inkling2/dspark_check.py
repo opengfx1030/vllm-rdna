@@ -593,6 +593,7 @@ def fake_vllm_config(hf_config, num_steps: int, max_reqs: int, max_model_len: in
             draft_model_config=types.SimpleNamespace(hf_config=hf_config),
             num_speculative_tokens=num_steps,
             draft_sample_method="greedy",
+            speculator_options=None,
         ),
         model_config=types.SimpleNamespace(
             dtype=torch.float16, max_model_len=max_model_len
