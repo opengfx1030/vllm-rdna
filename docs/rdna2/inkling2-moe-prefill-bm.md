@@ -151,6 +151,26 @@ shipped kernels add fp16 partial sums of the split K). The W4A8 error against th
 activations is the activation quantisation (about 9x the fp16 kernel's); the kernel itself
 matches an oracle that multiplies the int8 activations to 2e-4 / 5e-4.
 
+Small chunks on the real checkpoint layers (`small_t_oracle.py`: the engine's own `repack_nvfp4` /
+`repack_mxfp8` on the checkpoint tensors of layers 0, 6, 17 (NVFP4) and 20 - 23 (MXFP8); T = 33,
+40, 70, 97 and 128 with uniform routing and T = 70 and 128 with a skewed routing (up to 39 rows
+of one expert: full 32-row blocks plus partial tails); synthetic activations; 24 evenly spread
+tokens, the last one included; the w2 stage includes the fp16 CAS accumulation; mean of 3
+repeats), relative L2 against fp64, 98 cases:
+
+| format | stage | shipped (mean) | 32-row (mean) | worst ratio 32-row / shipped |
+| --- | --- | ---: | ---: | ---: |
+| NVFP4 (layers 0, 6, 17) | w13 | 5.95e-4 | 3.45e-4 | 0.59 |
+| NVFP4 (layers 0, 6, 17) | w2 | 1.06e-3 | 5.75e-4 | 0.55 |
+| MXFP8 (layers 20 - 23) | w13 | 5.27e-4 | 2.08e-4 | 0.40 |
+| MXFP8 (layers 20 - 23) | w2 | 1.02e-3 | 5.01e-4 | 0.50 |
+
+The 32-row kernel is closer to fp64 than the shipped one in all 98 cases (also in the worst of
+the 3 repeats, and in max |error| / rms: worst ratio 0.65). At the shapes of the tiny test models
+(K 256 / 128, N 256, 8 experts, top-2; 36 format x stage x token cases, T = 1 to 128) both
+kernels sit on the fp16 output rounding floor (NVFP4 3.7e-4 / 4.3e-4, MXFP8 2.1e-4 / 3.0e-4)
+and are equal to within 0.1 % (largest 32-row / shipped ratio 1.0007).
+
 ### 5.2 Teacher-forced NLL on the real checkpoint
 
 `tools/rdna/inkling2/real_check.py --nll-file docs/rdna2/inkling2-port-spec.md --nll-tokens
@@ -188,8 +208,17 @@ adds the top-k rows of a token with fp16 CAS atomics in the order the blocks fin
 the shipped kernel does, so repeat runs differ in the last fp16 bits for both; the 32-row
 kernel's blocks differ more in duration (the work list puts the partial blocks last), so more
 elements see another add order. Every difference is one fp16 rounding step of a sum of eight
-terms [INFERENCE: the measurement counts elements, not magnitudes]. A bitwise repeatable w2
-needs a fixed-order reduction of the eight rows (see section 10).
+terms (magnitudes below). A bitwise repeatable w2 needs a fixed-order reduction of the eight
+rows (see section 10).
+
+Magnitude (`det_check.py` v2, five repeats against the first launch; `|diff|` relative to the rms
+of the sampled output): the largest difference is the same size for both kernels (NVFP4 w2 at
+T = 1000: 8.8e-3 for both, at 4096: 8.8e-3 against 4.4e-3; MXFP8: 5.7e-3 against 8.5e-3 and
+5.6e-3 for both), one fp16 rounding step of a few elements; the mean difference is 1.1e-4
+(32-row) against 3.9e-5 (shipped) of the rms at T = 1000 and 1.3e-5 against 4.0e-7 at
+T = 4096. The fp64 error of the same outputs is lower for the 32-row kernel at both token
+counts (NVFP4 5.8e-4 against 1.05e-3, MXFP8 5.0e-4 against 1.02e-3). On the tiny models of the
+model-level test the repeat runs are bitwise identical for both kernels.
 
 ### 5.4 Greedy equality
 
@@ -200,9 +229,35 @@ tokens is 6.2e-3; the prefix cache hits 960 of 1000 tokens, graph capture takes 
 0.70 GiB, decode 20.2 ms per token, all identical with `VLLM_INKLING2_PREFILL_BM=0`. A
 high-entropy prompt (the head of `inkling2-port-spec.md`) flips at the first token (logprob
 -0.695 against -1.186, a near tie) in a run where the shipped kernels themselves answered two
-identical 16-token requests differently (the run-to-run noise of the shipped path). Long
-prompts (16k / 32k tokens) against the shipped kernels within that floor: not run at the time
-of this commit.
+identical 16-token requests differently (the run-to-run noise of the shipped path).
+
+Long prompts (`long_req.py`: the head of the concatenated `docs/rdna2/*.md`, 16384 and 32768
+tokens, 48 greedy tokens; `serve_long.sh` boots on HIP 5; two boots of each configuration, so
+the floor is a pair of shipped boots). `off` = `VLLM_INKLING2_PREFILL_BM=0`, `on` = default.
+The 32768-token request reuses the 16384-token prefix from the prefix cache.
+
+| length | pair | tokens equal | first divergence | mean / max \|dlogprob\| before it | logprobs of the two choices |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 16384 | off A vs off B (floor) | 10 / 48 | 10 | 5.2e-2 / 1.9e-1 | -1.884 / -1.853 |
+| 16384 | on C vs on D | 38 / 48 | 38 | 3.7e-2 / 2.8e-1 | -1.494 / -1.510 |
+| 16384 | on C vs off A | 10 / 48 | 10 | 2.2e-2 / 6.8e-2 | -1.901 / -1.884 |
+| 16384 | on C vs off B | 38 / 48 | 38 | 2.7e-2 / 2.0e-1 | -1.494 / -1.470 |
+| 16384 | on D vs off A | 10 / 48 | 10 | 5.2e-2 / 2.7e-1 | -1.885 / -1.884 |
+| 16384 | on D vs off B | 48 / 48 | none | 2.9e-2 / 2.4e-1 | |
+| 32768 | off A vs off B (floor) | 22 / 48 | 20 | 2.6e-2 / 9.5e-2 | -1.604 / -1.553 |
+| 32768 | on C vs on D | 48 / 48 | none | 2.0e-2 / 9.5e-2 | |
+| 32768 | on C vs off A | 33 / 48 | 33 | 2.2e-2 / 1.8e-1 | -0.698 / -0.704 |
+| 32768 | on C vs off B | 21 / 48 | 20 | 1.9e-2 / 9.5e-2 | -1.579 / -1.553 |
+| 32768 | on D vs off A | 33 / 48 | 33 | 2.4e-2 / 1.1e-1 | -0.710 / -0.704 |
+| 32768 | on D vs off B | 21 / 48 | 20 | 2.6e-2 / 1.0e-1 | -1.647 / -1.553 |
+
+Every divergence is a near tie (the two chosen tokens differ by 0.001 to 0.094 nats), the
+earliest divergence of the default kernels from the shipped ones (token 10 at 16384, 20 at
+32768) is the earliest divergence of the two shipped boots from each other (10 and 20), and
+the default kernels' own two boots agree for 38 and 48 tokens: within the floor of the shipped
+path. The four serve logs have no evict, KFD, fault or hang line. Wall time of a request
+(prompt + 48 tokens): 16384 tokens 16.3 / 16.4 s shipped against 10.2 / 10.2 s default; the
+32768-token request (second half computed) 18.7 / 18.8 s against 12.5 / 12.6 s.
 
 ## 6. W4A8 prototype (experimental, `VLLM_INKLING2_PREFILL_INT8=1`, off by default)
 
@@ -359,6 +414,27 @@ NVFP4 experts 211.5 (w13 138.6, w2 72.9), attention input pack 67.9, attention 3
 tok/s (400 ms) is not reached by the expert kernels alone: the dense GEMMs run at 26 TFLOP/s
 (83 - 86 % of the dot2 peak) and the glue families are separate work.
 
+### 7.6 End to end, default config (the `_rocm_C` build of this patch)
+
+`profile_prefill.py` of the prefill profile on HIP 5 (TP = 1, graphs on, prefill chunks eager,
+3 runs each, clean = without the profiler):
+
+| prompt / chunk | ms per forward (3 runs) | tokens per second | kernels per step |
+| --- | ---: | ---: | ---: |
+| 1000 tokens, text | 488.3 / 488.2 / 488.4 | 2048 | 1075 |
+| 1000 tokens, random ids | 476.1 / 475.0 / 475.0 | 2105 | |
+| chunk 184 | 135.5 / 138.6 / 137.6 | 1338 | 1074 |
+| chunk 512 | 268.7 / 269.9 / 269.8 | 1898 | |
+| chunk 1024 | 497.9 / 497.4 / 498.2 | 2057 | 1074 |
+| chunk 2048 | 1015.2 / 1014.7 / 1016.0 | 2017 | 1315 |
+| chunk 4096 | 2079.8 / 2083.2 / 2085.8 | 1966 | 1794 |
+
+The shipped kernels take 873 - 883 ms for the 1000-token prompt on the same harness (the
+prefill profile's measurement; not repeated in this run). The ops this path adds to the shipped
+four cost (`launch_cost.py`): the work list 9.4 us per layer visit at T = 1000 (9.5 us at 1024);
+the activation quantiser of the experimental W4A8 path 10.0 us (w13 input [1000, 2304]) + 26.3 us
+(w2 input [8000, 1152]) = 36.3 us per NVFP4 visit.
+
 ## 8. Tests and mutants
 
 `tests/kernels/core/test_inkling2_moe_prefill_bm_rdna2.py` (304 tests, gfx1030 only):
@@ -371,10 +447,17 @@ against an oracle that multiplies the dequantised int8 activations the quantiser
 the quantiser against an fp32 reference (scale exactly, int8 within 1 LSB on < 0.1 % of the
 values), the work list against a Python reference (block sizes 1 .. 16), repeat-run
 determinism and the argument checks. `tests/models/inkling2_loop/test_moe_prefill_bm_gpu.py`
-runs the serving model on router-stable tiny checkpoints with the kernels off / on / W4A8,
-proves the path with op call counters and requires the default path to be at least as close
-to the fp32 transformers reference as the shipped kernels. `test_moe_prefill_flags.py` is the
-CPU gate of the switches (defaults, rollback flag, token gate, K eligibility).
+runs the serving model on router-stable tiny checkpoints with the kernels off / on / W4A8 and
+proves the path with op call counters. It compares the error against the fp32 transformers
+reference PAIRED over 8 checkpoints x 6 prompts per variant: the median and the one-sided
+99 % bound of the error ratio (dot2 prefill / decode kernels) of the pairs whose router
+decisions agree must stay below 1.04 and 1.06 (measured: tiny1 0.996 / 1.008, tiny8 1.005 /
+1.027). A pair whose top-k expert set differs in one token is a discrete router event, not an
+accuracy pair (5 of 120 pairs over 10 checkpoints, error ratio 1.7 to 7, the router
+amplifying one rounding difference); at most a fifth of the pairs may flip (measured 1 and 4
+of 48). A single-seed bound cannot separate these cases: a seed-0 pair measured +6 % while the
+kernels differ by 0.1 % at those shapes. `test_moe_prefill_flags.py` is the CPU gate of the
+switches (defaults, rollback flag, token gate, K eligibility).
 
 ```bash
 python -m pytest tests/kernels/core/test_inkling2_moe_prefill_bm_rdna2.py -q   # needs _rocm_C with the ops
@@ -418,11 +501,12 @@ helper and run against the kernel test; the unmutated file passes):
 | `dot_chain_init` | second dot chain starts from the first one's sum |
 | `act_tile_offset` | int8 activation tile: store offset of a 16-K piece |
 
-28 mutants. All 28 were killed on the kernel source before the formatting pass (17 of the
-kernel / work-list / common code, 11 of the W4A8 kernel; the runner asserts that every pattern
-matches the committed file exactly once). The re-run on the committed file passes the
-unmutated file and had killed every mutant that had finished when this note was written; the
-final count follows in a later commit.
+28 mutants. All 28 are killed on the committed (clang-formatted) kernel source: the final
+re-run (`moe_prefill_bm_mutants.py --phase test`, 29 results) passes the unmutated file and
+fails every mutant (17 of the kernel / work-list / common code, 11 of the W4A8 kernel; the
+runner asserts that every pattern matches the committed file exactly once). On HIP 5 against
+the `_rocm_C` build of this patch: the kernel file 304 passed in 114 s, the model-level file
+30 passed in 27 s.
 
 ## 9. Six-arch build and archdiff
 
@@ -467,11 +551,11 @@ only: no kernel ran and no GPU was touched.
   `moe_align_block_size`) and `num_experts <= 256`.
 * The w2 stage adds the top-k rows of a token with fp16 CAS atomics like the shipped kernel:
   repeat runs on the same inputs are not bitwise equal (section 5.3). A deterministic
-  variant needs a fixed-order reduction of the eight rows (an extra launch, or an in-kernel
-  last-arriver reduction with per-token counters in the workspace); neither is part of
+  variant follows the repo's `VLLM_RDNA2_MOE_DETERMINISTIC=1` (`docs/rdna2/determinism-2026-11-04.md`:
+  w2 with `output_topk = 0`, one fp16 row per (token, expert) pair with plain stores, then a
+  fixed-order fp32 sum of the rows in top-k order); it needs a second launch and is not part of
   this change.
 * The kernels are not wired for graph capture of prefill (decode chunks are below the
   threshold); the ops allocate their outputs (`torch::empty`) like the glue router.
-* Open: the NLL gate of the W4A8 kernel on the serving prompts; long-prompt (16k / 32k)
-  greedy equality (section 5.4); dense `attn_in` / `o_proj` (96 ms of the 1000-token step,
-  fp16 `[N, K]` weights at 25 - 28 TFLOP/s) are not touched by this change.
+* Open: dense `attn_in` / `o_proj` (96 ms of the 1000-token step, fp16 `[N, K]` weights at
+  25 - 28 TFLOP/s) are not touched by this change.
