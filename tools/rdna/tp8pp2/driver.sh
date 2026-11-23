@@ -111,6 +111,7 @@ need_leases() {
 free_gib() {
     HIP_VISIBLE_DEVICES=$GPUS "$VENV/bin/python" -c '
 import torch
+torch.cuda.init()
 print(" ".join(f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}" for i in range(torch.cuda.device_count())))' 2> "$R/free_gib.err"
 }
 enough_memory() {

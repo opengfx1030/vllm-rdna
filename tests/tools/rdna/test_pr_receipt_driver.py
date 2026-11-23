@@ -26,6 +26,8 @@ extra=$(cat "$tree/plan_extra" 2> /dev/null)
 seqs=$(cat "$tree/seqs" 2> /dev/null || echo 8)
 args="'--compilation-config' '{\\"mode\\":3}' '--max-num-seqs' '$seqs'"
 echo "'$tree/bin/python' $args $extra"
+printf '%s\\n' "$@" > "$tree/plan_args"
+echo "${ROCR_VISIBLE_DEVICES-unset}" > "$tree/plan_rocr"
 """
 
 VALIDATE_WRAPPER = """#!/usr/bin/env bash
@@ -166,6 +168,9 @@ class Run:
         for rel, text in config.pop("head_files", {}).items():
             (self.head / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.head / rel).write_text(text)
+        for rel, text in config.pop("base_files", {}).items():
+            (self.base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.base / rel).write_text(text)
         self.calls = tmp_path / "calls.jsonl"
         self.config = {
             "calls": str(self.calls),
@@ -440,6 +445,48 @@ def test_the_stall_probe_runs_on_the_speed_boots_with_the_recipes_concurrency(ha
     assert str(manifest["settings"]["stall_decoders"]) == "5"
     text = (h.out / "receipt.md").read_text()
     assert "#### Overlap" in text and "#### Stall probe" in text
+
+
+def test_the_launch_plans_unset_rocr_visible_devices_instead_of_emptying_it(harness):
+    # An empty ROCR_VISIBLE_DEVICES hides every GPU from torch (or makes it reject
+    # HIP_VISIBLE_DEVICES); the plans must see the variable unset, not set to "".
+    h = harness()
+    res = h.run({"DRY_RUN": "1", "ROCR_VISIBLE_DEVICES": "0,1"})
+    assert res.returncode == 0, res.stdout + res.stderr
+    for tree in (h.base, h.head):
+        args = (tree / "plan_args").read_text().split()
+        assert "HIP_VISIBLE_DEVICES=2,3,4,5" in args
+        assert not [a for a in args if a.startswith("ROCR_VISIBLE_DEVICES")]
+        assert (tree / "plan_rocr").read_text().strip() == "unset"
+
+
+PROBE_SIZE_RECIPE = {"tools/rdna/recipes/unit.env": "PREFIX_PROBE_WORDS=16000\n"}
+
+
+def prefix_words(h) -> dict:
+    return {b["boot"]: b["env"]["PREFIX_WORDS"] for b in h.boots()}
+
+
+def test_the_prefix_probe_size_comes_from_the_recipe_when_it_has_one(harness):
+    h = harness(base_files=PROBE_SIZE_RECIPE, head_files=PROBE_SIZE_RECIPE)
+    assert h.run({"EXACT": "0"}).returncode == 0
+    # Left unset: serve_validate.sh reads PREFIX_PROBE_WORDS from the same tree.
+    assert set(prefix_words(h).values()) == {None}
+
+
+def test_the_prefix_probe_size_is_2600_for_a_recipe_without_the_key(harness):
+    h = harness()
+    assert h.run({"EXACT": "0"}).returncode == 0
+    assert set(prefix_words(h).values()) == {"2600"}
+
+
+def test_an_explicit_prefix_words_wins_over_the_recipe(harness):
+    h = harness(base_files=PROBE_SIZE_RECIPE, head_files=PROBE_SIZE_RECIPE)
+    assert h.run({"EXACT": "0", "PREFIX_WORDS": "3000"}).returncode == 0
+    assert set(prefix_words(h).values()) == {"3000"}
+    plain = harness()
+    assert plain.run({"EXACT": "0", "PREFIX_WORDS": "3000"}).returncode == 0
+    assert set(prefix_words(plain).values()) == {"3000"}
 
 
 def test_the_stall_probe_can_be_resized_or_skipped(harness):

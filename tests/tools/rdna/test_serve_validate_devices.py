@@ -11,6 +11,7 @@ path exits 2 (before any boot), the accepted path proceeds to the bounded
 BOOT FAILED exit 1. No GPU is touched in either case.
 """
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -26,6 +27,7 @@ def tree(tmp_path):
     (root / "tools/rdna/port_v031").mkdir(parents=True)
     (root / "tools/rdna/serve_rdna.sh").write_text(
         '#!/usr/bin/env bash\necho "STUB-SERVE $*"\n'
+        'echo "STUB-ROCR=${ROCR_VISIBLE_DEVICES-unset}"\n'
     )
     (root / "tools/rdna/port_v031/serve_validate.sh").write_text(DRIVER.read_text())
     home = tmp_path / "home"
@@ -81,3 +83,18 @@ def test_refused_list_repointable(tree):
     result = run(root, home, GPUS="2,3", REFUSED_GPUS="2,3")
     assert result.returncode == 2
     assert "refusing HIP GPU" in result.stdout
+
+
+@pytest.mark.skipif(
+    shutil.which("setsid") is None, reason="serve_validate.sh launches through setsid"
+)
+def test_an_inherited_rocr_selection_is_unset_not_emptied(tree):
+    # An empty ROCR_VISIBLE_DEVICES hides every GPU from torch (or makes it
+    # reject HIP_VISIBLE_DEVICES): the launched command must see it unset.
+    root, home = tree
+    result = run(root, home, GPUS="2,3", ROCR_VISIBLE_DEVICES="0,1")
+    assert result.returncode == 1
+    serve_log = (home / "w4a8_runs/port-v031/serve-unit-test/serve.log").read_text()
+    assert "STUB-ROCR=unset" in serve_log
+    assert "ROCR_VISIBLE_DEVICES" not in serve_log.split("STUB-ROCR")[0]
+    assert "HIP_VISIBLE_DEVICES=2,3" in serve_log

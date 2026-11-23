@@ -131,6 +131,7 @@ setup_group() {
 free_gib() {
     "$PY" -c '
 import torch
+torch.cuda.init()
 print(" ".join(f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}"
                for i in range(torch.cuda.device_count())))'
 }
