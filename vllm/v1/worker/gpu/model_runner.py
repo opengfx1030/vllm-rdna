@@ -1839,8 +1839,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # The batch-shard gather already does this reduction.
             sampler_output.num_nans = sum_nans_per_request(
                 sampler_output.num_nans,
-                input_batch.expanded_idx_mapping,
-                input_batch.num_reqs,
+                input_batch.cu_num_logits,
+                input_batch.cu_num_logits_np,
             )
 
         assert sampler_output is not None
