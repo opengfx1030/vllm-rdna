@@ -114,6 +114,7 @@ rdna_resolve_pci_buses() {
         "$VENV/bin/python" -c '
 import sys
 import torch
+torch.cuda.init()
 want = [a.lower().split(":")[-1] for a in sys.argv[1:]]
 have = {}
 for i in range(torch.cuda.device_count()):

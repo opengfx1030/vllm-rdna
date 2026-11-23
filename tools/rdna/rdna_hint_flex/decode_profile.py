@@ -175,7 +175,7 @@ def main() -> int:
 
     if a.pci_buses:
         chk = (
-            "import torch;print(' '.join('%02x' % "
+            "import torch;torch.cuda.init();print(' '.join('%02x' % "
             "torch.cuda.get_device_properties(i).pci_bus_id "
             "for i in range(torch.accelerator.device_count())))"
         )

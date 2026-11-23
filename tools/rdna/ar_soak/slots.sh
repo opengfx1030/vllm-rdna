@@ -12,6 +12,7 @@ resolve_slot() {
     hips=$(slot_hip "$s") || return 1
     HIP_VISIBLE_DEVICES=$hips "$VENV/bin/python" -c "
 import torch
+torch.cuda.init()
 hips = \"$hips\".split(\",\")
 for i in range(torch.cuda.device_count()):
     p = torch.cuda.get_device_properties(i)

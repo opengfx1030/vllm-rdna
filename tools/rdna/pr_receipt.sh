@@ -25,6 +25,9 @@
 #                       STALL_LENS=4096,16384 prefill lengths; STALL_DECODERS:
 #                       decoders (default: the recipe's --max-num-seqs less one, so
 #                       that the injected prefill has a slot).
+# PREFIX_WORDS          prompt size (words) of the prefix-cache probe on every boot;
+#                       default: the recipe's PREFIX_PROBE_WORDS when it has one,
+#                       else 2600.
 # CELLS                 speed cells "in:out:conc[:prompts] ..." (default: the
 #                       contract's matrix, `pr_receipt_report.py cells`); none skips.
 # EXACT_CELLS           cells whose greedy texts are hashed on the deterministic
@@ -174,8 +177,8 @@ _timeout=$(command -v timeout || command -v gtimeout || true)
 # The launch plan of each tree (serve_rdna.sh PRINT=1): the receipt shows whether they match.
 for _r in base head; do
     if [[ $_r == base ]]; then _tree=$BASE_TREE; _venv=$BASE_VENV; else _tree=$HEAD_TREE; _venv=$HEAD_VENV; fi
-    PRINT=1 bash "$_tree/tools/rdna/serve_rdna.sh" RECIPE="$RECIPE" MODEL="$MODEL" VENV="$_venv" \
-        VLLM_TREE="$_tree" HIP_VISIBLE_DEVICES="$GPUS" ROCR_VISIBLE_DEVICES= PORT="$PORT" \
+    PRINT=1 env -u ROCR_VISIBLE_DEVICES bash "$_tree/tools/rdna/serve_rdna.sh" RECIPE="$RECIPE" MODEL="$MODEL" VENV="$_venv" \
+        VLLM_TREE="$_tree" HIP_VISIBLE_DEVICES="$GPUS" PORT="$PORT" \
         HOST=127.0.0.1 VLLM_CACHE_ROOT="$OUT/cache/$_r/vllm" TRITON_CACHE_DIR="$OUT/cache/$_r/triton" \
         TORCHINDUCTOR_CACHE_DIR="$OUT/cache/$_r/inductor" VLLM_SERVER_DEV_MODE=1 \
         ${OVERRIDES[@]+"${OVERRIDES[@]}"} > "$OUT/plans/$_r.txt" 2>&1 \
@@ -366,7 +369,7 @@ fi
 
 run_boot() { # id role kind
     local id=$1 role=$2 kind=$3 tree venv bdir cells bench_extra hold=0 hook="" conc=1 rc t0 py
-    local -a det=() stall=()
+    local -a det=() stall=() prefix=()
     if [[ $role == base ]]; then tree=$BASE_TREE; venv=$BASE_VENV; else tree=$HEAD_TREE; venv=$HEAD_VENV; fi
     py=$(command -v "$(pyof "$venv")")
     bdir=$OUT/boots/$id
@@ -393,6 +396,12 @@ run_boot() { # id role kind
             conc=0
             ;;
     esac
+    # The prefix probe's prompt size: PREFIX_WORDS from the caller, else the recipe's
+    # PREFIX_PROBE_WORDS (serve_validate.sh reads it from the same tree), else 2600.
+    if [[ -n ${PREFIX_WORDS:-} ]] \
+        || ! grep -q '^PREFIX_PROBE_WORDS=[0-9]' "$tree/tools/rdna/recipes/$RECIPE.env" 2> /dev/null; then
+        prefix=(PREFIX_WORDS="${PREFIX_WORDS:-2600}")
+    fi
     wait_idle
     note "boot $id ($role, $kind): $tree"
     t0=$(date -u +%T)
@@ -408,7 +417,7 @@ run_boot() { # id role kind
         OUT="$bdir" CACHE="$OUT/cache/$role/$id" VENV="$venv" SERVE_TREE="$tree" \
         TRITON_CACHE_DIR="$OUT/cache/$role/triton" TORCHINDUCTOR_CACHE_DIR="$OUT/cache/$role/inductor" \
         CELLS="$cells" BENCH_EXTRA="$bench_extra" RESET_PREFIX_CACHE=1 CONC_PROBE="$conc" \
-        PREFIX_WORDS="${PREFIX_WORDS:-2600}" ${stall[@]+"${stall[@]}"} \
+        ${prefix[@]+"${prefix[@]}"} ${stall[@]+"${stall[@]}"} \
         QUIET_HOLD="$hold" READY_TIMEOUT="${READY_TIMEOUT:-1800}" STOP_GRACE="${STOP_GRACE:-120}" \
         LOAD_HOOK="$hook" RECEIPT_PY="$py" RECEIPT_TOOLS="$TOOLS" QUALITY_WINDOWS="$QUALITY_WINDOWS" \
         QUALITY_LIMIT="$QUALITY_LIMIT" QUALITY_TOP="$QUALITY_TOP" QUALITY_PASSAGES="$QUALITY_PASSAGES" \

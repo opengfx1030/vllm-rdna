@@ -164,7 +164,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Release tags publish `<tag>` and `<tag>-rocm<version>` directly.
+      # Release tags publish `<tag>` and `<tag>-rocm<version>` directly. Provenance
+      # attestation is off on both builds: BuildKit would otherwise push an extra
+      # attestation manifest (an untagged package version) next to every image.
       - name: Build and publish release image
         id: build-release
         if: startsWith(github.ref, 'refs/tags/')
@@ -175,6 +177,7 @@ jobs:
           target: final
           platforms: linux/amd64
           push: true
+          provenance: false
           tags: ${{ steps.metadata.outputs.tags }}
           build-args: |
             VLLM_VERSION=${{ steps.version.outputs.version }}
@@ -197,6 +200,7 @@ jobs:
           target: final
           platforms: linux/amd64
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
           build-args: |
             VLLM_VERSION=${{ steps.version.outputs.version }}
             VLLM_COMMIT=${{ steps.metadata.outputs.commit }}

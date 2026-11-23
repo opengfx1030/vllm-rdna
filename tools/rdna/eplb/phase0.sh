@@ -135,6 +135,7 @@ setup_gpus() {
 probe_gpus() {
     WANT_BUSES="$WANT_BUSES" "$PY" -c '
 import os, sys, torch
+torch.cuda.init()
 want = set(os.environ["WANT_BUSES"].lower().split())
 def bus_of(i):
     b = torch.cuda.get_device_properties(i).pci_bus_id

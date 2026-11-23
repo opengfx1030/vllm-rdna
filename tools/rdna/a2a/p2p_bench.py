@@ -627,7 +627,13 @@ class ProbeSession:
 # Torch backend (Tensor.copy_ between peer devices; no new kernels)
 # --------------------------------------------------------------------------- #
 def device_count(torch: Any) -> int:
-    """Visible accelerator count without the device-wide torch.cuda calls."""
+    """Visible accelerator count without the device-wide torch.cuda calls.
+
+    torch.cuda.init() creates no context; without it the count is 0 on ROCm builds
+    that take it from amdsmi.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.init()
     acc = getattr(torch, "accelerator", None)
     if acc is not None and hasattr(acc, "device_count"):
         return int(acc.device_count())
@@ -823,7 +829,7 @@ class TorchBench:
             for j, m in enumerate(ms):
                 per_runs[j].append(gbps(size * n_iter, m * 1e3))
         ok = True
-        for i, (_, a, b) in enumerate(state):
+        for i, (_, _, b) in enumerate(state):
             d = flows[i][1]
             self._sync(d)
             ok = ok and bool(self.t.equal(b, self._pattern(d, size, 10 + i)))
@@ -862,7 +868,7 @@ class TorchBench:
                 stream.synchronize()
             step_us.append((time.perf_counter() - t0) * 1e6 / n_iter)
         ok = True
-        for i, (_, a, b) in enumerate(state):
+        for i, (_, _, b) in enumerate(state):
             d = flows[i][1]
             self._sync(d)
             ok = ok and bool(self.t.equal(b, self._pattern(d, chunk, 10 + i)))

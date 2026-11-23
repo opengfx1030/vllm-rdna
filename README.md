@@ -165,9 +165,10 @@ The previous nightly digest becomes untagged when the tags move. The daily
 older than seven days, every version that is untagged or carries only legacy
 `sha-*` tags (`DISPOSABLE_TAGS`, default `sha-*`), together with its child
 manifests. A version that also has `nightly`, `nightly-*` or a release tag is
-never deleted, and neither is anything a retained image references (the
-platform manifest and buildx provenance attestation of a tagged image are
-untagged versions of this package). Manual runs are a dry run by default. Old
+never deleted, and neither is anything a retained image references (an image
+built before the workflow set `provenance: false` is an index whose platform
+manifest and buildx provenance attestation are untagged versions of this
+package; new builds push a single manifest). Manual runs are a dry run by default. Old
 `nightly-<version>-rocm…` tags of an earlier vLLM version stay until deleted by
 hand.
 
