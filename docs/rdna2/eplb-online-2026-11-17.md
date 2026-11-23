@@ -415,3 +415,124 @@ User decision after the no-plan controls: finish this bounded vote-allocation
 check, keep native K2 counter fusion separate, and proceed to the v0.34 upgrade.
 EPLB stays experimental/off; neither this candidate nor the failed chaos
 campaign is a production performance qualification.
+
+### v0.34 merge (2026-11-23)
+
+Both PR branches were merged with `origin/rdna_extras` `00f106c5b0` (Inkling-2
+PRs 195 and 196 landed) by `--no-ff` merge commits: no rebase, no force-push.
+EPLB stays opt-in and default-off. This section is a merge, build and HIP 1
+suite receipt. **None of the open gates above was run on the merged heads**:
+the b4 cards were held by another lane, so the gate chain is only scripted.
+
+| Branch | Commit | Parents | Textual conflicts |
+|---|---|---|---|
+| `eplb/online-rebalance` (#191) | `b5044b69cb` | `d802aea2f9` + `00f106c5b0` | none |
+| `eplb/online-mono` (#193) | `6789b31267` | `e2193b9bdc` + `b5044b69cb` | 1 |
+| `eplb/online-mono` (#193) | `a298cc550a` | `6789b31267` + `68f7148530` | none |
+
+The one conflict is `tools/rdna/port_v031/serve_validate.sh`, `quiet_lock_wait`:
+both sides refuse a measured window after a boot-lock timeout, `rdna_extras`
+with `exit 1`, #193 with `exit 3`. `exit 3` is kept: `phase0.sh`,
+`mono/w4a8/slot.sh` and `pr_receipt.sh` stop a campaign on rc 3 and treat rc 1
+as a failed arm; the `rdna_extras` test asserts only a non-zero exit.
+`csrc/rocm/ops.h` and `torch_bindings.cpp` merged without a conflict (the K2
+`expert_map`/`ids_out` schema next to `inkling2_attention` with `tile_impl`);
+`CMakeLists.txt` and `cmake/` have no difference against `rdna_extras`. Two
+behavior-neutral lint commits (`68f7148530` on #191, `f079debf27` on #193)
+parenthesize implicit string concatenations and underscore unused loop
+variables (ruff ISC004, B007), which the merged tree enforces on files these
+PRs touch. Tested heads: #191 `68f7148530`, #193 `f079debf27`; the commits
+after it on #193 add only the gate script and this section.
+
+Measured on the merged heads (CPU rows on macOS, build and GPU rows on
+par1-cs25, torch 2.12.0+rocm7.14.0, `0.34.0+rdna`):
+
+| Check | Result |
+|---|---|
+| `pre-commit run --from-ref origin/rdna_extras --to-ref HEAD`, twice per head | exit 0, 0 failed, on #191 `68f7148530` and on #193 `f079debf27` |
+| #191, `fused_moe/test_rdna_eplb_{online,stats,planner}.py` and `tools/rdna/test_eplb_{io,model,replay_check}.py` (150 tests) | 135 passed, 15 skipped |
+| #193, selection A below (1593 tests) | 15 failed, 1060 passed, 518 skipped in 242 s |
+| `origin/rdna_extras`, selection A (1390 tests) | 15 failed, 952 passed, 423 skipped in 241 s |
+| #193 head build, CPU only, `PYTORCH_ROCM_ARCH=gfx1030`, `build_ext --inplace`, MAX_JOBS 8 | exit 0, 757 s; `_rocm_C.abi3.so` md5 `895221ccdda9261e14650a1394d2d7d6`; 237 `_rocm_C` schemas, 46 `inkling2_*` |
+| `rdna_extras` base build, independent tree | exit 0, 760 s; md5 `d53c737e21160b5cfbbcf17ba1a06ee7`; 237 schemas, 46 `inkling2_*` |
+| Head schema checks | `mono_k2_rdna2` has `Tensor? expert_map=None` and `Tensor!? ids_out=None`; `inkling2_attention` has `int tile_impl`; base and head schema lists differ in the `mono_k2_rdna2` line only |
+| Archdiff of the head against `origin/rdna_extras`, six arches | PASS (exit 0, 682 s), see below |
+| Default K2 digest, M=1..24, base build against head build, HIP 1 | identical on all 24 rows |
+| Mono GPU suites (`..._expert_map.py`, `..._kernels.py`, `..._w4a8.py`), HIP 1 | 387 passed, 48 skipped (PR body: 387 / 48) |
+| Online-swap cases (`test_rdna_eplb_online.py -k swapped`), HIP 1 | 6 passed, 39 deselected (PR body: 6) |
+| `test_rdna_eplb_online.py` / `_stats.py` / `_planner.py`, HIP 1 | 45 / 49 / 20 passed |
+| Inkling-2 kernel suites `fuse_attn`, `moe`, `glue`, `attn`, HIP 1 | 384, 169, 227, 920 passed (the same counts as the `rdna_extras` merge check) |
+| Inkling-2 kernel suites `attn_prefill_depth`, `moe_prefill_bm`, `dspark`, `vit`, `linear`, HIP 1 | 306, 304, 139, 69, 677 passed |
+| `tests/models/inkling2_loop` `serving_path_gpu`, `serving_path_graph_gpu`, `moe_prefill_bm_gpu`, HIP 1 | 139, 7, 30 passed |
+| Inkling-2 `inkling2-mini-tp1` serve smoke and decode smoke, HIP 1 | ready after 57 s, smoke PASS; prefill 1000 tokens median 483.5 ms, b=1 decode 17.50 ms/token (the `rdna_extras` check on HIP 5: 483.7 ms, 17.50 ms/token) |
+
+Selection A (`--noconftest`): `tests/tools/rdna/test_*.py`,
+`tests/models/qwen4_exp/test_amd_mono_rdna2*.py` and `test_mono_*.py`, and the
+three `tests/model_executor/layers/fused_moe/test_rdna_eplb_*.py`. The 15 CPU
+failures are the same tests on both trees and are macOS-specific: 11 in
+`test_mono_w4a8_plan.py` (BSD `date -I`),
+`test_amd_mono_rdna2.py::test_flag_parses_into_engine_args` ("Failed to infer
+device type") and 3 NameErrors in `test_amd_mono_rdna2_offload.py`
+(`capture_pool`, `eager_break_during_piecewise_capture`).
+`tests/tools/rdna/pciescope` cannot be collected on macOS (no `textual`) and
+was not run.
+
+Archdiff (`tools/rdna/archdiff.sh`; gfx90a, gfx942, gfx950, gfx1030, gfx1100,
+gfx1200; `EXPECT=mono_ffn_kernel<[0-9]+, [0-9]+, 4>`): 24 differing functions,
+all expected. On each arch 6 objects were compared with 138 identical
+functions, 0 changed and 0 only in base; the 4 only in head are
+`mono_ffn::mono_ffn_kernel<N, 8, 4>` for N = 4, 8, 12, 24, the mapped Stage-4
+kernels. Changed sources: `csrc/rocm/mono_k2_rdna2.cu` (+116 -19), `ops.h`
+(+14 -13), `torch_bindings.cpp` (+2 -1). Host-only objects are not compared.
+
+#### Gate chain, scripted and not run
+
+`tools/rdna/eplb/run_gates_v034.sh` chains the open gates on TP4
+`flashnext-mtp2` (HIP 2,3,4,5 only; it refuses HIP 0 and 1), after a
+`BASE_TREE`/`HEAD_TREE` pair with separate `_rocm_C` builds. Unit costs are
+durations measured in earlier receipts on this box; `LIST=1` prints this table:
+
+| Gate | Open item | Boots | ETA (min) | Unit cost |
+|---|---|---:|---:|---|
+| build | (a) independent base/head extension builds | 0 | 0 (13 per unbuilt tree) | 757 s head, 760 s base |
+| inject | (d) mapped K2 under >8-row injection, (e) reverse-arrival gap, (h) stall probe | 4 | 37 | 9 min 6 s per boot (paired gate: 18 min 13 s for 2 boots) |
+| ppl | (g) full PPL/KL gate on a chaos boot | 3 | 25 | 6 min 48 s per floor boot; the chaos boot's decode traffic is inferred |
+| r2 | (a) flag-on ABBA, (f) prefix probe | 4 | 55 | 54 min 58 s (`prefix-contract-06e01fee103a`) |
+| r1 | (a) flag-off ABBA, zero REGRESSION labels | 6 | 169 | 2 h 48 min 28 s (`final-2ea7a364848c`) |
+| stationary | (b) at most one plan per 10,000 steps, (f) | 1 | 98 | 90 min window plus an inferred 8 min |
+| soak | (c) recurrence budget, (f) | 1 | 248 | 240 min window plus an inferred 8 min |
+| total | | 19 | 632 | about 10.5 h |
+
+The inject gate runs 2 decoders (6 rows, under the mapped K2 cap of 8) and
+7 decoders (21 rows, module path) with EPLB off and chaos, so mapped K2 is
+exercised under prefill injection. The ppl gate compares a chaos boot with two
+off boots (KL and top-1 inside the off-off floor, PPL rise within the existing
+`MAX_PPL_REL` 0.02). The stationary gate applies the design rule (at most one
+rebalance per 10,000 steps after a warm-up) to a fixed 1k/512 c=8 workload.
+The soak ends in a ledger that can report only "no recurrence in N boots / H
+hours", never the cause of the PCIe event. `r1` and `r2` call the unchanged
+`qualify_final.sh`; `r1` adds a hard zero-REGRESSION-label check. Thresholds
+with no receipt behind them are environment variables marked `[INFERENCE]` in
+the script: `GAP_TOL`, `REVERSE_TOL`, `INJECT_MIN_OVERLAP`, `INJECT_MIN_STEPS`,
+`PPL_MIN_PLANS`, `PPL_PRETRAFFIC_MAX_S`, `STATIONARY_MINUTES`,
+`STATIONARY_ITL_DRIFT`, `SOAK_MINUTES` and the one-third warm-up.
+
+Script checks that ran, all without a GPU: `bash -n` and the repo shellcheck
+config exit 0; `DRY_RUN=1` with the two independent builds exits 0 in 12 s with
+seven gates `PLAN-OK`, the head plan `--max-num-seqs 8` with
+`cudagraph_capture_sizes:[3,6,12,24]`, and off, chaos and planner launch plans
+that differ only in the EPLB environment words. Its judge replayed on saved
+receipts: `serve-eplb-monogate-{off,chaos}` pass as 7-decoder boots and fail as
+the wrong arm or as 2-decoder boots; the paired gap check on them reads +0.56 %
+and +0.64 % (inject 16,384 and 4,096) and +0.12 % (reverse 16,384); the
+stationary judge reads the old `serve-eplb-soak1` plan lines as 14 plans and
+233 swaps, as the soak section above states. No real 2-decoder receipt exists,
+so that branch has only a synthetic positive control. These replays validate
+the script, not the gates.
+
+Still open: all of (a) to (h). The earlier v0.34 attempt on the old rebase
+(`eplb/online-mono-034`, `38f3024159`) stopped twice in its flag-off arm A1
+(`r2-034-20261121-111250`: KFD queue evictions of about 18.7 to 19.5 s;
+`r2-034-20261121-111950`: `HSA_STATUS_ERROR_EXCEPTION` code `0x1016` in
+`at::native::indexFuncSmallIndex` on GPU index 1, 2 and 3; AER before equals
+after in both). Whether the merged tree repeats it is unknown.
