@@ -157,12 +157,14 @@ commit. A newer push cancels an in-flight branch build (version tag builds are
 never cancelled), and a build whose commit is no longer the branch tip is not
 promoted. Ref deletions do not publish images.
 
-The previous nightly digest becomes untagged when the tag moves.
-Untagged package versions older than seven days are pruned daily by
-[the package cleanup workflow](.github/workflows/package-cleanup.yml). It keeps
-every version a retained image references (a tagged index's platform manifest
-and buildx provenance attestation are untagged versions of this package) and
-never deletes a tagged version. Manual runs are a dry run by default. Old
+The previous nightly digest becomes untagged when the tags move. The daily
+[package cleanup workflow](.github/workflows/package-cleanup.yml) deletes, once
+older than seven days, every version that is untagged or carries only legacy
+`sha-*` tags (`DISPOSABLE_TAGS`, default `sha-*`), together with its child
+manifests. A version that also has `nightly`, `nightly-*` or a release tag is
+never deleted, and neither is anything a retained image references (the
+platform manifest and buildx provenance attestation of a tagged image are
+untagged versions of this package). Manual runs are a dry run by default. Old
 `nightly-<version>-rocm…` tags of an earlier vLLM version stay until deleted by
 hand.
 

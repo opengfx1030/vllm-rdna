@@ -10,7 +10,8 @@ untagged versions of the same package. Deleting those versions breaks
 ``docker pull`` of the tagged image, which is why the plain "delete untagged
 versions" APIs cannot be used for these packages.
 
-This script deletes an untagged version only when it is older than
+This script deletes an untagged version (or one tagged only with a disposable
+pattern, see ``DISPOSABLE_TAGS``) only when it is older than
 ``RETENTION_DAYS`` *and* no retained version references it: not shared with a
 tagged version, not a child of a tagged index (platform image, provenance or
 SBOM attestation) and not a child of an untagged index that is itself retained.
@@ -23,6 +24,9 @@ Environment:
     PACKAGES: space- or comma-separated package names (default ``vllm-rdna``)
     PACKAGE_OWNER: package owner (default ``opengfx1030``)
     RETENTION_DAYS: minimum age of a deletable version (default ``7``)
+    DISPOSABLE_TAGS: space- or comma-separated tag patterns; a version whose tags
+        all match is deleted like an untagged one (default ``sha-*``, the
+        per-commit tags of the old image workflow)
     GITHUB_EVENT_NAME: a manual run defaults to a dry run, other events delete
     INPUT_DRY_RUN: ``true``/``false`` forces the mode, unset keeps the default
     GH_TOKEN / GITHUB_TOKEN: token with ``packages: read`` (``write`` to delete)
@@ -32,6 +36,7 @@ Manifests are read from the registry with an anonymous pull token.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import sys
@@ -190,6 +195,13 @@ class Version:
     def tagged(self) -> bool:
         return bool(self.tags)
 
+    def disposable(self, patterns: tuple[str, ...]) -> bool:
+        """True for an untagged version or one whose tags all match ``patterns``."""
+        return all(
+            any(fnmatch.fnmatchcase(tag, pattern) for pattern in patterns)
+            for tag in self.tags
+        )
+
     @property
     def label(self) -> str:
         tags = ", ".join(self.tags)
@@ -223,7 +235,13 @@ def load_versions(owner: str, package: str) -> list[Version]:
     return versions
 
 
-def prune(owner: str, package: str, retention_days: int, dry_run: bool) -> bool:
+def prune(
+    owner: str,
+    package: str,
+    retention_days: int,
+    dry_run: bool,
+    disposable_tags: tuple[str, ...] = (),
+) -> bool:
     """Prune one package; return False when a version could not be deleted."""
     image = f"{owner}/{package}"
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)
@@ -241,16 +259,21 @@ def prune(owner: str, package: str, retention_days: int, dry_run: bool) -> bool:
                     f"{version.id} reports {version.digest}"
                 )
 
-    untagged = [version for version in versions if not version.tagged]
-    expired = [version for version in untagged if version.created_at < cutoff]
+    # A disposable version is untagged, or carries only per-commit tags that the
+    # image workflow no longer publishes (default ``sha-*``). A version that
+    # also carries any other tag (nightly, a release) is never disposable.
+    disposable = [
+        version for version in versions if version.disposable(disposable_tags)
+    ]
+    expired = [version for version in disposable if version.created_at < cutoff]
 
-    # Reachability closure: a version survives if it is tagged or too young, and
-    # everything such a version references survives with it. Only versions
-    # outside that closure can be deleted.
+    # Reachability closure: a version survives if it is not disposable or too
+    # young, and everything such a version references survives with it. Only
+    # versions outside that closure can be deleted.
     retained: dict[str, str] = {
         version.digest: version.label
         for version in versions
-        if version.tagged or version.created_at >= cutoff
+        if not version.disposable(disposable_tags) or version.created_at >= cutoff
     }
     referenced: dict[str, set[str]] = {}
     pending = list(retained)
@@ -281,8 +304,9 @@ def prune(owner: str, package: str, retention_days: int, dry_run: bool) -> bool:
     print(f"package: {image} on {REGISTRY_HOST}")
     print(f"retention: {retention_days} days, cutoff {cutoff:%Y-%m-%dT%H:%M:%SZ}")
     print(
-        f"versions: {len(versions)} total, {len(versions) - len(untagged)} tagged, "
-        f"{len(untagged)} untagged, {len(expired)} untagged and expired"
+        f"versions: {len(versions)} total, {len(versions) - len(disposable)} kept "
+        f"by tag, {len(disposable)} disposable (untagged or only {disposable_tags} "
+        f"tags), {len(expired)} disposable and expired"
     )
     print(f"referenced digests held by retained versions: {len(referenced)}")
 
@@ -295,7 +319,7 @@ def prune(owner: str, package: str, retention_days: int, dry_run: bool) -> bool:
             )
     else:
         print(
-            f"held back {len(protected)} expired untagged versions that a "
+            f"held back {len(protected)} expired disposable versions that a "
             "retained version still references"
         )
 
@@ -354,12 +378,15 @@ def main() -> int:
         for name in os.environ.get("PACKAGES", "vllm-rdna").replace(",", " ").split()
         if name
     ]
+    disposable_tags = tuple(
+        os.environ.get("DISPOSABLE_TAGS", "sha-*").replace(",", " ").split()
+    )
     print(f"mode: {'dry run, nothing is deleted' if dry_run else 'delete'}")
 
     ok = True
     for package in packages:
         try:
-            ok = prune(owner, package, retention_days, dry_run) and ok
+            ok = prune(owner, package, retention_days, dry_run, disposable_tags) and ok
         except PackageCleanupError as error:
             ok = False
             print(f"::error::{owner}/{package}: {error}")
