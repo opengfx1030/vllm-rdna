@@ -1,0 +1,318 @@
+{
+  "schema": "v034-canary-publication-index/1",
+  "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+  "artifact_sha256": "579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042",
+  "files": [
+    {
+      "path": "canary-summary.json",
+      "sha256": "a9ce32b28d94bac8f09f7a3556da92a1075707964e4368fa38543ffb3bfb7504",
+      "bytes": 5507
+    },
+    {
+      "path": "focused-r0-invalid-nodeids.receipt.json",
+      "sha256": "8657a3ad156c1e19ef895c6dafa8275ddf5f24c5990e23748d53aca5b99c0aa6",
+      "bytes": 4167
+    },
+    {
+      "path": "focused-r1-tests-pass-kfd-wrapper-false-negative.receipt.json",
+      "sha256": "6ea5340067bc2bc0ba344dc5f0a9cf87ff2c81189c831de5a84e44942ce090fe",
+      "bytes": 4159
+    },
+    {
+      "path": "focused-r2/junit.xml",
+      "sha256": "b8604ea5e69ac7184f31483f7b62792abfe8748ee5e0a72addaf2eb76662816d",
+      "bytes": 1155
+    },
+    {
+      "path": "focused-r2/kernel-before.log",
+      "sha256": "63053495e083d609b2a552bc676142a3b3350c54ae4356780bb865f2aeaa76f5",
+      "bytes": 270748
+    },
+    {
+      "path": "focused-r2/kernel-new.log",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "bytes": 1
+    },
+    {
+      "path": "focused-r2/preflight.json",
+      "sha256": "5c669b1eb70b46fb2cb3d9a5d4a7cb79649ff9dfa445fa5e8575afa9b2ba10e0",
+      "bytes": 475
+    },
+    {
+      "path": "focused-r2/pytest.log",
+      "sha256": "fac4ee462e807bae24f35739c8221c0c56b27c12558672d0cea6c4c86e3f5b32",
+      "bytes": 1376
+    },
+    {
+      "path": "focused-r2/pytest.pid",
+      "sha256": "08a20adc99b5b009b03aaae86aaebde5e407188faf861b2b59b9ed20a75ecd9b",
+      "bytes": 8
+    },
+    {
+      "path": "focused-r2/receipt.json",
+      "sha256": "132bfee85afe3446591c62104a51a46848268359b3d64705801253712ae721f6",
+      "bytes": 4896
+    },
+    {
+      "path": "focused-r2/thermal.csv",
+      "sha256": "b37909810592b19f6c24705ab8b3453889821d378fb5c3819d81ae7e314adbdc",
+      "bytes": 877
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/bench-1024x512-c1.json",
+      "sha256": "0bff57bbf7b1ca5591b7df7f9debfbd1ddd23b0acd77cb04036c423e010cd393",
+      "bytes": 1522
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/bench-1024x512-c1.log",
+      "sha256": "a32be868031085ca41c5f029c4efdd41d9c69bfeed08a87662954893bcc1493a",
+      "bytes": 6135
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/bench-1024x512-c8.json",
+      "sha256": "086a845f1fd73771b5fdd8793335f2bfc43ec7f662b4bcc530c149ff0c711a61",
+      "bytes": 1775
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/bench-1024x512-c8.log",
+      "sha256": "c1ce096b61e1362fe65045ca7aa250d58206f6ed5e8fdec73e6972f416227acd",
+      "bytes": 6477
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/concurrency.txt",
+      "sha256": "4aa4f903c7537b8e7d9f73f142b16fb1e398f102cedcac237f90c971cbbe0609",
+      "bytes": 2534
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/evicted-bench-1024x512-c1.json",
+      "sha256": "0500db57dfb666a395d9f891e72c09648f5b2e1e7c4f220a5416265dc0e45491",
+      "bytes": 38
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/evicted-bench-1024x512-c8.json",
+      "sha256": "0500db57dfb666a395d9f891e72c09648f5b2e1e7c4f220a5416265dc0e45491",
+      "bytes": 38
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/evicted-ready.json",
+      "sha256": "0500db57dfb666a395d9f891e72c09648f5b2e1e7c4f220a5416265dc0e45491",
+      "bytes": 38
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/models.json",
+      "sha256": "8610e91378b27e1794d27789a51410d77d86add73434a7ca08b8b6e47b281155",
+      "bytes": 575
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/ppl.txt",
+      "sha256": "2d418289f46d82109e97548cc9431b67625342dadf29c349114ae385ba9d8b7e",
+      "bytes": 957
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/prefix.txt",
+      "sha256": "7bd68f47ada066fe9c38f6e84f723a564a996ed660b886472990b12f091c1835",
+      "bytes": 493
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/probe-after.txt",
+      "sha256": "74223daffe16f52ff82b12e9da665d4554f11e40bd762cc018bb382f77727fdb",
+      "bytes": 616
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/probe.txt",
+      "sha256": "74223daffe16f52ff82b12e9da665d4554f11e40bd762cc018bb382f77727fdb",
+      "bytes": 616
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/serve.pid",
+      "sha256": "8276c14d9de28c6eb5cf62eb38c7cdbdec9e3ee786c5b0f05f44cce38a096cca",
+      "bytes": 8
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/summary.txt",
+      "sha256": "2696df75cd1a2bab7b041e06dc3fc5558660ac5780799e3f28382c8fa6bf96c8",
+      "bytes": 4701
+    },
+    {
+      "path": "runtime-r1/27b-hi2-tp2-mtp2/warmup.txt",
+      "sha256": "aad584ab316e986263e0024416422322596089c66892a1790f60bab891c0b90c",
+      "bytes": 536
+    },
+    {
+      "path": "runtime-r1/aer-27b-hi2-tp2-mtp2-after.json",
+      "sha256": "6f425f907020c8076aaddc4cedbf68e373ad77734e894a4530d5cd82991f68f7",
+      "bytes": 4891
+    },
+    {
+      "path": "runtime-r1/aer-before.json",
+      "sha256": "6f425f907020c8076aaddc4cedbf68e373ad77734e894a4530d5cd82991f68f7",
+      "bytes": 4891
+    },
+    {
+      "path": "runtime-r1/aer-flashnext-mtp2-after.json",
+      "sha256": "6f425f907020c8076aaddc4cedbf68e373ad77734e894a4530d5cd82991f68f7",
+      "bytes": 4891
+    },
+    {
+      "path": "runtime-r1/driver-27b-hi2-tp2-mtp2.log",
+      "sha256": "7ab58ffd5216000723e00d6c6dc5e85d9b3c7f746920ad67bb342a369cefd798",
+      "bytes": 4085
+    },
+    {
+      "path": "runtime-r1/driver-flashnext-mtp2.log",
+      "sha256": "97a433171c19d72f5deb2d5de955e8b76d79753001b795a9a690a4acfc7b69f7",
+      "bytes": 6099
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/bench-1024x512-c1.json",
+      "sha256": "a4950b68e675a5e72b48c126a2aca023be06d116e480148ee4f04d6280a900d8",
+      "bytes": 1534
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/bench-1024x512-c1.log",
+      "sha256": "d366f7ac6fcefad255c87128d24e53d569714f71bffcb3ffd28c268cc2512b86",
+      "bytes": 6140
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/bench-1024x512-c8.json",
+      "sha256": "0ae09d96bd8194c005b17b39c01b032369a23bf22e1040325835e3053efc0787",
+      "bytes": 1793
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/bench-1024x512-c8.log",
+      "sha256": "83583553aebefe870d282f78831fc7054bcbeed20c4b87c085426f72dd39b4a7",
+      "bytes": 6420
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/concurrency.txt",
+      "sha256": "1628b62c8dbb4b9b6a55101dd60835b622da94ea163cdcff0b0bac28e2db32d5",
+      "bytes": 2997
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/evicted-bench-1024x512-c1.json",
+      "sha256": "543309c669d8330cd3ce21cba571ee3d3494445750d51a25c029e697c119432f",
+      "bytes": 92
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/evicted-bench-1024x512-c8.json",
+      "sha256": "543309c669d8330cd3ce21cba571ee3d3494445750d51a25c029e697c119432f",
+      "bytes": 92
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/evicted-ready.json",
+      "sha256": "543309c669d8330cd3ce21cba571ee3d3494445750d51a25c029e697c119432f",
+      "bytes": 92
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/models.json",
+      "sha256": "5d30143198b17e02084fa4c4a7ae84e396728707b6eac0dbe70fec6cd7d76883",
+      "bytes": 582
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/ppl.txt",
+      "sha256": "b04b8061e6cfb293abcb5e53421f563d496fa9330a4f4cf6dce909752f20ff96",
+      "bytes": 1203
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/prefix.txt",
+      "sha256": "60d0cce347e1a5b44e20ce62576d5d5fb27652f239498f760bdcfd29cc39c7d5",
+      "bytes": 491
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/probe-after.txt",
+      "sha256": "fac58588c699dbf8eb83d0ff060a8772fe0b2ede66ec8b8d1c5f4dc97ba35600",
+      "bytes": 670
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/probe.txt",
+      "sha256": "b7924f4b9be2167bcee090737fa145c61d0de15b1f84c9923ba86133decf993c",
+      "bytes": 661
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/serve.pid",
+      "sha256": "1e3776d1ce46eee88bc6065f04f907c527293b65589370b4754fe4be69727799",
+      "bytes": 8
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/summary.txt",
+      "sha256": "6180431f8d60feda3fc185be6d783cb4c550cc0de28e44b5a45c04fa28add240",
+      "bytes": 6760
+    },
+    {
+      "path": "runtime-r1/flashnext-mtp2/warmup.txt",
+      "sha256": "947a424f45228f2a75c926e789b40b501379cc218a58b91da38ea9e6d765cc0c",
+      "bytes": 536
+    },
+    {
+      "path": "runtime-r1/gpus-27b-hi2-tp2-mtp2.json",
+      "sha256": "e4275e2f3a63ab5ec22ee4200caa16f9d6767683879dd7246b99bf062095f82e",
+      "bytes": 239
+    },
+    {
+      "path": "runtime-r1/gpus-flashnext-mtp2.json",
+      "sha256": "5c669b1eb70b46fb2cb3d9a5d4a7cb79649ff9dfa445fa5e8575afa9b2ba10e0",
+      "bytes": 475
+    },
+    {
+      "path": "runtime-r1/kernel-27b-hi2-tp2-mtp2.log",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "bytes": 1
+    },
+    {
+      "path": "runtime-r1/kernel-before.log",
+      "sha256": "63053495e083d609b2a552bc676142a3b3350c54ae4356780bb865f2aeaa76f5",
+      "bytes": 270748
+    },
+    {
+      "path": "runtime-r1/kernel-flashnext-mtp2.log",
+      "sha256": "ad70bf27cc8ff76ac53080bd6278004de23a2d809e0d1a648b105438c4b90fd7",
+      "bytes": 816
+    },
+    {
+      "path": "runtime-r1/kernel-new.log",
+      "sha256": "ad70bf27cc8ff76ac53080bd6278004de23a2d809e0d1a648b105438c4b90fd7",
+      "bytes": 816
+    },
+    {
+      "path": "runtime-r1/monitor-27b-hi2-tp2-mtp2.json",
+      "sha256": "360ece4d2783e282c8f0c797f3e449616fe534d6bb6957c3f835086905afe438",
+      "bytes": 233
+    },
+    {
+      "path": "runtime-r1/monitor-flashnext-mtp2.json",
+      "sha256": "211bd28612a513956fd6de010d144367ff731c2258381041bafec35bac836d06",
+      "bytes": 263
+    },
+    {
+      "path": "runtime-r1/receipt-27b-hi2-tp2-mtp2.json",
+      "sha256": "835a958ac4e61a75571141448bd444da06952eadfc2d8f5749e2c134b0d1b9b0",
+      "bytes": 1076
+    },
+    {
+      "path": "runtime-r1/receipt-flashnext-mtp2.json",
+      "sha256": "d2288a553dd07e9ee550eb99ab3ecc2b82d641f729079a1cd3f01bb1c8f3ed12",
+      "bytes": 1074
+    },
+    {
+      "path": "runtime-r1/receipt.json",
+      "sha256": "e840b30d7268b98bbbf1547d34753bd33e7bb3c1900f9500a85205dff1a5c930",
+      "bytes": 4974
+    },
+    {
+      "path": "runtime-r1/runtime-status.txt",
+      "sha256": "dfc8959ff3979e2519996726c2b3156980e565cf4550d7e05a54e94063d8279c",
+      "bytes": 137
+    },
+    {
+      "path": "runtime-r1/thermal-27b-hi2-tp2-mtp2.csv",
+      "sha256": "20cbf43cc3a052785205d6a85b750970fca5d2b87904e0ba9e276a82979bba93",
+      "bytes": 15454
+    },
+    {
+      "path": "runtime-r1/thermal-flashnext-mtp2.csv",
+      "sha256": "52ea42c2750a86ec8567e76d495fdfcd365c54fd2fe7a18a24f083225361b67c",
+      "bytes": 18120
+    }
+  ],
+  "note": "Curated canary evidence only; full serve.log/concurrency.json remain on par1-cs25. No binaries or secrets."
+}

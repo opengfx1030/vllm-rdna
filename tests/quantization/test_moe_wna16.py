@@ -125,7 +125,9 @@ def test_rdna2_resident_rejects_unsupported_config(change, expected):
     method.quant_config = quant_config
     method.moe = moe_config
 
-    assert expected in method._resident_config_error()
+    reason = method._resident_config_error()
+    assert reason is not None
+    assert expected in reason
 
 
 @pytest.mark.parametrize(
@@ -268,7 +270,6 @@ def test_compressed_tensors_nfirst_weights_pass_through_for_triton():
         backend=WNA16MoEBackend.TRITON,
         layer=torch.nn.Module(),
         quant_config=quant_config,
-        input_dtype=None,
         w13=w13,
         w2=w2,
         w13_scale=w13_scale,
@@ -298,7 +299,6 @@ def test_gptq_nfirst_weights_pass_through_for_triton():
         backend=WNA16MoEBackend.TRITON,
         layer=torch.nn.Module(),
         quant_config=quant_config,
-        input_dtype=None,
         w13=w13,
         w2=w2,
         w13_scale=w13_scale,
@@ -480,8 +480,9 @@ def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
     assert method.moe_kernel is not None
     assert set(layer.weight_schemas) == {"w13", "w2"}
     assert set(layer.humming_configs) == {"w13", "w2"}
-    assert not hasattr(layer, "w13_weight_packed")
-    assert not hasattr(layer, "w2_weight_packed")
+    # The converted weights are written to the loaded params (one object each).
+    assert layer.w13_weight_packed is layer.w13_weight
+    assert layer.w2_weight_packed is layer.w2_weight
     assert layer.w13_weight.dtype is torch.int32
     assert layer.w2_weight.dtype is torch.int32
 

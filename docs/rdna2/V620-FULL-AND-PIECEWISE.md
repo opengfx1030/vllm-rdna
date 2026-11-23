@@ -20,3 +20,19 @@ every graph. A bare `PIECEWISE` request still becomes `NONE`.
 
 The MTP draft manager captures its own FULL graphs even when the target
 config also has piecewise graphs.
+
+Models that are not compiled can still keep `FULL_AND_PIECEWISE` on RDNA: an
+architecture listed in `default_breakable_cudagraph_architectures`
+(`vllm/config/vllm.py`) records its eager forward as breakable CUDA graphs, with
+the layers' custom ops as the eager breaks (Inkling-2: one `attend_hip` break per
+layer visit, 49 segments). Uniform decode and speculative-verify batches replay the
+FULL graph, prefill and mixed batches the breakable graphs, padded up to the
+captured token count. See "integration part B" in `inkling2-port-spec.md` for the
+capture contract and the measured cost: the padding is the whole cost of the
+breakable graphs (a captured size is as fast as eager on the same real tokens), and
+padded decode rows are real MoE work, so such a model's default decode grid is dense:
+`dense_decode_cudagraph_architectures` (`vllm/config/vllm.py`, Inkling-2 on RDNA) makes
+`decode_cudagraph_capture_request_sizes` every request count up to 16, then the usual
+request-count grid, for plain decode and for every speculative-verification query length;
+an explicit list still wins. 5 rows replayed in the 8-row graph measured 61.0 ms against
+45.3 ms eager and 43.8 ms in an exact-size graph.

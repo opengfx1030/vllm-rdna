@@ -112,7 +112,8 @@ __device__ __forceinline__ float tl_rand32(int64_t seed, int64_t offset) {
 }
 
 // tl_rand32(..., includes_zero=False): clamp away from zero.
-__device__ __forceinline__ float tl_rand32_nozero(int64_t seed, int64_t offset) {
+__device__ __forceinline__ float tl_rand32_nozero(int64_t seed,
+                                                  int64_t offset) {
   float u = tl_rand32(seed, offset);
   return u < 4.6566127342e-10f ? 4.6566127342e-10f : u;
 }
@@ -142,8 +143,8 @@ __device__ __forceinline__ uint32_t murmur3_fmix32(uint32_t h) {
 }
 
 __device__ __forceinline__ uint32_t murmur3_hash32(int64_t seed, int64_t pos,
-                                                  uint32_t offset,
-                                                  uint32_t domain = 0u) {
+                                                   uint32_t offset,
+                                                   uint32_t domain = 0u) {
   uint32_t h = (uint32_t)(seed ^ seed);
   h ^= domain;
   h = murmur3_mix(h, (uint32_t)((uint64_t)seed & 0xFFFFFFFFu));
@@ -332,7 +333,8 @@ struct Block8192 {
 #pragma unroll
     for (int n = kRegs; n > 1; n >>= 1) {
 #pragma unroll
-      for (int i = 0; i < n / 2; i++) a[i] = argmax_combine(a[2 * i], a[2 * i + 1]);
+      for (int i = 0; i < n / 2; i++)
+        a[i] = argmax_combine(a[2 * i], a[2 * i + 1]);
     }
     return a[0];
   }
@@ -371,9 +373,9 @@ __device__ __forceinline__ float warp4_max(float local,
   return __shfl_sync(0xffffffffffffffffULL, r, 0);
 }
 
-__device__ __forceinline__ ValIdx warp4_argmax(ValIdx local,
-                                               float* __restrict__ scratch_f,
-                                               int64_t* __restrict__ scratch_i) {
+__device__ __forceinline__ ValIdx
+warp4_argmax(ValIdx local, float* __restrict__ scratch_f,
+             int64_t* __restrict__ scratch_i) {
   const int lane = threadIdx.x & 31;
   const int warp = (threadIdx.x >> 5) & 3;
   if (lane == 0) {
@@ -471,12 +473,10 @@ __global__ void prepare_prefill_inputs_kernel(
 // ---------------------------------------------------------------------------
 template <bool ADVANCE_DRAFT_POSITIONS>
 __global__ void prepare_decode_inputs_kernel(
-    const int64_t* __restrict__ draft_tokens,
-    const int64_t draft_tokens_stride,
+    const int64_t* __restrict__ draft_tokens, const int64_t draft_tokens_stride,
     const int32_t* __restrict__ target_seq_lens,
-    const int32_t* __restrict__ num_rejected,
-    int32_t* __restrict__ input_ids, int64_t* __restrict__ positions,
-    int64_t* __restrict__ sample_src_positions,
+    const int32_t* __restrict__ num_rejected, int32_t* __restrict__ input_ids,
+    int64_t* __restrict__ positions, int64_t* __restrict__ sample_src_positions,
     int32_t* __restrict__ query_start_loc, int32_t* __restrict__ seq_lens,
     const int64_t max_model_len, const int64_t max_num_reqs) {
   const int req_idx = blockIdx.x;
@@ -499,8 +499,8 @@ __global__ void prepare_decode_inputs_kernel(
   int64_t seq_len = (int64_t)target_seq_lens[req_idx] - num_rejected[req_idx];
   if (ADVANCE_DRAFT_POSITIONS) {
     int64_t position = positions[req_idx];
-    position = position + 1 < max_model_len - 1 ? position + 1
-                                                : max_model_len - 1;
+    position =
+        position + 1 < max_model_len - 1 ? position + 1 : max_model_len - 1;
     positions[req_idx] = position;
     seq_len = seq_len + 1 < max_model_len ? seq_len + 1 : max_model_len;
   }
@@ -517,13 +517,14 @@ __global__ void update_draft_inputs_kernel(
     T* __restrict__ next_input_hidden_states,
     const int64_t next_input_hidden_states_stride,
     int32_t* __restrict__ input_ids, int64_t* __restrict__ positions,
-    int64_t* __restrict__ sample_src_positions,
-    int32_t* __restrict__ seq_lens, const int64_t* __restrict__ draft_tokens,
+    int64_t* __restrict__ sample_src_positions, int32_t* __restrict__ seq_lens,
+    const int64_t* __restrict__ draft_tokens,
     const int64_t* __restrict__ current_draft_step,
     const T* __restrict__ hidden_states, const int64_t hidden_states_stride,
-    const int64_t hidden_size, const int64_t max_model_len,
+    const int64_t hidden_size, const int32_t* __restrict__ max_model_len_ptr,
     const int64_t num_speculative_steps) {
   const int req_idx = blockIdx.x;
+  const int64_t max_model_len = (int64_t)*max_model_len_ptr;
   const int64_t draft_token = draft_tokens[req_idx];
   const int64_t step = *current_draft_step;
   output_draft_tokens[req_idx * output_draft_tokens_stride + step] =
@@ -545,8 +546,8 @@ __global__ void update_draft_inputs_kernel(
 
   if (ADVANCE_DRAFT_POSITIONS) {
     int64_t position = positions[req_idx];
-    position = position + 1 < max_model_len - 1 ? position + 1
-                                                : max_model_len - 1;
+    position =
+        position + 1 < max_model_len - 1 ? position + 1 : max_model_len - 1;
     positions[req_idx] = position;
     int64_t seq_len = seq_lens[req_idx];
     seq_len = seq_len + 1 < max_model_len ? seq_len + 1 : max_model_len;
@@ -606,14 +607,14 @@ template <typename T_TARGET, typename T_DRAFT>
 __global__ void compute_local_logits_stats_kernel(
     int64_t* __restrict__ target_local_argmax,
     const int64_t target_local_argmax_stride,
-    float* __restrict__ target_local_max,
-    const int64_t target_local_max_stride,
+    float* __restrict__ target_local_max, const int64_t target_local_max_stride,
     float* __restrict__ target_local_sumexp,
     const int64_t target_local_sumexp_stride,
     float* __restrict__ draft_local_max, const int64_t draft_local_max_stride,
     float* __restrict__ draft_local_sumexp,
     const int64_t draft_local_sumexp_stride,
-    const T_TARGET* __restrict__ target_logits, const int64_t target_logits_stride,
+    const T_TARGET* __restrict__ target_logits,
+    const int64_t target_logits_stride,
     const T_DRAFT* __restrict__ draft_logits,
     const int64_t draft_logits_stride_0, const int64_t draft_logits_stride_1,
     const int32_t* __restrict__ expanded_idx_mapping,
@@ -633,7 +634,8 @@ __global__ void compute_local_logits_stats_kernel(
   const int lane = threadIdx.x & 31;
   const int warp = (threadIdx.x >> 5) & 3;
   const int64_t base = (int64_t)block_idx * 8192;
-  const T_TARGET* __restrict__ trow = target_logits + logit_idx * target_logits_stride;
+  const T_TARGET* __restrict__ trow =
+      target_logits + logit_idx * target_logits_stride;
   __shared__ float scratch_f[8];
   __shared__ int64_t scratch_i[8];
 
@@ -688,22 +690,22 @@ __global__ void compute_local_logits_stats_kernel(
       }
     } else {
 #pragma unroll
-    for (int p = 0; p < 16; p++) {
-      const int64_t abs = base + 512 * p + 128 * warp + 4 * lane;
-      if (abs + 3 < vocab_size) {
-        float c[4];
-        load4<T_DRAFT>(drow + abs, c);
+      for (int p = 0; p < 16; p++) {
+        const int64_t abs = base + 512 * p + 128 * warp + 4 * lane;
+        if (abs + 3 < vocab_size) {
+          float c[4];
+          load4<T_DRAFT>(drow + abs, c);
 #pragma unroll
-        for (int r = 0; r < 4; r++) dblk.v[4 * p + r] = c[r] / t;
-      } else {
+          for (int r = 0; r < 4; r++) dblk.v[4 * p + r] = c[r] / t;
+        } else {
 #pragma unroll
-        for (int r = 0; r < 4; r++) {
-          const bool in_range = abs + r < vocab_size;
-          const float value = in_range ? (float)drow[abs + r] : -INFINITY;
-          dblk.v[4 * p + r] = in_range ? value / t : -INFINITY;
+          for (int r = 0; r < 4; r++) {
+            const bool in_range = abs + r < vocab_size;
+            const float value = in_range ? (float)drow[abs + r] : -INFINITY;
+            dblk.v[4 * p + r] = in_range ? value / t : -INFINITY;
+          }
         }
       }
-    }
     }
     const float dmax = warp4_max(warp_bfly_max(dblk.max()), scratch_f);
     Block8192 dexpb;
@@ -726,7 +728,6 @@ __global__ void compute_local_logits_stats_kernel(
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // Per-request reductions over the padded vocab blocks (one warp per request,
 // lane == block index), matching Triton's `tl.sum`/`tl.max` over
@@ -745,15 +746,15 @@ __device__ __forceinline__ float global_logsumexp(
   const float gmax = warp_bfly_max(mx);
   const float e = tl_exp(mx - gmax);
   const float prod = sx * e;
-  // Triton's `tl.sum(sumexps * exp(...))` is reduced over PADDED_VOCAB_NUM_BLOCKS
-  // lanes and LLVM contracts the elementwise multiply into the *first* butterfly
-  // add (`fma(sumexps, exp, shfl(prod, n/2))`); the remaining steps are plain
-  // adds. Reproduce that so the product is rounded exactly once, as Triton does.
+  // Triton's `tl.sum(sumexps * exp(...))` is reduced over
+  // PADDED_VOCAB_NUM_BLOCKS lanes and LLVM contracts the elementwise multiply
+  // into the *first* butterfly add (`fma(sumexps, exp, shfl(prod, n/2))`); the
+  // remaining steps are plain adds. Reproduce that so the product is rounded
+  // exactly once, as Triton does.
   float s;
   if (padded_vocab_num_blocks >= 2) {
     int o = padded_vocab_num_blocks / 2;
-    s = __fmaf_rn(
-        sx, e, __shfl_xor_sync(0xffffffffffffffffULL, prod, o));
+    s = __fmaf_rn(sx, e, __shfl_xor_sync(0xffffffffffffffffULL, prod, o));
     for (o >>= 1; o >= 1; o >>= 1) {
       s += __shfl_xor_sync(0xffffffffffffffffULL, s, o);
     }
@@ -795,7 +796,8 @@ template <typename T_TARGET, typename T_DRAFT>
 __device__ __forceinline__ LogProbs global_logprobs_and_lse(
     const int64_t token, const bool mask, const int64_t logit_idx,
     const int32_t req_state_idx, const int32_t draft_step, const float temp,
-    const T_TARGET* __restrict__ target_logits, const int64_t target_logits_stride,
+    const T_TARGET* __restrict__ target_logits,
+    const int64_t target_logits_stride,
     const float* __restrict__ target_local_max,
     const int64_t target_local_max_stride,
     const float* __restrict__ target_local_sumexp,
@@ -821,8 +823,7 @@ __device__ __forceinline__ LogProbs global_logprobs_and_lse(
     const T_DRAFT* __restrict__ row =
         draft_logits + (int64_t)req_state_idx * draft_logits_stride_0 +
         (int64_t)draft_step * draft_logits_stride_1;
-    const float draft_logit =
-        mask ? (float)row[token] / temp : -INFINITY;
+    const float draft_logit = mask ? (float)row[token] / temp : -INFINITY;
     out.draft_lse = global_logsumexp(
         draft_local_max, draft_local_max_stride, draft_local_sumexp,
         draft_local_sumexp_stride, logit_idx, vocab_num_blocks,
@@ -873,7 +874,8 @@ __global__ void rejection_kernel(
     int32_t* __restrict__ rejected_steps,
     float* __restrict__ target_rejected_logsumexp,
     float* __restrict__ draft_rejected_logsumexp,
-    const T_TARGET* __restrict__ target_logits, const int64_t target_logits_stride,
+    const T_TARGET* __restrict__ target_logits,
+    const int64_t target_logits_stride,
     const int64_t* __restrict__ target_local_argmax,
     const int64_t target_local_argmax_stride,
     const float* __restrict__ target_local_max,
@@ -893,10 +895,9 @@ __global__ void rejection_kernel(
     const float* __restrict__ synthetic_conditional_rates,
     const float* __restrict__ cumulative_log_p,
     const float* __restrict__ local_residual_mass,
-    const int64_t local_residual_mass_stride,
-    const int32_t vocab_num_blocks, const int32_t padded_vocab_num_blocks,
-    const bool has_draft_logits, const bool synthetic_mode,
-    const bool use_block_verification) {
+    const int64_t local_residual_mass_stride, const int32_t vocab_num_blocks,
+    const int32_t padded_vocab_num_blocks, const bool has_draft_logits,
+    const bool synthetic_mode, const bool use_block_verification) {
   const int req_idx = blockIdx.x;
   const int lane = threadIdx.x & 31;
   const int32_t req_state_idx = idx_mapping[req_idx];
@@ -945,8 +946,7 @@ __global__ void rejection_kernel(
             accepted ? draft_token : target_argmax;
       }
     } else if (use_block_verification) {
-      const float prefix_joint_ratio =
-          tl_exp(cumulative_log_p[logit_idx]);
+      const float prefix_joint_ratio = tl_exp(cumulative_log_p[logit_idx]);
       int64_t next_draft_token = -1;
       if (i < num_draft_tokens - 1) {
         next_draft_token = draft_sampled[logit_idx + 2];
@@ -954,9 +954,9 @@ __global__ void rejection_kernel(
       float h;
       if (next_draft_token >= 0) {
         const float residual_mass = global_residual_mass<T_TARGET, T_DRAFT>(
-            local_residual_mass, local_residual_mass_stride,
-            prefix_joint_ratio, target_logits, target_logits_stride,
-            target_local_max, target_local_max_stride, target_local_sumexp,
+            local_residual_mass, local_residual_mass_stride, prefix_joint_ratio,
+            target_logits, target_logits_stride, target_local_max,
+            target_local_max_stride, target_local_sumexp,
             target_local_sumexp_stride, next_draft_token, logit_idx + 1,
             vocab_num_blocks, padded_vocab_num_blocks, has_draft_logits, lane);
         const float denom = residual_mass + 1.0f - prefix_joint_ratio;
@@ -1033,7 +1033,8 @@ __global__ void resample_kernel(
     const int64_t resampled_local_argmax_stride,
     void* __restrict__ resampled_local_max,
     const int64_t resampled_local_max_stride,
-    const T_TARGET* __restrict__ target_logits, const int64_t target_logits_stride,
+    const T_TARGET* __restrict__ target_logits,
+    const int64_t target_logits_stride,
     const float* __restrict__ target_rejected_logsumexp,
     const T_DRAFT* __restrict__ draft_logits,
     const int64_t draft_logits_stride_0, const int64_t draft_logits_stride_1,
@@ -1044,9 +1045,8 @@ __global__ void resample_kernel(
     const int32_t* __restrict__ draft_sampled,
     const float* __restrict__ temp_ptr, const int64_t* __restrict__ seed_ptr,
     const int64_t* __restrict__ pos_ptr,
-    const float* __restrict__ cumulative_log_p,
-    const int32_t vocab_size, const bool has_draft_logits,
-    const bool use_block_verification) {
+    const float* __restrict__ cumulative_log_p, const int32_t vocab_size,
+    const bool has_draft_logits, const bool use_block_verification) {
   using VT = typename ResampleVal<USE_FP64>::type;
   const int req_idx = blockIdx.x;
   const int32_t resample_idx = rejected_step[req_idx];
@@ -1075,8 +1075,8 @@ __global__ void resample_kernel(
     const int64_t block = block_base + (int64_t)e * stride + threadIdx.x;
     const bool mask = block < vocab_size;
     const float target_logit =
-        mask ? (float)
-                   target_logits[resample_token_idx * target_logits_stride + block]
+        mask ? (float)target_logits[resample_token_idx * target_logits_stride +
+                                    block]
              : -INFINITY;
 
     float residual_logits;
@@ -1177,8 +1177,9 @@ __global__ void resample_kernel(
       }
     }
     if (lane == 0) {
-      reinterpret_cast<VT*>(resampled_local_max)
-          [req_idx * resampled_local_max_stride + blockIdx.y] = v;
+      reinterpret_cast<VT*>(
+          resampled_local_max)[req_idx * resampled_local_max_stride +
+                               blockIdx.y] = v;
       resampled_local_argmax[req_idx * resampled_local_argmax_stride +
                              blockIdx.y] = idx;
     }
@@ -1195,8 +1196,7 @@ __global__ void insert_resampled_kernel(
     const int64_t* __restrict__ resampled_local_argmax,
     const int64_t resampled_local_argmax_stride,
     const T_MAX* __restrict__ resampled_local_max,
-    const int64_t resampled_local_max_stride,
-    const int32_t resample_num_blocks,
+    const int64_t resampled_local_max_stride, const int32_t resample_num_blocks,
     const int32_t* __restrict__ cu_num_logits,
     const int32_t* __restrict__ expanded_idx_mapping,
     const float* __restrict__ temp_ptr) {
@@ -1224,8 +1224,8 @@ __global__ void insert_resampled_kernel(
   float best = -INFINITY;
   int best_idx = 0x7fffffff;
   for (int b = tid; b < resample_num_blocks; b += blockDim.x) {
-    float v = (float)resampled_local_max[req_idx * resampled_local_max_stride +
-                                         b];
+    float v =
+        (float)resampled_local_max[req_idx * resampled_local_max_stride + b];
     v = v != v ? -INFINITY : v;
     if (v > best) {
       best = v;
@@ -1243,9 +1243,8 @@ __global__ void insert_resampled_kernel(
   }
   if (tid == 0) {
     sampled[req_idx * sampled_stride + num] =
-        resampled_local_argmax
-            [req_idx * resampled_local_argmax_stride +
-             (best_idx == 0x7fffffff ? 0 : best_idx)];
+        resampled_local_argmax[req_idx * resampled_local_argmax_stride +
+                               (best_idx == 0x7fffffff ? 0 : best_idx)];
   }
 }
 
@@ -1258,10 +1257,10 @@ __global__ void insert_resampled_kernel(
 namespace {
 
 using at::Tensor;
-using vllm::rdna2_spec_decode::insert_resampled_kernel;
 using vllm::rdna2_spec_decode::compute_local_logits_stats_kernel;
 using vllm::rdna2_spec_decode::flatten_sampled_kernel;
 using vllm::rdna2_spec_decode::gather_draft_sampled_kernel;
+using vllm::rdna2_spec_decode::insert_resampled_kernel;
 using vllm::rdna2_spec_decode::prepare_decode_inputs_kernel;
 using vllm::rdna2_spec_decode::prepare_prefill_inputs_kernel;
 using vllm::rdna2_spec_decode::rejection_kernel;
@@ -1315,8 +1314,7 @@ void dispatch_float_dtype(const Tensor& t, F&& f) {
       f(at::BFloat16{});
       return;
     default:
-      TORCH_CHECK(false,
-                  "rdna2 spec-decode: unsupported target logits dtype");
+      TORCH_CHECK(false, "rdna2 spec-decode: unsupported target logits dtype");
   }
 }
 
@@ -1377,8 +1375,7 @@ void spec_prepare_decode_inputs_rdna2(
     torch::Tensor num_rejected, torch::Tensor input_ids,
     torch::Tensor positions, torch::Tensor sample_src_positions,
     torch::Tensor query_start_loc, torch::Tensor seq_lens,
-    int64_t max_model_len, int64_t max_num_reqs,
-    bool advance_draft_positions) {
+    int64_t max_model_len, int64_t max_num_reqs, bool advance_draft_positions) {
   check_dtype(draft_tokens, at::kLong, "draft_tokens");
   check_dtype(target_seq_lens, at::kInt, "target_seq_lens");
   check_dtype(num_rejected, at::kInt, "num_rejected");
@@ -1393,29 +1390,29 @@ void spec_prepare_decode_inputs_rdna2(
   auto stream = at::cuda::getCurrentCUDAStream();
   const int64_t stride = draft_tokens.stride(0);
   if (advance_draft_positions) {
-    prepare_decode_inputs_kernel<true><<<num_reqs + 1, kThreads, 0,
-                                         stream.stream()>>>(
-        reinterpret_cast<const int64_t*>(draft_tokens.data_ptr()), stride,
-        reinterpret_cast<const int32_t*>(target_seq_lens.data_ptr()),
-        reinterpret_cast<const int32_t*>(num_rejected.data_ptr()),
-        reinterpret_cast<int32_t*>(input_ids.data_ptr()),
-        reinterpret_cast<int64_t*>(positions.data_ptr()),
-        reinterpret_cast<int64_t*>(sample_src_positions.data_ptr()),
-        reinterpret_cast<int32_t*>(query_start_loc.data_ptr()),
-        reinterpret_cast<int32_t*>(seq_lens.data_ptr()), max_model_len,
-        max_num_reqs);
+    prepare_decode_inputs_kernel<true>
+        <<<num_reqs + 1, kThreads, 0, stream.stream()>>>(
+            reinterpret_cast<const int64_t*>(draft_tokens.data_ptr()), stride,
+            reinterpret_cast<const int32_t*>(target_seq_lens.data_ptr()),
+            reinterpret_cast<const int32_t*>(num_rejected.data_ptr()),
+            reinterpret_cast<int32_t*>(input_ids.data_ptr()),
+            reinterpret_cast<int64_t*>(positions.data_ptr()),
+            reinterpret_cast<int64_t*>(sample_src_positions.data_ptr()),
+            reinterpret_cast<int32_t*>(query_start_loc.data_ptr()),
+            reinterpret_cast<int32_t*>(seq_lens.data_ptr()), max_model_len,
+            max_num_reqs);
   } else {
-    prepare_decode_inputs_kernel<false><<<num_reqs + 1, kThreads, 0,
-                                          stream.stream()>>>(
-        reinterpret_cast<const int64_t*>(draft_tokens.data_ptr()), stride,
-        reinterpret_cast<const int32_t*>(target_seq_lens.data_ptr()),
-        reinterpret_cast<const int32_t*>(num_rejected.data_ptr()),
-        reinterpret_cast<int32_t*>(input_ids.data_ptr()),
-        reinterpret_cast<int64_t*>(positions.data_ptr()),
-        reinterpret_cast<int64_t*>(sample_src_positions.data_ptr()),
-        reinterpret_cast<int32_t*>(query_start_loc.data_ptr()),
-        reinterpret_cast<int32_t*>(seq_lens.data_ptr()), max_model_len,
-        max_num_reqs);
+    prepare_decode_inputs_kernel<false>
+        <<<num_reqs + 1, kThreads, 0, stream.stream()>>>(
+            reinterpret_cast<const int64_t*>(draft_tokens.data_ptr()), stride,
+            reinterpret_cast<const int32_t*>(target_seq_lens.data_ptr()),
+            reinterpret_cast<const int32_t*>(num_rejected.data_ptr()),
+            reinterpret_cast<int32_t*>(input_ids.data_ptr()),
+            reinterpret_cast<int64_t*>(positions.data_ptr()),
+            reinterpret_cast<int64_t*>(sample_src_positions.data_ptr()),
+            reinterpret_cast<int32_t*>(query_start_loc.data_ptr()),
+            reinterpret_cast<int32_t*>(seq_lens.data_ptr()), max_model_len,
+            max_num_reqs);
   }
   LAUNCH_CHECK();
 }
@@ -1426,61 +1423,68 @@ static void launch_update_draft_inputs(
     Tensor& input_ids, Tensor& positions, Tensor& sample_src_positions,
     Tensor& seq_lens, const Tensor& draft_tokens,
     const Tensor& current_draft_step, const Tensor& hidden_states,
-    int64_t hidden_size, int64_t max_model_len, int64_t num_speculative_steps,
-    bool advance_draft_positions) {
+    int64_t hidden_size, const Tensor& max_model_len,
+    int64_t num_speculative_steps, bool advance_draft_positions) {
   const int num_reqs = (int)draft_tokens.numel();
   auto stream = at::cuda::getCurrentCUDAStream();
   const int64_t out_stride = output_draft_tokens.stride(0);
   const int64_t nihs_stride = next_input_hidden_states.stride(0);
   const int64_t hs_stride = hidden_states.stride(0);
   if (advance_draft_positions) {
-    update_draft_inputs_kernel<T, true><<<num_reqs, kThreads, 0,
-                                          stream.stream()>>>(
-        reinterpret_cast<int64_t*>(output_draft_tokens.data_ptr()), out_stride,
-        reinterpret_cast<T*>(next_input_hidden_states.data_ptr()),
-        nihs_stride, reinterpret_cast<int32_t*>(input_ids.data_ptr()),
-        reinterpret_cast<int64_t*>(positions.data_ptr()),
-        reinterpret_cast<int64_t*>(sample_src_positions.data_ptr()),
-        reinterpret_cast<int32_t*>(seq_lens.data_ptr()),
-        reinterpret_cast<const int64_t*>(draft_tokens.data_ptr()),
-        reinterpret_cast<const int64_t*>(current_draft_step.data_ptr()),
-        reinterpret_cast<const T*>(hidden_states.data_ptr()), hs_stride,
-        hidden_size, max_model_len, num_speculative_steps);
+    update_draft_inputs_kernel<T, true>
+        <<<num_reqs, kThreads, 0, stream.stream()>>>(
+            reinterpret_cast<int64_t*>(output_draft_tokens.data_ptr()),
+            out_stride,
+            reinterpret_cast<T*>(next_input_hidden_states.data_ptr()),
+            nihs_stride, reinterpret_cast<int32_t*>(input_ids.data_ptr()),
+            reinterpret_cast<int64_t*>(positions.data_ptr()),
+            reinterpret_cast<int64_t*>(sample_src_positions.data_ptr()),
+            reinterpret_cast<int32_t*>(seq_lens.data_ptr()),
+            reinterpret_cast<const int64_t*>(draft_tokens.data_ptr()),
+            reinterpret_cast<const int64_t*>(current_draft_step.data_ptr()),
+            reinterpret_cast<const T*>(hidden_states.data_ptr()), hs_stride,
+            hidden_size,
+            reinterpret_cast<const int32_t*>(max_model_len.data_ptr()),
+            num_speculative_steps);
   } else {
-    update_draft_inputs_kernel<T, false><<<num_reqs, kThreads, 0,
-                                           stream.stream()>>>(
-        reinterpret_cast<int64_t*>(output_draft_tokens.data_ptr()), out_stride,
-        reinterpret_cast<T*>(next_input_hidden_states.data_ptr()),
-        nihs_stride, reinterpret_cast<int32_t*>(input_ids.data_ptr()),
-        reinterpret_cast<int64_t*>(positions.data_ptr()),
-        reinterpret_cast<int64_t*>(sample_src_positions.data_ptr()),
-        reinterpret_cast<int32_t*>(seq_lens.data_ptr()),
-        reinterpret_cast<const int64_t*>(draft_tokens.data_ptr()),
-        reinterpret_cast<const int64_t*>(current_draft_step.data_ptr()),
-        reinterpret_cast<const T*>(hidden_states.data_ptr()), hs_stride,
-        hidden_size, max_model_len, num_speculative_steps);
+    update_draft_inputs_kernel<T, false>
+        <<<num_reqs, kThreads, 0, stream.stream()>>>(
+            reinterpret_cast<int64_t*>(output_draft_tokens.data_ptr()),
+            out_stride,
+            reinterpret_cast<T*>(next_input_hidden_states.data_ptr()),
+            nihs_stride, reinterpret_cast<int32_t*>(input_ids.data_ptr()),
+            reinterpret_cast<int64_t*>(positions.data_ptr()),
+            reinterpret_cast<int64_t*>(sample_src_positions.data_ptr()),
+            reinterpret_cast<int32_t*>(seq_lens.data_ptr()),
+            reinterpret_cast<const int64_t*>(draft_tokens.data_ptr()),
+            reinterpret_cast<const int64_t*>(current_draft_step.data_ptr()),
+            reinterpret_cast<const T*>(hidden_states.data_ptr()), hs_stride,
+            hidden_size,
+            reinterpret_cast<const int32_t*>(max_model_len.data_ptr()),
+            num_speculative_steps);
   }
   LAUNCH_CHECK();
 }
 
 void spec_update_draft_inputs_rdna2(
-    torch::Tensor output_draft_tokens,
-    torch::Tensor next_input_hidden_states, torch::Tensor input_ids,
-    torch::Tensor positions, torch::Tensor sample_src_positions,
-    torch::Tensor seq_lens, torch::Tensor draft_tokens,
-    torch::Tensor current_draft_step, torch::Tensor hidden_states,
-    int64_t hidden_size, int64_t max_model_len, int64_t num_speculative_steps,
+    torch::Tensor output_draft_tokens, torch::Tensor next_input_hidden_states,
+    torch::Tensor input_ids, torch::Tensor positions,
+    torch::Tensor sample_src_positions, torch::Tensor seq_lens,
+    torch::Tensor draft_tokens, torch::Tensor current_draft_step,
+    torch::Tensor hidden_states, int64_t hidden_size,
+    torch::Tensor max_model_len, int64_t num_speculative_steps,
     bool advance_draft_positions) {
   check_dtype(output_draft_tokens, at::kLong, "output_draft_tokens");
+  check_dtype(max_model_len, at::kInt, "max_model_len");
   check_dtype(input_ids, at::kInt, "input_ids");
   check_dtype(positions, at::kLong, "positions");
   check_dtype(sample_src_positions, at::kLong, "sample_src_positions");
   check_dtype(seq_lens, at::kInt, "seq_lens");
   check_dtype(draft_tokens, at::kLong, "draft_tokens");
   check_dtype(current_draft_step, at::kLong, "current_draft_step");
-  TORCH_CHECK(hidden_states.scalar_type() ==
-                  next_input_hidden_states.scalar_type(),
-              "rdna2 spec-decode: hidden-state dtype mismatch");
+  TORCH_CHECK(
+      hidden_states.scalar_type() == next_input_hidden_states.scalar_type(),
+      "rdna2 spec-decode: hidden-state dtype mismatch");
 
   const at::cuda::OptionalCUDAGuard guard(device_of(draft_tokens));
   if (hidden_states.scalar_type() == at::kFloat) {
@@ -1506,11 +1510,13 @@ void spec_update_draft_inputs_rdna2(
   }
 }
 
-void spec_gather_draft_sampled_rdna2(
-    torch::Tensor draft_sampled, torch::Tensor pos, torch::Tensor input_ids,
-    torch::Tensor positions, torch::Tensor logits_indices,
-    torch::Tensor expanded_idx_mapping, torch::Tensor expanded_local_pos,
-    torch::Tensor prefill_len) {
+void spec_gather_draft_sampled_rdna2(torch::Tensor draft_sampled,
+                                     torch::Tensor pos, torch::Tensor input_ids,
+                                     torch::Tensor positions,
+                                     torch::Tensor logits_indices,
+                                     torch::Tensor expanded_idx_mapping,
+                                     torch::Tensor expanded_local_pos,
+                                     torch::Tensor prefill_len) {
   check_dtype(draft_sampled, at::kInt, "draft_sampled");
   check_dtype(pos, at::kLong, "pos");
   check_dtype(input_ids, at::kInt, "input_ids");
@@ -1540,9 +1546,10 @@ void spec_gather_draft_sampled_rdna2(
   LAUNCH_CHECK();
 }
 
-void spec_flatten_sampled_rdna2(torch::Tensor flat_sampled, torch::Tensor sampled,
-                           torch::Tensor num_sampled,
-                           torch::Tensor cu_num_logits) {
+void spec_flatten_sampled_rdna2(torch::Tensor flat_sampled,
+                                torch::Tensor sampled,
+                                torch::Tensor num_sampled,
+                                torch::Tensor cu_num_logits) {
   check_dtype(flat_sampled, at::kLong, "flat_sampled");
   check_dtype(sampled, at::kLong, "sampled");
   check_dtype(num_sampled, at::kInt, "num_sampled");
@@ -1567,9 +1574,10 @@ static void launch_compute_local_logits_stats(
     const Tensor& target_local_argmax, Tensor& target_local_max,
     Tensor& target_local_sumexp, Tensor& draft_local_max,
     Tensor& draft_local_sumexp, const Tensor& target_logits,
-    const std::optional<Tensor>& draft_logits, const Tensor& expanded_idx_mapping,
-    const Tensor& expanded_local_pos, const Tensor& temp, int64_t vocab_size,
-    int64_t num_speculative_steps, bool has_draft_logits) {
+    const std::optional<Tensor>& draft_logits,
+    const Tensor& expanded_idx_mapping, const Tensor& expanded_local_pos,
+    const Tensor& temp, int64_t vocab_size, int64_t num_speculative_steps,
+    bool has_draft_logits) {
   const int64_t num_logits = expanded_idx_mapping.numel();
   const int64_t vocab_num_blocks = cdiv(vocab_size, 8192);
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -1582,29 +1590,27 @@ static void launch_compute_local_logits_stats(
       has_draft_logits
           ? reinterpret_cast<const T_DRAFT*>(draft_logits->data_ptr())
           : nullptr;
-  const int64_t draft_stride_0 =
-      has_draft_logits ? draft_logits->stride(0) : 0;
-  const int64_t draft_stride_1 =
-      has_draft_logits ? draft_logits->stride(1) : 0;
+  const int64_t draft_stride_0 = has_draft_logits ? draft_logits->stride(0) : 0;
+  const int64_t draft_stride_1 = has_draft_logits ? draft_logits->stride(1) : 0;
   dim3 grid((unsigned)num_logits, (unsigned)vocab_num_blocks);
-  compute_local_logits_stats_kernel<T_TARGET, T_DRAFT><<<grid, kReduceThreads, 0,
-                                               stream.stream()>>>(
-      reinterpret_cast<int64_t*>(target_local_argmax.data_ptr()),
-      target_local_argmax.stride(0),
-      reinterpret_cast<float*>(target_local_max.data_ptr()),
-      target_local_max.stride(0),
-      reinterpret_cast<float*>(target_local_sumexp.data_ptr()),
-      target_local_sumexp.stride(0),
-      reinterpret_cast<float*>(draft_local_max.data_ptr()),
-      draft_local_max.stride(0),
-      reinterpret_cast<float*>(draft_local_sumexp.data_ptr()),
-      draft_local_sumexp.stride(0),
-      reinterpret_cast<const T_TARGET*>(target_logits.data_ptr()),
-      target_logits.stride(0), draft_ptr, draft_stride_0, draft_stride_1,
-      reinterpret_cast<const int32_t*>(expanded_idx_mapping.data_ptr()),
-      reinterpret_cast<const int32_t*>(expanded_local_pos.data_ptr()),
-      reinterpret_cast<const float*>(temp.data_ptr()), (int32_t)vocab_size,
-      (int32_t)num_speculative_steps, has_draft_logits, vec4, vec4_draft);
+  compute_local_logits_stats_kernel<T_TARGET, T_DRAFT>
+      <<<grid, kReduceThreads, 0, stream.stream()>>>(
+          reinterpret_cast<int64_t*>(target_local_argmax.data_ptr()),
+          target_local_argmax.stride(0),
+          reinterpret_cast<float*>(target_local_max.data_ptr()),
+          target_local_max.stride(0),
+          reinterpret_cast<float*>(target_local_sumexp.data_ptr()),
+          target_local_sumexp.stride(0),
+          reinterpret_cast<float*>(draft_local_max.data_ptr()),
+          draft_local_max.stride(0),
+          reinterpret_cast<float*>(draft_local_sumexp.data_ptr()),
+          draft_local_sumexp.stride(0),
+          reinterpret_cast<const T_TARGET*>(target_logits.data_ptr()),
+          target_logits.stride(0), draft_ptr, draft_stride_0, draft_stride_1,
+          reinterpret_cast<const int32_t*>(expanded_idx_mapping.data_ptr()),
+          reinterpret_cast<const int32_t*>(expanded_local_pos.data_ptr()),
+          reinterpret_cast<const float*>(temp.data_ptr()), (int32_t)vocab_size,
+          (int32_t)num_speculative_steps, has_draft_logits, vec4, vec4_draft);
   LAUNCH_CHECK();
 }
 
@@ -1679,8 +1685,8 @@ static void launch_rejection(
     const std::optional<Tensor>& synthetic_conditional_rates,
     const std::optional<Tensor>& cumulative_log_p,
     const std::optional<Tensor>& local_residual_mass, int64_t vocab_num_blocks,
-    int64_t padded_vocab_num_blocks, bool has_draft_logits,
-    bool synthetic_mode, bool use_block_verification) {
+    int64_t padded_vocab_num_blocks, bool has_draft_logits, bool synthetic_mode,
+    bool use_block_verification) {
   const int num_reqs = (int)idx_mapping.numel();
   auto stream = at::cuda::getCurrentCUDAStream();
   const T_DRAFT* draft_ptr =
@@ -1688,10 +1694,9 @@ static void launch_rejection(
           ? reinterpret_cast<const T_DRAFT*>(draft_logits->data_ptr())
           : nullptr;
   const float* synthetic_ptr =
-      synthetic_mode
-          ? reinterpret_cast<const float*>(
-                synthetic_conditional_rates->data_ptr())
-          : nullptr;
+      synthetic_mode ? reinterpret_cast<const float*>(
+                           synthetic_conditional_rates->data_ptr())
+                     : nullptr;
   const float* cumulative_ptr =
       cumulative_log_p.has_value()
           ? reinterpret_cast<const float*>(cumulative_log_p->data_ptr())
@@ -1702,34 +1707,35 @@ static void launch_rejection(
           : nullptr;
   const int64_t residual_stride =
       local_residual_mass.has_value() ? local_residual_mass->stride(0) : 0;
-  rejection_kernel<T_TARGET, T_DRAFT><<<num_reqs, kScalarThreads, 0, stream.stream()>>>(
-      reinterpret_cast<int64_t*>(sampled.data_ptr()), sampled.stride(0),
-      reinterpret_cast<int32_t*>(rejected_steps.data_ptr()),
-      reinterpret_cast<float*>(target_rejected_logsumexp.data_ptr()),
-      reinterpret_cast<float*>(draft_rejected_logsumexp.data_ptr()),
-      reinterpret_cast<const T_TARGET*>(target_logits.data_ptr()),
-      target_logits.stride(0),
-      reinterpret_cast<const int64_t*>(target_local_argmax.data_ptr()),
-      target_local_argmax.stride(0),
-      reinterpret_cast<const float*>(target_local_max.data_ptr()),
-      target_local_max.stride(0),
-      reinterpret_cast<const float*>(target_local_sumexp.data_ptr()),
-      target_local_sumexp.stride(0),
-      reinterpret_cast<const int32_t*>(draft_sampled.data_ptr()), draft_ptr,
-      has_draft_logits ? draft_logits->stride(0) : 0,
-      has_draft_logits ? draft_logits->stride(1) : 0,
-      reinterpret_cast<const float*>(draft_local_max.data_ptr()),
-      draft_local_max.stride(0),
-      reinterpret_cast<const float*>(draft_local_sumexp.data_ptr()),
-      draft_local_sumexp.stride(0),
-      reinterpret_cast<const int32_t*>(cu_num_logits.data_ptr()),
-      reinterpret_cast<const int32_t*>(idx_mapping.data_ptr()),
-      reinterpret_cast<const float*>(temperature.data_ptr()),
-      reinterpret_cast<const int64_t*>(seed.data_ptr()),
-      reinterpret_cast<const int64_t*>(pos.data_ptr()), synthetic_ptr,
-      cumulative_ptr, residual_ptr, residual_stride,
-      (int32_t)vocab_num_blocks, (int32_t)padded_vocab_num_blocks,
-      has_draft_logits, synthetic_mode, use_block_verification);
+  rejection_kernel<T_TARGET, T_DRAFT>
+      <<<num_reqs, kScalarThreads, 0, stream.stream()>>>(
+          reinterpret_cast<int64_t*>(sampled.data_ptr()), sampled.stride(0),
+          reinterpret_cast<int32_t*>(rejected_steps.data_ptr()),
+          reinterpret_cast<float*>(target_rejected_logsumexp.data_ptr()),
+          reinterpret_cast<float*>(draft_rejected_logsumexp.data_ptr()),
+          reinterpret_cast<const T_TARGET*>(target_logits.data_ptr()),
+          target_logits.stride(0),
+          reinterpret_cast<const int64_t*>(target_local_argmax.data_ptr()),
+          target_local_argmax.stride(0),
+          reinterpret_cast<const float*>(target_local_max.data_ptr()),
+          target_local_max.stride(0),
+          reinterpret_cast<const float*>(target_local_sumexp.data_ptr()),
+          target_local_sumexp.stride(0),
+          reinterpret_cast<const int32_t*>(draft_sampled.data_ptr()), draft_ptr,
+          has_draft_logits ? draft_logits->stride(0) : 0,
+          has_draft_logits ? draft_logits->stride(1) : 0,
+          reinterpret_cast<const float*>(draft_local_max.data_ptr()),
+          draft_local_max.stride(0),
+          reinterpret_cast<const float*>(draft_local_sumexp.data_ptr()),
+          draft_local_sumexp.stride(0),
+          reinterpret_cast<const int32_t*>(cu_num_logits.data_ptr()),
+          reinterpret_cast<const int32_t*>(idx_mapping.data_ptr()),
+          reinterpret_cast<const float*>(temperature.data_ptr()),
+          reinterpret_cast<const int64_t*>(seed.data_ptr()),
+          reinterpret_cast<const int64_t*>(pos.data_ptr()), synthetic_ptr,
+          cumulative_ptr, residual_ptr, residual_stride,
+          (int32_t)vocab_num_blocks, (int32_t)padded_vocab_num_blocks,
+          has_draft_logits, synthetic_mode, use_block_verification);
   LAUNCH_CHECK();
 }
 
@@ -1752,8 +1758,7 @@ void spec_rejection_rdna2(
   check_dtype(rejected_steps, at::kInt, "rejected_steps");
   check_dtype(target_rejected_logsumexp, at::kFloat,
               "target_rejected_logsumexp");
-  check_dtype(draft_rejected_logsumexp, at::kFloat,
-              "draft_rejected_logsumexp");
+  check_dtype(draft_rejected_logsumexp, at::kFloat, "draft_rejected_logsumexp");
   TORCH_CHECK(target_logits.scalar_type() == at::kFloat ||
                   target_logits.scalar_type() == at::kHalf ||
                   target_logits.scalar_type() == at::kBFloat16,
@@ -1784,30 +1789,27 @@ void spec_rejection_rdna2(
           draft_rejected_logsumexp, target_logits, target_local_argmax,
           target_local_max, target_local_sumexp, draft_sampled, draft_logits,
           draft_local_max, draft_local_sumexp, cu_num_logits, idx_mapping,
-          temperature, seed, pos, synthetic_conditional_rates,
-          cumulative_log_p, local_residual_mass, vocab_num_blocks,
-          padded_vocab_num_blocks, false, synthetic_mode,
-          use_block_verification);
+          temperature, seed, pos, synthetic_conditional_rates, cumulative_log_p,
+          local_residual_mass, vocab_num_blocks, padded_vocab_num_blocks, false,
+          synthetic_mode, use_block_verification);
     } else if (draft_logits->scalar_type() == at::kFloat) {
       launch_rejection<T_TARGET, float>(
           sampled, rejected_steps, target_rejected_logsumexp,
           draft_rejected_logsumexp, target_logits, target_local_argmax,
           target_local_max, target_local_sumexp, draft_sampled, draft_logits,
           draft_local_max, draft_local_sumexp, cu_num_logits, idx_mapping,
-          temperature, seed, pos, synthetic_conditional_rates,
-          cumulative_log_p, local_residual_mass, vocab_num_blocks,
-          padded_vocab_num_blocks, true, synthetic_mode,
-          use_block_verification);
+          temperature, seed, pos, synthetic_conditional_rates, cumulative_log_p,
+          local_residual_mass, vocab_num_blocks, padded_vocab_num_blocks, true,
+          synthetic_mode, use_block_verification);
     } else if (draft_logits->scalar_type() == at::kHalf) {
       launch_rejection<T_TARGET, at::Half>(
           sampled, rejected_steps, target_rejected_logsumexp,
           draft_rejected_logsumexp, target_logits, target_local_argmax,
           target_local_max, target_local_sumexp, draft_sampled, draft_logits,
           draft_local_max, draft_local_sumexp, cu_num_logits, idx_mapping,
-          temperature, seed, pos, synthetic_conditional_rates,
-          cumulative_log_p, local_residual_mass, vocab_num_blocks,
-          padded_vocab_num_blocks, true, synthetic_mode,
-          use_block_verification);
+          temperature, seed, pos, synthetic_conditional_rates, cumulative_log_p,
+          local_residual_mass, vocab_num_blocks, padded_vocab_num_blocks, true,
+          synthetic_mode, use_block_verification);
     } else {
       TORCH_CHECK(draft_logits->scalar_type() == at::kBFloat16,
                   "rdna2 spec-decode: unsupported draft logits dtype");
@@ -1816,10 +1818,9 @@ void spec_rejection_rdna2(
           draft_rejected_logsumexp, target_logits, target_local_argmax,
           target_local_max, target_local_sumexp, draft_sampled, draft_logits,
           draft_local_max, draft_local_sumexp, cu_num_logits, idx_mapping,
-          temperature, seed, pos, synthetic_conditional_rates,
-          cumulative_log_p, local_residual_mass, vocab_num_blocks,
-          padded_vocab_num_blocks, true, synthetic_mode,
-          use_block_verification);
+          temperature, seed, pos, synthetic_conditional_rates, cumulative_log_p,
+          local_residual_mass, vocab_num_blocks, padded_vocab_num_blocks, true,
+          synthetic_mode, use_block_verification);
     }
   });
 }
@@ -1846,25 +1847,25 @@ static void launch_resample(
           ? reinterpret_cast<const float*>(cumulative_log_p->data_ptr())
           : nullptr;
   dim3 grid((unsigned)num_reqs, (unsigned)resample_num_blocks);
-  resample_kernel<USE_FP64, T_TARGET, T_DRAFT><<<grid, kReduceThreads, 0,
-                                       stream.stream()>>>(
-      reinterpret_cast<int64_t*>(resampled_local_argmax.data_ptr()),
-      resampled_local_argmax.stride(0), resampled_local_max.data_ptr(),
-      resampled_local_max.stride(0),
-      reinterpret_cast<const T_TARGET*>(target_logits.data_ptr()),
-      target_logits.stride(0),
-      reinterpret_cast<const float*>(target_rejected_logsumexp.data_ptr()),
-      draft_ptr, has_draft_logits ? draft_logits->stride(0) : 0,
-      has_draft_logits ? draft_logits->stride(1) : 0,
-      reinterpret_cast<const float*>(draft_rejected_logsumexp.data_ptr()),
-      reinterpret_cast<const int32_t*>(rejected_step.data_ptr()),
-      reinterpret_cast<const int32_t*>(cu_num_logits.data_ptr()),
-      reinterpret_cast<const int32_t*>(expanded_idx_mapping.data_ptr()),
-      reinterpret_cast<const int32_t*>(draft_sampled.data_ptr()),
-      reinterpret_cast<const float*>(temperature.data_ptr()),
-      reinterpret_cast<const int64_t*>(seed.data_ptr()),
-      reinterpret_cast<const int64_t*>(pos.data_ptr()), cumulative_ptr,
-      (int32_t)vocab_size, has_draft_logits, use_block_verification);
+  resample_kernel<USE_FP64, T_TARGET, T_DRAFT>
+      <<<grid, kReduceThreads, 0, stream.stream()>>>(
+          reinterpret_cast<int64_t*>(resampled_local_argmax.data_ptr()),
+          resampled_local_argmax.stride(0), resampled_local_max.data_ptr(),
+          resampled_local_max.stride(0),
+          reinterpret_cast<const T_TARGET*>(target_logits.data_ptr()),
+          target_logits.stride(0),
+          reinterpret_cast<const float*>(target_rejected_logsumexp.data_ptr()),
+          draft_ptr, has_draft_logits ? draft_logits->stride(0) : 0,
+          has_draft_logits ? draft_logits->stride(1) : 0,
+          reinterpret_cast<const float*>(draft_rejected_logsumexp.data_ptr()),
+          reinterpret_cast<const int32_t*>(rejected_step.data_ptr()),
+          reinterpret_cast<const int32_t*>(cu_num_logits.data_ptr()),
+          reinterpret_cast<const int32_t*>(expanded_idx_mapping.data_ptr()),
+          reinterpret_cast<const int32_t*>(draft_sampled.data_ptr()),
+          reinterpret_cast<const float*>(temperature.data_ptr()),
+          reinterpret_cast<const int64_t*>(seed.data_ptr()),
+          reinterpret_cast<const int64_t*>(pos.data_ptr()), cumulative_ptr,
+          (int32_t)vocab_size, has_draft_logits, use_block_verification);
   LAUNCH_CHECK();
 }
 
@@ -1913,8 +1914,7 @@ void spec_resample_rdna2(
               "rdna2 spec-decode: unsupported target logits dtype");
   check_dtype(target_rejected_logsumexp, at::kFloat,
               "target_rejected_logsumexp");
-  check_dtype(draft_rejected_logsumexp, at::kFloat,
-              "draft_rejected_logsumexp");
+  check_dtype(draft_rejected_logsumexp, at::kFloat, "draft_rejected_logsumexp");
   check_dtype(rejected_step, at::kInt, "rejected_step");
   check_dtype(cu_num_logits, at::kInt, "cu_num_logits");
   check_dtype(expanded_idx_mapping, at::kInt, "expanded_idx_mapping");
@@ -1968,24 +1968,26 @@ void spec_resample_rdna2(
 }
 
 template <typename T_MAX>
-static void launch_insert_resampled(
-    Tensor& sampled, Tensor& num_sampled, const Tensor& resampled_local_argmax,
-    const Tensor& resampled_local_max, int64_t resample_num_blocks,
-    const Tensor& cu_num_logits, const Tensor& expanded_idx_mapping,
-    const Tensor& temperature) {
+static void launch_insert_resampled(Tensor& sampled, Tensor& num_sampled,
+                                    const Tensor& resampled_local_argmax,
+                                    const Tensor& resampled_local_max,
+                                    int64_t resample_num_blocks,
+                                    const Tensor& cu_num_logits,
+                                    const Tensor& expanded_idx_mapping,
+                                    const Tensor& temperature) {
   const int num_reqs = (int)num_sampled.numel();
   auto stream = at::cuda::getCurrentCUDAStream();
-  insert_resampled_kernel<T_MAX><<<num_reqs, kScalarThreads, 0,
-                                   stream.stream()>>>(
-      reinterpret_cast<int64_t*>(sampled.data_ptr()), sampled.stride(0),
-      reinterpret_cast<int32_t*>(num_sampled.data_ptr()),
-      reinterpret_cast<const int64_t*>(resampled_local_argmax.data_ptr()),
-      resampled_local_argmax.stride(0),
-      reinterpret_cast<const T_MAX*>(resampled_local_max.data_ptr()),
-      resampled_local_max.stride(0), (int32_t)resample_num_blocks,
-      reinterpret_cast<const int32_t*>(cu_num_logits.data_ptr()),
-      reinterpret_cast<const int32_t*>(expanded_idx_mapping.data_ptr()),
-      reinterpret_cast<const float*>(temperature.data_ptr()));
+  insert_resampled_kernel<T_MAX>
+      <<<num_reqs, kScalarThreads, 0, stream.stream()>>>(
+          reinterpret_cast<int64_t*>(sampled.data_ptr()), sampled.stride(0),
+          reinterpret_cast<int32_t*>(num_sampled.data_ptr()),
+          reinterpret_cast<const int64_t*>(resampled_local_argmax.data_ptr()),
+          resampled_local_argmax.stride(0),
+          reinterpret_cast<const T_MAX*>(resampled_local_max.data_ptr()),
+          resampled_local_max.stride(0), (int32_t)resample_num_blocks,
+          reinterpret_cast<const int32_t*>(cu_num_logits.data_ptr()),
+          reinterpret_cast<const int32_t*>(expanded_idx_mapping.data_ptr()),
+          reinterpret_cast<const float*>(temperature.data_ptr()));
   LAUNCH_CHECK();
 }
 
@@ -2007,18 +2009,14 @@ void spec_insert_resampled_rdna2(
   }
   const at::cuda::OptionalCUDAGuard guard(device_of(sampled));
   if (resampled_local_max.scalar_type() == at::kFloat) {
-    launch_insert_resampled<float>(sampled, num_sampled,
-                                   resampled_local_argmax, resampled_local_max,
-                                   resample_num_blocks, cu_num_logits,
-                                   expanded_idx_mapping, temperature);
+    launch_insert_resampled<float>(
+        sampled, num_sampled, resampled_local_argmax, resampled_local_max,
+        resample_num_blocks, cu_num_logits, expanded_idx_mapping, temperature);
   } else {
     TORCH_CHECK(resampled_local_max.scalar_type() == at::kDouble,
                 "rdna2 spec-decode: resampled_local_max dtype mismatch");
-    launch_insert_resampled<double>(sampled, num_sampled,
-                                    resampled_local_argmax,
-                                    resampled_local_max, resample_num_blocks,
-                                    cu_num_logits, expanded_idx_mapping,
-                                    temperature);
+    launch_insert_resampled<double>(
+        sampled, num_sampled, resampled_local_argmax, resampled_local_max,
+        resample_num_blocks, cu_num_logits, expanded_idx_mapping, temperature);
   }
 }
-

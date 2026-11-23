@@ -527,6 +527,10 @@ class GroupCoordinator:
         self.cpu_group = self_cpu_group
         self.device_group = self_device_group
 
+        # Dead DP slots under fault-tolerance scale-down (empty when FT is
+        # off); read by the DP allreduce to neutralize dead columns.
+        self.dead_dp_ranks: set[int] = set()
+
         from vllm.platforms import current_platform
 
         if current_platform.is_cuda_alike():
@@ -1692,7 +1696,7 @@ def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
 
 
 @contextmanager
-def graph_capture(device: torch.device):
+def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None):
     """`graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that some
     operations will be run after the graph is captured, before the graph
@@ -1704,12 +1708,14 @@ def graph_capture(device: torch.device):
     the graph capture is running on a separate stream from the default stream,
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
+    A given ``stream`` is reused instead, so graphs captured on it share the
+    caching allocator's free blocks of the graph pool.
     """
     from vllm.device_allocator.alloc_conf import non_expandable_allocations
     from vllm.platforms import current_platform
 
     tp, pp, dp = get_tp_group(), get_pp_group(), get_dp_group()
-    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    context = GraphCaptureContext(stream or torch.cuda.Stream(device=device))
     # Let AITER all-reduce register captured buffers instead of copying them.
     # Not with DP AITER collectives: they reduce workspaces allocated earlier.
     non_expandable = (
@@ -2254,7 +2260,10 @@ def initialize_model_parallel(
         # DCP spans PCP first, then TP for full TP x PCP groups.
         dcp_ranks = dcp_ranks.transpose(-1, -2)
     group_ranks = dcp_ranks.reshape(-1, dcp_size).unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
+    # torch.distributed orders group members by sorted global rank, so a
+    # full TP x PCP group's members must be listed in that order too, or
+    # rank_in_group disagrees with the collectives' output order.
+    group_ranks = [sorted(x.tolist()) for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,
         get_world_group().local_rank,

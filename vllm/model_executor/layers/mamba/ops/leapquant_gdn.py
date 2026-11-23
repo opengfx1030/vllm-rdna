@@ -157,18 +157,11 @@ def verify_leapquant_gdn(
             "and no connector knows the format. Remove the connector or the "
             "offloading option."
         )
-    if cache_config.mamba_cache_mode == "align" and not vllm_config.use_v2_model_runner:
-        raise ValueError(
-            f"{LEAPQUANT_FLAG} with mamba align prefix caching "
-            "(--mamba-cache-mode align) needs the V2 model runner. Its fused "
-            "align copies commit the LeapQuant records. Set "
-            "VLLM_USE_V2_MODEL_RUNNER=1 or turn prefix caching off."
-        )
     from vllm._aiter_ops import rocm_aiter_ops
 
     if (
         rocm_aiter_ops.are_gdn_triton_kernels_available()
-        or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+        or rocm_aiter_ops.are_rdna_gdn_triton_kernels_available()
     ):
         raise ValueError(
             f"{LEAPQUANT_FLAG} does not cover the AITER GDN path. Set "

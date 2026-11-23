@@ -17,19 +17,10 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.hisparse.runtime import (
-    FP8_DS_MLA_ROW_BYTES,
     HiSparseCacheHandle,
     HiSparsePrefillStagingPlan,
     create_hisparse_cache_handle,
 )
-
-
-def _create_side_stream(device: torch.device) -> torch.Stream:
-    return torch.Stream(device=device)
-
-
-def _create_event() -> torch.Event:
-    return torch.Event()
 
 
 @dataclass
@@ -45,11 +36,14 @@ class SparseMLAIndexGroup:
     has_indexer: bool
     num_layers: int = 0
 
+    def _current_stream(self) -> Any:
+        return current_stream()
+
     def register_layer(
         self,
         vllm_config: VllmConfig | None = None,
         *,
-        head_size: int | None = None,
+        row_width: int | None = None,
         kv_cache_dtype: str | None = None,
     ) -> int:
         layer_index = self.num_layers
@@ -66,7 +60,7 @@ class SparseMLAIndexGroup:
         # touches this event), so skip the record as well.
         if in_piecewise_cudagraph():
             return
-        self.logical_topk_ready.record(current_stream())
+        self.logical_topk_ready.record(self._current_stream())
 
     def prepare_for_batch(self, layer_index: int, attn_metadata: Any | None) -> None:
         pass
@@ -138,7 +132,7 @@ class SparseMLAIndexGroup:
 
         physical_topk_indices = self.physical_topk_indices[:num_tokens]
         valid_topk_counts = self.valid_topk_counts[:num_tokens]
-        compute_stream = current_stream()
+        compute_stream = self._current_stream()
         if layer_index == 0:
             if self.has_indexer and not in_piecewise_cudagraph():
                 self.side_stream.wait_event(self.logical_topk_ready)
@@ -176,26 +170,27 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
     prefill_stream: torch.Stream | None = None
     prefill_ready_events: list[torch.Event] = field(default_factory=list)
 
+    def _current_stream(self) -> Any:
+        return torch.accelerator.current_stream()
+
     def register_layer(
         self,
         vllm_config: VllmConfig | None = None,
         *,
-        head_size: int | None = None,
+        row_width: int | None = None,
         kv_cache_dtype: str | None = None,
     ) -> int:
         assert vllm_config is not None
-        assert head_size is not None
+        assert row_width is not None
         assert kv_cache_dtype is not None
         layer_index = super().register_layer()
         if self.prefill_stream is None:
-            self.prefill_stream = _create_side_stream(self.logical_topk_indices.device)
+            self.prefill_stream = torch.Stream(device=self.logical_topk_indices.device)
         if kv_cache_dtype == "fp8_ds_mla":
-            row_width = FP8_DS_MLA_ROW_BYTES
             kv_dtype = torch.uint8
         else:
             from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
-            row_width = head_size
             kv_dtype = kv_cache_dtype_str_to_dtype(
                 kv_cache_dtype, vllm_config.model_config
             )
@@ -210,7 +205,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert cache is not None
         self.caches.append(cache)
         cache.index_group_caches = self.caches
-        self.prefill_ready_events.append(_create_event())
+        self.prefill_ready_events.append(torch.Event())
         return layer_index
 
     def cache(self, layer_index: int) -> HiSparseCacheHandle:
@@ -329,7 +324,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill_stream = self.prefill_stream
         assert prefill_stream is not None
         block_table = plan.block_table[request_start : request_start + batch_size]
-        prefill_stream.wait_stream(current_stream())
+        prefill_stream.wait_stream(torch.accelerator.current_stream())
         with prefill_stream:
             ops.cp_gather_and_upconvert_fp8_kv_cache(
                 cache.view.cache,
@@ -365,7 +360,7 @@ class SparseMLAIndexGroupBuilder:
         is_index_producing_layer: bool,
         vllm_config: VllmConfig | None = None,
         *,
-        head_size: int | None = None,
+        row_width: int | None = None,
         kv_cache_dtype: str | None = None,
     ) -> tuple[SparseMLAIndexGroup, int]:
         if is_index_producing_layer or self.current_group is None:
@@ -389,15 +384,15 @@ class SparseMLAIndexGroupBuilder:
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
                 ),
-                side_stream=_create_side_stream(self.logical_topk_indices.device),
-                logical_topk_ready=_create_event(),
-                physical_topk_ready=_create_event(),
+                side_stream=torch.Stream(device=self.logical_topk_indices.device),
+                logical_topk_ready=torch.Event(),
+                physical_topk_ready=torch.Event(),
                 has_indexer=is_index_producing_layer,
             )
         group = self.current_group
         group_index = group.register_layer(
             vllm_config,
-            head_size=head_size,
+            row_width=row_width,
             kv_cache_dtype=kv_cache_dtype,
         )
         return group, group_index

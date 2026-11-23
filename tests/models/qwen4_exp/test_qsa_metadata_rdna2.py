@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.common import qsa_cache
+from vllm.models.qwen4_exp.common import qsa_indexer
 from vllm.platforms.rdna import on_rdna2
 
 pytestmark = pytest.mark.skipif(
@@ -97,7 +97,9 @@ def test_build_qsa_metadata_parity(
     circular_buffer_size: int,
     with_k_work: bool,
 ) -> None:
-    common = _common(query_lengths, seq_lens, num_padding, negative_blocks=negative_blocks)
+    common = _common(
+        query_lengths, seq_lens, num_padding, negative_blocks=negative_blocks
+    )
     num_tokens = common.num_actual_tokens
     num_reqs = len(query_lengths)
 
@@ -105,7 +107,7 @@ def test_build_qsa_metadata_parity(
     hip_k_work = None if k_work is None else torch.empty_like(k_work)
     tri_k_work = None if k_work is None else torch.empty_like(k_work)
 
-    hip = qsa_cache.build_qsa_metadata_rdna2(
+    hip = qsa_indexer.build_qsa_metadata_rdna2(
         common,
         *_buffers(num_tokens),
         storage_block_size=2,
@@ -114,7 +116,7 @@ def test_build_qsa_metadata_parity(
         k_work_metadata_buffer=hip_k_work,
         request_capacity=num_reqs,
     )
-    tri = qsa_cache.build_qsa_metadata_triton(
+    tri = qsa_indexer.build_qsa_metadata_triton(
         common,
         *_buffers(num_tokens),
         storage_block_size=2,
@@ -125,18 +127,22 @@ def test_build_qsa_metadata_parity(
     )
 
     for name, got, want in zip(
-        ("token_to_req", "logical_positions", "visible_blocks", "slot_mapping"), hip, tri
+        ("token_to_req", "logical_positions", "visible_blocks", "slot_mapping"),
+        hip,
+        tri,
     ):
         assert torch.equal(got, want), f"{name} differs from Triton"
     if hip_k_work is not None:
-        assert torch.equal(hip_k_work, tri_k_work), "k_work_metadata differs from Triton"
+        assert torch.equal(hip_k_work, tri_k_work), (
+            "k_work_metadata differs from Triton"
+        )
 
 
 def test_build_qsa_metadata_zero_tokens() -> None:
     common = _common([0], [0], 0)
     num_tokens = common.num_actual_tokens
     assert num_tokens == 0
-    hip = qsa_cache.build_qsa_metadata_rdna2(
+    hip = qsa_indexer.build_qsa_metadata_rdna2(
         common, *_buffers(0), storage_block_size=2, compress_ratio=4
     )
     assert all(t.numel() == 0 for t in hip)
@@ -144,8 +150,8 @@ def test_build_qsa_metadata_zero_tokens() -> None:
 
 def test_build_qsa_metadata_dispatch_is_not_triton(monkeypatch) -> None:
     """On RDNA2 the dispatcher must resolve to the HIP builder, never Triton."""
-    monkeypatch.setattr(qsa_cache, "_qsa_metadata_impl", None)
-    assert qsa_cache._resolve_qsa_metadata_builder() is (
-        qsa_cache.build_qsa_metadata_rdna2
+    monkeypatch.setattr(qsa_indexer, "_qsa_metadata_impl", None)
+    assert qsa_indexer._resolve_qsa_metadata_builder() is (
+        qsa_indexer.build_qsa_metadata_rdna2
     )
-    assert qsa_cache._qsa_metadata_impl is None
+    assert qsa_indexer._qsa_metadata_impl is None

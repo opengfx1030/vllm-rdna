@@ -69,7 +69,8 @@ From [`rdna_launcher_common.sh`](../../tools/rdna/rdna_launcher_common.sh), unle
 | `VLLM_WORKER_MULTIPROC_METHOD` | `spawn` | Leave it. |
 | `ROCPROFILER_REGISTER_ENABLED` | `0` | Set `1` only while attaching a GPU profiler. |
 | `VLLM_BATCH_INVARIANT` | `0` | Leave it for serving. |
-| `VLLM_CACHE_ROOT` and the Triton / Inductor / extension caches | `<repo>/cache/...` | Stale `vllm serve` processes are killed only when they carry the same `VLLM_CACHE_ROOT`. |
+| `VLLM_CACHE_ROOT` | `<repo>/cache/vllm-<HIP_VISIBLE_DEVICES, commas as _>-<PORT>` | Stale `vllm serve` processes are killed only when they carry the same `VLLM_CACHE_ROOT`. The default is per GPU set and port, so two servers of one checkout on different cards boot side by side without killing each other (a relaunch on the same cards and port still replaces its predecessor). An explicit `VLLM_CACHE_ROOT` is used as given: every server carrying that exact root is stopped at launch, so give parallel servers different roots. |
+| Triton / Inductor / extension caches | `<repo>/cache/...` | Shared by the servers of one checkout. |
 | `PYTHONPATH` | the repo root | So this checkout wins over an installed copy. |
 
 The command always includes `--dtype float16`. `TUNABLEOP` defaults to `1`: the launcher hashes `librocblas.so.5` and selects a profile under [`tunableop/`](../../tunableop/). `TUNABLEOP=0` turns that off. `TUNABLEOP_PROFILE=<name>` forces a named profile and refuses to start when the name is missing. `TUNABLEOP_PREFER=<name>` is the soft form: it applies only when that profile is registered for the loaded library's hash, otherwise the launcher warns and auto-selects (recipes `27b-hi2-tp2` and `27b-hi2-tp2-mtp2` set it to their opt-in derived profile; `TUNABLEOP_PREFER=` empty gives the canonical rows). `P2P=0` turns the RDNA all-reduce off and sets `NCCL_P2P_DISABLE=1` (RCCL over host shared memory) for a host whose PCIe peer-to-peer is broken.
@@ -180,7 +181,7 @@ Where a recipe sets these, the value is the one below. A later section names the
 | `PYTHONFAULTHANDLER` | `1` | Same recipes as `OMP_NUM_THREADS`. |
 | `VLLM_CAUSAL_CONV1D_RDNA2_FWD`, `VLLM_CAUSAL_CONV1D_RDNA2_UPDATE` | `0` | HIP causal conv1d off; Triton stays. Set by every Flash-Next recipe and by `27b-awq`. The tuning guide's code default is 1; these recipes override it. |
 | `VLLM_ENABLE_STARTUP_PLAN` | `0` | Same recipes as the causal-conv pair. |
-| `VLLM_RDNA_DENSE_INT8`, `VLLM_RDNA_DENSE_INT8_ONLY`, `VLLM_RDNA_DENSE_GEMV` | `0` on the TP=4 Flash-Next recipes and `27b-awq` | Both PP=3 recipes set `VLLM_RDNA_DENSE_INT8=1` and `VLLM_RDNA_DENSE_INT8_ONLY=1`, and leave `VLLM_RDNA_DENSE_GEMV=0`. |
+| `VLLM_RDNA_DENSE_INT8`, `VLLM_RDNA_DENSE_INT8_ONLY` | `0` on the TP=4 Flash-Next recipes and `27b-awq` | Both PP=3 recipes set these to `1`. gfx1030 FP16 decode uses the RDNA2 GEMV without a separate force switch. |
 | `VLLM_RDNA_FUSED_SE` | `1` | Fused shared expert, where the recipe sets it. `flashnext-exl3` sets `0` (EXL3 experts use `Exl3MoEMethod`). |
 | `VLLM_GDN_HIP_PREFILL` | `1` on the Flash-Next AWQ recipes | `flashnext-exl3` sets `0`. |
 | `VLLM_USE_AOT_COMPILE` | `0` and `VLLM_DISABLE_COMPILE_CACHE=1` | Per-rank JIT. Set by `flashnext-exl3`, `27b-awq`, `27b-exl3`, `dsv4-flash`, `full`. The recipe comments: a shared AOT cache replays one rank's device tensors onto the others. |
@@ -244,7 +245,7 @@ Export `DFLASH_TOKENS` in the shell that runs the launcher, before the command. 
 
 AWQ-W4A16, three gfx1030 cards, `TP=1`, `PP=3`, `PP_PARTITION=16,16,16`, `MTP=0`. `SERVE_ENTRY=api`, port 18096, `MAXLEN=262144`, `SEQS=8`, `MAXBAT=2048`, `KV=auto`, `GMEM=0.95`. Text only (`language-model-only skip-mm-profiling`): the recipe comment says the vision encoder sits on stage 0 and does not fit beside 16 layers.
 
-`VLLM_RDNA_DENSE_INT8=1` and `VLLM_RDNA_DENSE_INT8_ONLY=1` (the comment: keeping the fp16 copy next to the int8 shadow OOMs a stage). `VLLM_RDNA_DENSE_GEMV=0`. `TUNED_CONFIG=1`. `VLLM_GDN_HIP_PREFILL=1`, `VLLM_RDNA_FUSED_SE=1`. `HSA_ENABLE_SDMA=0` and both causal-conv variables are `0`, same as the TP=4 Flash-Next recipes. This file does not set `GPU_MAX_HW_QUEUES`.
+`VLLM_RDNA_DENSE_INT8=1` and `VLLM_RDNA_DENSE_INT8_ONLY=1` (the comment: keeping the fp16 copy next to the int8 shadow OOMs a stage). `TUNED_CONFIG=1`. `VLLM_GDN_HIP_PREFILL=1`, `VLLM_RDNA_FUSED_SE=1`. `HSA_ENABLE_SDMA=0` and both causal-conv variables are `0`, same as the TP=4 Flash-Next recipes. This file does not set `GPU_MAX_HW_QUEUES`.
 
 ```bash
 bash tools/rdna/serve_rdna.sh RECIPE=flashnext-pp3 \

@@ -1,0 +1,46 @@
+{
+  "source_commit": "93d737878644180147f44d001fa00ceb2bde8f2e",
+  "base_native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+  "patched_files": [
+    "csrc/rocm/v1_sample_rdna2.cu",
+    "csrc/rocm/v1_spec_decode_rdna2.cu",
+    "csrc/rocm/ops.h",
+    "csrc/rocm/torch_bindings.cpp"
+  ],
+  "patch_sha256": "79583684dd9a0519a393d00d529f370cc0d9e849d2021f63828b9d14c4733449",
+  "reason": "HIP gumbel cache seed mix parity; update_draft_inputs must read max_model_len from a device scalar during graph capture (no .item())",
+  "build_dir": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm",
+  "build_command": "flock build.lock; nice -n 19 cmake --build build-v034-rocm -j8 --target _rocm_C",
+  "build_rc": 0,
+  "build_seconds": 282.5,
+  "old_rocm_C_sha256": "2d09fdcdf456f4719f1739b83b0b1998ddae47db5000f11af9eaf6565bc262f1",
+  "new_rocm_C_sha256": "41d5030b7791caf573d45df538ab3a9772bae533d572dc82416455dd2c977f6c",
+  "new_rocm_C_bytes": 201771832,
+  "rocm_arches": [
+    "gfx90a",
+    "gfx942",
+    "gfx950",
+    "gfx1030",
+    "gfx1100",
+    "gfx1200"
+  ],
+  "build_log": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/cmake-build-rocm_C-maxlen.log",
+  "previous_gumbel_only_record": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/native-patch-gumbel-only.json",
+  "test_patch_sha256": "79583684dd9a0519a393d00d529f370cc0d9e849d2021f63828b9d14c4733449",
+  "operator_r3_receipt_sha256": "2d532f0a8e32e0a6764d8ad81a02a2b508d12965b09ec9d2eb4f648fe5d9714e",
+  "operator_r3_junit_sha256": "28eadf7de725dcdd7565dd86de20731aa5d5be94d0b92f59d11797648f82036b",
+  "pre_fix_maxlen_capture_junit_sha256": "930873941a0e9e2beb39a4aef360c78a82d75061d8bdd0182686ca2e3a86adc7",
+  "post_fix_maxlen_gumbel_junit_sha256": "617efec1b42215df68ca111d088945f07bb2e1e80981c086298a7b19bd61aeee",
+  "runtime_r2_capture_receipt_sha256": "601795307e87072cdb06cd060e5dfd4adb70fded9812772266378634823fbb9d",
+  "runtime_r2_capture_serve_sha256": "5dc96b1d233a3fcd7c5c065e2270b1b5a01c4869a1dc90ccdd3941bb3aeac906",
+  "operator_gate_sha256": "5ad0893c40a07889839d5eaa83891a2e548d488b3cb0cebd3ac93424a731b335",
+  "runtime_gate_sha256": "51e30e02495bb41f23a9bda3b4dfe9732f7ae29dceefc5fa04d7a2efc93a8e84",
+  "runtime_r3_receipt_sha256": "f44760fd6bef1f4e6e5f2e118da49466c108fe245df1fd4220d1e87c4d047e46",
+  "runtime_r3_passed": true,
+  "runtime_r3_recipes": [
+    "27b-hi2-tp2-mtp2",
+    "flashnext-mtp2"
+  ],
+  "manifest_sha256": "2b3a2bef8ff12a554229c2dd74863cd306b7d5eaf1ac4067ecb23851fd0ca270",
+  "pause_proof_sha256": "178f306b5b853e1f55e6c8bc821f34adee6b9b2cbc0337598c44ef4f58dd4a9a"
+}

@@ -1,0 +1,21 @@
+{
+  "source": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/__init__.py",
+  "modules": {
+    "_C": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_C.abi3.so",
+    "_C_stable_libtorch": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_C_stable_libtorch.abi3.so",
+    "_moe_C_stable_libtorch": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_moe_C_stable_libtorch.abi3.so",
+    "_rocm_C": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_rocm_C.abi3.so",
+    "cumem_allocator": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/cumem_allocator.abi3.so",
+    "fs_io_C": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/fs_io_C.abi3.so",
+    "spinloop": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/spinloop.abi3.so"
+  },
+  "module_count": 7,
+  "rocm_schema_count": 186,
+  "rocm_C_sha256": "41d5030b7791caf573d45df538ab3a9772bae533d572dc82416455dd2c977f6c",
+  "update_draft_schema": [
+    "_rocm_C::spec_update_draft_inputs_rdna2(Tensor(a!) output_draft_tokens, Tensor(b!) next_input_hidden_states, Tensor(c!) input_ids, Tensor(d!) positions, Tensor(e!) sample_src_positions, Tensor(f!) seq_lens, Tensor draft_tokens, Tensor current_draft_step, Tensor hidden_states, int hidden_size, Tensor max_model_len, int num_speculative_steps, bool advance_draft_positions) -> ()"
+  ],
+  "gumbel_schemas": [
+    "_rocm_C::gumbel_sample_rdna2(Tensor(a!) local_argmax, int local_argmax_stride, Tensor(b!) local_max, int local_max_stride, Tensor? logits_cache, int logits_cache_stride_0, int logits_cache_stride_1, Tensor? logits_cache_col, Tensor logits, int logits_stride, Tensor expanded_idx_mapping, Tensor seeds, Tensor pos, Tensor temperature, int vocab_size, bool is_drafting, bool apply_temperature, bool use_fp64, bool per_token_col) -> ()"
+  ]
+}

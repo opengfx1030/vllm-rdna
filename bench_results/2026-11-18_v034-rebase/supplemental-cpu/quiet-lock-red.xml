@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="0.577" timestamp="2026-11-18T23:26:50.311911+01:00" hostname="par1-cs25"><testcase classname="tests.tools.rdna.test_mlock_pinned_proof" name="test_quiet_lock_timeout_does_not_start_measurement" time="0.393"><failure message="AssertionError: assert 0 != 0&#10; +  where 0 = int('0')">tmp_path = PosixPath('/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/quiet-test-red-tmp/test_quiet_lock_timeout_does_n0')
+
+    def test_quiet_lock_timeout_does_not_start_measurement(tmp_path: Path):
+        lines = _run_quiet(
+            tmp_path,
+            """
+    flock() { return 1; }
+    date() {
+        if [[ -e "$QUIET_DIR/clock-advanced" ]]; then
+            echo 2
+        else
+            touch "$QUIET_DIR/clock-advanced"
+            echo 0
+        fi
+    }
+    BOOT_LOCK=held QUIET_LOCK_WAIT=1
+    (
+        quiet_lock_wait
+        echo MEASUREMENT_STARTED
+    )
+    echo "lock_wait_exit=$?"
+    """,
+        )
+        exit_line = next(line for line in lines if line.startswith("lock_wait_exit="))
+&gt;       assert int(exit_line.split("=", 1)[1]) != 0
+E       AssertionError: assert 0 != 0
+E        +  where 0 = int('0')
+
+tests/tools/rdna/test_mlock_pinned_proof.py:745: AssertionError</failure></testcase></testsuite></testsuites>

@@ -30,7 +30,6 @@ FLASH_NEXT = (
 def _config(
     monokernel=True,
     arch="Qwen4ExpForConditionalGeneration",
-    v2=True,
     pp=1,
     knobs=None,
     cache_dtype=None,
@@ -40,7 +39,6 @@ def _config(
         kernel_config=SimpleNamespace(monokernel=monokernel),
         model_config=SimpleNamespace(architectures=[arch]),
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp),
-        use_v2_model_runner=v2,
         additional_config=extra,
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
@@ -80,12 +78,14 @@ def test_flag_parses_into_engine_args():
 
 def test_flag_turns_on_every_part_with_the_validated_defaults():
     o = md.options(_config())
+    assert o is not None
     assert (o.k1, o.k2, o.gdn, o.qsa, o.timing) == (True, True, True, True, False)
     assert (o.k1_max_rows, o.k2_max_rows, o.gdn_max_rows) == (24, 8, 64)
 
 
 def test_knobs_dict_and_unknown_keys():
     o = md.options(_config(knobs={"k2_max_rows": 4, "gdn": False, "k1_max_rows": 99}))
+    assert o is not None
     assert (o.k2_max_rows, o.gdn, o.k1_max_rows) == (4, False, 24)
     with pytest.raises(ValueError, match="unknown rocm_mono_decode keys"):
         md.options(_config(knobs={"rdna_mono_ffn": True}))
@@ -94,8 +94,10 @@ def test_knobs_dict_and_unknown_keys():
 
 
 def test_mtp_drafter_is_opt_in_and_has_independent_row_caps():
-    assert not md.options(_config()).mtp_drafter
-    assert md.options(_config()).mtp_k2_max_rows == 24
+    defaults = md.options(_config())
+    assert defaults is not None
+    assert not defaults.mtp_drafter
+    assert defaults.mtp_k2_max_rows == 24
     opts = md.options(
         _config(
             knobs={
@@ -105,6 +107,7 @@ def test_mtp_drafter_is_opt_in_and_has_independent_row_caps():
             }
         )
     )
+    assert opts is not None
     assert opts.mtp_drafter
     assert (opts.mtp_k1_max_rows, opts.mtp_k2_max_rows) == (24, 3)
 
@@ -184,7 +187,6 @@ def _engine_config(monkeypatch, *args, env=None):
 
     if not on_gfx10x():
         pytest.skip("needs a gfx10x GPU")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     if env is not None:
         monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", env)
     else:
@@ -226,11 +228,10 @@ def test_flag_and_env_alias_reach_kernel_config(monkeypatch, args, env, expected
     [
         ({"_on_gfx10x": lambda: False}, {}, "needs a gfx10x"),
         ({}, {"arch": "Qwen3NextForCausalLM"}, "supports Qwen4Exp only"),
-        ({}, {"v2": False}, "needs Model Runner V2"),
         ({}, {"pp": 2}, "pipeline parallelism"),
         ({"ops_refusal": lambda: "needs the _rocm_C ops ['x']"}, {}, "_rocm_C ops"),
     ],
-    ids=["not-gfx10x", "not-qwen4exp", "not-mrv2", "pp", "ops"],
+    ids=["not-gfx10x", "not-qwen4exp", "pp", "ops"],
 )
 def test_unsupported_deployment_is_refused(monkeypatch, deployment, patch, cfg, reason):
     for name, value in patch.items():
@@ -321,7 +322,9 @@ def test_quantized_kv_cache_is_refused(deployment, cache_dtype):
 
 def test_missing_ops_are_named(monkeypatch):
     monkeypatch.setattr(md, "REQUIRED_OPS", ("mono_does_not_exist_rdna2",))
-    assert "mono_does_not_exist_rdna2" in md.ops_refusal()
+    reason = md.ops_refusal()
+    assert reason is not None
+    assert "mono_does_not_exist_rdna2" in reason
 
 
 def test_api_server_check_leaves_other_gpus_and_models_alone(monkeypatch):

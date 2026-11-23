@@ -1,0 +1,8 @@
+FAILS-CLOSED missing junction temp2_input: d9: expected one junction temp2_input, found 0
+FAILS-CLOSED wrong PCI identity: HIP 3 is 0000:00:00.0, expected 0000:dc:00.0
+FAILS-CLOSED failed JUnit case: failed operator cases: tests/v1/worker/test_spec_decode_ops_rdna2.py::test_one: assert 1 == 2
+FAILS-CLOSED suite with no executed case: no executed case in requested suites: tests/v1/worker/test_gpu_block_table.py
+FAILS-CLOSED suite skipped wholesale: no executed case in requested suites: tests/kernels/mamba/test_precopy_mamba_align.py
+FAILS-CLOSED lease collision: lease timeout: Other.b4
+FAILS-CLOSED thermal helper does not enforce limits: thermal helper does not fail a 96 C sample
+SELFTEST PASS (7 negative cases + positive controls)

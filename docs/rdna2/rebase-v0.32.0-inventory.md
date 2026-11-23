@@ -983,3 +983,143 @@ no other call-signature breaks (remaining findings are vendored Triton typing no
 
 Not servable on the box: DSV4 / MXFP4 (no checkpoint present), so those stay
 statically verified only.
+
+## v0.34.0 integration branch (bounded final-artifact canary passed)
+
+The isolated `rebase/v0.34.0` branch starts from production
+`1e1cac5340a9c9af8c9df3db331978548d709b42` and integrates upstream
+`62d4bc3c7e33b1b6c906e233e6af2d3506c482ca`. It does not import the unmerged
+EPLB-online or RAM-prefetch study runtime changes. Production remains on
+`rdna_extras` until the new branch passes its gates.
+
+### Source migration
+
+- Use only the current GPU runner. Remove the obsolete MRV1 proposers and
+  operative `VLLM_USE_V2_MODEL_RUNNER=1` settings, rather than restoring deleted
+  upstream interfaces.
+- Migrate weight finalization to children-first, no-argument module hooks;
+  quantization-method hooks still receive the layer. Preserve RDNA HI2/EXL3,
+  W4A16/MoE, PLE and GGUF loading paths.
+- Adopt the new QSA module names and attention interface while preserving
+  model-dtype caches, RDNA cache layouts, metadata bounds and optional HIP
+  dispatch.
+- Retain the gfx1030 FP16 wvSplitK refusal in the new launcher translation
+  unit. Move fork-only skinny GEMV/MoE implementations into their own
+  translation unit, not a shared header compiled repeatedly upstream.
+- Gate GFX10+ DPP row-XOR instructions in GDN prefill and monolithic QSA
+  decode per device architecture. Older targets use the equivalent shuffle
+  tree; the RDNA instruction path is unchanged.
+- `VLLM_RDNA_DENSE_GEMV` is removed: gfx1030 FP16 decode already selects the
+  native GEMV unconditionally. Setting the obsolete variable now gives a
+  migration error.
+- Prefix-cache qualification uses measured cache hits. TTFT is reported;
+  `--ratio` remains an explicit latency requirement, not an implicit 2x
+  speedup requirement. Prompt length comes from `/tokenize`, and missing
+  tokenization or metrics evidence fails the probe.
+
+### Build and qualification
+
+Use a fresh `venv-7.14.0_0.34.0-rebase-1e1cac5340`, not the serving venv.
+Upstream's build requirements are `requirements/build/rock.txt`; Torch
+remains `2.12.0+rocm7.14.0`. Rebuild all seven native targets:
+`cumem_allocator`, `spinloop`, `fs_io_C`, `_rocm_C`, `_C`,
+`_C_stable_libtorch`, and `_moe_C_stable_libtorch`. Compile for gfx90a,
+gfx942, gfx950, gfx1030, gfx1100 and gfx1200; compilation does not establish
+runtime correctness on architectures without hardware.
+
+Flash-Next MTP2 and HI2 merged-head gates must run on b4 with
+`FULL_AND_PIECEWISE`, real requests after the first replay, quality,
+prefix-cache and concurrency checks. The explicit-KV recipes do not qualify
+upstream's new `KV=auto` extensible-cache path.
+
+The first six-architecture build stopped on GFX10-only `row_xmask` controls
+in the GDN prefill and monolithic QSA translation units while compiling
+older targets. Those helpers now compile with shuffle fallbacks. The next
+build reached the EXL3 dense translation unit, where v2 launch geometry
+was hidden inside the RDNA device guard; those unchanged constants now
+sit outside the guard, like the existing v3 geometry.
+
+The native build at `6333bc722e` passed: all seven extensions import from
+the isolated tree, 186 `_rocm_C` schemas are registered, and `pip check`
+passes. CPU collection exposed an SM100-only reload-test marker querying
+device capability with GPUs hidden; its skip predicate now checks the
+CUDA platform and accelerator availability first.
+
+The first executed CPU batch had 55 passes and seven failures. It exposed
+the same missing CUDA-platform gate in the SM100 capture-default heuristic;
+that heuristic is now CUDA-only. CLI tests use local model configs rather
+than a remote `dummy` repository, and PLE fixtures include EXL3 lookup
+metadata and cover the distinct CUDA-wait/ROCm-host-sync contracts.
+The repaired batch passes 63 cases at `6601d70678`. The capture-contract
+gate passes 14 cases at `5d388329bb`: its autoregressive-draft fixture now
+uses the production initializer, including the independent one-token draft
+request grid, rather than reusing the target's verification-token bound.
+Raw native and CPU receipts are in
+`bench_results/2026-11-18_v034-rebase/`. These are CPU-phase checkpoints;
+the later GPU fixes below change `_rocm_C` and require their own artifact
+provenance.
+The actual CLI reports `0.34.0+rdna.rocm714`; `serve --help=all` exposes
+`--replayssm-state-dtype {auto,leapquant}`. Its logs retain an optional
+`triton_kernels`/Triton 3.7.1 compatibility error (`is_hip_gfx1250` is
+missing). That backend is not qualified by the native/CPU receipts.
+
+GPU preflight exposed a discovery discrepancy in the fresh environment:
+native HIP and Torch's native API find four leased devices, while Torch's
+pre-initialization AMDSMI path reports zero. The ROCm platform now consults
+native HIP when AMDSMI returns zero as well as when it is unavailable.
+Four CPU cases pass, preserving positive AMDSMI counts and the genuinely
+empty-device case; the missing-device case fails before the fix.
+
+The benchmark driver also aborts when the boot lock outlives its wait
+timeout, rather than starting a measurement under another boot. Its new
+regression fails before the fix; four quiet-window cases pass afterwards.
+
+Hardware qualification initially paused after the independent Triton
+PR #12747 unit run faulted HIP1 (`d4`). That run used isolated Triton 3.9
+PR code, not this environment's Triton 3.7.1. It resumed on 2026-11-19.
+
+The resumed GPU gate exposed two real HIP bugs, fixed in `540fbbe1ed`:
+cached Gumbel sampling must mix the cache column into the seed, and draft
+input updates must read `max_model_len` from its device tensor rather than
+coercing it with `.item()` during FULL graph capture. Stale test call
+signatures were migrated to the v0.34 interfaces.
+
+The historical `41d5030b...` operator gate passes __504/504__ cases across
+seven suites. Its two `FULL_AND_PIECEWISE`/MTP2 runtime gates pass, including
+requests after first replay, greedy probes, concurrency, prefix caching and 16k:
+
+| recipe | PPL | warm prefix hit rate | prefix TTFT speedup | concurrency failures | max junction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Flash-Next TP4 | 4.89 | 53.1% | 1.86x | 0 | 76 C |
+| HI2 TP2 | 5.73 | 53.1% | 1.99x | 0 | 83 C |
+
+Both runs record zero KFD eviction increments, no AER counter jumps and no
+new dmesg GPU faults. These are functional qualification results, not a
+performance-improvement claim. Explicit-KV recipes still do not qualify
+the new `KV=auto` path.
+
+Raw receipts live under `~/w4a8_runs/v034-rebase-1e1cac5340/`:
+`operators-93d737878644-r3/receipt.json` and
+`runtime-93d737878644-r3/receipt.json`. Their original native-source fields
+are stale; `source-patch-93d737/r3-attestation.json` links the actual tested
+`41d5030b...` binary and source patch without rewriting those receipts.
+Committed source `540fbbe1ed` builds the new `579d8ca2...` artifact for all
+six targets; all seven extensions import and 186 schemas register. The
+strict actual-artifact guard and five fail-closed mutations pass.
+The exact old `41d5030b...` file was lost during an accidental in-place
+`objcopy --dump-section`; its section dumps and historical receipts remain,
+but binary equivalence cannot be established. Those broad GPU receipts remain
+historical, not claims about the rebuilt artifact.
+
+The exact `579d8ca2...` artifact separately passed its final canary on
+2026-11-19: seven focused Gumbel/draft-graph cases (zero failures/skips), then
+Flash-Next TP4 and HI2 TP2 with MTP2 and `FULL_AND_PIECEWISE`. Both completed
+requests after first replay, greedy/PPL/prefix/concurrency probes and the
+1k/512 c=1/n=2 and c=8/n=8 cells. Receipts record zero KFD increments, AER
+jumps and new GPU/native faults. No 504-case or 16k rerun, quality parity or
+performance-improvement claim is made. The separately hashed final receipts
+are in `bench_results/2026-11-18_v034-rebase/canary-540fbbe1ed/`.
+
+The allowlisted provenance bundle, including the preservation incident and
+canary plan, is in
+`bench_results/2026-11-18_v034-rebase/provenance-540fbbe1ed/`.

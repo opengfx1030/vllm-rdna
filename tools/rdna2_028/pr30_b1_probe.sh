@@ -51,7 +51,7 @@ export LD_LIBRARY_PATH="$ROCM_SDK_LIB:$ROCM_SDK/host-math/lib:$ROCM_SDK/rocm_sys
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn GPU_MAX_HW_QUEUES=2
 export VLLM_ROCM_USE_AITER=0 TORCH_BLAS_PREFER_HIPBLASLT=0
-export VLLM_USE_V2_MODEL_RUNNER=1 VLLM_USE_RDNA2_FA=1
+export VLLM_USE_RDNA2_FA=1
 export VLLM_USE_AOT_COMPILE=0
 # The hybrid 27B graph is not saveable on the JIT path (>1 aot_autograd
 # artifact -> compiler_interface.is_saveable_2_10 raises). Production 27B

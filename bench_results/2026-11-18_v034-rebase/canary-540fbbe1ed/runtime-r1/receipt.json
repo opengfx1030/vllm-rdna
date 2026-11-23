@@ -1,0 +1,136 @@
+{
+  "schema": "v034-runtime-gate/1",
+  "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+  "native_source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+  "cpu_native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+  "cpu_receipt": {
+    "receipt": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/capture-fixture-00295ed66c16/cpu-receipt.json",
+    "receipt_sha256": "480ceea86503f4ee6b2fa089079e941f1581d055d9c63be8e7df51a097ab84a1",
+    "native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+    "checks": [
+      {
+        "junit": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/cpu-6601d70678f0/config-worker-reload.xml",
+        "junit_sha256": "d2f43ceee60300a099906322f5d21d0fa6471c5073ed57ecd775f23501f66c55",
+        "passed": 63,
+        "skipped": 0,
+        "failed": 0,
+        "source_commit": "6601d70678f0ab6847750c5843147475ac9117e3"
+      },
+      {
+        "junit": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/capture-fixture-00295ed66c16/capture-contracts.xml",
+        "junit_sha256": "71b20e2492e5471c16c84beac35aedfadb96156e8fd2b24e25d591edcfde29c2",
+        "passed": 14,
+        "skipped": 0,
+        "failed": 0,
+        "source_commit": "5d388329bb5a5333f677de6fcb7ff36bbb263bfa"
+      }
+    ],
+    "test_source_sha256": "00295ed66c16af15fa3fc39da49461757639c93de879b4a63edfc7806b5a62ce"
+  },
+  "native": {
+    "receipt": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/native-receipt-540fbbe1ed.json",
+    "receipt_sha256": "476d7c12300a0e35eb0889545aa9a96c2183f13b33bb901bcfc24eb5499d00c5",
+    "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+    "artifact": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_rocm_C.abi3.so",
+    "artifact_sha256": "579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042",
+    "bytes": 201767808,
+    "architectures": [
+      "gfx90a",
+      "gfx942",
+      "gfx950",
+      "gfx1030",
+      "gfx1100",
+      "gfx1200"
+    ],
+    "modules": 7,
+    "rocm_schema_count": 186,
+    "source": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/__init__.py"
+  },
+  "recipes": {
+    "flashnext-mtp2": {
+      "recipe": "flashnext-mtp2",
+      "out": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/runtime-r1/flashnext-mtp2",
+      "passed": true,
+      "ppl": 4.83,
+      "ppl_bound": 5.0,
+      "prefix": {
+        "speedup": 1.86,
+        "hits": 1024,
+        "hit_rate_pct": 53.1
+      },
+      "cells": {
+        "bench-1024x512-c1": {
+          "in": 1024,
+          "out": 512,
+          "concurrency": 1,
+          "requests": 2,
+          "output_tps": 78.04650821607021,
+          "ttft_ms": 392.48218848661054,
+          "tpot_ms": 12.068382439346175
+        },
+        "bench-1024x512-c8": {
+          "in": 1024,
+          "out": 512,
+          "concurrency": 8,
+          "requests": 8,
+          "output_tps": 262.7201044988564,
+          "ttft_ms": 2011.3091966195498,
+          "tpot_ms": 24.159325898239715
+        }
+      },
+      "failures": [],
+      "measurement_claim": "bounded smoke/timing receipt only: PPL bounds are corruption gates, one boot per recipe, no baseline parity or performance-improvement claim",
+      "driver_exit": 0,
+      "new_dmesg_lines": 13,
+      "new_kernel_faults": [],
+      "aer_jumps": {},
+      "aer_unverified": [],
+      "all_run_new_faults": []
+    },
+    "27b-hi2-tp2-mtp2": {
+      "recipe": "27b-hi2-tp2-mtp2",
+      "out": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/runtime-r1/27b-hi2-tp2-mtp2",
+      "passed": true,
+      "ppl": 5.73,
+      "ppl_bound": 6.0,
+      "prefix": {
+        "speedup": 2.0,
+        "hits": 1024,
+        "hit_rate_pct": 53.1
+      },
+      "cells": {
+        "bench-1024x512-c1": {
+          "in": 1024,
+          "out": 512,
+          "concurrency": 1,
+          "requests": 2,
+          "output_tps": 63.382433893113586,
+          "ttft_ms": 1305.7153624977218,
+          "tpot_ms": 13.251432228963065
+        },
+        "bench-1024x512-c8": {
+          "in": 1024,
+          "out": 512,
+          "concurrency": 8,
+          "requests": 8,
+          "output_tps": 108.68212998865917,
+          "ttft_ms": 6811.025303370116,
+          "tpot_ms": 43.76375594276677
+        }
+      },
+      "failures": [],
+      "measurement_claim": "bounded smoke/timing receipt only: PPL bounds are corruption gates, one boot per recipe, no baseline parity or performance-improvement claim",
+      "driver_exit": 0,
+      "new_dmesg_lines": 0,
+      "new_kernel_faults": [],
+      "aer_jumps": {},
+      "aer_unverified": [],
+      "all_run_new_faults": []
+    }
+  },
+  "passed": true,
+  "lease": "/home/chenco_adm/w4a8_runs/lanes/lease/V034FinalArtifactCanary20261119R1.b4",
+  "measurement_claim": "bounded smoke/timing gate; one boot per recipe; PPL bounds are corruption thresholds; not a parity or performance-improvement measurement",
+  "lease_warnings": [],
+  "run_fault_lines": []
+}

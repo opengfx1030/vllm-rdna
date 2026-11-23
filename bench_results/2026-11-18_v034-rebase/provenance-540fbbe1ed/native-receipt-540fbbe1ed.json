@@ -1,0 +1,145 @@
+{
+ "schema": "v034-native-receipt/1",
+ "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+ "base_native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+ "artifact_path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_rocm_C.abi3.so",
+ "sha256": "579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042",
+ "bytes": 201767808,
+ "architectures": [
+  "gfx90a",
+  "gfx942",
+  "gfx950",
+  "gfx1030",
+  "gfx1100",
+  "gfx1200"
+ ],
+ "architectures_evidence": {
+  "build_ninja": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm/build.ninja",
+  "build_ninja_sha256": "286b5e4dc0fc4ae4c04846d51c9bcbb9506a7d712e5e7674cd8296a0070980d7",
+  "offload_flags": [
+   "--offload-arch=gfx90a",
+   "--offload-arch=gfx942",
+   "--offload-arch=gfx950",
+   "--offload-arch=gfx1030",
+   "--offload-arch=gfx1100",
+   "--offload-arch=gfx1200"
+  ],
+  "note": "Six distinct --offload-arch flags in the configured build graph; the fatbin is a compressed CCOB container, so target IDs were not independently enumerated from it."
+ },
+ "modules": 7,
+ "module_names": [
+  "_C",
+  "_C_stable_libtorch",
+  "_moe_C_stable_libtorch",
+  "_rocm_C",
+  "cumem_allocator",
+  "fs_io_C",
+  "spinloop"
+ ],
+ "rocm_schema_count": 186,
+ "imports_receipt": {
+  "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/native-imports-540fbbe.json",
+  "sha256": "0ace849eb35d9edf99396d531066b190981bc1241a41455695cb2c15397527b7",
+  "bytes": 2229
+ },
+ "source": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/__init__.py",
+ "build_rc": 0,
+ "build_kind": "committed-source-incremental-sixarch-rocm_C",
+ "build_dir": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/build-v034-rocm",
+ "build_log": {
+  "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/cmake-build-rocm_C-540fbbe1ed.log",
+  "sha256": "f302cac860ad602d8b73877a3e0b93ed961cf8f158e49baea56fa042e270e85b",
+  "bytes": 68478
+ },
+ "source_files": {
+  "csrc/rocm/ops.h": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/ops.h",
+   "sha256": "b82322d7e9559f10154f6e71dfeb7398b40b860640b9b2980e4ace1bac9002fb",
+   "bytes": 84297
+  },
+  "csrc/rocm/torch_bindings.cpp": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/torch_bindings.cpp",
+   "sha256": "c5e3dae617c3808344af59938836945533e3f150fe736037fef0dea66d51d1d5",
+   "bytes": 73395
+  },
+  "csrc/rocm/v1_sample_rdna2.cu": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/v1_sample_rdna2.cu",
+   "sha256": "d0daeba73553f69faef31998d23ad295b5f83a219420adf697a7f7a7b8e7941c",
+   "bytes": 58328
+  },
+  "csrc/rocm/v1_spec_decode_rdna2.cu": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/v1_spec_decode_rdna2.cu",
+   "sha256": "12685505175d39167348bf2db5d3c692abc126991585385ccd26d7479c8ab7b6",
+   "bytes": 89827
+  },
+  "tests/v1/worker/test_sample_ops_rdna2.py": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_sample_ops_rdna2.py",
+   "sha256": "be884bbf791b5192afdf081b56c1dba653085c7f4f7ea144a03557c98af81e1b",
+   "bytes": 49940
+  },
+  "tests/v1/worker/test_spec_decode_ops_rdna2.py": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_spec_decode_ops_rdna2.py",
+   "sha256": "9759f6c434b1c2ae45423b576f9f07ec3d2246cb4f8e5677569b28a5d34abae7",
+   "bytes": 52533
+  },
+  "tests/v1/worker/test_worker_ops_rdna2.py": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_worker_ops_rdna2.py",
+   "sha256": "91fa064925b99988467ff647b936426be5f8f28a101fc0f31af997d82b92a02e",
+   "bytes": 19144
+  }
+ },
+ "sections": {
+  "text": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/committed-540fbbe1ed/sections/text.bin",
+   "sha256": "699aece42ac83ea7df7dd7f7d34eea6689e80602463a97f13c4464665a2c646d",
+   "bytes": 7282644
+  },
+  "rodata": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/committed-540fbbe1ed/sections/rodata.bin",
+   "sha256": "2d9a7b843d34a25b5d17be3aecce7869d6b25c1891da4495fc3afc81f411d943",
+   "bytes": 1219808
+  },
+  "hip_fatbin": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/committed-540fbbe1ed/sections/hip_fatbin.bin",
+   "sha256": "fc2a22a2aa944817dd05c0bc2d8641c07539602eb2b70e4991de4b4a58ad9d56",
+   "bytes": 123207350
+  }
+ },
+ "preserved_reference": {
+  "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/_rocm_C.abi3.so",
+  "sha256": "519138997d2096983de91a0245819a6a55b22a6790d3344a421eb036402a51b7",
+  "bytes": 201752568,
+  "attestation": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/attestation.json",
+   "sha256": "ab56bfc7f768c4663d2886d06ed8dc9212cfba50ff68bd8474b88358bb5b1857",
+   "bytes": 1932
+  },
+  "sections": {
+   "text": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/text.bin",
+    "sha256": "788c86c07a69d1323eef6b5967f3ada5d44d81f75a51a611a41af8275b84b516",
+    "bytes": 7282644
+   },
+   "rodata": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/rodata.bin",
+    "sha256": "2a47c0bde7bff4d7675fa69f4b07f07a91dce97c4e5c596a7eca998681eadb70",
+    "bytes": 1219808
+   },
+   "hip_fatbin": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/hip_fatbin.bin",
+    "sha256": "cee45cd824b2a7e83e07d2a435a970b4fef671a435f30d3e10811cee4fc09d34",
+    "bytes": 123211446
+   }
+  },
+  "integrity": "full-file sha256 is NOT the historical 41d5; an in-place objcopy --dump-section rewrote the preserved copy. Code-section dumps were retained; original full 41d5 file is not available. A separate recovery build from pre-format sources produced 635b52f5..., also not 41d5.",
+  "sections_identical": {
+   "text": false,
+   "rodata": false,
+   "hip_fatbin": false
+  }
+ },
+ "gpu_evidence": null,
+ "gpu_qualified": false,
+ "qualification": "CPU-only artifact provenance: actual hash/size, six configured architectures, seven loaded extension modules, 186 ROCm schemas. No b4 GPU run and no runtime-correctness claim for this rebuilt binary. Binary .text/.rodata/.hip_fatbin section hashes differ from the preserved reference; narrow GPU proof would be required before any runtime claim.",
+ "note": "Committed-source CPU rebuild at 540fbbe1ed. Historical r3 GPU receipt belongs to the earlier 41d5 patched-working-tree artifact and is not inherited by this binary."
+}

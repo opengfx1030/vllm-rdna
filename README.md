@@ -153,6 +153,12 @@ Builds are not cancelled by subsequent pushes. Only promotion is serialized:
 the current branch tip can promote its built manifest digest, while stale
 builds retain their commit tags. Ref deletions do not publish images.
 
+Untagged package versions older than seven days are pruned daily by
+[the package cleanup workflow](.github/workflows/package-cleanup.yml). It keeps
+every version a retained image references (a tagged index's platform manifest
+and buildx provenance attestation are untagged versions of this package) and
+never deletes a tagged version. Manual runs are a dry run by default.
+
 The image also carries the GGUF plugin fork (`opengfx1030/vllm-gguf-plugin`),
 built for gfx1030 from the commit pinned in `docker/Dockerfile.rdna`
 (`GGUF_PLUGIN_REF`), so `flashnext-gguf-mtp0` works inside it. Bump that ref to
@@ -319,7 +325,7 @@ vLLM is flexible and easy to use with:
 - Tool calling and reasoning parsers
 - OpenAI-compatible API server, plus Anthropic Messages API and gRPC support
 - Efficient multi-LoRA support for dense and MoE layers
-- Support for NVIDIA GPUs, AMD GPUs, Intel GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, and more.
+- Support for NVIDIA GPUs, AMD GPUs, Intel GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, Iluvatar CoreX GPU, and more.
 
 vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
 

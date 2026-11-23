@@ -191,6 +191,8 @@ quiet_lock_wait() {
     while ! flock -n "$BOOT_LOCK" true 2>/dev/null; do
         if (( $(date +%s) - t_lock > ${QUIET_LOCK_WAIT:-600} )); then
             log "$BOOT_LOCK is still held: refusing a measured window"
+            # 3 = STOP: the campaign drivers (phase0.sh, mono/w4a8/slot.sh,
+            # pr_receipt.sh) end the run on it instead of booting the next arm.
             exit 3
         fi
         log "$BOOT_LOCK is held (a boot is in flight): waiting"

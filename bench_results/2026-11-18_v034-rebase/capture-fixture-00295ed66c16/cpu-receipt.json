@@ -1,0 +1,17 @@
+{
+  "native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+  "checks": [
+    {
+      "junit": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/cpu-6601d70678f0/config-worker-reload.xml",
+      "passed": 63,
+      "source_commit": "6601d70678f0ab6847750c5843147475ac9117e3"
+    },
+    {
+      "junit": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/capture-fixture-00295ed66c16/capture-contracts.xml",
+      "passed": 14,
+      "source_commit": "5d388329bb5a5333f677de6fcb7ff36bbb263bfa",
+      "test_source_sha256": "00295ed66c16af15fa3fc39da49461757639c93de879b4a63edfc7806b5a62ce"
+    }
+  ],
+  "passed": 77
+}

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.common import qsa_cache
+from vllm.models.qwen4_exp.common import qsa_indexer
 from vllm.platforms.rdna import on_rdna2
 
 pytestmark = pytest.mark.skipif(
@@ -95,7 +95,7 @@ def test_circular_ring_skips_null_block(null_row: int) -> None:
         torch.arange(n, dtype=torch.int64),
     )
 
-    hip = _slots(qsa_cache.build_qsa_metadata_rdna2, metadata, CIRCULAR)
+    hip = _slots(qsa_indexer.build_qsa_metadata_rdna2, metadata, CIRCULAR)
 
     start = sum(query_lens[:null_row])
     null_tokens = hip[start : start + query_lens[null_row]]
@@ -103,7 +103,7 @@ def test_circular_ring_skips_null_block(null_row: int) -> None:
         f"tokens of the null-block row were mapped into block 0: {null_tokens}"
     )
     assert torch.equal(hip, _expected_ring_slots(query_lens, seq_lens, ring_blocks, n))
-    triton_slots = _slots(qsa_cache.build_qsa_metadata_triton, metadata, CIRCULAR)
+    triton_slots = _slots(qsa_indexer.build_qsa_metadata_triton, metadata, CIRCULAR)
     assert torch.equal(hip, triton_slots), "HIP ring slots differ from Triton"
 
 
@@ -120,8 +120,8 @@ def test_dummy_batch_maps_no_token(rule: dict[str, int]) -> None:
         torch.full((n,), -1, dtype=torch.int64),
     )
 
-    hip = _slots(qsa_cache.build_qsa_metadata_rdna2, metadata, rule)
+    hip = _slots(qsa_indexer.build_qsa_metadata_rdna2, metadata, rule)
 
     assert torch.all(hip == -1), f"dummy tokens mapped to slots {hip.tolist()}"
-    triton_slots = _slots(qsa_cache.build_qsa_metadata_triton, metadata, rule)
+    triton_slots = _slots(qsa_indexer.build_qsa_metadata_triton, metadata, rule)
     assert torch.equal(hip, triton_slots)

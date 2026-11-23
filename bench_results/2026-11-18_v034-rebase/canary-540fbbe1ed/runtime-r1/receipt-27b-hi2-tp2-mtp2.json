@@ -1,0 +1,40 @@
+{
+  "recipe": "27b-hi2-tp2-mtp2",
+  "out": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/runtime-r1/27b-hi2-tp2-mtp2",
+  "passed": true,
+  "ppl": 5.73,
+  "ppl_bound": 6.0,
+  "prefix": {
+    "speedup": 2.0,
+    "hits": 1024,
+    "hit_rate_pct": 53.1
+  },
+  "cells": {
+    "bench-1024x512-c1": {
+      "in": 1024,
+      "out": 512,
+      "concurrency": 1,
+      "requests": 2,
+      "output_tps": 63.382433893113586,
+      "ttft_ms": 1305.7153624977218,
+      "tpot_ms": 13.251432228963065
+    },
+    "bench-1024x512-c8": {
+      "in": 1024,
+      "out": 512,
+      "concurrency": 8,
+      "requests": 8,
+      "output_tps": 108.68212998865917,
+      "ttft_ms": 6811.025303370116,
+      "tpot_ms": 43.76375594276677
+    }
+  },
+  "failures": [],
+  "measurement_claim": "bounded smoke/timing receipt only: PPL bounds are corruption gates, one boot per recipe, no baseline parity or performance-improvement claim",
+  "driver_exit": 0,
+  "new_dmesg_lines": 0,
+  "new_kernel_faults": [],
+  "aer_jumps": {},
+  "aer_unverified": [],
+  "all_run_new_faults": []
+}

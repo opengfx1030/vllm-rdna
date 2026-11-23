@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -68,10 +69,11 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
 
         return forward_fn
 
+    capture_stream = object()
     with (
         patch(
             "vllm.v1.worker.gpu.cudagraph_utils.graph_capture",
-            return_value=nullcontext(),
+            return_value=nullcontext(SimpleNamespace(stream=capture_stream)),
         ),
         patch(
             "vllm.v1.worker.gpu.cudagraph_utils.is_global_first_rank",
@@ -80,6 +82,7 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     ):
         manager.capture(create_forward_fn)
 
+    assert manager.capture_stream is capture_stream
     assert [warmup for warmup, _ in create_calls] == [True, False]
     assert [mode for _, mode, _ in forward_calls] == [
         CUDAGraphMode.NONE,
@@ -236,6 +239,54 @@ def test_piecewise_only_decorator_keeps_op_in_full_graphs(
     finally:
         bcg.BreakableCUDAGraphCapture._tls.active = None
     assert len(capture.eager) == int(expect_break)
+
+
+def test_mla_pcp_gather_replays_with_step_split(monkeypatch, cuda_capture_stream):
+    """The PCP cache-input gather depends on each step's decode/prefill split,
+    so it replays eagerly with that step's metadata, filling fixed-size buffers
+    padded with PAD_SLOT_ID so the cache write after it stays in the graph."""
+    from types import SimpleNamespace
+
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.model_executor.layers.attention import mla_attention
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+    from vllm.v1.attention.ops import pcp as attention_pcp
+
+    layer = object.__new__(mla_attention.MLAAttention)
+    layer.layer_name = "layer"
+    layer.use_pcp = True
+    layer.pcp_shard_decode_requests = False
+    step = {"metadata": SimpleNamespace(num_decode_tokens=2)}
+    monkeypatch.setattr(
+        mla_attention,
+        "get_attention_context",
+        lambda _: (step["metadata"], None, None, None),
+    )
+    # Rank 1's rows are rank 0's plus 10; its copy of the decode is not written.
+    pcp_group = SimpleNamespace(
+        world_size=2, all_gather=lambda t, dim: torch.cat((t, t + 10), dim=dim)
+    )
+    monkeypatch.setattr(mla_attention, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(attention_pcp, "get_pcp_group", lambda: pcp_group)
+
+    kv_c = torch.zeros(2, 1, device=DEVICE_TYPE)
+    k_pe = torch.zeros(2, 1, 1, device=DEVICE_TYPE)
+    slots = torch.tensor([100, 101, PAD_SLOT_ID, 103], device=DEVICE_TYPE)
+    cache = torch.zeros(201, 1, device=DEVICE_TYPE)
+
+    cap = BreakableCUDAGraphCapture()
+    with cap:  # Captured on a decode-only step.
+        out_kv_c, _, out_slots = layer._gather_pcp_cache_inputs(kv_c, k_pe, slots)
+        rows = torch.where(out_slots >= 0, out_slots, cache.shape[0] - 1)
+        cache.index_copy_(0, rows, out_kv_c)
+    assert cap.num_eager_breaks == 1
+
+    step["metadata"] = SimpleNamespace(num_decode_tokens=1)
+    kv_c.copy_(torch.tensor([[5.0], [6.0]]))
+    cache.zero_()
+    cap.replay()
+    torch.accelerator.synchronize()
+    assert cache[[100, 101, 103], 0].tolist() == [5.0, 6.0, 16.0]
 
 
 def test_attention_op_breaks_when_imported_before_enable(tmp_path):

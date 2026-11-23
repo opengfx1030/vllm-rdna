@@ -1073,8 +1073,8 @@ FLASH_NEXT_ROPE = dict(
 def test_qsa_norm_rope_matches_today(default_vllm_config, heads, n):
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm
     from vllm.model_executor.layers.rotary_embedding import get_rope
-    from vllm.models.qwen4_exp.amd.indexer_qsa import apply_qsa_rmsnorm, apply_qsa_rope
     from vllm.models.qwen4_exp.amd.mono.rdna2.qsa import norm_rope
+    from vllm.models.qwen4_exp.amd.qsa_indexer import apply_qsa_rmsnorm, apply_qsa_rope
 
     torch.manual_seed(heads * 10000 + n)
     rope = get_rope(**FLASH_NEXT_ROPE, dtype=torch.float16).to(DEV)
@@ -1296,7 +1296,7 @@ def test_qsa_epilogue_matches_today(default_vllm_config, width, n_req):
     from vllm.model_executor.layers.rotary_embedding import get_rope
     from vllm.models.qwen4_exp.amd.mono.rdna2 import qsa as mono_qsa
     from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
-    from vllm.models.qwen4_exp.common.qsa_cache import canonical_qsa_rope_positions
+    from vllm.models.qwen4_exp.common.qsa_indexer import canonical_qsa_rope_positions
 
     if not mono_qsa._has_hip_epilogue():
         pytest.skip("mono_qsa_epilogue_rdna2 not built")
@@ -1407,7 +1407,7 @@ def test_qsa_hip_store_cache_rows_matches_triton(n, kind):
     PAD (-1) slots skipped."""
     from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
     from vllm.models.qwen4_exp.amd.ops import qsa_rdna2
-    from vllm.models.qwen4_exp.common.qsa_cache import canonical_qsa_rope_positions
+    from vllm.models.qwen4_exp.common.qsa_indexer import canonical_qsa_rope_positions
 
     if not hasattr(torch.ops._rocm_C, "qsa_store_cache_rows_rdna2"):
         pytest.skip("qsa_store_cache_rows_rdna2 not built")

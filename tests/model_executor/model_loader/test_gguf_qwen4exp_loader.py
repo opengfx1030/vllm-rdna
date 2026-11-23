@@ -568,9 +568,7 @@ def _patch_cpu_qsa_noop(monkeypatch):
         q4_pkg, "Qwen4ExpForCausalLM", amd_model.Qwen4ExpForCausalLM, raising=False
     )
     monkeypatch.setattr(q4_pkg, "Qwen4ExpMTP", amd_mtp.Qwen4ExpMTP, raising=False)
-    monkeypatch.setattr(
-        qsa_mod, "Qwen4ExpQSAFlashAttentionImpl", lambda *_a, **_k: None
-    )
+    monkeypatch.setattr(qsa_mod, "Qwen4ExpQSAImpl", lambda *_a, **_k: None)
 
 
 def test_registry_resolves_qwen4exp_gguf_loader(tmp_path):
@@ -787,7 +785,7 @@ def _tp2_worker(rank: int, init_file: str, hf_dir: str, gguf_dir: str, out_dir: 
     qsa_mod = importlib.import_module("vllm.models.qwen4_exp.amd.qsa")
 
     q4_pkg.Qwen4ExpForCausalLM = amd_model.Qwen4ExpForCausalLM  # type: ignore[attr-defined]
-    qsa_mod.Qwen4ExpQSAFlashAttentionImpl = lambda *_a, **_k: None  # type: ignore[attr-defined]
+    qsa_mod.Qwen4ExpQSAImpl = lambda *_a, **_k: None  # type: ignore[attr-defined]
     from vllm.config import (
         CompilationConfig,
         DeviceConfig,

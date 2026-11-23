@@ -59,6 +59,11 @@ __forceinline__ __device__ int m_global(int m, int bz, int mc) {
   return bz * mc + m;
 }
 
+// v2 geometry is also used by launchers in non-RDNA device passes.
+#define V2_THREADS_X 64
+#define V2_BLOCK_N 1024  // 16 cols x 64 threads
+#define V2_BLOCK_K 128
+
 // v3 kernel geometry (see gemm_exl3_v3_kernel_rdna).
 #define V3_THREADS 128
 #define V3_TILES_PER_BLOCK 32  // one N-tile per lane
@@ -176,20 +181,17 @@ __global__ void gemm_exl3_kernel_rdna(
   }
 }
 
-  // Small-M (decode) variant for bits=3: grain-based decode with per-k_tile
-  // tile-word register staging. A thread owns 16 N-cols = exactly one 16x16
-  // tile; per k_tile it loads the tile's 24 uint32 words once and derives all
-  // 32 grains (8 windows each) via fshift from registers. Cuts trellis load
-  // instructions ~8x vs the per-weight window reads above: bit-identical
-  // output, 4.2-4.8x faster at M=1 on gfx1030 (microbench 2026-09-04).
-  // Grain g = j*4+mg covers windows p = 8g..8g+7:
-  //   i=0,1 -> rows 2mg,2mg+1       col j    (c/8 = 0)
-  //   i=2,3 -> rows 8+2mg,8+2mg+1   col j    (c/8 = 0)
-  //   i=4,5 -> rows 2mg,2mg+1       col j+8  (c/8 = 1)
-  //   i=6,7 -> rows 8+2mg,8+2mg+1   col j+8  (c/8 = 1)
-  #define V2_THREADS_X 64
-  #define V2_BLOCK_N 1024  // 16 cols x 64 threads
-  #define V2_BLOCK_K 128
+// Small-M (decode) variant for bits=3: grain-based decode with per-k_tile
+// tile-word register staging. A thread owns 16 N-cols = exactly one 16x16
+// tile; per k_tile it loads the tile's 24 uint32 words once and derives all
+// 32 grains (8 windows each) via fshift from registers. Cuts trellis load
+// instructions ~8x vs the per-weight window reads above: bit-identical
+// output, 4.2-4.8x faster at M=1 on gfx1030 (microbench 2026-09-04).
+// Grain g = j*4+mg covers windows p = 8g..8g+7:
+//   i=0,1 -> rows 2mg,2mg+1       col j    (c/8 = 0)
+//   i=2,3 -> rows 8+2mg,8+2mg+1   col j    (c/8 = 0)
+//   i=4,5 -> rows 2mg,2mg+1       col j+8  (c/8 = 1)
+//   i=6,7 -> rows 8+2mg,8+2mg+1   col j+8  (c/8 = 1)
 template <int M_PER, int cb>
 __global__ void gemm_exl3_v2_kernel_rdna(const half* __restrict__ a,
                                          const int16_t* __restrict__ trellis,
