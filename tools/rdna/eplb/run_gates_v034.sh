@@ -73,10 +73,12 @@
 #               clean.  PASS means NO RECURRENCE in the recorded budget; it does not explain the
 #               PCIe completion-timeout event.  The final ledger sums every EPLB boot of the run.
 #
-# Prior art you must know: the earlier v0.34 attempt on the old rebase
-# (eplb/online-mono-034) died twice at boot in its flag-OFF arm A1 with
-# HSA_STATUS_ERROR_EXCEPTION 0x1016 in at::native::indexFuncSmallIndex; the campaign
-# latched ABORT.  That is not measured on this merge.  Do not retry around an ABORT.
+# Prior art, measured but not on this merge: the earlier v0.34 attempt on the old rebase
+# (eplb/online-mono-034, 38f3024159; receipts r2-034-20261121-111250 and -111950 under
+# ~/w4a8_runs/eplb-online) stopped twice in its flag-OFF arm A1 (qualify_final.sh r2, rc 1): a KFD
+# queue eviction of ~18.7-19.5 s on the first run, HSA_STATUS_ERROR_EXCEPTION code 0x1016 in
+# at::native::indexFuncSmallIndex on GPU index 1, 2 and 3 on the second; AER before == after on both.
+# Whether the merged tree repeats it is unknown.  Do not retry around an ABORT.
 #
 # Deploying a final head: extract it to a fresh tree with .sha = its commit, build it
 # (BUILD=1) or copy vllm/*.so, vllm/_version.py, vllm/vllm-rs and .deps from a built tree
@@ -185,6 +187,12 @@ defaults() {
     OWNER=${OWNER:-EplbGatesV034}
     LEASE_HELD=${LEASE_HELD:-0}
     LEASE_SH=${LEASE_SH:-$HOME/w4a8_runs/leapquant/lease.sh}
+    # Sourced defaults: MAX_PPL_REL (0.02) and QUALITY_LIMIT/TOP/PASSAGES (64/20/6) are those of
+    # pr_receipt.sh, STATIONARY_STEPS_PER_PLAN (10,000) is the design-doc rule, PREFIX_WORDS (1800)
+    # the serve_validate.sh default, INJECT_REPEATS/INJECT_LENS (3, 4096,16384) the stall probe's.
+    # [INFERENCE] proposals that no receipt supports yet: GAP_TOL, REVERSE_TOL, INJECT_MIN_OVERLAP,
+    # INJECT_MIN_STEPS, PPL_MIN_PLANS, PPL_PRETRAFFIC_MAX_S, STATIONARY_MINUTES,
+    # STATIONARY_ITL_DRIFT, SOAK_MINUTES and the one-third warm-up of the stationary window.
     INJECT_REPEATS=${INJECT_REPEATS:-3}
     INJECT_LENS=${INJECT_LENS:-4096,16384}
     INJECT_MIN_OVERLAP=${INJECT_MIN_OVERLAP:-1}
