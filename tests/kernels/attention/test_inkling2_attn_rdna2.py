@@ -1695,6 +1695,47 @@ def test_split_policy_fused_decode_modes(monkeypatch):
             assert tile.setdefault((reqs, "full"), s_full[1]) == s_full[1]
 
 
+@pytest.mark.parametrize(
+    "flag, window, max_query_len, expected",
+    [
+        ("1", 0, 1024, 1),  # full layer, prefill chunk
+        ("1", 0, 2, 1),  # full layer, draft verification: the pipelined kernel wins
+        ("1", WINDOW, 1024, 1),
+        ("1", WINDOW, 33, 1),
+        ("1", WINDOW, 32, 0),  # sliding, at most two query tiles: shipped kernel
+        ("1", WINDOW, 2, 0),
+        ("0", 0, 1024, 0),  # the flag off restores the shipped kernel everywhere
+        ("0", WINDOW, 1024, 0),
+        ("", 0, 1024, 0),
+    ],
+)
+def test_tile_impl_policy(monkeypatch, flag, window, max_query_len, expected):
+    """``VLLM_INKLING2_PREFILL_ATTN_TILE`` and the sliding small-q exception of the
+    wrapper; the op gets ``tile_impl`` as its 25th (last) positional argument."""
+    ops = _ops()
+    if "VLLM_INKLING2_PREFILL_ATTN_TILE" not in os.environ:
+        assert ops._INKLING2_PREFILL_ATTN_TILE == "1"  # on by default
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        torch.ops._rocm_C,
+        "inkling2_attention",
+        lambda *a: seen.append(a),
+        raising=False,
+    )
+    monkeypatch.setattr(ops, "_INKLING2_PREFILL_ATTN_TILE", flag)
+    t = torch.empty(0)
+    args = (t, t, t, None, t, t, t, t, t, t, t, t, t, t)  # q .. workspace
+    tail = (REL_EXTENT, False, LOG_ALPHA, 8192.0, Q_CLIP, REL_CLIP)
+    ops.inkling2_attention(*args, window, *tail, max_query_len, 1, 1)
+    assert len(seen[-1]) == 25 and seen[-1][-1] == expected
+    # an explicit tile_impl overrides the flag and the exception
+    for impl in (0, 1):
+        ops.inkling2_attention(
+            *args, window, *tail, max_query_len, 1, 1, tile_impl=impl
+        )
+        assert seen[-1][-1] == impl
+
+
 def test_workspace_numel_formula():
     numel = _ops().inkling2_attention_workspace_numel
     assert numel(3, 20, 24, 4, 2) == (4 * 3 + 2 * 20) * 24 * 130

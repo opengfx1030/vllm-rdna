@@ -38,6 +38,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import ClassVar, cast
 
+import numpy as np
 import regex as re
 import torch
 from torch import nn
@@ -305,6 +306,19 @@ class Inkling2DSparkDecoder(nn.Module):
         self.confidence_head = None
 
 
+@dataclass
+class _DraftVocab:
+    """The token ids the greedy draft ranks (an explicit opt-in, see
+    ``speculator_options["draft_vocab"]``) with their rows of the target's LM head
+    and of the folded head.  A token outside it is never drafted, which can only
+    cost acceptance: the target verifies every draft."""
+
+    ids: torch.Tensor  # int64 [N], strictly ascending
+    weight: torch.Tensor  # fp16 [N, hidden]
+    fold_w: torch.Tensor  # fp16 [N, rank]
+    fold_b: torch.Tensor  # fp32 [N]
+
+
 class _Scratch:
     """Persistent buffers: every launch of a proposal reads and writes these."""
 
@@ -360,6 +374,7 @@ class _Scratch:
         # embed kernel reads them with
         self.part = new(2 * _HEAD_REQS, dtype=f32)
         self.tok = new(_HEAD_REQS, dtype=torch.int64)
+        self.tok2 = new(_HEAD_REQS, dtype=torch.int64)
         self.anchor_ids = new(chunk, dtype=torch.int32)
         self.anchor_rows = new(chunk, hidden)
         self.row_anchor = torch.div(
@@ -460,6 +475,12 @@ class Inkling2DSparkModel(nn.Module):
         self._tp = tp
         self.model = Inkling2DSparkDecoder(config, f"{prefix}model")
         self.lm_head: nn.Module | None = None
+        self._draft_vocab_path = (spec.speculator_options or {}).get("draft_vocab")
+        if self._draft_vocab_path is not None and tp.enabled:
+            raise NotImplementedError(
+                "the draft_vocab option is not supported under tensor parallelism"
+            )
+        self._draft_vocab: _DraftVocab | None = None
         # this rank's share of the vocabulary: the first id, the rows of its LM head
         # and the rows holding real ids (the rest is the zero padding of the last
         # shard, which must never win an argmax); all of it at TP=1
@@ -599,6 +620,43 @@ class Inkling2DSparkModel(nn.Module):
             head.fold_b = torch.empty(vocab, dtype=torch.float32, device=lm.device)
         ops.inkling2_dspark_gemm(lm, head.hidden_out_t, head.fold_w, vocab, 0)
         ops.inkling2_dspark_fold_bias(lm, head.hidden_out_b, head.fold_b)
+        self._draft_vocab = (
+            None
+            if self._draft_vocab_path is None
+            else self._derive_draft_vocab(self._draft_vocab_path)
+        )
+
+    @torch.no_grad()
+    def _derive_draft_vocab(self, path: str) -> _DraftVocab:
+        """The LM-head and folded-head rows of the ids listed in ``path`` (an
+        ``.npy`` of strictly ascending token ids, made offline by
+        ``tools/rdna/inkling2/draft_vocab.py``)."""
+        assert self.lm_head is not None
+        head, lm = self.model.markov_head, self.lm_head.weight
+        ids = torch.from_numpy(np.load(path).astype(np.int64)).to(lm.device)
+        if (
+            ids.dim() != 1
+            or ids.numel() == 0
+            or int(ids[0]) < 0
+            or int(ids[-1]) >= self._head_take
+            or not bool((ids[1:] > ids[:-1]).all())
+        ):
+            raise ValueError(
+                f"{path}: the draft vocabulary must be a vector of strictly "
+                f"ascending token ids below {self._head_take}"
+            )
+        logger.info(
+            "Inkling-2 DSpark draft vocabulary: %d of %d token ids (%s)",
+            ids.numel(),
+            self._head_take,
+            path,
+        )
+        return _DraftVocab(
+            ids,
+            lm.index_select(0, ids),
+            head.fold_w.index_select(0, ids),
+            head.fold_b.index_select(0, ids),
+        )
 
     # -- speculator interface ------------------------------------------------
     def get_draft_kv_cache_layer_names(self) -> list[str]:
@@ -857,6 +915,11 @@ class Inkling2DSparkModel(nn.Module):
         # the folded head of the rows holding real ids (all of them at TP=1)
         fold_w, fold_b = head.fold_w[:take], head.fold_b[:take]
         greedy = spec.draft_logits is None
+        # with the draft vocabulary the greedy chain sweeps only its rows
+        ranked = self._draft_vocab if greedy else None
+        if ranked is not None:
+            weight, vocab = ranked.weight, ranked.ids.numel()
+            fold_w, fold_b = ranked.fold_w, ranked.fold_b
         sample_rows = num_reqs * steps
         idx_map = spec.sample_idx_mapping[:sample_rows].view(num_reqs, steps)
         sample_pos = spec.sample_pos[:sample_rows].view(num_reqs, steps)
@@ -927,6 +990,10 @@ class Inkling2DSparkModel(nn.Module):
                     )
                 elif self._tp.enabled:
                     out.copy_(self._argmax_across_ranks(rc))
+                elif ranked is not None:
+                    ops.inkling2_dspark_argmax(s.logits, s.tok[:rc], rc, vocab)
+                    torch.index_select(ranked.ids, 0, s.tok[:rc], out=s.tok2[:rc])
+                    out.copy_(s.tok2[:rc])
                 else:
                     ops.inkling2_dspark_argmax(s.logits, out, rc, vocab)
         return True
@@ -967,7 +1034,12 @@ class Inkling2DSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         config = self.draft_model_config.hf_config
         assert not self.sample_from_anchor
-        assert self._draft_topk is None and not self.enable_adaptive_verification
+        if self._draft_topk is not None or self.enable_adaptive_verification:
+            raise NotImplementedError(
+                "the Inkling-2 DSpark draft supports neither dspark_draft_topk nor "
+                "enable_adaptive_verification (its Markov head keeps no per-position "
+                "draft distribution); use speculator_options={'adaptive_k': {}}"
+            )
         taps = len(config.target_layer_ids)
         self.hidden_states = torch.zeros(
             self.max_num_tokens,

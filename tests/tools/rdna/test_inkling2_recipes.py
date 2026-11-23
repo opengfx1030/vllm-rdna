@@ -139,3 +139,85 @@ def test_no_rocblas_tunableop_rows(venv):
 
 def test_ports_are_distinct():
     assert len({port for _, port, *_ in RECIPES.values()}) == len(RECIPES)
+
+
+# DSpark recipe -> (the recipe it builds on, max_model_len, max_num_seqs)
+DSPARK = {
+    "inkling2-mini-tp1-dspark": ("inkling2-mini-tp1", 125000, 2),
+    "inkling2-mini-tp2-dspark": ("inkling2-mini-tp2", 780000, 2),
+}
+SPEC = (
+    '{"method":"dspark","num_speculative_tokens":7,'
+    '"num_speculative_tokens_per_batch_size":[[1,2,2]]}'
+)
+
+
+@pytest.mark.parametrize("recipe", DSPARK)
+def test_dspark_recipe_is_its_base_recipe_plus_the_draft(venv, recipe):
+    base, max_len, seqs = DSPARK[recipe]
+    result = plan(venv, f"RECIPE={recipe}")
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert flag(out, "--speculative-config", SPEC)
+    assert flag(out, "--max-model-len", str(max_len))
+    assert flag(out, "--max-num-seqs", str(seqs))
+    # Everything else is the base recipe's plan, flag for flag and variable for
+    # variable: the launcher's own keys on the command line give the same plan.
+    ref = plan(
+        venv,
+        f"RECIPE={base}",
+        f"SEQS={seqs}",
+        f"MAXLEN={max_len}",
+        f"SPEC_CONFIG={SPEC}",
+    )
+    assert ref.returncode == 0, ref.stderr
+    assert out.replace(recipe, base) == ref.stdout
+
+
+@pytest.mark.parametrize("recipe", DSPARK)
+def test_dspark_recipe_keys_follow_the_caller(venv, recipe):
+    max_len = DSPARK[recipe][1]
+    # The caller's environment wins over the recipe and over the recipe it builds on
+    # (PORT is set only by the latter).
+    out = plan(venv, f"RECIPE={recipe}", PORT="19999", SEQS="4").stdout
+    assert flag(out, "--port", "19999")
+    assert flag(out, "--max-num-seqs", "4")
+    assert flag(out, "--max-model-len", str(max_len))
+    assert flag(out, "--speculative-config", SPEC)
+    # KEY=value after RECIPE= wins over both; an empty SPEC_CONFIG drops the draft.
+    out = plan(venv, f"RECIPE={recipe}", "MAXLEN=90000", "SPEC_CONFIG=").stdout
+    assert flag(out, "--max-model-len", "90000")
+    assert "--speculative-config" not in out
+
+
+ADAPTIVE = "inkling2-mini-tp1-dspark-adaptive"
+
+
+def adaptive_spec(ids) -> str:
+    return (
+        '{"method":"dspark","num_speculative_tokens":7,'
+        '"num_speculative_tokens_per_batch_size":[[1,2,7]],'
+        f'"speculator_options":{{"adaptive_k":{{}},"draft_vocab":"{ids}"}}}}'
+    )
+
+
+def test_adaptive_recipe_names_the_ids_file(venv, tmp_path):
+    ids = tmp_path / "ids.npy"
+    # as a launcher argument and as an environment variable
+    for out in (
+        plan(venv, f"RECIPE={ADAPTIVE}", f"DRAFT_VOCAB={ids}").stdout,
+        plan(venv, f"RECIPE={ADAPTIVE}", DRAFT_VOCAB=str(ids)).stdout,
+    ):
+        assert flag(out, "--speculative-config", adaptive_spec(ids))
+        assert flag(out, "--max-num-seqs", "2")
+        assert flag(out, "--max-model-len", "105000")
+        assert flag(out, "--tensor-parallel-size", "1")
+    default = plan(venv, f"RECIPE={ADAPTIVE}").stdout
+    assert "/.cache/rdna/inkling2-mini-draft-vocab-32768.npy" in default
+
+
+def test_adaptive_recipe_keys_of_every_level_follow_the_caller(venv):
+    # PORT is set by inkling2-mini-tp1, two recipes below this one.
+    out = plan(venv, f"RECIPE={ADAPTIVE}", PORT="19999", DRAFT_VOCAB="x.npy").stdout
+    assert flag(out, "--port", "19999")
+    assert flag(out, "--gpu-memory-utilization", "0.92")

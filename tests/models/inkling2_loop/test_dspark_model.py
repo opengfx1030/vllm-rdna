@@ -296,6 +296,95 @@ def test_speculator_config_resolves_to_the_inkling2_speculator():
     assert issubclass(cls, DSparkSpeculator)
 
 
+def _ids_file(tmp_path, ids):
+    import numpy as np
+
+    path = tmp_path / "draft_vocab.npy"
+    np.save(path, np.asarray(ids))
+    return str(path)
+
+
+def test_draft_vocab_gathers_the_rows_of_the_listed_ids(model, tmp_path):
+    m, h = model.model.markov_head, TINY.hidden_size
+    g = torch.Generator().manual_seed(1)
+    lm = torch.randn(VOCAB, h, generator=g).half()
+    m.fold_w = torch.randn(VOCAB, TINY.markov_rank, generator=g).half()
+    m.fold_b = torch.randn(VOCAB, generator=g)
+    model.lm_head = types.SimpleNamespace(weight=lm)
+    ids = [0, 3, 4, 70, 299]
+    got = model._derive_draft_vocab(_ids_file(tmp_path, ids))
+    sel = torch.tensor(ids)
+    assert torch.equal(got.ids, sel)
+    assert torch.equal(got.weight, lm[sel])
+    assert torch.equal(got.fold_w, m.fold_w[sel])
+    assert torch.equal(got.fold_b, m.fold_b[sel])
+    assert got.weight.is_contiguous() and got.fold_w.is_contiguous()
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [[], [5, 5, 6], [7, 3], [-1, 4], [4, 300], [[1, 2], [3, 4]]],
+    ids=["empty", "repeat", "descending", "negative", "past the vocabulary", "2-d"],
+)
+def test_draft_vocab_refuses_lists_that_are_not_ascending_ids(model, tmp_path, ids):
+    model.lm_head = types.SimpleNamespace(weight=torch.zeros(VOCAB, TINY.hidden_size))
+    with pytest.raises(ValueError, match="strictly ascending token ids"):
+        model._derive_draft_vocab(_ids_file(tmp_path, ids))
+
+
+def test_the_step_cost_follows_the_draft_vocabulary(tmp_path):
+    from vllm.models.inkling2_loop.speculator_config import (
+        _V620_STEP_COST,
+        Inkling2DSparkSpeculatorConfig,
+    )
+
+    spec = types.SimpleNamespace(
+        speculator_options={
+            "adaptive_k": {"decay": 0.5},
+            "draft_vocab": _ids_file(tmp_path, list(range(2000))),
+        },
+        draft_model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(vocab_size=20000)
+        ),
+    )
+    policy = Inkling2DSparkSpeculatorConfig(spec).make_num_tokens_policy([0, 7])
+    assert policy is not None
+    cost = policy.cost
+    assert cost.draft_ms < _V620_STEP_COST.draft_ms - 2.0
+    assert cost.draft_token_ms < _V620_STEP_COST.draft_token_ms
+    assert cost.forward_ms == _V620_STEP_COST.forward_ms
+
+
+def test_adaptive_verification_is_refused_with_a_pointer_to_adaptive_k():
+    from vllm.models.inkling2_loop.speculator_config import (
+        Inkling2DSparkSpeculatorConfig,
+    )
+
+    spec = types.SimpleNamespace(
+        speculator_options=None, enable_adaptive_verification=True
+    )
+    with pytest.raises(ValueError, match="adaptive_k"):
+        Inkling2DSparkSpeculatorConfig.validate_options(spec)
+    spec.enable_adaptive_verification = False
+    spec.speculator_options = {"adaptive_k": {}, "draft_vocab": "ids.npy"}
+    Inkling2DSparkSpeculatorConfig.validate_options(spec)
+    spec.speculator_options = {"adaptive_k": {}}
+    cfg = Inkling2DSparkSpeculatorConfig(spec)
+    assert cfg.uses_adaptive_num_tokens
+    policy = cfg.make_num_tokens_policy([0, 7, 7])
+    assert policy is not None and policy.choose(["r"]) >= 1
+    spec.speculator_options = {"adaptive_k": False}
+    assert not Inkling2DSparkSpeculatorConfig(spec).uses_adaptive_num_tokens
+    spec.speculator_options = {"adaptive_k": {"decay": 0.5, "draft_ms": 2.3}}
+    custom = Inkling2DSparkSpeculatorConfig(spec).make_num_tokens_policy([0, 7])
+    assert custom is not None
+    assert custom.decay == 0.5 and custom.cost.draft_ms == 2.3
+    for bad in ({"draft_vocab": 3}, {"adaptive_k": {"nope": 1}}, {"other": 1}):
+        spec.speculator_options = bad
+        with pytest.raises(ValueError):
+            Inkling2DSparkSpeculatorConfig.validate_options(spec)
+
+
 # ---------------------------------------------------------------------------
 # gfx1030
 # ---------------------------------------------------------------------------
@@ -442,6 +531,35 @@ def test_the_markov_chain_stops_at_the_largest_verified_token(synthetic_hip, ste
     assert torch.equal(cut.tokens[:, :steps], full.tokens[:, :steps])
     assert not cut.tokens[:, steps:].any(), "the unused columns keep their zeros"
     assert torch.equal(cut.hidden, full.hidden)
+
+
+@requires_gpu
+def test_draft_vocab_restricts_the_greedy_chain(synthetic_hip, tmp_path):
+    """With every id listed the chain is the full chain bit for bit; with a subset
+    it drafts only listed ids, and its first token is the full chain's argmax over
+    them (the later tokens continue from different ones)."""
+    import numpy as np
+
+    hip, anchors = synthetic_hip
+    model = hip.model
+    ctx = _contexts([37, 300, 1100], anchors, seed=17)
+    full = hip.propose(ctx)
+    ids = np.sort(np.random.default_rng(0).choice(SYN_VOCAB, 700, replace=False))
+    try:
+        for listed in (np.arange(SYN_VOCAB), ids):
+            model._draft_vocab_path = _ids_file(tmp_path, listed.astype(np.int32))
+            model.refresh_derived_weights()
+            ranked = hip.propose(ctx, capture_logits=False)
+            if len(listed) == SYN_VOCAB:
+                assert torch.equal(ranked.tokens, full.tokens)
+    finally:
+        model._draft_vocab_path = None
+        model.refresh_derived_weights()
+    allowed = torch.from_numpy(ids).long()
+    assert torch.isin(ranked.tokens, allowed).all()
+    first = full.logits[:, 0, :][:, allowed].argmax(-1)
+    assert torch.equal(ranked.tokens[:, 0], allowed[first])
+    assert torch.equal(hip.propose(ctx, capture_logits=False).tokens, full.tokens)
 
 
 @requires_gpu

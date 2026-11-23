@@ -699,7 +699,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor query_start_loc, Tensor! out, Tensor! workspace, int window, "
       "int rel_extent, bool log_scale, float log_alpha, float log_n_floor, "
       "float q_clip, float rel_clip, int max_query_len, "
-      "int splits_decode, int splits_tile) -> ()");
+      "int splits_decode, int splits_tile, int tile_impl) -> ()");
   rocm_ops.impl("inkling2_attention", torch::kCUDA, &inkling2_attention);
 
   // Inkling-2-Mini DSpark draft kernels (csrc/rocm/inkling2_dspark_rdna2.cu).

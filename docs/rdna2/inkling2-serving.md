@@ -35,6 +35,9 @@ bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1 MODEL=/path/to/inkling2-m
 | [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | 1 | 18221 | 180,000 | 16 | 1,024 | one card: short and medium contexts, up to 16 concurrent requests |
 | [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | 2 | 18222 | 1,048,576 | 8 | 184 | the full context on two cards; lower latency than TP=1 |
 | [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | 4 | 18223 | 1,048,576 | 8 | 4,096 | the full context with room for two such requests; fastest prefill |
+| [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | 1 | 18221 | 125,000 | 2 | 1,024 | `inkling2-mini-tp1` with the DSpark draft: one request decodes 1.3x faster (1.1x - 1.6x by kind of text), two about 1.1x, with less context |
+| [`inkling2-mini-tp1-dspark-adaptive`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark-adaptive.env) | 1 | 18221 | 105,000 | 2 | 1,024 | that with adaptive K and a 32,768-id draft vocabulary (an ids file made once): one request decodes 1.5x faster, with less context still |
+| [`inkling2-mini-tp2-dspark`](../../tools/rdna/recipes/inkling2-mini-tp2-dspark.env) | 2 | 18222 | 780,000 | 2 | 184 | `inkling2-mini-tp2` with the DSpark draft: one request decodes 1.35x faster (1.15x - 1.62x by kind of text), with less context |
 
 All three serve the model as `inkling2-mini` on `127.0.0.1`, capture HIP graphs
 (`FULL_AND_PIECEWISE`, the model's default capture grid), enable prefix caching and accept one
@@ -188,19 +191,27 @@ every process of the 942,628 and 1,046,914-token runs.
 
 The model's own draft (`mtp.safetensors`: three layers, a block of 8 rows, a Markov head) runs on native
 HIP kernels under the same `FULL_AND_PIECEWISE` graphs, with prefix caching, at TP=1 and TP=2; TP=4 shares
-the TP=2 code path and was not run through the engine. **It is not in the recipe defaults**: at this
-model's MoE row cost it pays at one or two requests only, and it takes context length. Switch it on with
-the launcher key `SPEC_CONFIG`; the model requires `num_speculative_tokens` 7, and the schedule decides
-how many of the 7 drafted tokens the engine verifies per step (2 for one or two requests, none above):
+the TP=2 code path and was not run through the engine. **The three recipes above stay without it**: at this
+model's MoE row cost it pays at one or two requests only, and it takes context length. Its own recipes are
+the same ones with the draft, `SEQS=2` and the longest context that fits; the launcher key `SPEC_CONFIG`
+(the engine's `--speculative-config`) carries it: the model requires `num_speculative_tokens` 7, and the
+schedule decides how many of the 7 drafted tokens the engine verifies per step (2 for one or two requests,
+none above):
 
 ```bash
-bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1 MODEL=/path/to/inkling2-mini VENV=/path/to/venv \
-  HIP_VISIBLE_DEVICES=3 SEQS=2 MAXLEN=125000 \
-  SPEC_CONFIG='{"method":"dspark","num_speculative_tokens":7,"num_speculative_tokens_per_batch_size":[[1,2,2]]}'
+bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1-dspark MODEL=/path/to/inkling2-mini \
+  VENV=/path/to/venv HIP_VISIBLE_DEVICES=3
 ```
 
-TP=2: `RECIPE=inkling2-mini-tp2 HIP_VISIBLE_DEVICES=4,5 SEQS=2 MAXLEN=780000`. With more slots keep the
-tail of the schedule: `[[1,2,2],[3,8,0]]`.
+TP=2: `RECIPE=inkling2-mini-tp2-dspark HIP_VISIBLE_DEVICES=4,5` (SEQS 2, 780,000 tokens). With more slots keep
+the tail of the schedule: `SEQS=8 SPEC_CONFIG='{"method":"dspark","num_speculative_tokens":7,
+"num_speculative_tokens_per_batch_size":[[1,2,2],[3,8,0]]}'`.
+
+For one request on one card there is a faster variant: `RECIPE=inkling2-mini-tp1-dspark-adaptive` lets the scheduler pick how
+many drafts to verify at every step (0 to 7) and restricts the draft to the 32,768 most frequent token ids of a file made once by
+`tools/rdna/inkling2/draft_vocab.py` (the one command is in the recipe header and in `docs/rdna2/inkling2-dspark.md`): 17.7 ->
+11.7 ms per token on the six kinds of text of the speculation profile (1.51x, K = 2 gives 1.31x) and 17.8 -> 12.5 on 33
+held-out prompts (1.42x; K = 2: 1.27x), at 106,267 tokens of KV cache instead of 125,597. TP=1 and greedy decoding only.
 
 Decode ms per token of one request (graph replay, 24 chat prompts x 128 tokens, speed-up over no draft in
 brackets; the TP=2 rows are one session on the same two cards):
@@ -240,10 +251,11 @@ full context back at TP=2; it is not built (`docs/rdna2/inkling2-dspark.md`).
 
 ## Known limits
 
-- **Speculative decoding (DSpark) is opt-in and not in the recipe defaults.** It speeds one or two requests
-  up (TP=1 1.24x / 1.11x, TP=2 1.29x / 1.14x), loses from three, and costs context length (section above);
-  the 1,048,576-token TP=2 / TP=4 recipes keep it off. The sampled (non-greedy) draft raises
-  `NotImplementedError` at TP > 1; TP=4 was not run with the draft.
+- **Speculative decoding (DSpark) is opt-in: `inkling2-mini-tp1-dspark`, `-tp1-dspark-adaptive` and `-tp2-dspark`, not the
+  recipes above.** It speeds one request up (TP=1 1.31x with K = 2 and 1.51x adaptive, TP=2 1.35x, mean of six kinds of text:
+  `inkling2-dspark.md`) and two requests about 1.1x, loses from three, and costs context length (section above); the
+  1,048,576-token TP=2 / TP=4 recipes keep it off. The sampled (non-greedy) draft raises `NotImplementedError` at TP > 1, as
+  does the draft vocabulary of the adaptive recipe (TP=1 and greedy only); TP=4 was not run with the draft.
 - **One image per prompt** in the recipes (`--limit-mm-per-prompt {"image":1}`); the Inkling processor takes
   no `--mm-processor-kwargs`, so the launcher's `vision-cap` feature is not used.
 - **Graphs cover decode steps of up to `min(16, SEQS)` requests and mixed steps of up to 32 tokens.**

@@ -48,6 +48,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <type_traits>
+#include <utility>
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -110,6 +112,25 @@ __device__ __forceinline__ float i2_sigmoid(float x) {
 
 __device__ __forceinline__ float i2_xor(float v, int m) {
   return __shfl_xor(v, m);
+}
+
+// lane ^ M inside a row of 16 lanes (the 16 lanes of a thread-group row of the
+// tile kernel): one DPP row_xmask modifier on the consumer instead of a
+// ds_bpermute round trip (gfx10+).
+template <int M>
+__device__ __forceinline__ float i2_row_xor(float v) {
+  static_assert(M > 0 && M < 16, "row_xmask stays inside a row of 16 lanes");
+  return __int_as_float(__builtin_amdgcn_update_dpp(
+      0, __float_as_int(v), 0x160 + M, 0xF, 0xF, false));
+}
+
+// lane N of the row of 16 lanes broadcast to the whole row (DPP row_share,
+// gfx10+)
+template <int N>
+__device__ __forceinline__ uint32_t i2_row_share(uint32_t v) {
+  static_assert(N >= 0 && N < 16, "row_share picks a lane of a row of 16");
+  return (uint32_t)__builtin_amdgcn_update_dpp(0, (int)v, 0x150 + N, 0xF, 0xF,
+                                               false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1494,6 +1515,542 @@ __global__ __launch_bounds__(kI2TileThreads) void i2_tile_kernel(I2AttnArgs a) {
   }
 }
 
+// ------------------------- tile, pipelined (q_len >= 2) --------------------
+// `i2_tile_pipe_kernel` computes exactly what `i2_tile_kernel` computes (every
+// fp32 operation in the same order: the outputs are bit-identical for finite
+// inputs) with a leaner schedule; `inkling2_attention(tile_impl = 1)` selects
+// it (VLLM_INKLING2_PREFILL_ATTN_TILE, docs/rdna2/inkling2-attn-kernels.md
+// section 12).  The prologue (q / rel staging) and the epilogue are the same
+// code as in `i2_tile_kernel`; the main loop differs in:
+//   * one LDS buffer holds the K tile while QK runs and the V tile while PV
+//     runs, and the probabilities never visit LDS (next item): LDS 55.5 KB ->
+//     32.5 KB at G = 3, four CTAs per WGP instead of two.  The K and V rows of
+//     tile i + 1 are loaded into registers during PV(i) (the V rows are used
+//     after QK(i + 1), the K rows at the start of the next iteration), so no
+//     global load latency is exposed; the page table is double buffered by
+//     tile parity;
+//   * the probability pairs stay in registers: pair m of a row (keys m and
+//     m + 32) sits in lane m % 16 of the row's 16 lanes, and DPP row_share
+//     hands it to the row for the PV dot2s: no sP tile, no P store / load;
+//   * a cache block of >= 64 tokens holds the 64 keys of a tile in one page:
+//   one
+//     scalar page and 32-bit row offsets instead of a per-key table lookup and
+//     64-bit address, and no per-key predicate in interior tiles;
+//   * a tile whose (row, key) pairs are all >= rel_extent apart skips the
+//     relative bias; a tile whose keys are visible to every row of a full
+//     16-token block skips the mask and the -inf selects;
+//   * the row max crosses lanes with DPP row_xmask instead of ds_bpermute;
+//   * the V tile keeps the two 4-dword halves of a lane's 8 dims in two
+//     contiguous 256 B runs: its b128 LDS reads and writes are bank-conflict
+//     free (the interleaved layout of i2_tile_kernel is a 2-way conflict).
+template <int G>
+__global__ __launch_bounds__(kI2TileThreads) void i2_tile_pipe_kernel(
+    I2AttnArgs a) {
+  constexpr int ROWS = kI2BR * G;
+  constexpr int RGS = kI2TileThreads / 16;  // row groups per CTA
+  constexpr int TPT = kI2BR / RGS;          // query tokens per thread
+  constexpr int RPT = TPT * G;              // (token, head) rows per thread
+  constexpr int NKR = kI2BC / RGS;          // K rows staged per thread
+  constexpr int NVR = 32 / RGS;             // V row pairs staged per thread
+  static_assert(kI2TileThreads % 32 == 0 && kI2BR % RGS == 0 &&
+                    kI2BC % RGS == 0 && 32 % RGS == 0 &&
+                    ROWS * 2 <= kI2TileThreads,
+                "tile geometry");
+  constexpr int DK = 136;  // halves per sQ / sK row (16B aligned, bank skew)
+
+  __shared__ __attribute__((aligned(16))) _Float16 sQ[ROWS * DK];
+  // K tile [64][DK] halves while QK runs, V tile [32][128] pair-interleaved
+  // dwords while PV runs
+  __shared__ __attribute__((aligned(16))) uint32_t sKV[kI2BC * DK / 2];
+  __shared__ __attribute__((aligned(16))) _Float16 sRel[ROWS * 16];
+  __shared__ int
+      s_page[2][kI2BC];  // pages of the tile (parity) and of the next one
+  _Float16* const sK = reinterpret_cast<_Float16*>(sKV);
+  uint32_t* const sV = sKV;
+
+  const int tid = threadIdx.x;
+  const int kvh = blockIdx.y % a.nkv;
+  const int split = blockIdx.y / a.nkv;
+  const int r = blockIdx.z;
+  const int qs = a.qsl[r];
+  const int q_len = a.qsl[r + 1] - qs;
+  if (q_len < 2) return;
+  const int L = a.seq_lens[r];
+  const int i0 = blockIdx.x * kI2BR;
+  if (L < q_len || i0 >= q_len) return;
+  const I2TileSplit ts = i2_tile_split(L, q_len, i0, a.window, a.splits_b);
+  const int t0 = ts.t_lo + split * ts.tps;
+  if (t0 >= ts.t_hi) return;
+  const int t1 = min(ts.t_hi, t0 + ts.tps);
+  const int ntok = ts.ntok;
+  const int p_first = ts.p_first;
+  const int lo_all = ts.lo;
+  const int hi_all = p_first + ntok;
+  const int bs_mask = (1 << a.bs_shift) - 1;
+  const int64_t head_off = (int64_t)kvh * a.kv_s1;
+
+  // ---- q tile: scaled L2 clip (+ log scale) -> fp16 in LDS
+  for (int i = tid; i < ROWS * 16; i += kI2TileThreads) {
+    const int row = i >> 4, cc = i & 15;
+    const int tq = row / G, g = row - tq * G;
+    float x[8];
+    float ss = 0.f, tau = 1.0f;
+    if (tq < ntok) {
+      const int tg = qs + i0 + tq;
+      const int hq = kvh * G + g;
+      const uint4 u = *reinterpret_cast<const uint4*>(
+          a.q + (int64_t)tg * a.q_stride + hq * kI2D + cc * 8);
+      const float* sc = a.q_scale + hq * kI2D + cc * 8;
+      const float4 s0 = *reinterpret_cast<const float4*>(sc);
+      const float4 s1 = *reinterpret_cast<const float4*>(sc + 4);
+      x[0] = i2_lo(u.x) * s0.x;
+      x[1] = i2_hi(u.x) * s0.y;
+      x[2] = i2_lo(u.y) * s0.z;
+      x[3] = i2_hi(u.y) * s0.w;
+      x[4] = i2_lo(u.z) * s1.x;
+      x[5] = i2_hi(u.z) * s1.y;
+      x[6] = i2_lo(u.w) * s1.z;
+      x[7] = i2_hi(u.w) * s1.w;
+  #pragma unroll
+      for (int k = 0; k < 8; ++k) ss += x[k] * x[k];
+      if (a.log_scale) tau = i2_log_tau(a, tg);
+    } else {
+  #pragma unroll
+      for (int k = 0; k < 8; ++k) x[k] = 0.f;
+    }
+    ss += i2_xor(ss, 1);
+    ss += i2_xor(ss, 2);
+    ss += i2_xor(ss, 4);
+    ss += i2_xor(ss, 8);
+    const float f = fminf(1.0f, a.q_clip / (sqrtf(ss) + 1e-6f));
+    uint32_t w[4];
+  #pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      float y0 = i2_round_half(x[2 * k] * f);
+      float y1 = i2_round_half(x[2 * k + 1] * f);
+      if (a.log_scale) {
+        y0 = i2_round_half(y0 * tau);
+        y1 = i2_round_half(y1 * tau);
+      }
+      w[k] = i2_pack(y0, y1);
+    }
+    *reinterpret_cast<uint4*>(sQ + row * DK + cc * 8) =
+        make_uint4(w[0], w[1], w[2], w[3]);
+  }
+  // ---- relative features: scaled L2 clip (+ log scale) -> fp16 in LDS
+  {
+    const bool act = tid < ROWS * 2;
+    const int row = tid >> 1, hf = tid & 1;
+    float x[8];
+    float ss = 0.f, tau = 1.0f;
+  #pragma unroll
+    for (int k = 0; k < 8; ++k) x[k] = 0.f;
+    if (act) {
+      const int tq = row / G, g = row - tq * G;
+      if (tq < ntok) {
+        const int tg = qs + i0 + tq;
+        const int hq = kvh * G + g;
+        const uint4 u = *reinterpret_cast<const uint4*>(
+            a.rel + (int64_t)tg * a.rel_stride + hq * 16 + hf * 8);
+        const float* sc = a.rel_scale + hq * 16 + hf * 8;
+        const float4 s0 = *reinterpret_cast<const float4*>(sc);
+        const float4 s1 = *reinterpret_cast<const float4*>(sc + 4);
+        x[0] = i2_lo(u.x) * s0.x;
+        x[1] = i2_hi(u.x) * s0.y;
+        x[2] = i2_lo(u.y) * s0.z;
+        x[3] = i2_hi(u.y) * s0.w;
+        x[4] = i2_lo(u.z) * s1.x;
+        x[5] = i2_hi(u.z) * s1.y;
+        x[6] = i2_lo(u.w) * s1.z;
+        x[7] = i2_hi(u.w) * s1.w;
+  #pragma unroll
+        for (int k = 0; k < 8; ++k) ss += x[k] * x[k];
+        if (a.log_scale) tau = i2_log_tau(a, tg);
+      }
+    }
+    ss += i2_xor(ss, 1);
+    if (act) {
+      const float f = fminf(1.0f, a.rel_clip / (sqrtf(ss) + 1e-6f));
+      uint32_t w[4];
+  #pragma unroll
+      for (int k = 0; k < 4; ++k) {
+        float y0 = i2_round_half(x[2 * k] * f);
+        float y1 = i2_round_half(x[2 * k + 1] * f);
+        if (a.log_scale) {
+          y0 = i2_round_half(y0 * tau);
+          y1 = i2_round_half(y1 * tau);
+        }
+        w[k] = i2_pack(y0, y1);
+      }
+      *reinterpret_cast<uint4*>(sRel + row * 16 + hf * 8) =
+          make_uint4(w[0], w[1], w[2], w[3]);
+    }
+  }
+
+  const int wave = tid >> 5, lane = tid & 31;
+  const int rg = (wave << 1) | (lane >> 4);
+  const int kg = lane & 15;
+  const int tq0 = TPT * rg;
+
+  float m_run[RPT], l_run[RPT], o_acc[RPT][8];
+  #pragma unroll
+  for (int ri = 0; ri < RPT; ++ri) {
+    m_run[ri] = -INFINITY;
+    l_run[ri] = 0.f;
+  #pragma unroll
+    for (int d = 0; d < 8; ++d) o_acc[ri][d] = 0.f;
+  }
+
+  if (tid < kI2BC)
+    s_page[t0 & 1][tid] =
+        a.block_table[(int64_t)r * a.bt_stride +
+                      (min(t0 * kI2BC + tid, L - 1) >> a.bs_shift)];
+  __syncthreads();
+
+  const int cc = tid & 15;
+  // a cache block of >= 64 tokens holds the 64 (aligned) keys of a tile in one
+  // page; the 32-bit row offsets below need 64 rows of kv_s2 halves to fit in
+  // 32 bits
+  const bool uni = a.bs_shift >= 6 && a.kv_s2 < (1 << 24);
+  const uint32_t rstride = (uint32_t)a.kv_s2 * 2u;  // bytes per key row
+  const uint32_t o_k = (uint32_t)(tid >> 4) * rstride +
+                       cc * 16u;  // this thread's K chunk of key 0 of the tile
+  // base of key 0 of the tile (K at +0, V at +256 B of the row)
+  auto tile_base = [&](int tile) -> const char* {
+    const int page = __builtin_amdgcn_readfirstlane(s_page[tile & 1][0]);
+    return reinterpret_cast<const char*>(
+        a.kv + (int64_t)page * a.kv_s0 + head_off +
+        (int64_t)((tile * kI2BC) & bs_mask) * a.kv_s2);
+  };
+  // global -> registers: the K rows of a tile (NKR x 16 B per thread)
+  uint4 kreg[NKR];
+  auto load_k = [&](int tile) {
+    const int* pg = s_page[tile & 1];
+    const int n0 = tile * kI2BC;
+    if (uni && n0 >= lo_all && n0 + kI2BC <= hi_all) {
+      const char* base = tile_base(tile);
+  #pragma unroll
+      for (int u = 0; u < NKR; ++u)
+        kreg[u] = *reinterpret_cast<const uint4*>(
+            base + (o_k + (uint32_t)(RGS * u) * rstride));
+      return;
+    }
+  #pragma unroll
+    for (int u = 0; u < NKR; ++u) {
+      const int key = (tid >> 4) + RGS * u;
+      const int n = n0 + key;
+      uint4 v = make_uint4(0u, 0u, 0u, 0u);
+      if (n >= lo_all && n < hi_all) {
+        const _Float16* p = a.kv + (int64_t)pg[key] * a.kv_s0 + head_off +
+                            (int64_t)(n & bs_mask) * a.kv_s2;
+        v = *reinterpret_cast<const uint4*>(p + cc * 8);
+      }
+      kreg[u] = v;
+    }
+  };
+  // global -> registers: the V row pairs of a tile (NVR x 2 x 16 B per thread),
+  // consumed after its QK
+  uint4 vra[NVR], vrb[NVR];
+  auto load_v = [&](int tile) {
+    const int n0 = tile * kI2BC;
+    if (uni && n0 >= lo_all && n0 + kI2BC <= hi_all) {
+      const char* base = tile_base(tile) + kI2D * 2;  // V half of the rows
+  #pragma unroll
+      for (int u = 0; u < NVR; ++u) {
+        vra[u] = *reinterpret_cast<const uint4*>(
+            base + (o_k + (uint32_t)(RGS * u) * rstride));
+        vrb[u] = *reinterpret_cast<const uint4*>(
+            base + (o_k + (uint32_t)(RGS * u + 32) * rstride));
+      }
+    } else {
+      const int* pg = s_page[tile & 1];
+  #pragma unroll
+      for (int u = 0; u < NVR; ++u) {
+        const int mp = (tid >> 4) + RGS * u;
+        const int na = n0 + mp, nb = n0 + mp + 32;
+        uint4 va = make_uint4(0u, 0u, 0u, 0u), vb = make_uint4(0u, 0u, 0u, 0u);
+        if (na >= lo_all && na < hi_all) {
+          const _Float16* p = a.kv + (int64_t)pg[mp] * a.kv_s0 + head_off +
+                              (int64_t)(na & bs_mask) * a.kv_s2;
+          va = *reinterpret_cast<const uint4*>(p + kI2D + cc * 8);
+        }
+        if (nb >= lo_all && nb < hi_all) {
+          const _Float16* p = a.kv + (int64_t)pg[mp + 32] * a.kv_s0 + head_off +
+                              (int64_t)(nb & bs_mask) * a.kv_s2;
+          vb = *reinterpret_cast<const uint4*>(p + kI2D + cc * 8);
+        }
+        vra[u] = va;
+        vrb[u] = vb;
+      }
+    }
+  };
+  load_k(t0);
+  load_v(t0);
+
+  for (int tile = t0; tile < t1; ++tile) {
+    const int n0 = tile * kI2BC;
+
+    __syncthreads();  // (0) the previous tile's PV readers of the buffer are
+                      // done
+    if (tid < kI2BC && tile + 1 < t1)
+      s_page[(tile + 1) & 1][tid] =
+          a.block_table[(int64_t)r * a.bt_stride +
+                        (min((tile + 1) * kI2BC + tid, L - 1) >> a.bs_shift)];
+  #pragma unroll
+    for (int u = 0; u < NKR; ++u)
+      *reinterpret_cast<uint4*>(sK + ((tid >> 4) + RGS * u) * DK + cc * 8) =
+          kreg[u];
+    __syncthreads();  // (1) K tile visible (and the next tile's pages)
+
+    // ---- S = Q K^T
+    float sacc[RPT][4];
+  #pragma unroll
+    for (int ri = 0; ri < RPT; ++ri)
+  #pragma unroll
+      for (int u = 0; u < 4; ++u) sacc[ri][u] = 0.f;
+  #pragma unroll 2
+    for (int dch = 0; dch < 16; ++dch) {
+      uint4 kc[4];
+  #pragma unroll
+      for (int u = 0; u < 4; ++u)
+        kc[u] =
+            *reinterpret_cast<const uint4*>(sK + (kg + 16 * u) * DK + dch * 8);
+  #pragma unroll
+      for (int ri = 0; ri < RPT; ++ri) {
+        const uint4 qc =
+            *reinterpret_cast<const uint4*>(sQ + (tq0 * G + ri) * DK + dch * 8);
+  #pragma unroll
+        for (int u = 0; u < 4; ++u) {
+          float s = sacc[ri][u];
+          s = i2_dot2(qc.x, kc[u].x, s);
+          s = i2_dot2(qc.y, kc[u].y, s);
+          s = i2_dot2(qc.z, kc[u].z, s);
+          s = i2_dot2(qc.w, kc[u].w, s);
+          sacc[ri][u] = s;
+        }
+      }
+    }
+    // ---- scale + relative bias
+    if (p_first - (n0 + kI2BC - 1) >= a.rel_extent) {
+      // every (row, key) pair of the tile is rel_extent or more apart: the bias
+      // is 0 (as in i2_tile_kernel)
+  #pragma unroll
+      for (int ri = 0; ri < RPT; ++ri)
+  #pragma unroll
+        for (int u = 0; u < 4; ++u)
+          sacc[ri][u] = fmaf(sacc[ri][u], a.scale, 0.f);
+    } else {
+  #pragma unroll
+      for (int tqi = 0; tqi < TPT; ++tqi) {
+        const int pq = p_first + tq0 + tqi;
+        uint4 rw[G][2];
+  #pragma unroll
+        for (int g = 0; g < G; ++g) {
+          rw[g][0] = *reinterpret_cast<const uint4*>(
+              sRel + ((tq0 + tqi) * G + g) * 16);
+          rw[g][1] = *reinterpret_cast<const uint4*>(
+              sRel + ((tq0 + tqi) * G + g) * 16 + 8);
+        }
+  #pragma unroll
+        for (int u = 0; u < 4; ++u) {
+          const int dist = pq - (n0 + kg + 16 * u);
+          const int idx = min(max(dist, 0), a.rel_extent - 1);
+          const uint4 p0 =
+              *reinterpret_cast<const uint4*>(a.proj_t + (int64_t)idx * 16);
+          const uint4 p1 =
+              *reinterpret_cast<const uint4*>(a.proj_t + (int64_t)idx * 16 + 8);
+          const bool inb = dist < a.rel_extent;
+  #pragma unroll
+          for (int g = 0; g < G; ++g) {
+            float b = 0.f;
+            b = i2_dot2(rw[g][0].x, p0.x, b);
+            b = i2_dot2(rw[g][0].y, p0.y, b);
+            b = i2_dot2(rw[g][0].z, p0.z, b);
+            b = i2_dot2(rw[g][0].w, p0.w, b);
+            b = i2_dot2(rw[g][1].x, p1.x, b);
+            b = i2_dot2(rw[g][1].y, p1.y, b);
+            b = i2_dot2(rw[g][1].z, p1.z, b);
+            b = i2_dot2(rw[g][1].w, p1.w, b);
+            sacc[tqi * G + g][u] =
+                fmaf(sacc[tqi * G + g][u], a.scale, inb ? b : 0.f);
+          }
+        }
+      }
+    }
+    // ---- mask, online softmax, probabilities -> registers (fp16 pairs)
+    uint32_t pk[RPT][2];
+    // a tile whose keys are all visible to every row of a full 16-token block
+    // needs no mask and no -inf handling: the same fp32 operations as the
+    // general path below on finite scores
+    if (ntok == kI2BR && n0 + kI2BC - 1 <= p_first &&
+        (a.window <= 0 || n0 > p_first + (kI2BR - 1) - a.window)) {
+  #pragma unroll
+      for (int ri = 0; ri < RPT; ++ri) {
+        float tmax = fmaxf(fmaxf(sacc[ri][0], sacc[ri][1]),
+                           fmaxf(sacc[ri][2], sacc[ri][3]));
+        tmax = fmaxf(tmax, i2_row_xor<1>(tmax));
+        tmax = fmaxf(tmax, i2_row_xor<2>(tmax));
+        tmax = fmaxf(tmax, i2_row_xor<4>(tmax));
+        tmax = fmaxf(tmax, i2_row_xor<8>(tmax));
+        const float m_new = fmaxf(m_run[ri], tmax);
+        const float o_scale =
+            (m_run[ri] == -INFINITY) ? 0.f : __expf(m_run[ri] - m_new);
+        m_run[ri] = m_new;
+        float p[4], psum = 0.f;
+  #pragma unroll
+        for (int u = 0; u < 4; ++u) {
+          p[u] = __expf(sacc[ri][u] - m_new);
+          psum += p[u];
+        }
+        l_run[ri] = fmaf(l_run[ri], o_scale, psum);
+  #pragma unroll
+        for (int d = 0; d < 8; ++d) o_acc[ri][d] *= o_scale;
+        pk[ri][0] = i2_pack(p[0], p[2]);
+        pk[ri][1] = i2_pack(p[1], p[3]);
+      }
+    } else {
+  #pragma unroll
+      for (int ri = 0; ri < RPT; ++ri) {
+        const int tqi = ri / G;
+        const int pq = p_first + tq0 + tqi;
+        const bool rv = (tq0 + tqi) < ntok;
+        float tmax = -INFINITY;
+  #pragma unroll
+        for (int u = 0; u < 4; ++u) {
+          const int j = n0 + kg + 16 * u;
+          const bool vis =
+              rv && (j <= pq) && (a.window <= 0 || j > pq - a.window);
+          const float s = vis ? sacc[ri][u] : -INFINITY;
+          sacc[ri][u] = s;
+          tmax = fmaxf(tmax, s);
+        }
+        tmax = fmaxf(tmax, i2_row_xor<1>(tmax));
+        tmax = fmaxf(tmax, i2_row_xor<2>(tmax));
+        tmax = fmaxf(tmax, i2_row_xor<4>(tmax));
+        tmax = fmaxf(tmax, i2_row_xor<8>(tmax));
+        float o_scale = 1.0f, psum = 0.f;
+        float p[4] = {0.f, 0.f, 0.f, 0.f};
+        if (tmax > -INFINITY) {
+          const float m_new = fmaxf(m_run[ri], tmax);
+          o_scale = (m_run[ri] == -INFINITY) ? 0.f : __expf(m_run[ri] - m_new);
+          m_run[ri] = m_new;
+  #pragma unroll
+          for (int u = 0; u < 4; ++u) {
+            p[u] =
+                (sacc[ri][u] == -INFINITY) ? 0.f : __expf(sacc[ri][u] - m_new);
+            psum += p[u];
+          }
+        }
+        l_run[ri] = fmaf(l_run[ri], o_scale, psum);
+  #pragma unroll
+        for (int d = 0; d < 8; ++d) o_acc[ri][d] *= o_scale;
+        pk[ri][0] = i2_pack(p[0], p[2]);
+        pk[ri][1] = i2_pack(p[1], p[3]);
+      }
+    }
+    __syncthreads();  // (2) every QK reader of the buffer is done;
+                      // probabilities visible
+  #pragma unroll
+    for (int u = 0; u < NVR; ++u) {
+      const int mp = (tid >> 4) + RGS * u;
+      const uint4 va = vra[u], vb = vrb[u];
+      uint4 lo4, hi4;
+      lo4.x = (va.x & 0xFFFFu) | (vb.x << 16);
+      lo4.y = (va.x >> 16) | (vb.x & 0xFFFF0000u);
+      lo4.z = (va.y & 0xFFFFu) | (vb.y << 16);
+      lo4.w = (va.y >> 16) | (vb.y & 0xFFFF0000u);
+      hi4.x = (va.z & 0xFFFFu) | (vb.z << 16);
+      hi4.y = (va.z >> 16) | (vb.z & 0xFFFF0000u);
+      hi4.z = (va.w & 0xFFFFu) | (vb.w << 16);
+      hi4.w = (va.w >> 16) | (vb.w & 0xFFFF0000u);
+      *reinterpret_cast<uint4*>(sV + mp * kI2D + cc * 4) = lo4;
+      *reinterpret_cast<uint4*>(sV + mp * kI2D + kI2D / 2 + cc * 4) = hi4;
+    }
+    // the K and V rows of the next tile: the K rows are consumed at the start
+    // of the next iteration, the V rows after its QK; both loads hide behind PV
+    if (tile + 1 < t1) load_k(tile + 1);
+    if (tile + 1 < t1) load_v(tile + 1);
+    __syncthreads();  // (3) V tile visible
+
+    // ---- O += P V.  Pair m of a row sits in lane m % 16 of its 16-lane row
+    // (pk[ri][m / 16]): DPP row_share hands it to the whole row, the same
+    // (pair, V pair) dot2s in the same order as i2_tile_kernel
+    auto pv_pair = [&](auto mc) {
+      constexpr int m = decltype(mc)::value;
+      const uint4 va = *reinterpret_cast<const uint4*>(sV + m * kI2D + kg * 4);
+      const uint4 vb =
+          *reinterpret_cast<const uint4*>(sV + m * kI2D + kI2D / 2 + kg * 4);
+  #pragma unroll
+      for (int ri = 0; ri < RPT; ++ri) {
+        const uint32_t pwd = i2_row_share<(m & 15)>(pk[ri][m >> 4]);
+        o_acc[ri][0] = i2_dot2(pwd, va.x, o_acc[ri][0]);
+        o_acc[ri][1] = i2_dot2(pwd, va.y, o_acc[ri][1]);
+        o_acc[ri][2] = i2_dot2(pwd, va.z, o_acc[ri][2]);
+        o_acc[ri][3] = i2_dot2(pwd, va.w, o_acc[ri][3]);
+        o_acc[ri][4] = i2_dot2(pwd, vb.x, o_acc[ri][4]);
+        o_acc[ri][5] = i2_dot2(pwd, vb.y, o_acc[ri][5]);
+        o_acc[ri][6] = i2_dot2(pwd, vb.z, o_acc[ri][6]);
+        o_acc[ri][7] = i2_dot2(pwd, vb.w, o_acc[ri][7]);
+      }
+    };
+    [&]<int... M>(std::integer_sequence<int, M...>) {
+      (pv_pair(std::integral_constant<int, M>{}), ...);
+    }(std::make_integer_sequence<int, 32>{});
+  }
+
+  // ---- epilogue
+  #pragma unroll
+  for (int ri = 0; ri < RPT; ++ri) {
+    float l = l_run[ri];
+    l += i2_xor(l, 1);
+    l += i2_xor(l, 2);
+    l += i2_xor(l, 4);
+    l += i2_xor(l, 8);
+    const int tq = tq0 + ri / G;
+    if (tq >= ntok) continue;
+    const int tg = qs + i0 + tq;
+    const int hq = kvh * G + ri % G;
+    if (ts.n_active == 1) {
+      const float sink = (float)a.sink[(int64_t)tg * a.sink_stride + hq];
+      const float m = m_run[ri];
+      const float mg = fmaxf(m, sink);
+      const float w = (m == -INFINITY) ? 0.f : __expf(m - mg);
+      const float den = fmaf(l, w, __expf(sink - mg));
+      const float f = w / den;
+      float o[8];
+  #pragma unroll
+      for (int d = 0; d < 8; ++d) o[d] = o_acc[ri][d] * f;
+      if (a.gate != nullptr) {
+        const uint4 gr = *reinterpret_cast<const uint4*>(
+            a.gate + (int64_t)tg * a.gate_stride + hq * kI2D + kg * 8);
+        o[0] *= i2_sigmoid(i2_lo(gr.x));
+        o[1] *= i2_sigmoid(i2_hi(gr.x));
+        o[2] *= i2_sigmoid(i2_lo(gr.y));
+        o[3] *= i2_sigmoid(i2_hi(gr.y));
+        o[4] *= i2_sigmoid(i2_lo(gr.z));
+        o[5] *= i2_sigmoid(i2_hi(gr.z));
+        o[6] *= i2_sigmoid(i2_lo(gr.w));
+        o[7] *= i2_sigmoid(i2_hi(gr.w));
+      }
+      *reinterpret_cast<uint4*>(a.out + (int64_t)tg * a.out_stride + hq * kI2D +
+                                kg * 8) =
+          make_uint4(i2_pack(o[0], o[1]), i2_pack(o[2], o[3]),
+                     i2_pack(o[4], o[5]), i2_pack(o[6], o[7]));
+    } else {
+      const int64_t row =
+          ((int64_t)a.tile_row0 + (int64_t)split * a.T + tg) * a.nh + hq;
+      float* po = a.part_o + row * kI2D + kg * 8;
+      *reinterpret_cast<float4*>(po) =
+          make_float4(o_acc[ri][0], o_acc[ri][1], o_acc[ri][2], o_acc[ri][3]);
+      *reinterpret_cast<float4*>(po + 4) =
+          make_float4(o_acc[ri][4], o_acc[ri][5], o_acc[ri][6], o_acc[ri][7]);
+      if (kg == 0)
+        *reinterpret_cast<float2*>(a.part_ml + row * 2) =
+            make_float2(m_run[ri], l);
+    }
+  }
+}
+
 // ------------------------------- split combine -----------------------------
 // Grid (ceil(max_q / 16), H_kv, R), block 128: wave g merges the split partials
 // of head g of the kv head, one token at a time; lane l owns the head dims
@@ -1937,17 +2494,15 @@ void inkling2_kv_prep(torch::Tensor xk, torch::Tensor xv,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void inkling2_attention(torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
-                        std::optional<torch::Tensor> gate,
-                        torch::Tensor q_scale, torch::Tensor rel_scale,
-                        torch::Tensor rel_proj_t, torch::Tensor positions,
-                        torch::Tensor kv_cache, torch::Tensor block_table,
-                        torch::Tensor seq_lens, torch::Tensor query_start_loc,
-                        torch::Tensor out, torch::Tensor workspace,
-                        int64_t window, int64_t rel_extent, bool log_scale,
-                        double log_alpha, double log_n_floor, double q_clip,
-                        double rel_clip, int64_t max_query_len,
-                        int64_t splits_decode, int64_t splits_tile) {
+void inkling2_attention(
+    torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
+    std::optional<torch::Tensor> gate, torch::Tensor q_scale,
+    torch::Tensor rel_scale, torch::Tensor rel_proj_t, torch::Tensor positions,
+    torch::Tensor kv_cache, torch::Tensor block_table, torch::Tensor seq_lens,
+    torch::Tensor query_start_loc, torch::Tensor out, torch::Tensor workspace,
+    int64_t window, int64_t rel_extent, bool log_scale, double log_alpha,
+    double log_n_floor, double q_clip, double rel_clip, int64_t max_query_len,
+    int64_t splits_decode, int64_t splits_tile, int64_t tile_impl) {
   int bs_shift;
   i2_check_kv_cache(kv_cache, bs_shift);
   const int nkv = (int)kv_cache.size(1);
@@ -2016,6 +2571,10 @@ void inkling2_attention(torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
                   splits_tile >= 1 && splits_tile <= kI2MaxSplits,
               "splits_decode must be in [0, ", kI2MaxSplits,
               "], splits_tile in [1, ", kI2MaxSplits, "]");
+  TORCH_CHECK(
+      tile_impl == 0 || tile_impl == 1,
+      "tile_impl must be 0 (i2_tile_kernel) or 1 (i2_tile_pipe_kernel), got ",
+      tile_impl);
   const bool fused = S_A == 0;
   const int tiles = (int)((max_query_len + kI2BR - 1) / kI2BR);
   const bool has_tile = max_query_len > 1;
@@ -2084,23 +2643,26 @@ void inkling2_attention(torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
   const dim3 grid_b(tiles, nkv * S_B, R);
   const dim3 grid_c(tiles, nkv, R);
   if (R == 0) return;
-  #define I2_ATTN_LAUNCH(GG)                                          \
-    do {                                                              \
-      if (fused) {                                                    \
-        i2_decode_fused_kernel<GG, kI2FusedWaves>                     \
-            <<<grid_f, kI2FusedWaves * 32, 0, stream>>>(a);           \
-      } else {                                                        \
-        i2_decode_kernel<GG><<<grid_a, 128, 0, stream>>>(a);          \
-      }                                                               \
-      C10_CUDA_KERNEL_LAUNCH_CHECK();                                 \
-      if (has_tile) {                                                 \
-        i2_tile_kernel<GG><<<grid_b, kI2TileThreads, 0, stream>>>(a); \
-        C10_CUDA_KERNEL_LAUNCH_CHECK();                               \
-      }                                                               \
-      if (need_ws) {                                                  \
-        i2_combine_kernel<GG><<<grid_c, 128, 0, stream>>>(a);         \
-        C10_CUDA_KERNEL_LAUNCH_CHECK();                               \
-      }                                                               \
+  #define I2_ATTN_LAUNCH(GG)                                                 \
+    do {                                                                     \
+      if (fused) {                                                           \
+        i2_decode_fused_kernel<GG, kI2FusedWaves>                            \
+            <<<grid_f, kI2FusedWaves * 32, 0, stream>>>(a);                  \
+      } else {                                                               \
+        i2_decode_kernel<GG><<<grid_a, 128, 0, stream>>>(a);                 \
+      }                                                                      \
+      C10_CUDA_KERNEL_LAUNCH_CHECK();                                        \
+      if (has_tile) {                                                        \
+        if (tile_impl == 1)                                                  \
+          i2_tile_pipe_kernel<GG><<<grid_b, kI2TileThreads, 0, stream>>>(a); \
+        else                                                                 \
+          i2_tile_kernel<GG><<<grid_b, kI2TileThreads, 0, stream>>>(a);      \
+        C10_CUDA_KERNEL_LAUNCH_CHECK();                                      \
+      }                                                                      \
+      if (need_ws) {                                                         \
+        i2_combine_kernel<GG><<<grid_c, 128, 0, stream>>>(a);                \
+        C10_CUDA_KERNEL_LAUNCH_CHECK();                                      \
+      }                                                                      \
     } while (0)
   switch (G) {
     case 1:

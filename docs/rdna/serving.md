@@ -69,7 +69,8 @@ From [`rdna_launcher_common.sh`](../../tools/rdna/rdna_launcher_common.sh), unle
 | `VLLM_WORKER_MULTIPROC_METHOD` | `spawn` | Leave it. |
 | `ROCPROFILER_REGISTER_ENABLED` | `0` | Set `1` only while attaching a GPU profiler. |
 | `VLLM_BATCH_INVARIANT` | `0` | Leave it for serving. |
-| `VLLM_CACHE_ROOT` and the Triton / Inductor / extension caches | `<repo>/cache/...` | Stale `vllm serve` processes are killed only when they carry the same `VLLM_CACHE_ROOT`. |
+| `VLLM_CACHE_ROOT` | `<repo>/cache/vllm-<HIP_VISIBLE_DEVICES, commas as _>-<PORT>` | Stale `vllm serve` processes are killed only when they carry the same `VLLM_CACHE_ROOT`. The default is per GPU set and port, so two servers of one checkout on different cards boot side by side without killing each other (a relaunch on the same cards and port still replaces its predecessor). An explicit `VLLM_CACHE_ROOT` is used as given: every server carrying that exact root is stopped at launch, so give parallel servers different roots. |
+| Triton / Inductor / extension caches | `<repo>/cache/...` | Shared by the servers of one checkout. |
 | `PYTHONPATH` | the repo root | So this checkout wins over an installed copy. |
 
 The command always includes `--dtype float16`. `TUNABLEOP` defaults to `1`: the launcher hashes `librocblas.so.5` and selects a profile under [`tunableop/`](../../tunableop/). `TUNABLEOP=0` turns that off. `TUNABLEOP_PROFILE=<name>` forces a named profile and refuses to start when the name is missing. `TUNABLEOP_PREFER=<name>` is the soft form: it applies only when that profile is registered for the loaded library's hash, otherwise the launcher warns and auto-selects (recipes `27b-hi2-tp2` and `27b-hi2-tp2-mtp2` set it to their opt-in derived profile; `TUNABLEOP_PREFER=` empty gives the canonical rows). `P2P=0` turns the RDNA all-reduce off and sets `NCCL_P2P_DISABLE=1` (RCCL over host shared memory) for a host whose PCIe peer-to-peer is broken.

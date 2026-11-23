@@ -63,7 +63,7 @@ inkling2_attention(Tensor q, Tensor rel, Tensor sink, Tensor? gate,
                    int window, int rel_extent, bool log_scale,
                    float log_alpha, float log_n_floor, float q_clip,
                    float rel_clip, int max_query_len,
-                   int splits_decode, int splits_tile) -> ()
+                   int splits_decode, int splits_tile, int tile_impl) -> ()
 ```
 
 | Argument | Contract |
@@ -88,6 +88,7 @@ inkling2_attention(Tensor q, Tensor rel, Tensor sink, Tensor? gate,
 | `q_clip`, `rel_clip` | `22.627416997969522`, `8.0`. |
 | `max_query_len` | host upper bound of `q_len` (`1` for a pure decode batch; it must be `>=` the real maximum, otherwise longer requests are not computed). |
 | `splits_decode`, `splits_tile` | split-K factors, `splits_decode` in `[0, 256]` and `splits_tile` in `[1, 256]`: upper bounds on the partials per decode request / per tile CTA row (section 5). `splits_decode == 0` runs the decode requests in the fused kernel: no partial rows, no combine launch (section 11). |
+| `tile_impl` | `0` = the shipped tile kernel `i2_tile_kernel`, `1` = the pipelined `i2_tile_pipe_kernel` for the `q_len >= 2` requests (section 12); bit-identical outputs. Any other value is rejected. The Python wrapper takes it as the keyword `tile_impl`; `None` (the default) follows `VLLM_INKLING2_PREFILL_ATTN_TILE` (default on) and keeps the shipped kernel for sliding layers of at most 32 query tokens (section 12.3). |
 
 `nh` / `H_kv` is the GQA group size `g in {1, 2, 3, 4}`; the model has `g = 3` at
 every TP degree (24/8, 12/4, 6/2).
@@ -253,7 +254,7 @@ ops.inkling2_attention(q, rel, sink, gate, q_scale, rel_scale, rel_proj_t,
                        kv_md.query_start_loc, attn_out, workspace,
                        window, rel_extent, not is_sliding, 0.1, 8192.0,
                        qk_l2_clip_threshold, rel_l2_clip_threshold,
-                       max_query_len, splits_decode, splits_tile)
+                       max_query_len, splits_decode, splits_tile)  # tile_impl: the flag's default
 out = o_proj.linear(attn_out)
 ```
 
@@ -276,9 +277,10 @@ same ring rows hold the history and, for a long chunk, its tail).
   waves per `(request, q head)` walks the key range, merges the wave partials in LDS
   and writes the output row: no workspace rows and no combine launch (section 11).
 * **Prefill / chunked prefill / spec-verify** (`q_len >= 2`): one 128-thread CTA per
-  (16 query tokens, kv head, split) walks 64-key tiles in LDS (255 VGPRs, 55.5 KB
-  LDS at `g = 3`); `splits_tile` splits the key range of one CTA row when the grid
-  would otherwise be smaller than the GPU.
+  (16 query tokens, kv head, split) walks 64-key tiles in LDS (shipped kernel,
+  `tile_impl == 0`: 255 VGPRs, 55.5 KB LDS at `g = 3`; the pipelined kernel of section
+  12, the default: 244 VGPRs, 32.5 KB); `splits_tile` splits the key range of one CTA
+  row when the grid would otherwise be smaller than the GPU.
 * **Split policy** (`inkling2_attention_splits`, measured within about 3% of the best
   swept value on one V620): `keys = window + 16` (sliding) or `max_seq_len` (full),
   `groups = R * H_kv`; `splits_decode = min(max(ceil(256 / groups), 1),
@@ -558,7 +560,9 @@ Reading the table:
   128k) because a 16-token tile computes 16 rows for 4 live ones. A 4-token tile for
   `q <= 4` would remove most of that [INFERENCE: ~3-4x less tile compute].
 * **Prefill** runs at 11-13 TFLOP/s, 13.2 TFLOP/s for a 1024-token chunk at 128k depth
-  (124 ms per full-layer visit at TP=1).
+  (124 ms per full-layer visit at TP=1) with the shipped tile kernel; the pipelined
+  kernel (section 12, the default) runs a 1024-token chunk at 18.6 - 18.8 TFLOP/s at
+  100k - 144k of context.
 * `kv_prep` / `sconv` replace 1.4-3.4 ms of torch gather / conv / scatter work with
   4.2-5.0 us (decode, state write fused) and 24-25 us (1024 tokens, including the
   separate `inkling2_conv_state_write` launches). The conv rows were re-measured with
@@ -660,9 +664,10 @@ Other measurements on the same kernel:
   head-fastest decode grid are measured choices, not derived ones [INFERENCE for
   other parts]. Warm numbers below about 16k context are partly Infinity-Cache hits
   (128 MB L3); use the `cold` columns for DRAM-bound claims.
-* **Long-context prefill is the remaining lever**: the tiled kernel reaches about 11
-  TFLOP/s (27% of the `V_DOT2` peak of about 42 TFLOP/s, [INFERENCE for the peak]),
-  so a 1024-token chunk on a full layer costs about 125 ms at 128k depth (TP=1) and
+* **Long-context prefill is the remaining lever**: the shipped tiled kernel reaches
+  about 11 - 13 TFLOP/s (27% of the `V_DOT2` peak of about 42 TFLOP/s, [INFERENCE for
+  the peak]; the pipelined kernel of section 12 reaches 18.6 - 20.2), so a 1024-token chunk
+  on a full layer costs about 125 ms at 128k depth (TP=1) with the shipped kernel and
   full-attention prefill is quadratic in the prompt. A 256-thread CTA (3 rows per
   thread, 143 VGPRs, twice the resident waves) was built and measured: it is 12-13%
   slower on prefill (section 9), so the shipped kernel keeps 128 threads
@@ -938,3 +943,321 @@ mode-`2` row is 0.2 - 0.25 ms above that prediction, less than the A / A spread 
 * Timings come from a box with other users on it (load average 10 - 12): the per-call
   and chain numbers are best-of-N with cold caches, the end-to-end rows best of three,
   and the A / B pairs agree within 0.07 ms.
+
+## 12. Pipelined tile kernel (`tile_impl == 1`)
+
+With `tile_impl == 1` every request of two or more query tokens of `inkling2_attention`
+runs `i2_tile_pipe_kernel<G>` instead of `i2_tile_kernel<G>`. It performs the same fp32
+and dot2 operations in the same order, so its output is bit-identical to the shipped
+kernel for finite inputs (every case of the batteries of section 12.5 and every attention
+call of a real-model prefill), and it is 1.25x - 1.5x faster per visit (18.9 against 12.9
+TFLOP/s for a 1024-token chunk at 64k of context). The decode kernels, the fused decode
+kernel, the split-K combine kernel and the shipped tile kernel (`tile_impl == 0`) were not
+edited. At TP=1, a 1024-token chunk on a 64k-token cached prefix takes 12.4% less wall
+time and a 96k-token fill runs 12% faster (section 12.4).
+
+### 12.1 Why
+
+At depth the full-attention layers dominate a prefill chunk: 8 visits per chunk (4 layers,
+two loop passes), 889 of 1764 ms at 100k of context in the profile of
+`inkling2-prefill-profile.md` section 3.3, at 12 - 13.5 TFLOP/s, 41 - 44% of the dot2 peak
+(31.2 TFLOP/s at 1824 MHz). The shipped kernel is not arithmetic-bound. Ablations of a
+copy of it (one phase removed, wrong results, timing only; one full visit, 1024 queries
+x 64k keys = 62.7 ms, `var1.log`): without the barriers 60.2 ms (4%), without the QK dot
+products 41.4 ms (34%), without the PV dot products 44.2 ms (29%), without the K / V
+staging (global load, page lookup, LDS stores) 48.0 ms (23%). The structure behind it:
+255 VGPRs and 55.5 KB of LDS per CTA, two CTAs per WGP (`inkling2-prefill-profile.md`
+section 7.2: a probe that only changed the LDS allocation moved it from 2 to 4 CTAs per
+WGP and saved 15% to 28%); the V tile is stored in a layout whose b128 accesses are
+2-way bank-conflicted; every key row staged pays a page lookup, 64-bit address math and a
+predicate; interior tiles of a long context still evaluate the relative bias (a dead
+`rel_extent` = 1024 window) and the mask.
+
+### 12.2 Design
+
+`i2_tile_pipe_kernel<G>` (same grid, block, prologue and epilogue as the shipped kernel):
+
+* **One LDS buffer for K and V, the probabilities in registers.** The K tile of a
+  64-key iteration and its V tile share one 17.4 KB buffer (V is stored after QK has read
+  K; four barriers per tile). The probabilities never visit LDS: pair `m` of a row (keys
+  `m` and `m + 32`, two fp16 in one dword) sits in lane `m % 16` of the row's 16 lanes,
+  and DPP `row_share` hands it to the lanes of the row for the PV dot2s (no `sP` tile, no
+  P store or load). LDS per CTA at `G = 3`: 55,552 -> 32,512 B, four CTAs per WGP
+  instead of two (4 x 32,512 B = 130,048 B of the 131,072 B of a WGP).
+* **Prefetch into registers.** The K and V rows of tile `i + 1` are loaded during PV(i)
+  (the K rows are stored at the top of the next iteration, the V rows after its QK), so
+  no global-load latency is exposed in steady state; the page table of a tile is double
+  buffered by tile parity.
+* **Staging diet.** With a cache block of at least 64 tokens the 64 aligned keys of a tile
+  share one page: one scalar page (`readfirstlane`), 32-bit row offsets (guarded by
+  `kv_s2 < 2^24` halves) and no per-key predicate in the interior tiles. Edge tiles and
+  small cache blocks (`bs_shift < 6`) take the shipped per-key path.
+* **Dead work skipped, bit for bit.** A tile whose (row, key) distances are all
+  `>= rel_extent` skips the relative bias (`fmaf(s, scale, 0)`, as the shipped kernel
+  computes it for `bias == 0`); a tile whose 64 keys are visible to every row of a full
+  16-token block skips the mask and the `-inf` selects (the same fp32 operations on finite
+  scores).
+* **Cheaper cross-lane work.** The row max crosses the 16 lanes of a row with DPP
+  `row_xmask` instead of `ds_bpermute` (max is exact in any order); the V tile keeps the
+  two 4-dword halves of a lane's 8 dimensions in two contiguous runs, which removes the
+  bank conflict of the interleaved layout; the sink logits are read in the epilogue
+  instead of being held in `RPT` registers across the loop (this removed the 6 spills of
+  an earlier build).
+
+Resources of the final build (`-Rpass-analysis=kernel-resource-usage`, gfx1030):
+
+| G | pipelined: VGPR / scratch / waves per SIMD / LDS | shipped: VGPR / scratch / waves per SIMD / LDS |
+| --- | --- | --- |
+| 1 | 221 / 0 / 4 / 22,784 B | 159 / 0 / 3 / 41,216 B |
+| 2 | 216 / 0 / 4 / 27,648 B | 211 / 0 / 2 / 48,384 B |
+| 3 (Inkling-2-Mini) | 244 / 0 / 4 / 32,512 B | 255 / 0 / 2 / 55,552 B |
+| 4 | 256 / 116 B (84 spilled VGPRs) / 3 / 37,376 B | 256 / 184 B (54 spilled) / 2 / 62,720 B |
+
+The waves-per-SIMD column is the compiler's occupancy, not a hardware counter
+**[INFERENCE for the hardware residency: 4 x 32,512 B fits the 128 KB of a WGP]**. `G = 4`
+is not a shape of the model; it is covered by the correctness batteries only.
+
+### 12.3 Flag and policy
+
+`VLLM_INKLING2_PREFILL_ATTN_TILE` (read once at import, `vllm/_custom_ops.py`; a captured
+CUDA graph bakes the kernel in):
+
+| Value | Tile kernel |
+| --- | --- |
+| `1` (default) | pipelined, except sliding layers of at most 32 query tokens |
+| `0` | shipped, for every call (byte-identical to the previous build's launches) |
+
+`ops.inkling2_attention(..., tile_impl=None)` takes the flag (keyword-only; `0` / `1`
+overrides it). The registered op takes `tile_impl` as its 25th argument, mandatory
+(`int tile_impl`, any other value than 0 / 1 is a `TORCH_CHECK` error); the grid, the
+split factors and the workspace do not depend on it.
+
+Sliding layers of at most 32 query tokens (at most two query tiles) keep the shipped
+kernel: with 32 CTAs of four or five key tiles each the call is latency-bound, and the
+pipelined kernel loses 1 - 13% there (section 12.4: 47.0 -> 53.0 us at 2 tokens, 72.6 ->
+77.9 us at 16, +1.8 us at 24, +0.9 us at 32; it wins from 48 tokens on). Full layers win at every
+measured size. The tile kernel serves only requests of two or more query tokens: prefill
+chunks, prefix-cache tails and draft verification; a pure decode batch never reaches it.
+
+### 12.4 Measurements
+
+One V620 (HIP 5), TP=1 shapes (24 q / 8 kv heads, `g = 3`, 64-token cache blocks,
+`window = 1024` on sliding layers), CUDA-graph replay, `splits = (32, 1)` (the shipped
+policy for a 1024-token chunk), shipped kernel as the in-process control of every row
+(`tile_bench.py`, scratch). TFLOP/s counts 4 x pairs x 128 x 24 FLOP.
+
+| Full layer, 1024 queries, keys | Shipped | Pipelined | Speedup |
+| ---: | ---: | ---: | ---: |
+| 1,024 (depth 0) | 565.7 us (11.40 TFLOP/s) | 399.7 us (16.13) | 1.42x |
+| 4,096 | 3,112 us (14.49) | 2,487 us (18.14) | 1.25x |
+| 16,384 | 14.77 ms (13.52) | 9.90 ms (20.18) | 1.49x |
+| 32,768 | 30.80 ms (13.18) | 21.04 ms (19.29) | 1.46x |
+| 65,536 | 63.31 ms (12.92) | 43.21 ms (18.94) | 1.47x |
+| 102,400 | 100.67 ms (12.74) | 68.37 ms (18.75) | 1.47x |
+| 147,456 | 144.47 ms (12.80) | 99.18 ms (18.64) | 1.46x |
+| Sliding layer (window 1024), 1024 queries, 2,048 keys | 1,035 us (12.45) | 761 us (16.94) | 1.36x |
+
+Every row is equal to the shipped output bit for bit (the bench compares them). A chunk
+visits 8 full and 40 sliding layers; the logs are `bench_final.log` and `bench_prod4.log`
+(four builds of the same kernel agree within 1 - 2%).
+
+Where the time went at 64k of context (one visit, 1024 queries; variants of the same
+kernel built one change at a time on the shipped source, every one bit-identical to it in
+the battery; `var1.log` - `var4.log`, `bench_prod4.log`):
+
+| Step | One visit at 64k | Change |
+| --- | ---: | ---: |
+| shipped | 62.2 - 62.9 ms (13.1 TFLOP/s) | |
+| relative-bias skip | 59.5 ms | -5% |
+| + one K / V buffer, register prefetch (LDS 39.4 KB) | 54.2 ms | -9% |
+| + scalar page, 32-bit offsets | 50.5 ms | -7% |
+| + DPP row max, conflict-free V layout, mask skip | 44.5 ms (18.4 TFLOP/s) | -12% |
+| + V prefetch beside K, P in registers (LDS 32.5 KB, 4 CTAs per WGP) | 42.7 ms (19.1 TFLOP/s) | -4% |
+
+On top of the 50.5 ms step the three single toggles measured alone: DPP row max -3.3%,
+V layout -5.6%, mask skip -4.4%. The final step alone costs 192 `v_mov_b32_dpp` per tile
+(the compiler does not fold `row_share` into the dot2) and saves 48 `ds_read_b128` and 12
+`ds_write_b32` per tile and thread plus the LDS capacity.
+
+Small query counts (policy splits as printed by the bench; the wrapper uses the shipped
+kernel on the rows marked "shipped"):
+
+| Layer | Query tokens | Keys | Policy | Shipped | Pipelined | Ratio | Wrapper |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | --- |
+| sliding | 2 | 2,048 | (0, 4) | 47.0 us | 53.0 us | 0.89x | shipped |
+| sliding | 8 | 2,048 | (0, 4) | 56.3 us | 63.2 us | 0.89x | shipped |
+| sliding | 16 | 2,048 | (0, 4) | 72.6 us | 77.9 us | 0.93x | shipped |
+| sliding | 24 | 2,048 | (0, 4) | 81.9 us | 83.7 us | 0.98x | shipped |
+| sliding | 32 | 2,048 | (0, 4) | 82.3 us | 83.2 us | 0.99x | shipped |
+| sliding | 48 | 2,048 | (0, 4) | 93.7 us | 85.2 us | 1.10x | pipelined |
+| sliding | 64 | 2,048 | (0, 4) | 114.6 us | 93.7 us | 1.22x | pipelined |
+| sliding | 128 | 2,048 | (0, 3) | 176.7 us | 143.2 us | 1.23x | pipelined |
+| full | 2 | 2,048 | (32, 8) | 50.4 us | 51.8 us | 0.97x | pipelined |
+| full | 8 | 4,096 | (32, 16) | 98.0 us | 81.9 us | 1.20x | pipelined |
+| full | 2 | 32,768 | (32, 16) | 498.8 us | 364.2 us | 1.37x | pipelined |
+| full | 8 | 32,768 | (32, 16) | 520.2 us | 388.8 us | 1.34x | pipelined |
+| full | 16 | 32,768 | (32, 16) | 573.6 us | 435.6 us | 1.32x | pipelined |
+| full | 32 | 32,768 | (32, 9) | 1,051 us | 760 us | 1.38x | pipelined |
+| full | 64 | 32,768 | (32, 5) | 2,251 us | 1,657 us | 1.36x | pipelined |
+| full | 256 | 32,768 | (32, 2) | 8,349 us | 5,777 us | 1.45x | pipelined |
+
+A sliding layer of few query tokens has 32 CTAs of four or five key tiles each: one lone
+CTA per CU, no other wave to hide a load or a DPP latency behind, so the saved
+instructions do not pay for the longer dependency chain **[INFERENCE for the cause]**.
+The same effect costs 3% on a full layer of 2 tokens and 2,048 keys (1.4 us), which the
+policy does not special-case.
+
+End to end (real checkpoint, TP=1, fp16, 1024-token chunks into a 101,376-token prompt,
+`profile_prefill2.py`, the shipped and the new run in the same tree and session; chunk
+wall time per step, profiled steps carry kernel tables):
+
+| Chunk | Depth | Shipped | Pipelined | Change |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0 | 873.2 ms | 868.9 ms | -0.5% |
+| 8 | 8,192 | 962.0 ms | 928.8 ms | -3.5% |
+| 16 | 16,384 | 1,029.6 ms | 976.2 ms | -5.2% |
+| 24 | 24,576 | 1,099.6 ms | 1,025.4 ms | -6.7% |
+| 32 | 32,768 | 1,167.3 ms | 1,071.8 ms | -8.2% |
+| 48 | 49,152 | 1,306.8 ms | 1,168.6 ms | -10.6% |
+| 64 | 65,536 | 1,445.7 ms | 1,266.0 ms | -12.4% |
+| 80 | 81,920 | 1,579.8 ms | 1,357.8 ms | -14.1% |
+| 97 | 99,328 | 1,724.1 ms | 1,455.5 ms | -15.6% |
+
+| Profiled step (attention kernel GPU time per chunk) | Shipped | Pipelined |
+| --- | ---: | ---: |
+| depth 0 | 35.1 ms | 25.1 ms |
+| depth 24,576 | 260.9 ms | 175.0 ms |
+| depth 65,536 | 592.8 ms | 407.2 ms |
+| depth 99,328 | 869.2 ms | 597.7 ms |
+
+The 97,280-token fill (the unprofiled chunks of the run: 95 steps of 1024 tokens) takes
+124.8 s (779.5 tok/s) with the shipped kernel and 111.4 s (873.0 tok/s) with the
+pipelined one: +12.0%. The two runs are 18 minutes apart on the same card; the gain at
+64k of context (12.4%) is far above the 4% run-to-run clock noise of the profile
+(`inkling2-prefill-profile.md`). A 1024-token chunk at depth 0 is unchanged within noise
+(the attention is 35 ms of 873 ms there).
+
+### 12.5 Verification
+
+**What is and is not bit-identical.** `i2_tile_pipe_kernel` computes the same products and
+sums in the same order as `i2_tile_kernel` (the dot2 chains, the online softmax, the fp16
+probability pairs, the epilogue), so for finite inputs the output equals the shipped
+kernel's bit for bit, in every split configuration of the battery below (`splits_tile` 1, 2,
+3 and 5, mixed `(4, 2)`; the same combine kernel runs after it). The shipped kernel's source
+text was not edited; the host function only selects between the two by `tile_impl`.
+
+**Oracle battery (scratch `tile_check.py`, final kernel text built as its own JIT library
+with the production flags, HIP 5).** 75 worlds of the shipped test file's adversarial
+generator (NaN-poisoned unused pages, spikes on both sides of the window / relative-bias
+boundary): prefill and mixed batches, 8 / 4 / 2 kv heads in both page layouts, `g = 1 / 2
+/ 4`, `splits_tile` 1 / 2 / 5 and `(4, 2)` mixed, block-outermost layers, eight
+`rel_extent` values (64 - 5000), no-gate / unsharp worlds, padded rows; six depth chunks
+(`q` x keys 1024 x 9000, 512 x 17000, 1000 x 25000, 257 x 4177, 1024 x 12000 with 3 splits, a
+1024-token sliding chunk at 5000 keys; shipped against variant only, the fp64 oracle is too
+slow there); and an alignment sweep (`q = 256`, 3000 + r keys for `r = 0..15`, window 0
+and 1024) that moves every tile, mask and bias boundary across all residues of the first
+row position. Result: the pipelined output equals the shipped output bit for bit in 75 of
+75 worlds; in the 37 worlds with an oracle its error against the fp64 reference is the
+shipped kernel's, digit for digit (worst `err/bound` 0.765 of the tolerance
+`8e-4 + 4e-3 * abs(ref)`). The same library called with `tile_impl = 0` equals the
+installed shipped op in 75 of 75 (`chk_prod7b.log`).
+
+**Hand mutants of the final kernel** (one exact-string edit each, its own JIT library, the
+same battery stopping at the first failing world; every one must fail):
+
+| Mutant | Edit | Killed by |
+| --- | --- | --- |
+| `rs_lane` | the DPP lane of probability pair `m`: `m & 15` -> `(m + 1) & 15` | sliding prefill, `err/bound` 3002 |
+| `pk_half` | the register of the pair: `pk[ri][m >> 4]` -> `pk[ri][(m >> 4) ^ 1]` | sliding prefill, 3281 |
+| `pack_swap_fast` | interior-tile pair `i2_pack(p[0], p[2])` -> `i2_pack(p[2], p[0])` | sliding prefill, 3611 |
+| `pack_swap_edge` | the same edit in the edge-tile path | sliding prefill, 3857 |
+| `pk1_key` | edge-tile pair `i2_pack(p[1], p[3])` -> `i2_pack(p[1], p[2])` | sliding prefill, 2554 |
+| `v_same_tile` | V prefetch of the next tile loads the current tile | sliding prefill, 3118 |
+| `msk_one_late` | mask skip `n0 + kI2BC - 1 <= p_first` -> `<= p_first + 1` | alignment sweep `q = 256`, 3006 keys (not by the 43 worlds before the sweep: the edit only matters for a first row position of 62 mod 64) |
+
+**Repo tests on the real build.** The shipped test file `tests/kernels/attention/test_inkling2_attn_rdna2.py` reaches
+the op through the wrapper, so with the default flag it runs the pipelined kernel (prefill,
+mixed split-K batches, group sizes, padded rows, a million-token full layer, CUDA-graph replay,
+fake-tensor tracing, the conv / kv-prep neighbours). On a
+`_rocm_C` rebuilt with this patch (HIP 5): 920 passed in 7 min 21 s, no failure, no skip, exit 0
+(the 911 tests of the file before this patch plus the 9 cases of `test_tile_impl_policy`).
+
+**Real checkpoint (TP=1, fp16, HIP 5; `nll_multi.py`, one engine, the shipped op and the
+JIT-built final kernel alternating in the order off, off, on, on, off, on).** Every call of
+the pipelined kernel also ran the shipped op on a copy of the inputs and the two outputs
+were compared bit for bit (shadow mode): 3,456 tile-kernel calls over the three prompts
+below, 0 mismatches. Teacher-forced NLL of the first N tokens of a natural text (the
+`docs/rdna2/inkling2-*.md` files concatenated), prefill in 1024-token chunks (so the chunks of N = 20,000 run at depths up to
+19k), mean |dlogp| between runs; the limit is the repository rule `2 * floor + 0.01` with
+the run-to-run floor of two shipped runs:
+
+| N | floor (off vs off) | on vs off | limit | |
+| ---: | --- | --- | ---: | --- |
+| 800 | 0.0248 / 0.0247 / 0.0247 | 0.0268 / 0.0277 / 0.0305 | 0.0596 | pass |
+| 3,000 | 0.0337 / 0.0348 / 0.0335 | 0.0353 / 0.0311 / 0.0328 | 0.0774 | pass |
+| 20,000 | 0.0354 / 0.0358 / 0.0350 | 0.0360 / 0.0367 / 0.0369 | 0.0808 | pass |
+
+The on-vs-off differences sit at the floor (two runs of the unchanged build differ by as
+much: the fp16 CAS accumulation of the expert GEMMs is not deterministic), as they must
+for a bit-identical kernel; the shadow comparison is the sensitive check. All on-vs-off
+means are also below the absolute limit 0.1054 of the 800-token TP=1 reference (floor
+0.0477).
+
+**Repository gate (`real_check.py`, TP=1, the rebuilt `_rocm_C`).**
+`tools/rdna/inkling2/real_check.py --nll-file nll_text.md --nll-tokens 800 --nll-against
+tp1_a_nll.json --nll-floor tp1_b_nll.json` (the two reference runs of the previous build
+give the floor, mean 0.0463; the tool's limit is `2 * floor + 0.01` = 0.1026, the lead's
+absolute limit 0.1054). Flag on (the default): 799 positions, mean |dlogp| 0.0429 against
+the reference (p99 0.3328, max 0.4689); flag off: 0.0416 (p99 0.2868, max 0.4299); the
+two new runs against each other, two processes: 0.0414. All at the floor, `NLL AGAINST
+PASS` twice (`rc_on.log`, `rc_off.log`, `python exit=0`).
+
+**Other gates.** Six-architecture compile of the final file (`gfx1030;gfx1100;gfx90a;gfx942;gfx950;gfx1200`,
+`-O2`, as in `inkling2-glue-kernels.md` section 7.3): exit 0 (the other architectures see
+the same empty stubs as before). `clang-format` 23.1.3 (repo style) leaves
+the `.cu` unchanged; `ruff` 0.17.2 passes the Python files; the CPU policy test
+`test_tile_impl_policy` (nine flag / window / query-length combinations and the 25-argument
+call) passes.
+
+### 12.6 Limits and risks
+
+* gfx1030 (RDNA2) only: the file is inside the `__HIP__RDNA2__` guard, other
+  architectures build the same empty stubs as before (six-architecture compile, section
+  12.5). The DPP `row_share` / `row_xmask` controls need gfx10+.
+* Bit-identical means the same fp32 operations on finite inputs. The mask-skip path
+  drops the `-inf` selects of the shipped kernel: a NaN or infinite score (a corrupted
+  cache) would be handled by the shipped selects and not by the interior-tile path.
+* `splits_tile > 1` selects the same kernel per split and is covered by the battery
+  (`splits_tile` 2 and 5 worlds, the chunk with 3 splits); the policy itself is unchanged.
+  Raising `splits_tile` to 3 - 4 for window-0 chunks of 32k keys or more makes a visit a
+  further 4.2 - 7.0% faster at 32k - 144k keys (`tile_bench.py`, scratch workspace; 1%
+  slower at 16k), but only 0.6 - 1.9% of a 1024-token chunk at 64k - 99k of context end to
+  end (the 97k-token fill 873 -> 874 - 883 tok/s, 0.9% in an interleaved in-process A/B;
+  chunks below 32k, where the rule does not fire, differ by up to 2.2% between two such
+  runs), needs a 31 - 44 MB larger workspace and changes the fp32 summation order. It is
+  not part of this patch.
+* `G = 4` spills 84 VGPRs (the shipped kernel 54) and was not timed; the model does not
+  use it **[INFERENCE: no regression expected from the occupancy gain, not measured]**.
+* The static code of the kernel is about 7.5k instructions; a further growth of the loop
+  would pressure the 32 KB instruction cache of a WGP **[INFERENCE]**.
+* The flag is read at import: a CUDA graph captured with one value keeps it.
+
+### 12.7 Reproduction
+
+The benches, batteries and end-to-end runs of this section used scratch scripts that are
+not part of the repository (box directory `~/w4a8_runs/inkling2-work/Inkling2PrefillAttn/`,
+`scripts/` and `logs/`); every GPU job was one `gpu_sub.sh` call on HIP 5. The repository
+side is `tests/kernels/attention/test_inkling2_attn_rdna2.py`, which runs the pipelined
+kernel by default (920 tests, section 12.5). The pipelined kernel was loaded for the
+bench, battery, mutant, shadow and end-to-end jobs as a JIT-built module of the very
+source text of this patch (`prod7e.cu` = `inkling2_attn_rdna2.cu` plus a pybind tail);
+the real `_rocm_C` rebuilt with this patch ran the test file and `real_check.py`.
+
+| What | Command (`TREE` = the tree under test) |
+| --- | --- |
+| Kernel table, section 12.4 | `tile_bench.py --cases 1024:1024:full,...,256:32768:full --variant new=prod7e.cu#1 --json out.json` |
+| Batteries | `tile_check.py --mod prod7e=prod7e.cu#1 --mod prod7eoff=prod7e.cu#0` |
+| Mutants | `tile_check.py --mod prod7e=prod7e.cu#1 --mod m_<name>=mutp/m_<name>.cu#1 ... --expect-fail m_<name>,... --quiet-mutants` |
+| End to end, section 12.4 | `profile_prefill2.py --scenarios depth --mnbt 1024 --max-model-len 110000 --fill 101376 --profile-at 0,24,64,97 [--attn-variant prod7e.cu]` |
+| NLL with shadow, section 12.5 | `nll_multi.py --variant prod7e.cu --nll-file depth_text.txt --nll-tokens 800,3000,20000 --seq off,off,on,on,off,on` |
+| Repository gate, section 12.5 | `tools/rdna/inkling2/real_check.py --nll-file nll_text.md --nll-tokens 800 --nll-against tp1_a_nll.json --nll-floor tp1_b_nll.json`, with `VLLM_INKLING2_PREFILL_ATTN_TILE=1` and `=0` |

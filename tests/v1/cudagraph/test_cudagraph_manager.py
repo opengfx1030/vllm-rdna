@@ -364,6 +364,7 @@ def _create_decode_vllm_config(
         speculative_config.use_gemma4_mtp.return_value = False
         speculative_config.num_speculative_tokens_per_batch_size = dynamic_spec_schedule
         speculative_config.enable_adaptive_verification = False
+        speculative_config.speculator_config.uses_adaptive_num_tokens = False
         vllm_config.speculative_config = speculative_config
     _split_capture_sizes(vllm_config, legacy_sizes=decode_sizes is None)
     return vllm_config

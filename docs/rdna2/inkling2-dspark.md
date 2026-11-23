@@ -7,6 +7,196 @@ repo's existing dense RDNA2 GEMM designs); PyTorch / CPU code exists only as the
 fp64 oracle in tests and tools.  Numbers below are copied from runs on the box
 (`par1-cs25`, b4 HIP 2, gfx1030) unless marked `[INFERENCE]`.
 
+## Run DSpark
+
+One command on one card (the checkpoint directory has to hold `mtp.safetensors`, the draft):
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1-dspark MODEL=/path/to/inkling2-mini \
+  VENV=/path/to/venv HIP_VISIBLE_DEVICES=3
+```
+
+The recipe is `inkling2-mini-tp1` plus `SEQS=2`, `MAXLEN=125000` and
+`SPEC_CONFIG='{"method":"dspark","num_speculative_tokens":7,"num_speculative_tokens_per_batch_size":[[1,2,2]]}'`:
+the model requires `num_speculative_tokens` 7 (the draft block is 8 rows) and the schedule is how many of
+them the engine verifies per step (2 for one or two requests, no draft above). Any key can be overridden
+after `RECIPE=`. Smoke test of the running server (text, image, prefix cache, stream, concurrent requests):
+`python tools/rdna/inkling2/serve_smoke.py --url http://127.0.0.1:18221`.
+
+| recipe | cards | what it is | one request decodes (mean of six kinds of text) |
+| --- | --- | --- | --- |
+| `inkling2-mini-tp1-dspark` | 1 | `inkling2-mini-tp1` with the draft, K = 2, `SEQS=2`, `MAXLEN=125000` | 1.31x (1.09x - 1.59x by kind) |
+| `inkling2-mini-tp1-dspark-adaptive` | 1 | that with adaptive K and a 32,768-id draft vocabulary, `MAXLEN=105000` | 1.51x (1.16x - 2.43x) |
+| `inkling2-mini-tp2-dspark` | 2 | `inkling2-mini-tp2` with the draft, K = 2, `SEQS=2`, `MAXLEN=780000` (`HIP_VISIBLE_DEVICES=4,5`) | 1.35x (1.15x - 1.62x) |
+
+The adaptive recipe takes a draft vocabulary: an ids file made once, on the CPU (27 s on the box, no GPU). Any code and
+prose that is not what you will serve will do, here the venv's python packages and this repository's docs:
+
+```bash
+python tools/rdna/inkling2/draft_vocab.py --ckpt /path/to/inkling2-mini --size 32768 \
+  --out ~/.cache/rdna/inkling2-mini-draft-vocab-32768.npy \
+  --code '/path/to/venv/lib/python3.12/site-packages/**/*.py' --prose 'docs/**/*.md'
+```
+
+and is started like the first one with `RECIPE=inkling2-mini-tp1-dspark-adaptive` (`DRAFT_VOCAB=/other/ids.npy`, as an
+argument or in the environment, names another file). Its `SPEC_CONFIG` adds
+`"speculator_options":{"adaptive_k":{},"draft_vocab":"<ids.npy>"}` and the schedule `[[1,2,7]]`: the scheduler picks the
+number of verified drafts (0 to 7) at every step from the acceptance it has seen, and the draft ranks only the listed ids.
+Neither changes the output (the target verifies every drafted token whatever the count; a token outside the list is never
+drafted, which costs acceptance only). TP=1 and greedy decoding only: the draft vocabulary is refused at TP > 1.
+
+### Measured on the final head
+
+One V620 alone (`par1-cs25` HIP 3), the `0fd3e424dc` build, one request at a time, temperature 0, 160 tokens; ms per token
+from the first streamed chunk to the last, mean over the prompts of a kind of text. "No draft" is the recipe with
+`SPEC_CONFIG=` (the same engine settings), and all three configurations pass `serve_smoke.py` (text, image, prefix cache,
+stream, two concurrent requests). Boot with warm caches: 42 s no draft, 50 s K = 2, 71 s adaptive with the vocabulary.
+
+Tuned prompts (the six kinds of text of the speculation profile, 3 prompts each: the ones the estimator defaults were
+tuned on):
+
+| text | no draft | K = 2 | adaptive + vocabulary | speed-up K = 2 | speed-up adaptive |
+| --- | --- | --- | --- | --- | --- |
+| chat | 17.53 | 15.36 | 14.58 | 1.14x | 1.20x |
+| code_gen | 17.55 | 14.27 | 12.97 | 1.23x | 1.35x |
+| code_edit | 18.10 | 11.99 | 10.00 | 1.51x | 1.81x |
+| prose | 17.59 | 16.08 | 15.11 | 1.09x | 1.16x |
+| structured | 17.61 | 12.00 | 10.25 | 1.47x | 1.72x |
+| rag | 18.04 | 11.35 | 7.42 | 1.59x | 2.43x |
+| mean of the six | 17.74 | 13.51 | 11.72 | 1.31x | 1.51x |
+
+Held-out prompts (new prompts of the same six kinds, 5 - 6 each: none was used to tune the estimator or to rank the
+vocabulary, and the quoted excerpts come from code and recipe files, not from the docs the vocabulary was ranked on):
+
+| text | no draft | K = 2 | adaptive + vocabulary | speed-up K = 2 | speed-up adaptive |
+| --- | --- | --- | --- | --- | --- |
+| chat | 17.61 | 16.59 | 15.98 | 1.06x | 1.10x |
+| code_gen | 17.64 | 15.12 | 14.62 | 1.17x | 1.21x |
+| code_edit | 18.16 | 11.59 | 9.28 | 1.57x | 1.96x |
+| prose | 17.65 | 15.85 | 15.38 | 1.11x | 1.15x |
+| structured | 17.66 | 13.16 | 11.87 | 1.34x | 1.49x |
+| rag | 18.00 | 11.63 | 8.10 | 1.55x | 2.22x |
+| mean of the six | 17.79 | 13.99 | 12.54 | 1.27x | 1.42x |
+
+The held-out means are 3 - 6 % slower than the tuned ones and every kind of text is still faster than no draft with both
+recipes; the adaptive recipe is ahead of K = 2 on every kind (the least on chat and prose, the most on rag). The in-process
+bench of the speculation profile gave 14.01 and 12.09 for the tuned means at K = 2 and adaptive + vocabulary.
+
+What the draft costs in context (the engine's own numbers at `SEQS=2`, 125,000 requested): the KV cache holds 185,568 tokens
+without the draft, 125,597 with K = 2 (weights +0.89 GiB, graphs 0.87 GiB against 0.29) and 106,267 with adaptive K and the
+vocabulary (weights +1.05 GiB, graphs 1.38 GiB: every width is captured, and the gathered head rows are 0.16 GiB). The
+recipes' `MAXLEN` (125000 and 105000) is the largest round number that boots, 0.5 % and 1 % under the cache: lower it if the
+engine refuses to start on another card (it reports the longest length that fits).
+
+### Lossless: the output stays inside the no-draft run-to-run noise
+
+The target verifies every drafted token, so the output is the target's own greedy path; what can differ is the fp16 rounding of a
+row computed in a verify step against the same row computed alone, and the no-draft engine does not reproduce itself bit for bit
+either (two captures of the same prompts differ, below). The floor is therefore the no-draft engine against itself, and the
+question is whether the draft engines stay inside it. Two checks on the final head.
+
+**Greedy outputs of the served engines** (the prompts of the tables above, 160 tokens, the no-draft engine captured twice):
+
+| comparison | identical, tuned (of 18) | median first divergence | identical, held-out (of 33) | median first divergence |
+| --- | --- | --- | --- | --- |
+| K = 2 against no draft | 5 | token 75 | 6 | token 67 |
+| adaptive + vocabulary against no draft | 3 | token 60 | 7 | token 69 |
+| no draft against no draft (floor) | 3 | token 100 | 9 | token 67 |
+
+Even two no-draft captures part on most prompts, at a near-tie of the model's own distribution. Before the first divergence the
+log-probability of the chosen token differs by (mean, p99, max) 0.0082, 0.097, 0.262 (K = 2) and 0.0082, 0.096, 0.221 (adaptive)
+against 0.0064, 0.072, 0.226 for the floor on the tuned prompts, and 0.0089, 0.091, 0.474 / 0.0091, 0.101, 0.465 against
+0.0073, 0.076, 0.407 on the held-out ones. At the first divergence the two tokens differ by 0.42 nats or less in the
+reference run's log-probability in every comparison but one (K = 2: 0.38 tuned, 0.41 held-out; adaptive 0.20, 0.42; floor 0.19,
+0.39). The exception is one position: against the second no-draft capture the K = 2 run parts on chat prompt 2 at token 119 with
+a gap of 1.45 nats (the two no-draft captures part on that prompt at token 33, and the K = 2 run followed the second one);
+against the first capture it has no such position. A single free-running position selected for being a near-tie cannot say
+whether this is more than the tail of the noise, which is what the second check measures.
+
+**Teacher-forced NLL** (`tools/rdna/inkling2/dspark_nll.py`): the tokens of a reference capture are forced through the
+in-process TP=1 engine (the recipe's settings, the draft on) and the raw log-probability the engine gives the forced token is
+recorded at every position, so every run sees the same context at every position and the differences are the engines'
+numerical differences alone, with no free-running selection. The first no-draft capture of the 18 tuned prompts, 2,880 tokens:
+
+| engine | NLL | mean dlogp | mean abs dlogp | p99 abs | max abs |
+| --- | --- | --- | --- | --- | --- |
+| no draft, run 1 (the reference) | 0.2727 | | | | |
+| no draft, run 2 (the floor) | 0.2717 | +0.0010 | 0.0123 | 0.128 | 0.488 |
+| K = 2 (1316 drafts, 1.19 accepted each) | 0.2720 | +0.0007 | 0.0114 | 0.125 | 0.316 |
+| adaptive + vocabulary (1102 drafts, 1.62 accepted each) | 0.2719 | +0.0007 | 0.0111 | 0.120 | 0.271 |
+
+The pass rule is mean abs dlogp <= 2 x floor + 0.01 = 0.0346, and both draft engines pass it with a mean, a p99 and a worst
+position at or below the floor's. Per kind of text the mean NLL of the three engines differs by 0.002 or less (chat 0.3863 /
+0.3865 / 0.3866 for run 1 / K = 2 / adaptive, code_gen 0.3226 / 0.3223 / 0.3217, code_edit 0.1281 / 0.1281 / 0.1267, prose
+0.3902 / 0.3884 / 0.3887, structured 0.2085 / 0.2073 / 0.2077, rag 0.2003 / 0.1995 / 0.2003).
+
+The same on 8,160 tokens: the 18 tuned prompts forced with the second no-draft capture (the one whose path the 1.45-nat position
+above lies on) and the 33 held-out prompts forced with their no-draft capture:
+
+| engine | NLL | mean dlogp | mean abs dlogp | p99 abs | max abs |
+| --- | --- | --- | --- | --- | --- |
+| no draft, run 1 (the reference) | 0.2642 | | | | |
+| no draft, run 2 (the floor) | 0.2644 | -0.0002 | 0.0115 | 0.127 | 0.900 |
+| K = 2 (3813 drafts, 1.14 accepted each) | 0.2640 | +0.0002 | 0.0113 | 0.128 | 0.410 |
+| adaptive + vocabulary (3306 drafts, 1.47 accepted each) | 0.2639 | +0.0003 | 0.0112 | 0.120 | 0.371 |
+
+The rule is 0.0330 here and both pass. Two no-draft runs differ by 0.90 nats at their worst position of the 8,160, so the
+tail of the noise reaches the order of the 1.45 nats seen at one free-running position, and the draft engines' worst
+positions (0.41, 0.37) are below it. Per kind of text the mean NLL of the draft engines is within 0.003 of the first no-draft
+run (chat 0.3722 / 0.3718 / 0.3704 for run 1 / K = 2 / adaptive, held-out rag 0.0782 / 0.0779 / 0.0781).
+
+`python tools/rdna/inkling2/dspark_nll.py run --refs <refs.json> --out <o.json> [--spec-config '<json>']` makes a run (a JSON
+list of `{name, prompt, ids}` references; no draft twice with `--reps 2` for the floor) and `compare` prints the table above.
+
+### TP=2
+
+`inkling2-mini-tp2-dspark` is the same line with the pair (`HIP_VISIBLE_DEVICES=2,3` on the box). On the final head it is up
+after 57 s and passes `serve_smoke.py` (the no-draft recipe, `SPEC_CONFIG=`, boots in 60 s and passes too). The draft costs
+0.77 GiB of weights (10.38 against 9.61 GiB per rank) and 0.57 GiB of graphs per rank, and the KV cache holds 790,241 tokens at
+`MAXLEN=780000` (1.01x; 1,072,761 tokens without the draft). Decode of one request on the tuned prompts (3 of each kind, 160
+tokens, ms per token; the adaptive column is `speculator_options {"adaptive_k":{}}` with the schedule `[[1,2,7]]` and
+`MAXLEN=500000`, no recipe):
+
+| text | no draft | K = 2 | adaptive, default cost table | speed-up K = 2 | speed-up adaptive |
+| --- | --- | --- | --- | --- | --- |
+| chat | 12.41 | 10.79 | 11.04 | 1.15x | 1.12x |
+| code_gen | 12.41 | 9.68 | 9.69 | 1.28x | 1.28x |
+| code_edit | 12.78 | 8.32 | 7.35 | 1.54x | 1.74x |
+| prose | 12.39 | 10.63 | 11.67 | 1.17x | 1.06x |
+| structured | 12.42 | 8.56 | 7.81 | 1.45x | 1.59x |
+| rag | 12.75 | 7.85 | 5.62 | 1.62x | 2.27x |
+| mean of the six | 12.53 | 9.31 | 8.86 | 1.35x | 1.41x |
+
+Adaptive K runs at TP=2 (all widths captured, 1.07 GiB of graphs per rank, 758,884 tokens of KV at `MAXLEN=500000`, smoke test
+passes) and is ahead of K = 2 on code_edit, structured and rag, level on code_gen and behind on chat and prose (+2 % and
++10 %, with 3 prompts each). The draft vocabulary is refused at TP > 1: the engine stops at load with `NotImplementedError: the
+draft_vocab option is not supported under tensor parallelism`.
+
+The policy's default step-cost table is the V620's at TP=1. The step time at TP=2 was measured from static-K runs (ms per token
+times tokens per step, mean of rag and chat; K = 4 - 6 interpolated between the K = 3 and K = 7 runs):
+
+| K | rows | TP=2 step ms | TP=1 table, ms |
+| --- | --- | --- | --- |
+| 0 | 1 | 12.58 | 18.13 |
+| 1 | 2 | 19.27 | 26.36 |
+| 2 | 3 | 20.93 | 30.03 |
+| 3 | 4 | 22.14 | 32.10 |
+| 4 | 5 | 23.53 (interpolated) | 34.17 |
+| 5 | 6 | 24.93 (interpolated) | 36.24 |
+| 6 | 7 | 26.32 (interpolated) | 38.31 |
+| 7 | 8 | 27.72 | 40.36 |
+
+Relative to K = 0 the two tables are close (step(K) / step(0) at K = 1, 2, 3, 7: 1.53, 1.66, 1.76, 2.20 at TP=2 against 1.45,
+1.66, 1.77, 2.23 at TP=1), which is probably why the default table still gains on average here **[INFERENCE]**. The
+`adaptive_k` fields take another table (`forward_ms` per K with the other fields at 0 uses the step times above as they are);
+that override was derived from these runs but not run end to end, so whether it removes the loss on chat and prose is not
+measured.
+
+Greedy outputs at TP=2 (18 prompts): identical for 5 (K = 2) and 5 (adaptive; 3 against the second capture) against 6 for no
+draft against itself, median first divergence token 35 - 55 in all pairs, mean abs log-probability difference before the
+divergence 0.0063 - 0.0073 (K = 2) and 0.0074 - 0.0080 (adaptive) against 0.0062 for the floor, largest near-tie gap 0.38, 0.33
+and 0.33. `dspark_nll.py` is TP=1 only, so there is no teacher-forced run at TP=2.
+
 ## Status
 
 | Item | State |
@@ -348,7 +538,10 @@ bf16 weights are converted at load).
   profile found for the fifth-row cost (the row policy picked the 8-row MoE instance from 5
   tokens, and the old mxfp8 kernel spilled registers; per-launch numbers there): the K table
   above was measured before it; the re-measurement on the merged tree is in "Merged tree"
-  below (K = 2 is the best verified width there, 1.24x at batch 1).
+  below (K = 2 is the best verified width there, 1.24x at batch 1).  Which K is best depends on the
+  content (K = 3 on chat, 7 on retrieval-style text): `speculator_options={"adaptive_k": {}}` lets the
+  scheduler pick it every step from the running acceptance, measurements in
+  `inkling2-speculation-profile.md` section 9.
 * `draft_logits.py` (`_assign_rows_kernel` / `_stale_drafts_kernel`) is runner-owned Triton
   used only for probabilistic drafting; greedy drafting (default) does not touch it.
 * Prefix-cache hits: the draft K/V blocks are cached with the target's, so a hit reads
@@ -555,11 +748,18 @@ Levers, by what the trace shows.  Done: the Markov chain stops at the schedule's
 verified K (`scheduled_draft_tokens`, `_markov_steps`; the tokens after it are never read: the
 runner passes `draft_tokens[:, :num_spec_tokens]` on), 0.13 ms per skipped step (measured
 above); its GPU oracle test (`test_the_markov_chain_stops_at_the_largest_verified_token`)
-passes.  Not done: an 8-bit copy of the LM head for the base sweep (about -1 ms per step, 3%,
-costs 0.46 GB and acceptance risk `[INFERENCE]`), a frequency-pruned draft vocabulary (about
--1.7 ms; needs an acceptance measurement on real outputs), graph capture limited to the widths
-the schedule produces (memory only).  The sweep is at the memory roofline, the layers are at
-250 - 395 GB/s: the draft is about 14% of a K = 7 step and the K = 2 / 3 gain is bounded by the
+passes.  Done since (`inkling2-speculation-profile.md` section 9): a frequency-pruned draft
+vocabulary as an explicit opt-in file (`speculator_options={"draft_vocab": "ids.npy"}`, made offline
+by `tools/rdna/inkling2/draft_vocab.py`; TP = 1, greedy), the whole draft's graph replay at K = 2
+falls from 4.47 to 2.37 ms with 32768 ids and the acceptance was measured on real outputs; and a
+content-adaptive number of verified drafts (`speculator_options={"adaptive_k": {}}`, scheduler side;
+`enable_adaptive_verification` is refused at config time: the Markov head keeps no per-position draft
+distribution for it).  Not done: an 8-bit copy of the LM head for the base sweep (about -1 ms per
+step at the full vocabulary, 0.17 ms with the pruned one; costs 0.46 GB and acceptance risk
+`[INFERENCE]`), one draft graph per verified K (the unused Markov steps, 0.2 - 0.45 ms), graph
+capture limited to the widths the schedule produces (memory only; the adaptive mode captures them
+all, +0.5 GiB).  The sweep is at the memory roofline, the layers are at 250 - 395 GB/s: the draft is
+about 14% of a K = 7 step at the full vocabulary and the K = 2 / 3 gain is bounded by the
 verification rows, not the draft.
 
 Bugs found on the merged tree: FULL capture of the draft (verify batches of 8 rows with the

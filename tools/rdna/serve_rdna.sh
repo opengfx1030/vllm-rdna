@@ -77,8 +77,26 @@ if [[ ! -r $recipe_file ]]; then
     exit 2
 fi
 
+# KEY=value arguments are already in effect while the recipe is sourced (it can
+# build a value from one, e.g. a path inside SPEC_CONFIG) and win again after it.
+if ((${#rdse_overrides[@]})); then
+    for _ov in "${rdse_overrides[@]}"; do
+        _key=${_ov%%=*}
+        [[ $_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || rdna_die "bad override '$_ov' (expected KEY=value)."
+        printf -v "$_key" '%s' "${_ov#*=}"
+    done
+fi
+
 # Caller-set variables win over recipe defaults, so snapshot every key the
 # recipe touches (values only, setness included) and re-apply after sourcing.
+# A recipe may build on another one with `source "$RDSE_RECIPES/<name>.env"`;
+# the keys of those files (and of the ones they build on) are snapshotted too.
+rdse_key_files=("$recipe_file")
+for ((_i = 0; _i < ${#rdse_key_files[@]} && _i < 8; _i++)); do
+    while IFS= read -r _base; do
+        rdse_key_files+=("$RDSE_RECIPES/$_base.env")
+    done < <(sed -nE 's/^[[:space:]]*source[[:space:]]+"[$]RDSE_RECIPES\/([A-Za-z0-9_-]+)\.env".*/\1/p' "${rdse_key_files[_i]}")
+done
 declare -A rdse_saved=()
 declare -a rdse_keys=()
 while IFS= read -r _key; do
@@ -87,7 +105,7 @@ while IFS= read -r _key; do
     if [[ -v $_key ]]; then
         rdse_saved[$_key]=${!_key}
     fi
-done < <(grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$recipe_file" | tr -d ' =')
+done < <(grep -ohE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "${rdse_key_files[@]}" | tr -d ' =')
 
 # shellcheck disable=SC1090
 source "$recipe_file"
@@ -242,6 +260,10 @@ if [[ -n $PCI_BUSES && $rdse_hip_explicit == 0 ]]; then
 elif [[ -n $PCI_BUSES ]]; then
     rdse_gpu_line="HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$GPUIDS} (PCI_BUSES='$PCI_BUSES' ignored: an explicit device list wins)"
 fi
+
+# VLLM_CACHE_ROOT defaults per device list and port, so the stale-server kill below
+# cannot reach a sibling server of this tree on other cards. An explicit one is kept.
+rdna_default_cache_root
 
 case $PLE in
     bf16)

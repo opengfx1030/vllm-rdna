@@ -11,6 +11,7 @@ they're used in every process. Custom speculators are registered with
 `register_speculative_method`.
 """
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, final, get_args
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -18,6 +19,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.v1.spec_decode.dynamic.adaptive import AdaptiveSpecTokens
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -133,6 +135,20 @@ class SpeculatorConfig:
         """The most requests the draft forward pass fits in
         max_num_batched_tokens, which limits max_num_active_seqs, or None if
         unlimited (e.g. when it's sized by the target's scheduled tokens)."""
+        return None
+
+    @property
+    def uses_adaptive_num_tokens(self) -> bool:
+        """Whether the scheduler picks the number of drafts each step verifies
+        from the running acceptance (`make_num_tokens_policy`); the batch-size
+        schedule, or `num_speculative_tokens`, then bounds it."""
+        return False
+
+    def make_num_tokens_policy(
+        self, max_tokens: Sequence[int]
+    ) -> "AdaptiveSpecTokens | None":
+        """The per-step policy for `uses_adaptive_num_tokens`, with
+        `max_tokens[b]` the most drafts a step of `b` requests may verify."""
         return None
 
     def hash_factors(self) -> list[Any]:

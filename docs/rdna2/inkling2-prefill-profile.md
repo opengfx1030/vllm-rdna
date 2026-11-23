@@ -268,6 +268,14 @@ arithmetic (int8 dot4, 2x the dot2 issue rate) moves these: **[INFERENCE]** 78 m
 
 ### 7.2 Attention at depth
 
+**Update (pipelined tile kernel).** The kernel analysed in this section is the shipped `i2_tile_kernel`. With
+`inkling2_attention(tile_impl = 1)` (the default, `VLLM_INKLING2_PREFILL_ATTN_TILE`) the same call runs
+`i2_tile_pipe_kernel`, a bit-identical restructuring built from these findings (one K / V buffer with register prefetch,
+probabilities in registers, one page per tile, f1, DPP row max, conflict-free V layout, mask skip; 244 VGPR, LDS 32.5 KB,
+4 CTAs per WGP): a full visit at q=1024 and 16k-144k of context runs at 18.6-20.2 TFLOP/s instead of 12.7-13.5, a 1024-token chunk on a 64k prefix
+takes 1,266 ms instead of 1,446 (-12.4 %), at 99k 1,455 instead of 1,724 (-15.6 %), and the 97k-token fill runs at 873
+instead of 779 tok/s (`inkling2-attn-kernels.md` section 12). The tables below are the measurements of the shipped kernel.
+
 Kernel `i2_tile_kernel<3>` (`csrc/rocm/inkling2_attn_rdna2.cu`:741-1171): 128 threads, 16 query tokens x G=3 heads = 48
 rows, 64-key tiles, 6 rows per thread, 24 QK scores and 8 output dims per thread, **255 VGPR, LDS 55,552 B per CTA**.
 The compiler reports occupancy 2 waves/SIMD; with 255 VGPR the register file would allow 4 (1024 VGPR per lane), so **LDS is the
@@ -410,6 +418,12 @@ activations; `int8_err_l6.log`): rel L2 shipped K-split fp16 1.05e-3, fp16 whole
 1.19e-2, per 32-group 1.57e-2, per-row 6.6e-2: int8 needs 16-groups and a real-activation check.
 
 ### 9.2 Attention tile (lever 2): tuned vs redesigned **[INFERENCE, not prototyped]**
+
+**Built** (`i2_tile_pipe_kernel`, `inkling2-attn-kernels.md` section 12): of the list below, the shared K / V buffer with
+register prefetch (b), the one-page staging (2) and f1 (3) went in, plus P in registers, DPP row max, a conflict-free V layout
+and the mask skip; 18.6-20.2 TFLOP/s at depth, 4 CTAs per WGP. The **[INFERENCE]** marks below are the estimates made before
+it was built; the redesign for 20 TFLOP/s (larger QK register tile, persistent CTAs, split count from the resident slots)
+was not attempted.
 
 Tuned current structure (target 16-18 TFLOP/s at depth): (1) LDS diet below 42.6 KB (3 CTAs per WGP, measured ceiling x1.15) or
 below 32 KB (4 CTAs, x1.28; 255 VGPR still allow 4 waves/SIMD). The 55.5 KB are sQ 13.1 + sK 17.4 + sV 16.4 + sP 6.9 + sRel 1.5
