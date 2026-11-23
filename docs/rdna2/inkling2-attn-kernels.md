@@ -561,7 +561,8 @@ Reading the table:
   `q <= 4` would remove most of that [INFERENCE: ~3-4x less tile compute].
 * **Prefill** runs at 11-13 TFLOP/s, 13.2 TFLOP/s for a 1024-token chunk at 128k depth
   (124 ms per full-layer visit at TP=1) with the shipped tile kernel; the pipelined
-  kernel (section 12, the default) runs the same chunk at 18-19 TFLOP/s.
+  kernel (section 12, the default) runs a 1024-token chunk at 18.6 - 18.8 TFLOP/s at
+  100k - 144k of context.
 * `kv_prep` / `sconv` replace 1.4-3.4 ms of torch gather / conv / scatter work with
   4.2-5.0 us (decode, state write fused) and 24-25 us (1024 tokens, including the
   separate `inkling2_conv_state_write` launches). The conv rows were re-measured with
@@ -665,7 +666,7 @@ Other measurements on the same kernel:
   (128 MB L3); use the `cold` columns for DRAM-bound claims.
 * **Long-context prefill is the remaining lever**: the shipped tiled kernel reaches
   about 11 - 13 TFLOP/s (27% of the `V_DOT2` peak of about 42 TFLOP/s, [INFERENCE for
-  the peak]; the pipelined kernel of section 12 reaches 18 - 19), so a 1024-token chunk
+  the peak]; the pipelined kernel of section 12 reaches 18.6 - 20.2), so a 1024-token chunk
   on a full layer costs about 125 ms at 128k depth (TP=1) with the shipped kernel and
   full-attention prefill is quadratic in the prompt. A 256-thread CTA (3 rows per
   thread, 143 VGPRs, twice the resident waves) was built and measured: it is 12-13%
@@ -949,7 +950,7 @@ With `tile_impl == 1` every request of two or more query tokens of `inkling2_att
 runs `i2_tile_pipe_kernel<G>` instead of `i2_tile_kernel<G>`. It performs the same fp32
 and dot2 operations in the same order, so its output is bit-identical to the shipped
 kernel for finite inputs (every case of the batteries of section 12.5 and every attention
-call of a real-model prefill), and it is 1.3x - 1.5x faster per visit (19.1 against 13.1
+call of a real-model prefill), and it is 1.25x - 1.5x faster per visit (18.9 against 12.9
 TFLOP/s for a 1024-token chunk at 64k of context). The decode kernels, the fused decode
 kernel, the split-K combine kernel and the shipped tile kernel (`tile_impl == 0`) were not
 edited. At TP=1, a 1024-token chunk on a 64k-token cached prefix takes 12.4% less wall
@@ -1033,8 +1034,8 @@ split factors and the workspace do not depend on it.
 
 Sliding layers of at most 32 query tokens (at most two query tiles) keep the shipped
 kernel: with 32 CTAs of four or five key tiles each the call is latency-bound, and the
-pipelined kernel loses 1 - 10% there (section 12.4: 46.9 -> 52.2 us at 2 tokens, 72.3 ->
-77.5 us at 16, +0.9 us at 24 and 32; it wins from 48 tokens on). Full layers win at every
+pipelined kernel loses 1 - 13% there (section 12.4: 47.0 -> 53.0 us at 2 tokens, 72.6 ->
+77.9 us at 16, +1.8 us at 24, +0.9 us at 32; it wins from 48 tokens on). Full layers win at every
 measured size. The tile kernel serves only requests of two or more query tokens: prefill
 chunks, prefix-cache tails and draft verification; a pure decode batch never reaches it.
 
@@ -1202,6 +1203,15 @@ for a bit-identical kernel; the shadow comparison is the sensitive check. All on
 means are also below the absolute limit 0.1054 of the 800-token TP=1 reference (floor
 0.0477).
 
+**Repository gate (`real_check.py`, TP=1, the rebuilt `_rocm_C`).**
+`tools/rdna/inkling2/real_check.py --nll-file nll_text.md --nll-tokens 800 --nll-against
+tp1_a_nll.json --nll-floor tp1_b_nll.json` (the two reference runs of the previous build
+give the floor, mean 0.0463; the tool's limit is `2 * floor + 0.01` = 0.1026, the lead's
+absolute limit 0.1054). Flag on (the default): 799 positions, mean |dlogp| 0.0429 against
+the reference (p99 0.3328, max 0.4689); flag off: 0.0416 (p99 0.2868, max 0.4299); the
+two new runs against each other, two processes: 0.0414. All at the floor, `NLL AGAINST
+PASS` twice (`rc_on.log`, `rc_off.log`, `python exit=0`).
+
 **Other gates.** Six-architecture compile of the final file (`gfx1030;gfx1100;gfx90a;gfx942;gfx950;gfx1200`,
 `-O2`, as in `inkling2-glue-kernels.md` section 7.3): exit 0 (the other architectures see
 the same empty stubs as before). `clang-format` 23.1.3 (repo style) leaves
@@ -1219,11 +1229,35 @@ call) passes.
   cache) would be handled by the shipped selects and not by the interior-tile path.
 * `splits_tile > 1` selects the same kernel per split and is covered by the battery
   (`splits_tile` 2 and 5 worlds, the chunk with 3 splits); the policy itself is unchanged.
-  Raising `splits_tile` to 3 - 4 for window-0 chunks of 32k keys or more saves a further
-  4.5 - 5% per visit on top of this kernel (`tile_bench.py`, measured with a scratch
-  workspace) but changes the fp32 summation order, so it is not part of this patch.
+  Raising `splits_tile` to 3 - 4 for window-0 chunks of 32k keys or more makes a visit a
+  further 4.2 - 7.0% faster at 32k - 144k keys (`tile_bench.py`, scratch workspace; 1%
+  slower at 16k), but only 0.6 - 1.9% of a 1024-token chunk at 64k - 99k of context end to
+  end (the 97k-token fill 873 -> 874 - 883 tok/s, 0.9% in an interleaved in-process A/B;
+  chunks below 32k, where the rule does not fire, differ by up to 2.2% between two such
+  runs), needs a 31 - 44 MB larger workspace and changes the fp32 summation order. It is
+  not part of this patch.
 * `G = 4` spills 84 VGPRs (the shipped kernel 54) and was not timed; the model does not
   use it **[INFERENCE: no regression expected from the occupancy gain, not measured]**.
 * The static code of the kernel is about 7.5k instructions; a further growth of the loop
   would pressure the 32 KB instruction cache of a WGP **[INFERENCE]**.
 * The flag is read at import: a CUDA graph captured with one value keeps it.
+
+### 12.7 Reproduction
+
+The benches, batteries and end-to-end runs of this section used scratch scripts that are
+not part of the repository (box directory `~/w4a8_runs/inkling2-work/Inkling2PrefillAttn/`,
+`scripts/` and `logs/`); every GPU job was one `gpu_sub.sh` call on HIP 5. The repository
+side is `tests/kernels/attention/test_inkling2_attn_rdna2.py`, which runs the pipelined
+kernel by default (920 tests, section 12.5). The pipelined kernel was loaded for the
+bench, battery, mutant, shadow and end-to-end jobs as a JIT-built module of the very
+source text of this patch (`prod7e.cu` = `inkling2_attn_rdna2.cu` plus a pybind tail);
+the real `_rocm_C` rebuilt with this patch ran the test file and `real_check.py`.
+
+| What | Command (`TREE` = the tree under test) |
+| --- | --- |
+| Kernel table, section 12.4 | `tile_bench.py --cases 1024:1024:full,...,256:32768:full --variant new=prod7e.cu#1 --json out.json` |
+| Batteries | `tile_check.py --mod prod7e=prod7e.cu#1 --mod prod7eoff=prod7e.cu#0` |
+| Mutants | `tile_check.py --mod prod7e=prod7e.cu#1 --mod m_<name>=mutp/m_<name>.cu#1 ... --expect-fail m_<name>,... --quiet-mutants` |
+| End to end, section 12.4 | `profile_prefill2.py --scenarios depth --mnbt 1024 --max-model-len 110000 --fill 101376 --profile-at 0,24,64,97 [--attn-variant prod7e.cu]` |
+| NLL with shadow, section 12.5 | `nll_multi.py --variant prod7e.cu --nll-file depth_text.txt --nll-tokens 800,3000,20000 --seq off,off,on,on,off,on` |
+| Repository gate, section 12.5 | `tools/rdna/inkling2/real_check.py --nll-file nll_text.md --nll-tokens 800 --nll-against tp1_a_nll.json --nll-floor tp1_b_nll.json`, with `VLLM_INKLING2_PREFILL_ATTN_TILE=1` and `=0` |

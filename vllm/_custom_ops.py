@@ -2072,7 +2072,7 @@ _INKLING2_DECODE_FUSED = os.environ.get("VLLM_INKLING2_DECODE_FUSED", "1")
 #: work skipped on the interior tiles of a long context): the same fp32 operations in
 #: the same order, so bit-identical outputs, and 1.4x-1.5x faster per visit at 16k-144k
 #: of context (sliding layers of at most 32 query tokens keep the shipped kernel, which
-#: is 1-10% faster there); ``0`` restores the shipped kernel for every call.  Read once
+#: is 1-11% faster there); ``0`` restores the shipped kernel for every call.  Read once
 #: at import (a captured CUDA graph bakes the kernel in).
 _INKLING2_PREFILL_ATTN_TILE = os.environ.get("VLLM_INKLING2_PREFILL_ATTN_TILE", "1")
 
