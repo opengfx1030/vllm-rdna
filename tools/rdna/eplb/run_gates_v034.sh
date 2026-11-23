@@ -11,6 +11,7 @@
 #
 #   BASE_TREE=/built/base HEAD_TREE=/built/head VENV=/venv MODEL=/model \
 #     OUT=/fresh/run bash tools/rdna/eplb/run_gates_v034.sh
+#   PLE_QUANT_DIR=<ples_int4 dir> is required (the boots serve the int4 PLE table); ALLOW_BF16_PLE=1 opts out.
 #   GATES="inject ppl" ...  only these gates, in the order given
 #   LIST=1                  print the gates, boots, measured unit costs and ETA; stop
 #   DRY_RUN=1               check the inputs and print every launch plan; no GPU, no lease
@@ -1279,6 +1280,12 @@ summarize() {
 preflight() {
     : "${BASE_TREE:?BASE_TREE required}" "${HEAD_TREE:?HEAD_TREE required}"
     : "${VENV:?VENV required}" "${MODEL:?MODEL required}" "${OUT:?OUT required}"
+    # Without PLE_QUANT_DIR the recipe boots the bf16 PLE table: 4 x 23.84 GiB pinned and mlocked
+    # evicted every rank's GPU queues for 13-15 s at load and latched ABORT (2026-11-23).  The
+    # int4 table (about 7.5 GiB per rank) is what the production recipe serves.
+    [[ -n ${PLE_QUANT_DIR:-} || ${ALLOW_BF16_PLE:-0} == 1 ]] \
+        || die "PLE_QUANT_DIR=<ples_int4 dir> required (ALLOW_BF16_PLE=1 boots the 95 GiB bf16 table)"
+    [[ -z ${PLE_QUANT_DIR:-} || -f $PLE_QUANT_DIR/META.json ]] || die "PLE_QUANT_DIR has no META.json: $PLE_QUANT_DIR"
     [[ -d $BASE_TREE && -d $HEAD_TREE ]] || die "BASE_TREE and HEAD_TREE must be directories"
     BASE_TREE=$(cd "$BASE_TREE" && pwd)
     HEAD_TREE=$(cd "$HEAD_TREE" && pwd)

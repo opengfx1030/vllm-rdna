@@ -540,3 +540,26 @@ Still open: all of (a) to (h). The earlier v0.34 attempt on the old rebase
 `r2-034-20261121-111950`: `HSA_STATUS_ERROR_EXCEPTION` code `0x1016` in
 `at::native::indexFuncSmallIndex` on GPU index 1, 2 and 3; AER before equals
 after in both). Whether the merged tree repeats it is unknown.
+
+### The two aborts of the v0.34 gate attempts, explained (2026-11-23)
+
+Both aborts of the first gate boot (`inject-J2off`, flag off) had causes outside the EPLB code:
+
+- **KFD queue evictions of 13 to 15 s at model load** (`gates-20261123-1343`): the
+  chain did not set the PLE table type, so `flashnext-mtp2` booted the bf16 table,
+  4 x 23.84 GiB pinned and mlocked. With `PLE_QUANT_DIR` set (int4, 5.96 + 1.49 GiB per
+  rank) the load showed no eviction and no fault line. The aborted 2026-11-21 attempt
+  (evictions of 18.7 to 19.5 s) probably had the same cause [INFERENCE: its PLE setting
+  was not recorded]. `run_gates_v034.sh` now refuses to start without `PLE_QUANT_DIR`
+  (`ALLOW_BF16_PLE=1` opts out).
+- **`HSA_STATUS_ERROR_EXCEPTION` code `0x1016` in `indexFuncSmallIndex<...ReduceAdd>`**
+  (`gates-20261123-1351`, and `r2-034-20261121-111950`): not EPLB. `sum_nans_per_request`
+  did `index_add_(0, expanded_idx_mapping, ...)` into a `num_reqs`-long tensor, but
+  `expanded_idx_mapping` holds request state indices, so a request in a slot at or above
+  `num_reqs` wrote out of bounds. It runs when the sampler counts NaNs, which
+  `--monokernel` forces, with MTP. Reproduced outside the guard wrapper on the unchanged
+  tree (flag off), gone with the fix of PR #200: 4 of 4 chat requests and 96 of 96 bench
+  requests (random 1024/512, c=8, two runs), no fault string, KFD `evicted_ms` 0.
+  The same code is on `rdna_extras`, so every `--monokernel` MTP boot was exposed.
+
+The gates themselves have still not run.
