@@ -240,14 +240,14 @@ Verified on `par1-cs25` on 2026-10-27:
 - Actual checkpoint quantization: `compressed-tensors`, pack-quantized,
   symmetric INT4, group size 128; model type `qwen4_exp`.
 - Model directory:
-  `/home/chenco_adm/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c`.
+  `$HOME/.cache/huggingface/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c`.
 - INT4 PLE directory:
-  `/home/chenco_adm/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4`.
+  `$HOME/.cache/huggingface/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4`.
 - Isolated remote checkout:
-  `/home/chenco_adm/opengfx1030_vllm-rdna_moe_offloading`, on the same branch
+  `$HOME/opengfx1030_vllm-rdna_moe_offloading`, on the same branch
   and base as local. Existing runtime/service checkouts were not changed.
 
-The wrapper's historical `/home/chenco_adm/hfcache/` defaults do not exist on
+The wrapper's historical `$HOME/hfcache/` defaults do not exist on
 this host. Pass MODEL and PLE_QUANT_DIR overrides; do not download duplicates.
 
 ### MonoKernel execution requirement

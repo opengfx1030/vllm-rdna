@@ -18,11 +18,11 @@
 # Flash-Next co-tenant owns 0-3 and is never touched. No /tmp.
 set -uo pipefail
 
-V=${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0}
-T=${VLLM_TREE:-/home/chenco_adm/vllm-rdna-0.28.0}
-WORK=${WORK:-/home/chenco_adm/w4a8_runs/exl3-tunableop}
+V=${VENV:-$HOME/Apps/vllm/venv-7.14.0_0.28.0}
+T=${VLLM_TREE:-$HOME/vllm-rdna-0.28.0}
+WORK=${WORK:-$HOME/w4a8_runs/exl3-tunableop}
 ROWS=${ROWS:-$T/tunableop/rocblas-f30bb442e9b5}
-CAP_ROOT=${CAP_ROOT:-/home/chenco_adm/w4a8_runs/_captures-exl3}
+CAP_ROOT=${CAP_ROOT:-$HOME/w4a8_runs/_captures-exl3}
 ARMS=${ARMS:-"exl3-m0 exl3-m2"}
 GPUS=${GPUS:-4,5,6,7}
 PHASE=${PHASE:-all}

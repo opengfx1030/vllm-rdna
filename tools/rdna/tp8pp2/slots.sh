@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Harness settings + slot definitions for 4- and 8-GPU runs on par1-cs25. Source me.
+# Harness settings + slot definitions for 4- and 8-GPU runs on <build-host>. Source me.
 #
 #   H          directory of these scripts (not the run directory)
 #   R          run directory: arms/, caches, abort markers   (RUN_DIR, default
@@ -14,7 +14,7 @@
 # Slot A = HIP 1-4 = V620 ce d3 d8 db (root c0); slot B = HIP 6-9 = V620 0a 0f 14 17
 # (root 00); AB = both, in that order: ranks 0-3 on switch c0, ranks 4-7 on switch 00.
 # HIP 0 and HIP 5 (the W7800s) are never part of a slot. Every GPU command sets
-# HIP_VISIBLE_DEVICES on the same line. The HIP/bus maps are par1-cs25's; override
+# HIP_VISIBLE_DEVICES on the same line. The HIP/bus maps are <build-host>'s; override
 # SLOT_A_HIP / SLOT_A_BUSES / SLOT_B_HIP / SLOT_B_BUSES for another host.
 # shellcheck disable=SC2034  # H, R, LEASE, QUIET ... are read by the scripts that source this
 H=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

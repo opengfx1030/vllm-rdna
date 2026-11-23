@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329,SC2086  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -19,10 +20,10 @@
 # No /tmp. GPUs default 4-7 (the Flash-Next co-tenant owns 0-3).
 set -uo pipefail
 
-V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
-T=/home/chenco_adm/vllm-rdna-0.28.0
-MODEL=${MODEL:-/home/chenco_adm/models/Qwen3.8-27B-exl3-3.00bpw}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+V=$HOME/Apps/vllm/venv-7.14.0_0.28.0
+T=$HOME/vllm-rdna-0.28.0
+MODEL=${MODEL:-$HOME/models/Qwen3.8-27B-exl3-3.00bpw}
+OUT=${OUT:-$HOME/w4a8_runs}
 CAP_ROOT=${CAP_ROOT:-$OUT/_captures-exl3}
 CELLS=${CELLS:-"1 1024 64 221|8 1024 64 222|1 16384 64 111|8 16384 64 112"}
 WARM=${WARM:-"1024 32 999|16384 32 998"}

@@ -8,7 +8,7 @@ invented: the legacy binary has no `READY`, `END`, `VERSION`, `HBW`, `HAGG`,
 format examples inside the test file, which are not measurements.
 
 All source paths are relative to `~/w4a8_runs/pcie_audit/p2p/` on the box
-(`chenco_adm@par1-cs25`). The log header (`# hip=... buses={...}`) is written by
+(`<user>@<build-host>`). The log header (`# hip=... buses={...}`) is written by
 `run_matrix.py` between the `P2P` lines and the first `###` command.
 
 | Fixture | Source | Original bytes | Fixture bytes | Fixture lines |
@@ -26,8 +26,7 @@ All source paths are relative to `~/w4a8_runs/pcie_audit/p2p/` on the box
 lines):
 
 ```bash
-scp -i ~/.ssh/id_ed25519_ansible \
-  chenco_adm@par1-cs25:w4a8_runs/pcie_audit/p2p/res/s1_base.probe.log .
+scp <user>@<build-host>:w4a8_runs/pcie_audit/p2p/res/s1_base.probe.log .
 ```
 
 The four `w*` fixtures are the first 220 lines of the original (a cut that may
@@ -36,7 +35,7 @@ end inside a command on purpose, to exercise truncated blocks; `lat` all pairs,
 
 ```bash
 for n in w7_win1 w7_win3 w8_win4 w8_win5; do
-  ssh -i ~/.ssh/id_ed25519_ansible chenco_adm@par1-cs25 \
+  ssh <user>@<build-host> \
     "head -n 220 ~/w4a8_runs/pcie_audit/p2p/$n.log" > "$n.head220.log"
 done
 ```

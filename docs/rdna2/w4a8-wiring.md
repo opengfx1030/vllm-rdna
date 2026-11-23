@@ -1,7 +1,11 @@
 # W4A8 sdot4 wiring — opt-in drop-in for the dense W4A16 prefill on gfx1030
 
 Branch: `w4a8-wiring` (= `rdna_extras` + the production wrapper around the
-explore kernel from PR #9). Default OFF — the dispatcher takes the existing
+explore kernel from PR #9). Historical branch: the kernel and the switch are in
+`rdna_extras` now (`csrc/rocm/w4a8_sdot4_rdna2.cu`, `VLLM_RDNA2_W4A8_SDOT4`),
+but the branch itself is not an ancestor of it (no commit of it is in
+`rdna_extras` by hash or by patch id; the code arrived through other commits).
+Default OFF — the dispatcher takes the existing
 `gptq_gemm_rdna2_prefill` path unless `VLLM_RDNA2_W4A8_SDOT4=1`.
 
 The kernel body (`w4a8_gemm_kernel`, `w4a8_act_quant_kernel`, `Cfg`,
@@ -43,7 +47,7 @@ gates).
 
 ## Op contract
 
-```
+```text
 w4a8_act_quant_rdna2(x, group_size, a_i8, a_scale, a_asum) -> Tensor
   x       [M, K]            fp16, contiguous on dim 1
   a_i8    [T, K/8, 8, 8]    int8   (T = ceil(M / 8))
@@ -115,7 +119,7 @@ invoked, it:
 A one-time `TORCH_WARN_ONCE` fires the first time the fast path succeeds, so
 a serve log confirms it landed:
 
-```
+```text
 W ... RDNA2 W4A8 sdot4 prefill fast path active (config a8_lds_k32_ag)
 ```
 
@@ -148,6 +152,7 @@ for n in names: print(n)
 ```
 
 The suite covers:
+
 - `test_w4a8_act_quant_matches_numpy[M/g]` — act_quant vs the NumPy
   reference (per-(token, group) quant + tiled layout, bit-exact).
 - `test_w4a8_act_quant_rejects_bad_group_size` — invalid group_size (16)

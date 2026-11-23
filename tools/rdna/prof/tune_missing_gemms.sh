@@ -22,7 +22,7 @@
 #   TUNABLEOP_DIR default tunableop dir (default: <tree>/tunableop)
 #   PROFILE       default profile name (default: rocm7.14-rocblas5.5)
 #   REFUSED_GPUS HIP indices the script never touches, space or comma separated
-#                 (default "0 1"; par1-cs25 has its W7800s on HIP 0 and 5: "0 5")
+#                 (default "0 1"; <build-host> has its W7800s on HIP 0 and 5: "0 5")
 #   TUNE_ATOL, TUNE_RTOL
 #                 tolerances of the tuner's numerical check (default 2e-3 each, about
 #                 four fp16 half-ulps): a candidate solver whose result differs from the

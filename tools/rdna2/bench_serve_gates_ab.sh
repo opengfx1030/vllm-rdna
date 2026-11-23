@@ -16,7 +16,7 @@
 # The gate env vars are read at import time, so each arm needs its own server
 # process -- this script never restarts anything.
 set -euo pipefail
-repo=/home/wsantos/work/vllm-rdna
+repo=$HOME/work/vllm-rdna
 label=${1:?usage: bench_serve_gates_ab.sh <label>}
 port=${PORT:-8000}
 model=${SERVED_NAME:-active}
