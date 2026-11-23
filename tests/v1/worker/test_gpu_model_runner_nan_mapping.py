@@ -6,9 +6,12 @@
 The current runner samples spec-decode logits as one row per verification
 token plus one bonus row per request. ``num_nans_in_logits`` is reported per
 request, so every row must be summed into its request instead of being dropped
-by a per-request zip over the row counts.
+by a per-request zip over the row counts. Rows belong to a request by batch
+position (``cu_num_logits``); ``expanded_idx_mapping`` holds request state
+indices, which are not batch positions and must never index the result.
 """
 
+import numpy as np
 import pytest
 import torch
 
@@ -16,17 +19,19 @@ from vllm.v1.worker.gpu.async_utils import sum_nans_per_request
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 
-def _row_mapping(draft_lens: list[int]) -> torch.Tensor:
-    """Logit-row -> request index, matching the runner's expanded mapping."""
-    repeats = torch.tensor([n + 1 for n in draft_lens], dtype=torch.long)
-    return torch.arange(len(draft_lens), dtype=torch.int32).repeat_interleave(repeats)
+def _layout(draft_lens: list[int]) -> tuple[torch.Tensor, np.ndarray]:
+    """cu_num_logits as the runner builds it: n drafts + 1 bonus row per request."""
+    cu_np = np.concatenate([[0], np.cumsum([n + 1 for n in draft_lens])]).astype(
+        np.int32
+    )
+    return torch.from_numpy(cu_np.copy()), cu_np
 
 
 def test_spec_nan_counts_include_late_verification_and_bonus_rows():
     # One request, two drafts: neither the second verification row nor the
     # bonus row may disappear behind the old one-row-per-request mapping.
     num_nans = torch.tensor([0, 2, 3], dtype=torch.int32)
-    per_req = sum_nans_per_request(num_nans, _row_mapping([2]), 1)
+    per_req = sum_nans_per_request(num_nans, *_layout([2]))
     assert per_req.tolist() == [5]
     with pytest.raises(RuntimeError, match="req.*5"):
         raise_if_nan_logits(dict(zip(["req"], per_req.tolist())))
@@ -40,39 +45,33 @@ def test_spec_nan_counts_variable_lengths_and_later_requests():
     counts[11] = 2  # a verification row of request 5
     counts[-1] = 3  # bonus row of request 7
     per_req = sum_nans_per_request(
-        torch.tensor(counts, dtype=torch.int32), _row_mapping(draft_lens), 8
+        torch.tensor(counts, dtype=torch.int32), *_layout(draft_lens)
     )
     assert per_req.tolist() == [1, 0, 0, 0, 0, 2, 0, 3]
 
 
 def test_spec_nan_counts_clean_and_mismatched_metadata():
-    mapping = _row_mapping([2, 0])
-    clean = sum_nans_per_request(
-        torch.zeros(mapping.shape[0], dtype=torch.int32), mapping, 2
-    )
+    cu, cu_np = _layout([2, 0])
+    clean = sum_nans_per_request(torch.zeros(4, dtype=torch.int32), cu, cu_np)
     assert clean.tolist() == [0, 0]
     # A malformed speculative layout must not become an empty, successful
     # diagnostics dict.
-    with pytest.raises(ValueError, match=f"Expected {mapping.shape[0]}"):
-        sum_nans_per_request(torch.zeros(3, dtype=torch.int32), mapping, 2)
+    with pytest.raises(ValueError, match="Expected 4"):
+        sum_nans_per_request(torch.zeros(3, dtype=torch.int32), cu, cu_np)
 
 
-def test_non_spec_nan_counts_keep_missing_row_behavior():
-    # Outside spec decoding there is exactly one row per request.
-    mapping = torch.arange(2, dtype=torch.int32)
-    assert sum_nans_per_request(
-        torch.tensor([2], dtype=torch.int32), mapping[:1], 2
-    ).tolist() == [2, 0]
-    assert sum_nans_per_request(
-        torch.empty(0, dtype=torch.int32), mapping[:0], 2
-    ).tolist() == [0, 0]
+def test_spec_nan_counts_tolerate_empty_rows():
+    cu, cu_np = _layout([])  # zero requests
+    assert sum_nans_per_request(torch.empty(0, dtype=torch.int32), cu, cu_np).shape == (
+        0,
+    )
 
 
 def test_spec_nan_counts_own_their_rows():
     # The next model step reuses its metadata; the reported counts must not
     # observe later mutation.
     num_nans = torch.tensor([0, 2, 3], dtype=torch.int32)
-    per_req = sum_nans_per_request(num_nans, _row_mapping([2]), 1)
+    per_req = sum_nans_per_request(num_nans, *_layout([2]))
     num_nans.zero_()
     assert per_req.tolist() == [5]
 
@@ -116,11 +115,15 @@ def test_current_runner_reduces_non_sharded_spec_nan_rows():
     runner = _runner_with_sampler_output(
         _sampler_output(torch.tensor([0, 2, 3], dtype=torch.int32))
     )
+    cu, cu_np = _layout([2])
     input_batch = SimpleNamespace(
         logits_indices=torch.arange(3),
         num_reqs=1,
         num_draft_tokens=2,
-        expanded_idx_mapping=_row_mapping([2]),
+        cu_num_logits=cu,
+        cu_num_logits_np=cu_np,
+        # Request state indices: the only live request sits in slot 5.
+        expanded_idx_mapping=torch.full((3,), 5, dtype=torch.int32),
     )
 
     output, _, _ = runner.sample(torch.zeros(3, 4), input_batch, None)

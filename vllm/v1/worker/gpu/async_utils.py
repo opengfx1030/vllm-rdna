@@ -37,8 +37,8 @@ class StepTimingSample:
 
 def sum_nans_per_request(
     num_nans: torch.Tensor,
-    expanded_idx_mapping: torch.Tensor,
-    num_reqs: int,
+    cu_num_logits: torch.Tensor,
+    cu_num_logits_np: np.ndarray,
 ) -> torch.Tensor:
     """Reduce per-logit-row NaN counts to per-request totals.
 
@@ -47,16 +47,27 @@ def sum_nans_per_request(
     request. Every row, including the late verification and bonus rows, must
     be attributed to its request; a row-layout mismatch fails closed instead
     of producing an empty, successful diagnostics dict.
+
+    Rows are attributed by batch position (``cu_num_logits``), never by
+    ``InputBatch.expanded_idx_mapping``: that holds request *state* indices,
+    which run up to max_num_seqs and index past a ``num_reqs``-long result
+    (an out-of-range ``index_add_`` is a GPU memory fault).
     """
-    if num_nans.shape[0] != expanded_idx_mapping.shape[0]:
-        raise ValueError(
-            f"Expected {expanded_idx_mapping.shape[0]} NaN logit rows, "
-            f"got {num_nans.shape[0]}"
-        )
+    num_reqs = cu_num_logits_np.shape[0] - 1
+    num_rows = int(cu_num_logits_np[-1])
+    if num_nans.shape[0] != num_rows:
+        raise ValueError(f"Expected {num_rows} NaN logit rows, got {num_nans.shape[0]}")
+    rows_per_req = (cu_num_logits[1 : num_reqs + 1] - cu_num_logits[:num_reqs]).long()
+    # output_size is known on the host, so no device sync.
+    row_to_req = torch.repeat_interleave(
+        torch.arange(num_reqs, dtype=torch.long, device=num_nans.device),
+        rows_per_req,
+        output_size=num_rows,
+    )
     num_nans_per_req = torch.zeros(
         num_reqs, dtype=num_nans.dtype, device=num_nans.device
     )
-    num_nans_per_req.index_add_(0, expanded_idx_mapping, num_nans)
+    num_nans_per_req.index_add_(0, row_to_req, num_nans)
     return num_nans_per_req
 
 
