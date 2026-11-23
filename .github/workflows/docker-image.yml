@@ -184,8 +184,10 @@ jobs:
             VLLM_COMMIT=${{ steps.metadata.outputs.commit }}
             IMAGE_TAG=${{ steps.metadata.outputs.image_tag }}
             MAX_JOBS=${{ vars.VLLM_RDNA_MAX_JOBS || '2' }}
+          # The cache export is best effort (ignore-error): the image is already pushed, and a
+          # layer upload that outlives the cache service's 1 h token fails with HTTP 403.
           cache-from: type=gha,scope=rdna-rocm7.14.0
-          cache-to: type=gha,mode=max,scope=rdna-rocm7.14.0
+          cache-to: type=gha,mode=max,scope=rdna-rocm7.14.0,ignore-error=true
 
       # Branch builds push by digest only: no per-commit tag. The promote job
       # moves `nightly-<vllm version>-rocm<version>` onto the digest, so the
@@ -206,8 +208,9 @@ jobs:
             VLLM_COMMIT=${{ steps.metadata.outputs.commit }}
             IMAGE_TAG=${{ steps.metadata.outputs.image_tag }}
             MAX_JOBS=${{ vars.VLLM_RDNA_MAX_JOBS || '2' }}
+          # Best-effort cache export, see the release step.
           cache-from: type=gha,scope=rdna-rocm7.14.0
-          cache-to: type=gha,mode=max,scope=rdna-rocm7.14.0
+          cache-to: type=gha,mode=max,scope=rdna-rocm7.14.0,ignore-error=true
 
   promote-nightly:
     needs: build
