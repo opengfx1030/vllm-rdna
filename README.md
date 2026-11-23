@@ -146,21 +146,30 @@ branch clone. It publishes Linux x86-64 images to GHCR:
 
 | Source event | Tags on `ghcr.io/opengfx1030/vllm-rdna` |
 | --- | --- |
-| Push to `rdna_extras` | `sha-<full-commit>`; the current branch tip also updates `nightly` |
-| Create a version tag, e.g. `v0.33.1` (Git push, GitHub UI or API) | `v0.33.1`, without changing nightly |
+| Push to `rdna_extras` | `nightly-<vllm version>-rocm7.14.0`, e.g. `nightly-0.34.0-rocm7.14.0`, plus the floating `nightly` and `nightly-rocm7.14.0`; every newer build moves all three |
+| Create a version tag, e.g. `v0.34.0` (Git push, GitHub UI or API) | `v0.34.0` and `v0.34.0-rocm7.14.0`, without changing nightly |
 | Manual run | Same behavior for the selected `rdna_extras` branch or version tag |
 
-Each tag also has a `-rocm7.14.0` alias. "Nightly" is a rolling channel built
-on each push, not a daily cron; a multi-commit push builds its final commit.
-Builds are not cancelled by subsequent pushes. Only promotion is serialized:
-the current branch tip can promote its built manifest digest, while stale
-builds retain their commit tags. Ref deletions do not publish images.
+The nightly's vLLM version is the nearest `v<major>.<minor>.<patch>` tag in the
+history of the built commit (`git describe --tags --abbrev=0 --match 'v[0-9]*'`),
+so tagging `v0.35.0` switches later builds to `nightly-0.35.0-rocm7.14.0`.
+Branch builds are pushed by digest with no per-commit tag; the promote job then
+moves the three nightly tags onto the newest digest. "Nightly" is a rolling channel
+built on each push, not a daily cron; a multi-commit push builds its final
+commit. A newer push cancels an in-flight branch build (version tag builds are
+never cancelled), and a build whose commit is no longer the branch tip is not
+promoted. Ref deletions do not publish images.
 
-Untagged package versions older than seven days are pruned daily by
-[the package cleanup workflow](.github/workflows/package-cleanup.yml). It keeps
-every version a retained image references (a tagged index's platform manifest
-and buildx provenance attestation are untagged versions of this package) and
-never deletes a tagged version. Manual runs are a dry run by default.
+The previous nightly digest becomes untagged when the tags move. The daily
+[package cleanup workflow](.github/workflows/package-cleanup.yml) deletes, once
+older than seven days, every version that is untagged or carries only legacy
+`sha-*` tags (`DISPOSABLE_TAGS`, default `sha-*`), together with its child
+manifests. A version that also has `nightly`, `nightly-*` or a release tag is
+never deleted, and neither is anything a retained image references (the
+platform manifest and buildx provenance attestation of a tagged image are
+untagged versions of this package). Manual runs are a dry run by default. Old
+`nightly-<version>-rocm…` tags of an earlier vLLM version stay until deleted by
+hand.
 
 The image also carries the GGUF plugin fork (`opengfx1030/vllm-gguf-plugin`),
 built for gfx1030 from the commit pinned in `docker/Dockerfile.rdna`
@@ -180,8 +189,9 @@ git push origin v0.33.1
 ```
 
 Lightweight and annotated tags are supported. Use Docker-compatible names of
-at most 117 characters, such as `v0.33.1` or `v0.33.1-rc.1`; `/` and `+` are
-not valid. `nightly`, `nightly-*`, `sha-*` and `latest` are reserved.
+at most 117 characters, such as `v0.34.0` or `v0.34.0-rc.1`; `/` and `+` are
+not valid. The tag is the image name: tag `v0.34.0` builds `:v0.34.0`.
+`nightly`, `nightly-*`, `sha-*` and `latest` are reserved.
 
 ### Registry and runner setup
 
