@@ -243,6 +243,10 @@ elif [[ -n $PCI_BUSES ]]; then
     rdse_gpu_line="HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$GPUIDS} (PCI_BUSES='$PCI_BUSES' ignored: an explicit device list wins)"
 fi
 
+# VLLM_CACHE_ROOT defaults per device list and port, so the stale-server kill below
+# cannot reach a sibling server of this tree on other cards. An explicit one is kept.
+rdna_default_cache_root
+
 case $PLE in
     bf16)
         unset VLLM_PLE_QUANT_DIR VLLM_PLE_CPU_OFFLOAD

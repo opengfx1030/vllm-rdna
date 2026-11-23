@@ -98,6 +98,7 @@ tests/models/test_inkling2_loop_moe.py  # fork-only Inkling-2 MoE routing/expert
 tests/models/test_inkling2_tiny_harness.py  # fork-only Inkling-2 tiny checkpoint builder and reference harness, CPU unit test; not in CI
 tests/tools/rdna/test_rdna2_offload_ar_cli.py  # fork-only offload AR checker CLI, CPU unit test; not in CI
 tests/tools/rdna/test_serve_offload_topology.py  # fork-only offload launcher topology contract, CPU unit test; not in CI
+tests/tools/rdna/test_serve_cache_root.py  # fork-only launcher per-card VLLM_CACHE_ROOT default and scoped stale-server kill (fake /proc, stub kill), CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_devices.py  # fork-only qualification-driver device pin, CPU unit test; not in CI
 tests/tools/rdna/test_mono_w4a8_plan.py  # fork-only mono + W4A8 GPU plan tools (eviction verdict, arm checks, slot dry run), CPU unit test; not in CI
 tests/tools/rdna/test_pinned_evictions.py  # fork-only pinned-host eviction sampler and report (fake /proc trees), CPU unit test; not in CI
