@@ -57,9 +57,9 @@ Options (all optional):
 Limits: one stream (the counters have a single writer per layer and per ring, so
 two micro-batches on two streams would race: dual-batch overlap needs a ring per
 micro-batch); at most 8 expert-parallel ranks; the Flash-Next ``--monokernel`` K2
-and the expert-offload cache path do not route through ``_rdna2_fused_moe`` with
-observable ids, so K2 stands down while the counters are on and the cache path is
-not counted.
+reports its routed ids to the counters (map mode, ``mono_k2_rdna2`` with
+``ids_out``); the expert-offload cache path does not route through
+``_rdna2_fused_moe`` with observable ids and is not counted.
 """
 
 import json
@@ -495,7 +495,7 @@ class EplbStats:
         logger.warning(
             "EPLB load counters are ON (%s=%s, every %d call(s), ring %d, kernel=%s):"
             " one extra CTA in the MoE routing launch; the Flash-Next mono K2"
-            " stands down (its top-k is not observable)",
+            " runs in map mode and reports its routed ids",
             STATS_DIR_ENV if directory is not None else ONLINE_ENV,
             directory if directory is not None else "1",
             stats.every,

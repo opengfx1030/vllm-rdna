@@ -26,8 +26,10 @@ could not be judged: token-exact, quality, the overlap of the c=4 and c=8
 cells and the hard stall gate (no starved decoder stream). Speed verdicts and
 the relative stall metrics (ABBA verdicts per metric) are reported, not
 gated; so is the diff scan (``scan.json``), which lists lines for the
-reviewer. Standard library and ``regex`` only; run it with the python of a
-built venv.
+reviewer. A boot whose serve.log has a fault line, or whose summary reports
+fault markers, fails the run. A kernel log that could not be read is shown as
+``unknown`` and never becomes a zero. Standard library and ``regex`` only; run
+it with the python of a built venv.
 """
 
 import argparse
@@ -56,6 +58,13 @@ DEFAULT_EXACT_CELLS = "1024:128:1:4 16384:128:1:2"
 MAX_PPL_REL = 0.02
 # Gate results that do not fail the run: a gate that was not asked for.
 GATE_OK = ("PASS", "NOT RUN")
+# Fault lines of a server log: the phrases serve_validate.sh counts, including
+# the ROCm GPU-reset lines observed in serve-eplb-chaos1 ("GPU Hang" and
+# "HW Exception"). A boot with one is never a clean run.
+SERVE_LOG_FAULTS = re.compile(
+    r"Memory Fault|HSA_STATUS_ERROR|page fault|Segmentation fault|core dumped"
+    r"|GPU Hang|HW Exception"
+)
 
 
 def load_sibling(name: str) -> ModuleType:
@@ -263,6 +272,16 @@ class BootLog:
         return (self.marks or {}).get(key)
 
 
+def dmesg_status(token: str) -> str:
+    """A dmesg fault count, or "unknown" when the read did not happen."""
+    return token if token.isdigit() else "unknown"
+
+
+# Tokens that mean the kernel log could not be read. serve_validate.sh used to
+# print a count and then "n/a" on the next line when the read was denied.
+DMESG_UNKNOWN = ("n/a", "unknown", "unavailable")
+
+
 def parse_summary(text: str) -> BootLog:
     """Parse summary.txt; unknown lines are ignored."""
     log = BootLog(marks={}, cells={}, markers=[])
@@ -270,9 +289,13 @@ def parse_summary(text: str) -> BootLog:
     assert log.markers is not None
     current: CellLog | None = None
     in_markers = False
+    dmesg_pending = False
     for raw in text.splitlines():
         m = LOG_LINE.match(raw)
         if m is None:
+            if dmesg_pending and raw.strip().lower() in DMESG_UNKNOWN:
+                log.dmesg_faults = "unknown"
+            dmesg_pending = False
             if in_markers and raw.startswith("    "):
                 log.markers.append(raw.strip())
             elif current is not None:
@@ -285,6 +308,7 @@ def parse_summary(text: str) -> BootLog:
         stamp, msg = m.groups()
         current = None
         in_markers = False
+        dmesg_pending = msg.startswith("new amdgpu dmesg faults:")
         mark = MARK_LINE.match(msg)
         bench = BENCH_LINE.match(msg)
         if mark:
@@ -308,9 +332,10 @@ def parse_summary(text: str) -> BootLog:
             verdict = re.search(r"->\s*(ok|INVALID)\b", msg)
             log.evicted_since_ready = verdict.group(1) if verdict else "unchecked"
         elif msg.startswith("fault markers in serve.log:"):
-            log.fault_markers = int(msg.rsplit(" ", 1)[1])
+            token = msg.rsplit(" ", 1)[1]
+            log.fault_markers = int(token) if token.isdigit() else None
         elif msg.startswith("new amdgpu dmesg faults:"):
-            log.dmesg_faults = msg.rsplit(" ", 1)[1]
+            log.dmesg_faults = dmesg_status(msg.rsplit(" ", 1)[1])
         elif msg == "markers:":
             in_markers = True
         elif msg == "done":
@@ -390,6 +415,7 @@ class Boot:
     path: Path
     fields: dict[str, str]
     log: BootLog
+    faults: int | None = None  # fault lines in serve.log; None if it is missing
 
     @property
     def rc(self) -> int | None:
@@ -397,11 +423,27 @@ class Boot:
         return int(rc) if rc not in (None, "") else None
 
 
+def reported_faults(boot: Boot) -> int | None:
+    """Worst fault count known for a boot: its summary or its serve.log."""
+    seen = [n for n in (boot.faults, boot.log.fault_markers) if n is not None]
+    return max(seen) if seen else None
+
+
 def read_text(path: Path) -> str:
     try:
         return path.read_text(errors="replace")
     except OSError:
         return ""
+
+
+def serve_log_faults(bootdir: Path) -> int | None:
+    """Fault lines in the boot's serve.log; None when it is missing or unreadable."""
+    path = bootdir / "serve.log"
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    return sum(1 for line in text.splitlines() if SERVE_LOG_FAULTS.search(line))
 
 
 def max_gpu_temp(bootdir: Path) -> int | None:
@@ -425,6 +467,7 @@ def load_boots(run: Path, manifest: dict) -> list[Boot]:
                 path,
                 fields,
                 parse_summary(read_text(path / "summary.txt")),
+                serve_log_faults(path),
             )
         )
     return boots
@@ -1564,7 +1607,7 @@ def health_markdown(boots: Sequence[Boot]) -> str:
                 probes if seen else "-",
                 log.evicted_since_ready or "-",
                 "-" if (temp := max_gpu_temp(b.path)) is None else f"{temp} C",
-                "-" if log.fault_markers is None else log.fault_markers,
+                "-" if (faults := reported_faults(b)) is None else faults,
                 log.dmesg_faults or "-",
                 "-" if b.rc is None else b.rc,
             ]
@@ -1725,7 +1768,11 @@ def build_receipt(run: Path) -> dict:
     )
     stall = judge_stall(boots, settings, mode)
     scan = read_json(run / "scan.json")
-    boot_bad = [b.id for b in boots if b.rc not in (None, 0) or b.log.boot_failed]
+    boot_bad = [
+        b.id
+        for b in boots
+        if b.rc not in (None, 0) or b.log.boot_failed or (reported_faults(b) or 0) > 0
+    ]
     gates = {
         "exact": exact["verdict"],
         "quality": quality["verdict"],

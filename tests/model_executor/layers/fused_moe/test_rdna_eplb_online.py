@@ -167,6 +167,40 @@ LINEAR = np.tile(np.repeat(np.arange(4), E // 4), (LAYERS, 1))
 FAST = dict(mailbox_steps=4, chunk_kb=1, decision_steps=8, max_swaps=4)
 
 
+@pytest.mark.parametrize("words", [0, 1, 31, 8190, 8191, 8192, 16389, 638400])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU"),
+        ),
+    ],
+)
+def test_vote_checksum_preserves_modular_contract_and_other_vote_fields(words, device):
+    values = [-(2**31), 2**31 - 1, -1, 0, 1, 2**30, -(2**30)]
+    data = (values * (-(-words // len(values))))[:words]
+    expected = (
+        sum(v * (i % eo.CHECK_MOD + 1) for i, v in enumerate(data)) & eo.CHECK_MASK
+    )
+    ctl = eo.OnlineEplb(eo.OnlineConfig())
+    ctl._check = (
+        torch.arange(words, dtype=torch.int64, device=device) % eo.CHECK_MOD + 1
+    ).to(torch.int32)
+    ctl._products = torch.empty(words, dtype=torch.int32, device=device)
+    ctl._checksum_sum = torch.empty((), dtype=torch.int32, device=device)
+    vote = torch.full((eo.VOTE_WORDS,), -17, dtype=torch.int32, device=device)
+    ctl._checksum_into(
+        torch.tensor(data, dtype=torch.int32, device=device),
+        words,
+        vote[eo.V_SENT_A : eo.V_SENT_A + 1],
+    )
+    want = torch.full_like(vote, -17)
+    want[eo.V_SENT_A] = expected
+    assert torch.equal(vote, want)
+
+
 def test_chaos_swaps_keep_every_expert_on_exactly_one_rank():
     cfg = eo.OnlineConfig(chaos=3, chaos_seed=5, **FAST)
     bus, group = make_group(4, cfg)
@@ -374,6 +408,9 @@ def test_flag_on_enables_the_counters_without_snapshot_files(monkeypatch, tmp_pa
     "kwargs",
     [
         {"mailbox_steps": 0},
+        {"mailbox_steps": 1},
+        {"chunk_every": 256},
+        {"mailbox_steps": 4, "chunk_every": 8},
         {"chunk_kb": 0},
         {"chunk_kb": 8192},
         {"max_swaps": 0},
@@ -449,7 +486,9 @@ def _gfx1030_moe() -> bool:
 
 @pytest.mark.skipif(not _gfx1030_moe(), reason="needs gfx1030 and the RDNA2 MoE op")
 @pytest.mark.parametrize("M", [3, 17])
-def test_swapped_resident_experts_serve_the_same_moe_in_eager_and_replay(M):
+def test_swapped_resident_experts_serve_the_same_moe_in_eager_and_replay(
+    M, monkeypatch
+):
     """Two ranks on one GPU: the real kernels follow the rewritten slots and map.
 
     The graphs are captured before any swap, as in serving: they must read the
@@ -461,6 +500,16 @@ def test_swapped_resident_experts_serve_the_same_moe_in_eager_and_replay(M):
         prepare_resident_layer,
     )
     from vllm.platforms import current_platform
+    from vllm.utils import gpu_sync_debug as sync
+
+    vote_and_commit = eo.OnlineEplb._vote_and_commit
+
+    def checked_vote_and_commit(self, swap):
+        with sync._checked_region("error"):
+            return vote_and_commit(self, swap)
+
+    monkeypatch.setattr(sync, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(eo.OnlineEplb, "_vote_and_commit", checked_vote_and_commit)
 
     torch.manual_seed(23)
     dev = torch.device("cuda")
@@ -686,3 +735,27 @@ def test_swapped_k_first_experts_serve_the_same_moe(M, w4a8):
                 assert torch.equal(getattr(module, name)[int(slots[e])], tensor[e])
     after = forward()
     torch.testing.assert_close(after, before, atol=0.02, rtol=0.01)
+
+
+@pytest.mark.skipif(not _gfx1030_moe(), reason="needs gfx1030")
+def test_mailbox_error_disables_balancer_under_strict_sync_check(monkeypatch):
+    """The intentional mailbox handshake must not kill a sync-checked worker."""
+    from vllm.utils import gpu_sync_debug as sync
+
+    device = torch.device("cuda")
+    cfg = eo.OnlineConfig()
+    # A one-participant rendezvous exercises the real GPU mailbox transfers;
+    # the error word follows the same coordinated-disable path as a peer error.
+    ctl = eo.OnlineEplb(cfg, collective=Port(Bus(1), 0, device))
+    ctl._mail_host = torch.zeros(
+        eo.HEADER + eo.SWAP_WORDS * cfg.max_swaps, dtype=torch.int32
+    )
+    ctl._mail = torch.zeros_like(ctl._mail_host, device=device)
+    ctl._error = "setup failed"
+    ctl.t = cfg.mailbox_steps
+    monkeypatch.setattr(sync, "_SYNC_CHECK_MODE", "error")
+    with sync._checked_region("error"):
+        ctl._mailbox()
+    assert ctl.off
+    assert ctl.collectives == 1
+    assert ctl._mail.cpu()[eo.M_ERRORS].item() == 1

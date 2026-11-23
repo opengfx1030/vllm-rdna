@@ -112,11 +112,13 @@ tests/tools/rdna/test_hetero_moe.py  # fork-only hetero-MoE expert-stats IO, pla
 tests/tools/rdna/test_eplb_model.py  # fork-only lean-EPLB study tools (geometry, placement, simulator, rebalance policy), CPU unit test; not in CI
 tests/tools/rdna/test_eplb_io.py  # fork-only lean-EPLB trace readers, counter summary, placement solver and kernel-time objective fit, CPU unit test; not in CI
 tests/tools/rdna/test_eplb_replay_check.py  # fork-only replay analyzer of the cross-rank top-k study (synthetic counter dumps), CPU unit test; not in CI
+tests/tools/rdna/test_eplb_qualification.py  # fork-only final EPLB qualification guards and monotonic coverage, CPU unit test; not in CI
 tests/tools/rdna/test_tunable_bits.py  # fork-only bitwise comparison of the router GEMM across rank tables (synthetic run files), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_report.py  # fork-only PR receipt logic (cells, ABBA verdicts, summary parsing, gates), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_driver.py  # fork-only pr_receipt.sh driver against stub trees and a stub serve_validate.sh, CPU unit test; not in CI
 tests/tools/rdna/test_archdiff_report.py  # fork-only per-function disassembly diff report (normalization, verdicts), CPU unit test; not in CI
 tests/tools/rdna/test_serve_validate_quiet_windows.py  # fork-only serve_validate.sh quiet-window renewal between cells (stub server and venv), CPU unit test; not in CI
+tests/tools/rdna/test_prefix_probe.py  # fork-only prefix-cache probe validity gates (fake tokenizer/metrics, injected TTFT), CPU unit test; not in CI
 tests/tools/rdna/test_pr_receipt_scan.py  # fork-only added-line scan for host syncs and unchecked launches in a diff (stub trees), CPU unit test; not in CI
 tests/tools/rdna/test_tunable_hi2.py  # fork-only 27B HI2 TunableOp shape formulas and census groups, CPU unit test; not in CI
 tests/tools/rdna/test_hi2_tunableop_profile.py  # fork-only 27B HI2 TP=2 TunableOp profile registry / rows / recipe wiring (print mode, stub venv), CPU unit test; not in CI
@@ -126,6 +128,7 @@ tests/tools/rdna/test_inkling2_recipes.py  # fork-only Inkling-2-Mini serving re
 tests/model_executor/layers/fused_moe/test_rdna_expert_stats.py  # fork-only opt-in routing statistics collector (CPU torch, AST zero-cost-off checks), CPU unit test; not in CI
 tests/model_executor/layers/fused_moe/test_rdna_eplb_stats.py  # fork-only opt-in lean-EPLB load counters (CPU collector and AST zero-cost-off checks, GPU parity tests need a gfx10 GPU), not in CI
 tests/models/qwen4_exp/test_amd_mono_rdna2_w4a8.py  # fork-only mono next to the W4A8 MoE prefill (meta-tensor layout, dispatch), CPU unit test; not in CI
+tests/models/qwen4_exp/test_amd_mono_rdna2_expert_map.py  # requires RDNA (gfx10) GPU for mono K2 with an expert map, not in CI
 tests/models/qwen4_exp/test_hc_ops_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC ops, not in CI
 tests/models/qwen4_exp/test_hc_prefill_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused HC prefill, not in CI
 tests/models/qwen4_exp/test_se_rdna2.py  # requires RDNA (gfx10/11) GPU for the fused shared-expert kernels, not in CI

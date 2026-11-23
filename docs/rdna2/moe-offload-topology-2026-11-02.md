@@ -131,3 +131,98 @@ hold it shared (`flock -s`).
 PR 148 already conflicts with v0.33 `rdna_extras` in 7 KV files (it predates the v0.33 merge). This branch adds
 two more conflicts, `tools/rdna/mono/serve_offload.sh` and `tools/rdna/mono/sweep_offload_policy.py`;
 `rdna_expert_cache_policy.py` auto-merges. Land this branch first.
+
+## Predictive expert prefetch investigation (2026-11-17)
+
+**Decision: do not add the evaluated predictors to serving.** This is a
+CPU trace-replay study, not measured ITL or a runtime prefetch implementation.
+The router remains authoritative: every recorded expert demand is served.
+Live EPLB and expert offload were not combined.
+
+### What already exists
+
+`PackedExpertCache` directly indexes individual expert rows in pinned RAM;
+`ExpertCachePolicy` manages bounded VRAM slots and leases. A database lookup
+is not missing. Known-miss copies are issued on the compute stream in
+`PackedExpertCache.ensure()`. K2 overlaps resident-expert computation with
+CPU route draining/planning, **not with those weight transfers**.
+
+The packed Flash-Next payload is 2,553,600 bytes per expert in six tensors.
+Indexing does not remove the RAM-to-VRAM transfer requirement.
+
+### Real data and equal-memory control
+
+- TP2/MTP0: 2 ranks, all 48 layers, only 100 calls per layer, cold start.
+  It is not a steady-state qualification. At 96 slots the transition
+  predictor's candidates were already resident; it issued no prefetches.
+- TP4/MTP2: 5,242 decode calls in each of five sampled layers
+  (0/12/24/36/47), using a replicated rank-0 routing record filtered to each
+  rank's expert IDs. It does not establish independent per-rank routing or
+  full-model timing. “Next layer” in this replay means next **sampled**
+  layer, not necessarily the adjacent physical layer.
+- Baseline replay reproduces the existing policy's aggregate hits/misses:
+  TP2 42,353/5,647; TP4 1,971,550/621,025.
+
+On the TP4 trace, compared at the same extra slot capacity:
+
+| Replay policy | Demand misses | Total modeled H2D bytes (decimal GB) |
+|---|---:|---:|
+| Ordinary LFU/LRU, 48 slots | 621,025 | 1,585.85 |
+| Ordinary LFU/LRU, 56 slots | 472,641 | 1,206.94 |
+| Transition predictor, 48 demand + 8 reserved slots | 538,028 | 1,376.40 |
+
+The ordinary 56-slot cache removes 23.9% of baseline misses, versus 13.4%
+for reserved prediction. Prediction transfers 14.0% more bytes than the
+equal-capacity ordinary cache. Its reserved rows can serve repeated hits:
+this is a different two-tier cache policy, not just transfer lookahead or
+the proposed demand-policy-preserving D2D promotion.
+
+Candidate precision is 61.0%, but 669,667 of 670,644 candidates are already
+resident. Only 977 speculative copies are issued (2.49 GB), of which 247
+are evicted unused (0.63 GB). Accurate predictions of already-cached
+experts are not avoided demand loads. Total-copy accounting above includes
+repeated speculative hits and later eviction effects.
+
+Eight extra slots across all 48 layers would cost 980,582,400 bytes per
+rank; the trace covers only five layers. These results do not justify
+charging that VRAM to a predictor rather than to ordinary demand caching.
+The shared-capacity transition model issues no speculative transfers;
+the simple previous-layer predictor adds substantial wasted traffic.
+
+### Latency and safety limits
+
+No current-platform ITL saving or copy/compute overlap was measured.
+Historical native/batched-copy timings are only optimistic scenario inputs:
+that backend had a separate NaN qualification failure, and the current
+tensor-copy backend and shared-uplink H2D timing were not measured here.
+Do not describe a batch fitting a modeled layer interval as proven overlap.
+
+With SDMA disabled, copy work can contend for GPU execution resources.
+Bounded bytes, slots and in-flight requests do not guarantee zero demand
+latency. A runtime candidate would need to beat an equal-VRAM cache control,
+protect live slots, publish weights only after transfer completion, ignore
+unfinished predictions without waiting, and preserve the real router's
+choices. Concurrency, quality and p99 ITL would still need measurement.
+Do not enable SDMA as a shortcut: the 2026-11-16 SDMA-on probe hung.
+
+RAM hot-set indexing would matter if the host bank did not fit RAM and had
+to page from SSD. These traces already fit the box's host RAM; a RAM hit is
+not an avoided GPU transfer. This study makes no claim that an 8–12 GiB
+card can match fully resident serving of this checkpoint.
+
+Related designs: [ProMoE](https://arxiv.org/abs/2410.22134),
+[SeqMoE](https://arxiv.org/abs/2609.12978), and
+[MoE-Infinity](https://github.com/EfficientMoE/MoE-Infinity).
+Their reported performance is not RDNA2 validation.
+
+Local reproducibility artifacts: `.tmp/prefetch-study/` contains extracted
+trace data, replay scripts and `out/real_final/` results. The added
+`scripts/equal_vram_control.py` imports the actual production policy for
+the control instead of changing serving. TP4 input SHA-256:
+`1cd218f08522665338ae4b13aae3e76d0f071ba0f0e5a760ca04836ac27903b0`.
+Compact results and limitations are committed in
+[`equal-vram-replay.json`](../../bench_results/2026-11-17_expert-prefetch/equal-vram-replay.json).
+The control and selected 8-slot prediction were independently rerun by the
+parent; nine deterministic replay selfchecks pass. Results include cold
+start and lack a separate held-out workload; they are scoped evidence
+against these predictor choices, not against predictive offload generally.

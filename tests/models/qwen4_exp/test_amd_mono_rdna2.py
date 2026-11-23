@@ -638,3 +638,257 @@ def test_hw_queue_budget(monkeypatch):
     monkeypatch.setenv("GPU_MAX_HW_QUEUES", "2")
     md.set_worker_hw_queue_budget(_config(knobs={"hw_queues": 0}))
     assert os.environ["GPU_MAX_HW_QUEUES"] == "2"
+
+
+# ---- map mode: K2 reads the layer's live expert_map (EPLB load counters) ------
+
+
+def _meta(shape, dtype=torch.float16):
+    return torch.empty(shape, dtype=dtype, device="meta")
+
+
+def _block_map(base):
+    """int32 [512]: the contiguous block [base, base + 128) in rows 0..127."""
+    emap = torch.full((512,), -1, dtype=torch.int32)
+    emap[base : base + 128] = torch.arange(128, dtype=torch.int32)
+    return emap
+
+
+def _scattered_map(seed):
+    """int32 [512]: 128 random global experts in random rows (no block)."""
+    gen = torch.Generator().manual_seed(seed)
+    emap = torch.full((512,), -1, dtype=torch.int32)
+    owned = torch.randperm(512, generator=gen)[:128]
+    emap[owned] = torch.randperm(128, generator=gen).to(torch.int32)
+    return emap
+
+
+def _quantized_layer(emap, **experts_extra):
+    """A decoder layer with one TP4 / EP4 rank's quantized resident experts.
+    The weights are on the meta device (only their shapes are read); the router
+    and the expert map are real."""
+
+    def hc(count=4):
+        return SimpleNamespace(
+            hc_count=count,
+            use_combine=True,
+            hc_norm=SimpleNamespace(weight=_meta((10240,))),
+            input_mix_weight_down_block_inject=SimpleNamespace(
+                weight=_meta((336, 10240)), weight_i8=None
+            ),
+            input_mix_weight_up=SimpleNamespace(
+                weight=_meta((10240, 320)), weight_i8=None
+            ),
+            config=SimpleNamespace(rms_norm_eps=1e-6),
+        )
+
+    experts = SimpleNamespace(
+        quant_method=CompressedTensorsWNA16RDNA2MoEMethod(),
+        w13_weight_packed=_meta((128, 320, 1280), torch.int32),
+        w13_weight_scale=_meta((128, 20, 1280)),
+        w13_qzeros=_meta((128, 20, 160), torch.int32),
+        w2_weight_packed=_meta((128, 80, 2560), torch.int32),
+        w2_weight_scale=_meta((128, 5, 2560)),
+        w2_qzeros=_meta((128, 5, 320), torch.int32),
+        expert_map=emap,
+        top_k=10,
+        renormalize=True,
+        **experts_extra,
+    )
+    shared = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(weight=_meta((320, 2560))),
+        down_proj=SimpleNamespace(weight=_meta((2560, 160))),
+        expert_gate=SimpleNamespace(weight=_meta((1, 2560))),
+    )
+    mlp = SimpleNamespace(
+        gate=SimpleNamespace(weight=torch.zeros((512, 2560), dtype=torch.float16)),
+        experts=experts,
+        shared_expert=shared,
+    )
+    # the attention side is K1's business: hc_count 3 leaves K1 unready
+    return SimpleNamespace(
+        mlp=mlp, mlp_hyper_connection=hc(), attn_hyper_connection=hc(3)
+    )
+
+
+def _layout(monkeypatch, *, map_on):
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import layout
+
+    monkeypatch.setattr(layout, "workspace", lambda device, scope: object())
+    monkeypatch.setattr(layout, "map_mode", lambda: map_on)
+    monkeypatch.setattr(layout, "op_takes_map", lambda: True)
+    return layout
+
+
+def test_setup_without_map_mode_still_wants_one_contiguous_block(monkeypatch):
+    layout = _layout(monkeypatch, map_on=False)
+    mono = layout.MonoLayer(_quantized_layer(_block_map(256)))
+    assert mono.setup(), mono.reason
+    assert mono.base == 256
+    assert not mono.map_mode and mono.experts is None and mono.ids_out is None
+    scattered = layout.MonoLayer(_quantized_layer(_scattered_map(1)))
+    assert not scattered.setup()
+    assert "one contiguous block of 128" in scattered.reason
+
+
+def test_setup_in_map_mode_takes_any_placement(monkeypatch):
+    layout = _layout(monkeypatch, map_on=True)
+    for emap in (_block_map(256), _scattered_map(2)):
+        layer = _quantized_layer(emap)
+        mono = layout.MonoLayer(layer)
+        assert mono.setup(), mono.reason
+        assert mono.map_mode
+        assert mono.experts is layer.mlp.experts
+        assert mono.experts.expert_map is emap  # the live tensor, never a copy
+        assert mono.ids_out.shape == (layout.MAX_ROWS, layout.TOP_K)
+        assert mono.ids_out.dtype == torch.int32
+
+
+@pytest.mark.parametrize(
+    "case, reason",
+    [
+        ("duplicate row", "128 local slots"),
+        ("127 experts", "128 local slots"),
+        ("int64 map", "int32"),
+        ("short map", "one entry per global expert"),
+        ("expert cache", "expert cache"),
+        ("old extension", "built without"),
+    ],
+)
+def test_setup_in_map_mode_refuses_what_k2_cannot_run(monkeypatch, case, reason):
+    layout = _layout(monkeypatch, map_on=True)
+    emap = _scattered_map(3)
+    owned = (emap >= 0).nonzero().flatten()
+    extra = {}
+    if case == "duplicate row":
+        emap[owned[0]] = emap[owned[1]]
+    elif case == "127 experts":
+        emap[owned[0]] = -1
+    elif case == "int64 map":
+        emap = emap.long()
+    elif case == "short map":
+        emap = emap[:511]
+    elif case == "expert cache":
+        extra["_rdna_expert_cache"] = SimpleNamespace(
+            logical_num_experts=128, slot_count=128
+        )
+    else:
+        monkeypatch.setattr(layout, "op_takes_map", lambda: False)
+    mono = layout.MonoLayer(_quantized_layer(emap, **extra))
+    assert not mono.setup()  # the layer stays on the modules
+    assert not mono.map_mode and mono.ids_out is None
+    assert reason in mono.reason
+
+
+def _k2_inputs(rows=3):
+    """(mono, (hidden, attn_out, injection)) enough for ``k2.run`` to build the
+    op call; the op itself is replaced by a recorder."""
+    names = [
+        "norm_w",
+        "wd",
+        "wu",
+        "wr",
+        "se_w1",
+        "se_w2",
+        "se_wg",
+        "w13",
+        "s13",
+        "z13",
+        "w2",
+        "s2",
+        "z2",
+    ]
+    mono = SimpleNamespace(
+        t={name: torch.empty(0) for name in names},
+        ws=torch.empty(0),
+        base=0,
+        eps=1e-6,
+        is_mtp=False,
+        dense_mtp=False,
+    )
+    inputs = (
+        torch.zeros(rows, 10240, dtype=torch.float16),
+        torch.zeros(rows, 2560, dtype=torch.float16),
+        torch.zeros(rows, 4, dtype=torch.float16),
+    )
+    return mono, inputs
+
+
+@pytest.fixture
+def op_calls(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        torch.ops._rocm_C,
+        "mono_k2_rdna2",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+        raising=False,
+    )
+    return calls
+
+
+def test_k2_run_without_map_mode_is_todays_call(op_calls):
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+    mono, inputs = _k2_inputs()
+    k2.run(mono, *inputs)
+    ((args, kwargs),) = op_calls
+    # 28 positional arguments, none of the map-mode ones
+    assert kwargs == {} and len(args) == 28
+    assert args[19] is mono.ws
+    assert args[20:25] == (0, 1, k2.OPTS.k2_num_wg, 1e-6, 2000.0)
+    assert args[25:] == (False, False, False)
+
+
+def test_k2_run_in_map_mode_passes_the_live_map_and_counts_the_ids(
+    monkeypatch, op_calls
+):
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+    registered: list = []
+    counted: list = []
+    stats = SimpleNamespace(count=counted.append)
+
+    def layer_stats(layer, ids):
+        registered.append((layer, ids))
+        return stats
+
+    monkeypatch.setattr(k2, "EPLB_STATS", SimpleNamespace(layer_stats=layer_stats))
+    mono, inputs = _k2_inputs(rows=3)
+    emap = _scattered_map(4)
+    experts = SimpleNamespace(expert_map=emap)
+    mono.map_mode, mono.experts = True, experts
+    mono.ids_out = torch.zeros((24, 10), dtype=torch.int32)
+    k2.run(mono, *inputs)
+    ((args, kwargs),) = op_calls
+    assert kwargs == {} and len(args) == 30
+    assert args[28] is emap and args[29] is mono.ids_out
+    ((layer, ids),) = registered
+    assert layer is experts and ids.shape == (1, 10)
+    assert len(counted) == 1
+    assert counted[0].shape == (3, 10)
+    assert counted[0].data_ptr() == mono.ids_out.data_ptr()
+    # read at every call, never cached: the tensor the layer holds now is used
+    experts.expert_map = other = emap.clone()
+    k2.run(mono, *inputs)
+    assert op_calls[1][0][28] is other
+
+
+@pytest.mark.parametrize("collector", ["off", "layer unregistered"])
+def test_k2_run_in_map_mode_without_counters_asks_for_no_ids(
+    monkeypatch, op_calls, collector
+):
+    from vllm.models.qwen4_exp.amd.mono.rdna2 import k2
+
+    # counters off, or a layer that first ran inside a graph capture
+    monkeypatch.setattr(
+        k2,
+        "EPLB_STATS",
+        None if collector == "off" else SimpleNamespace(layer_stats=lambda *a: None),
+    )
+    mono, inputs = _k2_inputs()
+    emap = _block_map(0)
+    mono.map_mode, mono.experts = True, SimpleNamespace(expert_map=emap)
+    mono.ids_out = torch.zeros((24, 10), dtype=torch.int32)
+    k2.run(mono, *inputs)
+    ((args, _),) = op_calls
+    assert len(args) == 30 and args[28] is emap and args[29] is None
