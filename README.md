@@ -143,7 +143,7 @@ branch clone. It publishes Linux x86-64 images to GHCR:
 
 | Source event | Tags on `ghcr.io/opengfx1030/vllm-rdna` |
 | --- | --- |
-| Push to `rdna_extras` | `nightly-<vllm version>-rocm7.14.0`, e.g. `nightly-0.34.0-rocm7.14.0`; every newer build of the same vLLM version moves it |
+| Push to `rdna_extras` | `nightly-<vllm version>-rocm7.14.0`, e.g. `nightly-0.34.0-rocm7.14.0`, plus the floating `nightly` and `nightly-rocm7.14.0`; every newer build moves all three |
 | Create a version tag, e.g. `v0.34.0` (Git push, GitHub UI or API) | `v0.34.0` and `v0.34.0-rocm7.14.0`, without changing nightly |
 | Manual run | Same behavior for the selected `rdna_extras` branch or version tag |
 
@@ -151,7 +151,7 @@ The nightly's vLLM version is the nearest `v<major>.<minor>.<patch>` tag in the
 history of the built commit (`git describe --tags --abbrev=0 --match 'v[0-9]*'`),
 so tagging `v0.35.0` switches later builds to `nightly-0.35.0-rocm7.14.0`.
 Branch builds are pushed by digest with no per-commit tag; the promote job then
-moves the nightly tag onto the newest digest. "Nightly" is a rolling channel
+moves the three nightly tags onto the newest digest. "Nightly" is a rolling channel
 built on each push, not a daily cron; a multi-commit push builds its final
 commit. A newer push cancels an in-flight branch build (version tag builds are
 never cancelled), and a build whose commit is no longer the branch tip is not
@@ -242,7 +242,7 @@ docker run --rm --network host --ipc host --shm-size 16g \
   --device /dev/kfd --device /dev/dri --group-add video --group-add render \
   --security-opt seccomp=unconfined \
   -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
-  ghcr.io/opengfx1030/vllm-rdna:nightly-0.34.0-rocm7.14.0 \
+  ghcr.io/opengfx1030/vllm-rdna:nightly \
   serve "$MODEL" --dtype float16 --host 0.0.0.0 --port 8000
 ```
 

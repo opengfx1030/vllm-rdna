@@ -246,5 +246,7 @@ jobs:
           fi
           docker buildx imagetools create \
             --tag "$IMAGE_NAME:$NIGHTLY_TAG" \
+            --tag "$IMAGE_NAME:nightly" \
+            --tag "$IMAGE_NAME:nightly-rocm$ROCM_VERSION" \
             "$IMAGE_NAME@$IMAGE_DIGEST"
           printf 'promoted=true\n' >> "$GITHUB_OUTPUT"
