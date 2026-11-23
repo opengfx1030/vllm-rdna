@@ -275,8 +275,18 @@ if [[ ${PPL_PROBE:-1} == 1 ]]; then
 fi
 
 if [[ ${PREFIX_PROBE:-1} == 1 ]]; then
+    # The prompt size at which the cache must hit is a property of the recipe:
+    # 27b-awq reuses state only for long prompts, Flash-Next already at ~1.9k
+    # tokens. A recipe declares it with PREFIX_PROBE_WORDS=; PREFIX_WORDS in the
+    # environment still wins, and 1800 words is the default.
+    prefix_words=${PREFIX_WORDS:-}
+    if [[ -z $prefix_words ]]; then
+        prefix_words=$(sed -n 's/^PREFIX_PROBE_WORDS=\([0-9][0-9]*\).*/\1/p' \
+            "$SERVE_TREE/tools/rdna/recipes/$RECIPE.env" 2> /dev/null | tail -1)
+    fi
+    log "prefix probe prompt: ${prefix_words:-1800} words"
     if "$VENV/bin/python" "$TREE/tools/rdna/port_v031/prefix_probe.py" --url "$URL" \
-        --model "$SERVED" --words "${PREFIX_WORDS:-1800}" \
+        --model "$SERVED" --words "${prefix_words:-1800}" \
         > "$OUT/prefix.txt" 2>&1; then
         log "PREFIX PASS"
     else

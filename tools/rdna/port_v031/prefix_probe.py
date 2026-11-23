@@ -16,11 +16,13 @@ TTFT). The old default of 0.5 demanded a 2x speedup even when the cache was
 working, because a hit only removes the prefill of the reused blocks.
 
 Cache granularity belongs to the served model, not this probe. The probe asks
-the server's /tokenize endpoint for the real prompt length and validates
---max-model-len with it; --words only sizes the generated prompt. Whether any
-blocks are reusable is proved by the measured hits, never by a hardcoded
-token threshold. Tokenize and metrics reads fail closed instead of inventing
-a length or zero counters.
+the server's /tokenize endpoint for the real prompt length and the served
+max_model_len (--max-model-len overrides it) and rejects a prompt that cannot
+fit; --words only sizes the generated prompt. Whether any blocks are reusable
+is proved by the measured hits, never by a hardcoded token threshold. A recipe
+whose cache only reuses long prompts needs a longer prompt: serve_validate.sh
+takes it from the recipe's PREFIX_PROBE_WORDS. Tokenize and metrics reads fail
+closed instead of inventing a length or zero counters.
 """
 
 import argparse
@@ -89,8 +91,12 @@ def _server_root(url: str) -> str:
     return re.sub(r"/v1(?:/.*)?$", "", url)
 
 
-def tokenize_count(url: str, model: str, prompt: str) -> int:
-    """Return the server's real token count for prompt via POST /tokenize."""
+def tokenize_info(url: str, model: str, prompt: str) -> tuple[int, int | None]:
+    """Return (token count, max_model_len) for prompt via POST /tokenize.
+
+    vLLM's /tokenize reply carries the served model's max_model_len. It is None
+    when a server does not report one.
+    """
     tokenize_url = _server_root(url) + "/tokenize"
     body = json.dumps({"model": model, "prompt": prompt}).encode()
     req = urllib.request.Request(
@@ -108,7 +114,15 @@ def tokenize_count(url: str, model: str, prompt: str) -> int:
         raise ProbeError(
             f"tokenize endpoint {tokenize_url} returned no positive integer token count"
         )
-    return count
+    limit = payload.get("max_model_len")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        limit = None
+    return count, limit
+
+
+def tokenize_count(url: str, model: str, prompt: str) -> int:
+    """Return the server's real token count for prompt via POST /tokenize."""
+    return tokenize_info(url, model, prompt)[0]
 
 
 def prefix_counters(url: str) -> tuple[float, float]:
@@ -206,7 +220,8 @@ def main(argv: list[str] | None = None) -> int:
     # --words sizes the prompt; only the server knows its tokenized length.
     ap.add_argument("--words", type=int, default=1800)
     ap.add_argument("--max-tokens", type=int, default=32)
-    ap.add_argument("--max-model-len", type=int, default=4096)
+    # None: read the served model's max_model_len from /v1/models.
+    ap.add_argument("--max-model-len", type=int, default=None)
     # None: report TTFT as context and gate only on the measured cache hits.
     # An explicit ratio keeps its strict warm <= ratio * cold target.
     ap.add_argument("--ratio", type=float, default=None)
@@ -241,12 +256,19 @@ def main(argv: list[str] | None = None) -> int:
     prompt = nonce + filler + "\n\nSummarize the text above in one sentence:"
 
     try:
-        prompt_tokens = tokenize_count(args.url, args.model, prompt)
+        prompt_tokens, server_max_len = tokenize_info(args.url, args.model, prompt)
     except ProbeError as exc:
         print(f"prompt length unknown: {exc}")
         return 1
+    max_model_len = args.max_model_len if args.max_model_len else server_max_len
+    if max_model_len is None:
+        print(
+            "prompt rejected: the server's /tokenize reply has no max_model_len; "
+            "pass --max-model-len"
+        )
+        return 1
     try:
-        check_prompt(prompt_tokens, args.max_tokens, args.max_model_len)
+        check_prompt(prompt_tokens, args.max_tokens, max_model_len)
     except ProbeError as exc:
         print(f"prompt rejected: {exc}")
         return 1

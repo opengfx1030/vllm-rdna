@@ -107,6 +107,7 @@ These are shell variables in the `.env` files. They become flags. They are not e
 | `EAGER` | `1` skips compile and graphs. | Correctness fallback. The tuning guide treats it as not a speed target. |
 | `FEATURES` | Space-separated tokens, expanded below. | Add or remove a token on the command line. |
 | `ENABLE_PREFIX_CACHING` | Used with the `prefix-caching` feature. `0` passes `--no-enable-prefix-caching`. | `full` sets 1. vLLM's own default is on; the token makes the flag explicit. |
+| `PREFIX_PROBE_WORDS` | Prompt size in words for the prefix-cache probe of `port_v031/serve_validate.sh` (default 1800, about 1.9k tokens). `PREFIX_WORDS` in the environment overrides it. | `27b-awq` sets 16000 (about 17k tokens): it reuses cached state only for long prompts (no hits at 1.9k, 3.8k and 9.5k tokens, 97 % at 16.8k). Flash-Next hits at 1.9k and keeps the default. |
 | `W4A8` | Exported as `VLLM_RDNA2_W4A8_SDOT4`. | `27b-awq` sets 1 (int8-activation prefill, M ≥ 33; decode stays W4A16). `W4A8=0` on the command line falls back to W4A16 prefill. |
 | `RDNA_AR` | Exported as `VLLM_RDNA_AR` when the recipe left `VLLM_RDNA_AR` unset. | `0` disables the one-shot all-reduce. `P2P=0` forces that too. |
 | `PLE` | `bf16` (default), `int4`, `int4-disk`, `exl3`. | See [PLE](#ple). |
