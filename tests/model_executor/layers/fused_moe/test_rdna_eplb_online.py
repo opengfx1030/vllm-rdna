@@ -143,7 +143,7 @@ def placement(group) -> np.ndarray:
     """Rank of every expert of every layer, proven by the maps and the rows."""
     ranks = len(group)
     owner = np.full((LAYERS, E), -1)
-    for rank, (_, stats, modules) in enumerate(group):
+    for rank, (_, _stats, modules) in enumerate(group):
         for pos, module in enumerate(modules):
             slots = module.expert_map.cpu().numpy()
             local = np.flatnonzero(slots >= 0)
