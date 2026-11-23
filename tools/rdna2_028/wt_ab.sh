@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2086,SC2012  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -22,12 +23,12 @@
 #   PLE          optional VLLM_PLE_QUANT_DIR (only set when non-empty)
 #   HIP_VISIBLE  GPU list (default 4,5,6,7)
 #
-# No /tmp. Logs: /home/chenco_adm/w4a8_runs/<TAG>/.
+# No /tmp. Logs: $HOME/w4a8_runs/<TAG>/.
 set -uo pipefail
 
-V=${V:-/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0}
-T=${T:-/home/chenco_adm/vllm-rdna-0.28.0}
-RUN=${RUN:-/home/chenco_adm/w4a8_runs}
+V=${V:-$HOME/Apps/vllm/venv-7.14.0_0.28.0}
+T=${T:-$HOME/vllm-rdna-0.28.0}
+RUN=${RUN:-$HOME/w4a8_runs}
 RECIPE=${RECIPE:?RECIPE required}
 SERVED=${SERVED:-}
 ARM=${ARM:-arm}

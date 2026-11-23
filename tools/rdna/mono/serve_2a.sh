@@ -12,8 +12,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 TREE=$(cd "$HERE/../../.." && pwd)
 RUN=${RUN:-$HOME/w4a8_runs/mono-layout}
 : "${ARM:?ARM=on|off}" "${GPUS:?}"
-export MODEL=${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
-PLE_QUANT_DIR=${PLE_QUANT_DIR:-/home/chenco_adm/hfcache/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
+export MODEL=${MODEL:-$HOME/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+PLE_QUANT_DIR=${PLE_QUANT_DIR:-$HOME/hfcache/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
 export RECIPE=${RECIPE:-flashnext-mtp2} GPUS PORT=${PORT:-18790} TAG=${TAG:-2a-$ARM}
 export OUT=$RUN/serve-$TAG CACHE=${CACHE:-$RUN/cache-2a-$ARM}
 export VENV=${VENV:-$HOME/Apps/vllm/venv-7.14.0_0.31.0-final}

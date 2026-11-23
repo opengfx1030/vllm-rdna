@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2086,SC2012  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -19,18 +20,18 @@
 #
 # Guards: hygiene scoped to the 0.28.0 venv only (never a co-tenant on
 # venv-7.14.0), IPMI PCI-SERR baseline before/after every phase, stop marker.
-# No /tmp: everything under /home/chenco_adm/w4a8_runs/<TAG>/.
+# No /tmp: everything under $HOME/w4a8_runs/<TAG>/.
 set -uo pipefail
 
-V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
-T=/home/chenco_adm/vllm-rdna-0.28.0
-MODEL=${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+V=$HOME/Apps/vllm/venv-7.14.0_0.28.0
+T=$HOME/vllm-rdna-0.28.0
+MODEL=${MODEL:-$HOME/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
 ARM=${ARM:?set ARM (w4a8on|w4a8off)}
 W4A8=${W4A8:?set W4A8 (1|0)}
 MTP=${MTP:-0}
 TAG=${TAG:-2026-09-29_fn-$ARM-m$MTP}
 PORT=${PORT:-18260}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+OUT=${OUT:-$HOME/w4a8_runs}
 CACHE=$T/cache/arm-fn-$ARM
 TRITON_TEMPLATE=${TRITON_TEMPLATE:-$T/cache/triton}
 WARM_TRITON=${WARM_TRITON:-1}

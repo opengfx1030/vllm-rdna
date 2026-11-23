@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2012,SC2086  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -12,18 +13,18 @@
 #     IS the STEP 4 validation, so this single pass serves both goals when no
 #     new shapes are captured.
 #
-# Outputs (per arm, under /home/chenco_adm/w4a8_runs/<TAG>/):
+# Outputs (per arm, under $HOME/w4a8_runs/<TAG>/):
 #   serve.log, driver.log, coherence.txt, cells/c{IN}_{N}/{log, coherence.txt}
 #   untuned_captures.csv -- every GemmTunableOp key not in the frozen rows
 #   cells.csv, kfd.log, markers.txt
 #
-# No /tmp. Scratch rows live under /home/chenco_adm/w4a8_runs/_captures/<arm>/.
+# No /tmp. Scratch rows live under $HOME/w4a8_runs/_captures/<arm>/.
 set -uo pipefail
 
-V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
-T=/home/chenco_adm/vllm-rdna-0.28.0
-MODEL=${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+V=$HOME/Apps/vllm/venv-7.14.0_0.28.0
+T=$HOME/vllm-rdna-0.28.0
+MODEL=${MODEL:-$HOME/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+OUT=${OUT:-$HOME/w4a8_runs}
 ROWS=$T/tunableop/rocblas-f30bb442e9b5
 CAP_ROOT=$OUT/_captures
 CELLS=${CELLS:-"1 1024 512 221|8 1024 512 222|1 16384 1024 111|8 16384 1024 112"}
