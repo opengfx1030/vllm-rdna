@@ -64,7 +64,7 @@ if [[ -n $rocm_lib ]]; then
     export LD_LIBRARY_PATH="$rocm_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 if [[ ${V620_PRELOAD_ROCR:-0} == 1 ]]; then
-    export LD_PRELOAD=${V620_ROCR_FIX:-/home/wsantos/work/rocr-fix/rocm-systems/build/rocr/lib/libhsa-runtime64.so}
+    export LD_PRELOAD=${V620_ROCR_FIX:-$HOME/work/rocr-fix/rocm-systems/build/rocr/lib/libhsa-runtime64.so}
 fi
 # TunableOp: solution IDs belong to a rocBLAS build, not just a version number.
 # The rows root holds one rocblas-<sha256-first-12>/ directory per build.

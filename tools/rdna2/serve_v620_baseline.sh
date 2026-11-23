@@ -4,8 +4,8 @@
 set -euo pipefail
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
-runtime=${V620_RUNTIME:-/home/george/v620-experiments/upstream-20260915/v620-vllm-testing}
-model=${V620_MODEL:-/home/george/v620-vllm/models/intel-autoround}
+runtime=${V620_RUNTIME:-$HOME/v620-experiments/upstream-20260915/v620-vllm-testing}
+model=${V620_MODEL:-$HOME/v620-vllm/models/intel-autoround}
 port=${V620_PORT:-${V620_TEST_PORT:-8082}}
 host=${V620_HOST:-127.0.0.1}
 export PYTHONPATH=$source_dir
