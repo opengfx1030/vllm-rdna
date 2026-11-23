@@ -149,6 +149,7 @@ HI2 is the user-facing name of the HadamardINT2-FP16 weight format (`rdna_hint_f
 
 | File | Kind | What it is |
 | --- | --- | --- |
+| [`regression-suite-d0b0c2b9af-2026-11-23.md`](regression-suite-d0b0c2b9af-2026-11-23.md) | dated record | No-regression suite on `rdna_extras` after PRs 197 to 200, and the spec-decode NaN-count crash PR 200 fixed. |
 | [`fa-gqa-decode-validation-2026-11-11.md`](fa-gqa-decode-validation-2026-11-11.md) | dated record | FA-RDNA2 GQA decode kernel validation and the opt-in decision. |
 | [`determinism-2026-11-04.md`](determinism-2026-11-04.md) | dated record | Run-to-run determinism of Flash-Next on gfx1030. |
 | [`concurrency-probe-noise-2026-11-12.md`](concurrency-probe-noise-2026-11-12.md) | dated record | Concurrency-probe FAILs on `flashnext-mtp2`: noise, not corruption. |
