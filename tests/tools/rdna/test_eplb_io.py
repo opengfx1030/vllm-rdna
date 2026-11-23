@@ -372,7 +372,7 @@ def test_solve_packs_skewed_layers_and_leaves_balanced_ones_linear():
     assert solve.validate_doc(doc) == []
     assert doc["version"] == 1 and doc["ep_size"] == 4 and doc["num_experts"] == 64
     assert set(doc["layers"]) <= {"0", "1", "2"} and doc["layers"]
-    for key, entry in doc["layers"].items():
+    for key in doc["layers"]:
         assert (
             report[key]["objective_ratio_packed"]
             < report[key]["objective_ratio_linear"]

@@ -649,7 +649,7 @@ def ppl_text(rel, verdict):
 def quality_run(tmp_path, head_kl=0.0011, head_top1=0.985, rel=0.002, verdict="PASS"):
     run = tmp_path / "run"
     boots = [("A1", "base", "speed"), ("B1", "head", "speed"), ("A2", "base", "floor")]
-    for bid, role, kind in boots:
+    for bid, _role, _kind in boots:
         write_boot(run, bid, hook="PASS pr_receipt hook")
     manifest(
         run,

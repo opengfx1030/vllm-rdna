@@ -1298,8 +1298,10 @@ def cmd_r2(args: argparse.Namespace) -> int:
         "design: A1 off, B1 chaos, B2 chaos, A2 off; `--monokernel`; "
         "cells " + args.cells,
         "",
-        "| arm | EPLB | mono | K2 3-row FULL | modules >=24 | plan cells | "
-        "unfinished | faults | ok |",
+        (
+            "| arm | EPLB | mono | K2 3-row FULL | modules >=24 | plan cells | "
+            "unfinished | faults | ok |"
+        ),
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for arm in args.arms:
@@ -1316,8 +1318,10 @@ def cmd_r2(args: argparse.Namespace) -> int:
         )
     text += [
         "",
-        "K2 evidence is the c=1/probe 3-row FULL path; the c=8 module path is "
-        "the >=24-row evidence. They are never merged.",
+        (
+            "K2 evidence is the c=1/probe 3-row FULL path; the c=8 module path is "
+            "the >=24-row evidence. They are never merged."
+        ),
         "",
         R2_INJECTION_NOTE,
     ]

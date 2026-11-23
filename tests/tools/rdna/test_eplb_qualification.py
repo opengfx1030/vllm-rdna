@@ -437,8 +437,10 @@ def _counter_log(chaos: int = 1, decision: int = 1_000_000_000) -> str:
             f"{worker} mono rdna2: --monokernel on TP rank {rank}",
             f"{worker} mono k2_rdna2: 3 rows (full) -> mono kernel",
             f"{worker} mono k2_rdna2: 24 rows (eager) -> modules",
-            f"{worker} Online EPLB is ON: OnlineConfig(chaos={chaos}, "
-            f"decision_steps={decision})",
+            (
+                f"{worker} Online EPLB is ON: OnlineConfig(chaos={chaos}, "
+                f"decision_steps={decision})"
+            ),
             f"{worker} EPLB load counters are ON",
         ]
     return _log(*lines)

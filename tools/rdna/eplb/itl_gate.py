@@ -186,8 +186,10 @@ def compare(
 
 def format_rows(rows: list[dict]) -> str:
     lines = [
-        f"{'cell':>16} {'metric':>18} {'off':>10} {'on':>10} {'on/off-1':>9} "
-        f"{'noise':>7} verdict"
+        (
+            f"{'cell':>16} {'metric':>18} {'off':>10} {'on':>10} {'on/off-1':>9} "
+            f"{'noise':>7} verdict"
+        )
     ]
     for r in rows:
         noise = "-" if r["noise"] is None else f"{100 * r['noise']:.2f}%"
