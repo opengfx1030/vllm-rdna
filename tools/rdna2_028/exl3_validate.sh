@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2086  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -8,9 +9,9 @@
 # Reuses the warm capture cache so no recompile; the TunableOp env differs
 # (lookup-only vs record) so the served numbers are the real frozen-row run.
 set -uo pipefail
-V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
-T=/home/chenco_adm/vllm-rdna-0.28.0
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+V=$HOME/Apps/vllm/venv-7.14.0_0.28.0
+T=$HOME/vllm-rdna-0.28.0
+OUT=${OUT:-$HOME/w4a8_runs}
 TAG=${TAG:-2026-10-01_exl3-validate}
 PORT=${PORT:-18106}
 CACHE=$T/cache/arm-cap-exl3-m0
@@ -95,7 +96,7 @@ for cell in "${_cells[@]}"; do
   log "bench c=$N in=$IN"
   ( cd "$D" && "$V/bin/python" -m vllm.entrypoints.cli.main bench serve \
     --backend openai --endpoint /v1/completions --base-url "http://127.0.0.1:$PORT" \
-    --model /home/chenco_adm/models/Qwen3.8-27B-exl3-3.00bpw --served-model-name exl3-27b-mul1 \
+    --model $HOME/models/Qwen3.8-27B-exl3-3.00bpw --served-model-name exl3-27b-mul1 \
     --dataset-name random --random-input-len "$IN" --random-output-len "$OUTL" \
     --num-prompts "$N" --max-concurrency "$N" --ignore-eos --request-rate inf --seed "$SEED" --temperature 0 \
     --save-result --result-dir "$CD" ) >"$CD.log" 2>&1

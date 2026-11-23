@@ -14,7 +14,7 @@ case $(basename -- "$test_root") in
     *) printf 'Refusing launch outside a dedicated V620 testing directory.\n' >&2; exit 2 ;;
 esac
 venv=$test_root/.venv
-model=${V620_MODEL:-/home/george/v620-vllm/models/intel-autoround}
+model=${V620_MODEL:-$HOME/v620-vllm/models/intel-autoround}
 port=${V620_TEST_PORT:-8081}
 mtp_tokens=${V620_MTP_TOKENS:-1}
 if [[ ! $port =~ ^[0-9]+$ || ! $mtp_tokens =~ ^[0-9]+$ ]]; then

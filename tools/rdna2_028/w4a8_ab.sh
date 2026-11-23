@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2086,SC2034  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -13,17 +14,17 @@
 #   - every per-10s SpecDecoding window (Mean acceptance length + acc/draft),
 #   - the distinct (m,k,n,group) shapes that fired the W4A8 fast path,
 #   - the W4A8 gate marker.
-# Everything lands in /home/chenco_adm/w4a8_runs/<TAG>/ (persistent, no /tmp).
+# Everything lands in $HOME/w4a8_runs/<TAG>/ (persistent, no /tmp).
 set -uo pipefail
-V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
-T=/home/chenco_adm/vllm-rdna-0.28.0
-MODEL=${MODEL:-/home/chenco_adm/.cache/huggingface/hub/models--cyankiwi--Qwen3.8-27B-AWQ-INT4/snapshots/63768c10df38c0395e12ef49edac1bd539eaeeea}
+V=$HOME/Apps/vllm/venv-7.14.0_0.28.0
+T=$HOME/vllm-rdna-0.28.0
+MODEL=${MODEL:-$HOME/.cache/huggingface/hub/models--cyankiwi--Qwen3.8-27B-AWQ-INT4/snapshots/63768c10df38c0395e12ef49edac1bd539eaeeea}
 MTP=${MTP:-2}
 W4A8=${W4A8:-0}
 DBG=${DBG:-1}
 TAG=${TAG:-ab_mtp${MTP}_w${W4A8}}
 PORT=${PORT:-18230}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+OUT=${OUT:-$HOME/w4a8_runs}
 D=$OUT/$TAG
 rm -rf "$D"; mkdir -p "$D"
 ROCM_SDK_LIB=$V/lib/python3.12/site-packages/_rocm_sdk_libraries/lib

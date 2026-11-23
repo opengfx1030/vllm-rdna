@@ -6,7 +6,7 @@
   mode-0 `FULL_DECODE_ONLY`, over the persistent batch buffers).
 - Mixed and prefill batches replay the piecewise graphs.
 
-`rdna_extra/v0.29.0` and the piecewise follow-up
+`rdna_extra/v0.29.0` (a historical port branch) and the piecewise follow-up
 ([#20](https://github.com/opengfx1030/vllm-rdna/pull/20)) replayed every ROCm
 FULL dispatch as piecewise. Decode then ran with eager GDN and attention
 breaks between pieces (about 63–70 tok/s down to 26–34 tok/s on the V620

@@ -1,6 +1,7 @@
 # MoE W4A8 (int4 x int8 sdot4) wiring for gfx1030
 
-Branch: `w4a8-wiring`. The MoE half of the W4A8 sdot4 alternative to W4A16.
+Branch: `w4a8-wiring` (historical: its content is in `rdna_extras` now, but the
+branch is not an ancestor of it and none of its commits is in it by patch id). The MoE half of the W4A8 sdot4 alternative to W4A16.
 Default OFF — `VLLM_RDNA2_W4A8_SDOT4=1` is required for the fused MoE kernel to
 be used. This is what makes W4A8 able to fire on Qwen3.8-Flash-Next-AWQ, whose
 quant is entirely `mlp.experts.*` (the dense W4A8 op is unreachable there).
@@ -22,7 +23,7 @@ quant is entirely `mlp.experts.*` (the dense W4A8 op is unreachable there).
 
 ## Op contract
 
-```
+```text
 moe_w4a8_gemm_rdna2(a, c, b_q_weight, b_scales, b_qzeros, topk_weights,
                     sorted_token_ids, expert_ids, num_tokens_post_padded,
                     top_k, block_size_m, mul_topk_weight,

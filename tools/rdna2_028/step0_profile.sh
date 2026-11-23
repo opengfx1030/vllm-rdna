@@ -17,15 +17,15 @@
 # steps. No /tmp (rocprof TMPDIR + all artifacts under $OUT).
 set -uo pipefail
 
-V=${V:-/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0}
-T=${T:-/home/chenco_adm/vllm-rdna-0.28.0}
-MODEL=${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
-PLE=${PLE:-/home/chenco_adm/hfcache/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
+V=${V:-$HOME/Apps/vllm/venv-7.14.0_0.28.0}
+T=${T:-$HOME/vllm-rdna-0.28.0}
+MODEL=${MODEL:-$HOME/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+PLE=${PLE:-$HOME/hfcache/hub/models--primitive-ai--Qwen3.8-Flash-Next-PLE-quant/snapshots/4f861b63f69e61bfc2e22130ec91ec67f03ec43e/ples_int4}
 MTP=${MTP:-0}
 OUTLEN=${OUTLEN:-128}
 NUM_PROMPTS=${NUM_PROMPTS:-1}
 TAG=${TAG:-step0_mtp$MTP}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs/$TAG}
+OUT=${OUT:-$HOME/w4a8_runs/$TAG}
 CELLS=${CELLS:-"1024 16384"}
 READY_SO=${READY_SO:-}
 

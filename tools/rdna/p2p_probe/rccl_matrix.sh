@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RCCL all_reduce_perf over subsets of the par1-cs25 V620s (HIP ids, resolve
+# RCCL all_reduce_perf over subsets of the <build-host> V620s (HIP ids, resolve
 # them to PCI buses first). usage: rccl_matrix.sh <outdir> <label> <hip csv> [ENV=VAL ...]
 # Production env is NCCL_P2P_LEVEL=pxb NCCL_PROTO=Simple RCCL_P2P_NET_DISABLE=1
 # RCCL_P2P_BATCH_ENABLE=1 RCCL_MSCCL_ENABLE=0 (docs/rdna2/tuning.md).

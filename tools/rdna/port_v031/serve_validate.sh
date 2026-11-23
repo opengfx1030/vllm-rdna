@@ -77,10 +77,10 @@ SUM=$OUT/summary.txt
 : > "$SUM"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$SUM"; }
 
-# HIP indices on par1-cs25: 0-1 = W7800 (other job), 2-5 = V620 PLX-B,
+# HIP indices on <build-host>: 0-1 = W7800 (other job), 2-5 = V620 PLX-B,
 # 6-9 = V620 PLX-A. rocm-smi numbers them differently. This refusal is host
 # allocation policy, not a vLLM constraint, so it is explicit and portable:
-# REFUSED_GPUS keeps the par1-cs25 default; a host whose HIP 0/1 ARE the
+# REFUSED_GPUS keeps the <build-host> default; a host whose HIP 0/1 ARE the
 # intended V620s (e.g. a four-card 0,1,2,3 allocation) clears or repoints
 # the list via env instead of editing the driver.
 REFUSED_GPUS=${REFUSED_GPUS-0,1}
@@ -288,8 +288,18 @@ if [[ ${PPL_PROBE:-1} == 1 ]]; then
 fi
 
 if [[ ${PREFIX_PROBE:-1} == 1 ]]; then
+    # The prompt size at which the cache must hit is a property of the recipe:
+    # 27b-awq reuses state only for long prompts, Flash-Next already at ~1.9k
+    # tokens. A recipe declares it with PREFIX_PROBE_WORDS=; PREFIX_WORDS in the
+    # environment still wins, and 1800 words is the default.
+    prefix_words=${PREFIX_WORDS:-}
+    if [[ -z $prefix_words ]]; then
+        prefix_words=$(sed -n 's/^PREFIX_PROBE_WORDS=\([0-9][0-9]*\).*/\1/p' \
+            "$SERVE_TREE/tools/rdna/recipes/$RECIPE.env" 2> /dev/null | tail -1)
+    fi
+    log "prefix probe prompt: ${prefix_words:-1800} words"
     if "$VENV/bin/python" "$TREE/tools/rdna/port_v031/prefix_probe.py" --url "$URL" \
-        --model "$SERVED" --words "${PREFIX_WORDS:-1800}" \
+        --model "$SERVED" --words "${prefix_words:-1800}" \
         > "$OUT/prefix.txt" 2>&1; then
         log "PREFIX PASS"
     else

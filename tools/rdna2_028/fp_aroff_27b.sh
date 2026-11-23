@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2024,SC2086,SC2034  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -12,13 +13,13 @@
 #
 # Usage: TAG=2026-09-29_tp4-fp-aroff bash fp_aroff_27b.sh
 set -uo pipefail
-V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
-T=/home/chenco_adm/vllm-rdna-0.28.0
+V=$HOME/Apps/vllm/venv-7.14.0_0.28.0
+T=$HOME/vllm-rdna-0.28.0
 CACHE=$T/cache/hip-fp-aroff
-MODEL=${MODEL:-/home/chenco_adm/.cache/huggingface/hub/models--cyankiwi--Qwen3.8-27B-AWQ-INT4/snapshots/63768c10df38c0395e12ef49edac1bd539eaeeea}
+MODEL=${MODEL:-$HOME/.cache/huggingface/hub/models--cyankiwi--Qwen3.8-27B-AWQ-INT4/snapshots/63768c10df38c0395e12ef49edac1bd539eaeeea}
 TAG=${TAG:-2026-09-29_tp4-fp-aroff}
 PORT=${PORT:-18240}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+OUT=${OUT:-$HOME/w4a8_runs}
 D=$OUT/$TAG
 rm -rf "$D"; mkdir -p "$D"
 ROCK_SDK_LIB=$V/lib/python3.12/site-packages/_rocm_sdk_libraries/lib

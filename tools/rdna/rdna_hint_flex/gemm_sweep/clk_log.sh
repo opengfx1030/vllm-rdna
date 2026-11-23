@@ -4,7 +4,7 @@
 #
 # Sample the graphics clock, socket power, throttle status and hotspot
 # temperature of one V620 while a benchmark runs (amd-smi numbers GPUs by PCI
-# order, so on par1-cs25 amd-smi index 5 is bus e2 = HIP 5; check
+# order, so on <build-host> amd-smi index 5 is bus e2 = HIP 5; check
 # `amd-smi list` before using another index).
 #
 #   bash clk_log.sh <amd-smi gpu index> <samples> <interval_s> > clk.log
