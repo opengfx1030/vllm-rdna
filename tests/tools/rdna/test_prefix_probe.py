@@ -259,7 +259,7 @@ def test_cli_fails_when_metrics_are_unavailable(monkeypatch):
     _serve(
         monkeypatch,
         {
-            TOKENIZE: [json.dumps({"count": 1927})],
+            TOKENIZE: [json.dumps({"count": 1927, "max_model_len": 4096})],
             METRICS: [OSError("connection refused")],
         },
     )
@@ -277,7 +277,7 @@ def test_cli_uses_the_tokenized_length_not_the_word_count(monkeypatch):
     _serve(
         monkeypatch,
         {
-            TOKENIZE: [json.dumps({"count": 4100})],
+            TOKENIZE: [json.dumps({"count": 4100, "max_model_len": 4096})],
             METRICS: [_metrics(0, 0)],
         },
     )
@@ -288,6 +288,52 @@ def test_small_context_uses_measured_hits_not_assumed_block_geometry(monkeypatch
     _main_routes(monkeypatch, 64, [(0, 0), (128, 48)])
     monkeypatch.setattr(pp, "ttft", _fake_ttft([0.10, 0.08]))
     assert pp.main(_argv("--words", "1", "--max-model-len", "256")) == 0
+
+
+def test_a_long_prompt_fits_the_context_the_server_reports(monkeypatch):
+    # 27b-awq hits only on long prompts: the probe must not keep an old 4096
+    # limit when the server's own context is larger.
+    routes = {
+        TOKENIZE: [json.dumps({"count": 17000, "max_model_len": 262144})],
+        METRICS: [_metrics(0, 0), _metrics(34000, 16384)],
+    }
+    _serve(monkeypatch, routes)
+    monkeypatch.setattr(pp, "ttft", _fake_ttft([13.0, 0.6]))
+    assert pp.main(_argv("--words", "16000")) == 0
+
+
+def test_a_prompt_beyond_the_servers_context_is_rejected_before_any_request(
+    monkeypatch,
+):
+    monkeypatch.setattr(pp, "ttft", _no_ttft())
+    _serve(
+        monkeypatch,
+        {TOKENIZE: [json.dumps({"count": 17000, "max_model_len": 8192})]},
+    )
+    assert pp.main(_argv("--words", "16000")) == 1
+
+
+def test_a_server_without_max_model_len_needs_the_flag(monkeypatch):
+    monkeypatch.setattr(pp, "ttft", _no_ttft())
+    _serve(monkeypatch, {TOKENIZE: [json.dumps({"count": 17000})]})
+    assert pp.main(_argv("--words", "16000")) == 1
+
+    routes = {
+        TOKENIZE: [json.dumps({"count": 17000})],
+        METRICS: [_metrics(0, 0), _metrics(34000, 16384)],
+    }
+    _serve(monkeypatch, routes)
+    monkeypatch.setattr(pp, "ttft", _fake_ttft([13.0, 0.6]))
+    assert pp.main(_argv("--words", "16000", "--max-model-len", "32768")) == 0
+
+
+def test_the_27b_recipe_probes_with_a_prompt_long_enough_to_hit():
+    # Without PREFIX_PROBE_WORDS serve_validate uses 1800 words (~1.9k tokens),
+    # where 27b-awq measured 0 hits.
+    text = (ROOT / "tools/rdna/recipes/27b-awq.env").read_text()
+    match = pp.re.search(r"^PREFIX_PROBE_WORDS=(\d+)\s*$", text, pp.re.MULTILINE)
+    assert match is not None
+    assert int(match.group(1)) >= 14000
 
 
 def test_empty_completion_stream_has_no_measurable_ttft(monkeypatch):
