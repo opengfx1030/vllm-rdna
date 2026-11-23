@@ -525,9 +525,16 @@ path (correctness A/B only).
 
 ### Other
 
-- `VLLM_USE_BREAKABLE_CUDAGRAPH`: auto-enabled for models whose RDNA path
-  needs eager breaks inside FULL graphs (DeepSeek-V4, Qwen3.5/3.8 hybrids).
-  Set it explicitly only to override.
+- `VLLM_USE_BREAKABLE_CUDAGRAPH`: unset means the engine decides
+  (`VllmConfig._maybe_enable_breakable_cudagraph`); an explicit `0` or `1`
+  always wins. On RDNA it turns the feature on for the architectures
+  `DeepseekV41ForCausalLM`, `HYV4ForCausalLM` / `HYV4MTPModel`,
+  `Qwen3_5ForCausalLM` / `Qwen3_5MoeForCausalLM` (their GDN prefill chain
+  stays eager) and `Inkling2LoopForConditionalGeneration`, and for
+  `--monokernel` with an expert cache (`rocm_mono_decode.expert_cache_slots`).
+  Whether a Qwen3.8 checkpoint is covered depends on the architecture string in
+  its `config.json`; the recipes `dsv4-flash` and `full` set `=1` themselves.
+  See `default_breakable_cudagraph_architectures` in `vllm/config/vllm.py`.
 - `VLLM_HIPPIHX`, `_LIB`, `_CODE_OBJECT`: route ops through a prebuilt hippihx
   V1 library when its plan is ready.
 - `VLLM_NO_PARTIAL_HASH=1`: disable partial-block prefix hits (debugging).

@@ -2,7 +2,7 @@
 
 **Status**: opt-in scaffolding shipped 2026-09-14. All new ops default to
 **off** — the existing Triton paths are the source of truth until the HIP
-ports are verified end-to-end on `.176`. The goal of this note is to map
+ports are verified end-to-end on the test box. The goal of this note is to map
 what's currently HIP on gfx1030, what's still Triton-only, and which
 env-var gates flip the new HIP paths on.
 

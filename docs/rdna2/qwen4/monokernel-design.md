@@ -86,7 +86,7 @@ K2's internal phases, one persistent launch:
 
 That is ~21 launches at M ≤ 8 and ~28 at M > 8 replaced by one, which is the
 part's main value; the phase timings are in
-[`../monokernel/2a-results.md`](../monokernel/2a-results.md).
+[`../../rdna/monokernel/2a-results.md`](../../rdna/monokernel/2a-results.md).
 
 ### 1.3 Persistent kernel and barrier scheme
 
@@ -190,7 +190,7 @@ channels are rolled through LDS; the fp32 recurrent state tile lives in
 registers; per-token state slots and the `num_accepted - 1` initial state
 handle MTP verify. Head dims are 128/128, conv width 4, ≤ 64 rows, ≤ 8 tokens
 per sequence. State is exact (conv) and ≤ 7e-8 (SSM) against the modular
-path ([`../monokernel/2a-results.md`](../monokernel/2a-results.md)).
+path ([`../../rdna/monokernel/2a-results.md`](../../rdna/monokernel/2a-results.md)).
 
 ### 1.8 MTP
 
@@ -203,8 +203,9 @@ is hard-coded to `w13[128,1280,2560]`/`w2[128,2560,640]`, the unquantized
 Flash-Next drafter geometry. Enabling the route requires
 `VLLM_RAISE_ON_LOGIT_NANS=1` and a same-stream control reset; the measured
 value was not established (see
-[`../monokernel/README.md`](../monokernel/README.md) and the MTP section of
-[`MTP-MONO-HANDOVER-2026-10-24.md`](../../../MTP-MONO-HANDOVER-2026-10-24.md)).
+[`../../rdna/monokernel/README.md`](../../rdna/monokernel/README.md) and the MTP
+section of the 2026-10-24 MTP mono handover note, which is not tracked in this
+repository).
 
 ### 1.9 Hardware queues
 
@@ -231,7 +232,7 @@ the budget to 4 for the workers; recipes that set 2 for prefill reasons
 | MoE format | symmetric W4A16; W4A8 prefill (`VLLM_RDNA2_W4A8_SDOT4=1`) runs next to it, from 512 tokens, on the same packed weights | asymmetric zeros, FP8, MXFP4 fall back or refuse; the expert cache refuses W4A8 |
 
 Performance context, so the Qwen4 design does not over-promise: the FFN-only
-kernel was neutral-to-negative on its own ([`../monokernel/2a-results.md`](../monokernel/2a-results.md));
+kernel was neutral-to-negative on its own ([`../../rdna/monokernel/2a-results.md`](../../rdna/monokernel/2a-results.md));
 the all-on monokernel (K1 + GDN + QSA + K2) reached −1.4 % to −12.2 % ITL
 across eight MTP0/MTP2 cells, and the merged tree measured 85.02 → 86.16
 decode tok/s at 16k/1k c=8. MoE offload, not the kernel, is the large win at
@@ -607,9 +608,9 @@ architecture gate. Command:
   [DSv4.1 60397](https://github.com/vllm-project/vllm/pull/60397),
   [gfx942 port 60731](https://github.com/vllm-project/vllm/pull/60731),
   [Flash-Next draft 61325](https://github.com/vllm-project/vllm/pull/61325).
-- This fork: [`../monokernel/README.md`](../monokernel/README.md),
-  [`../monokernel/2a-results.md`](../monokernel/2a-results.md),
-  [`../monokernel/p0-results.md`](../monokernel/p0-results.md),
+- This fork: [`../../rdna/monokernel/README.md`](../../rdna/monokernel/README.md),
+  [`../../rdna/monokernel/2a-results.md`](../../rdna/monokernel/2a-results.md),
+  [`../../rdna/monokernel/p0-results.md`](../../rdna/monokernel/p0-results.md),
   [`../async-stall-profile-2026-11-02.md`](../async-stall-profile-2026-11-02.md),
   [`../moe-offloading-improvements.md`](../moe-offloading-improvements.md),
   [`../moe-offload-topology-2026-11-02.md`](../moe-offload-topology-2026-11-02.md),
