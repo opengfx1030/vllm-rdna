@@ -521,14 +521,18 @@ Script checks that ran, all without a GPU: `bash -n` and the repo shellcheck
 config exit 0; `DRY_RUN=1` with the two independent builds exits 0 in 12 s with
 seven gates `PLAN-OK`, the head plan `--max-num-seqs 8` with
 `cudagraph_capture_sizes:[3,6,12,24]`, and off, chaos and planner launch plans
-that differ only in the EPLB environment words. Its judge replayed on saved
-receipts: `serve-eplb-monogate-{off,chaos}` pass as 7-decoder boots and fail as
-the wrong arm or as 2-decoder boots; the paired gap check on them reads +0.56 %
-and +0.64 % (inject 16,384 and 4,096) and +0.12 % (reverse 16,384); the
-stationary judge reads the old `serve-eplb-soak1` plan lines as 14 plans and
-233 swaps, as the soak section above states. No real 2-decoder receipt exists,
-so that branch has only a synthetic positive control. These replays validate
-the script, not the gates.
+that differ only in the EPLB environment words. A pass-through with an emulated
+`qualify_final.sh` (each boot exits at once) ran all seven stages in order with
+`CONTINUE=1` and ended with exit 1, as the stage checks found no artifacts; an
+emulated ABORT latch ended with exit 3 and `GATES=build` with exit 0 and no
+lease; the stand-in lease was taken once and released on exit. Its judge
+replayed on saved receipts: `serve-eplb-monogate-{off,chaos}` pass as
+7-decoder boots and fail as the wrong arm or as 2-decoder boots; the paired gap
+check on them reads +0.56 % and +0.64 % (inject 16,384 and 4,096) and +0.12 %
+(reverse 16,384); the stationary judge reads the old `serve-eplb-soak1` plan
+lines as 14 plans and 233 swaps, as the soak section above states. No real
+2-decoder receipt exists, so that branch has only a synthetic positive control.
+These replays validate the script, not the gates.
 
 Still open: all of (a) to (h). The earlier v0.34 attempt on the old rebase
 (`eplb/online-mono-034`, `38f3024159`) stopped twice in its flag-off arm A1
