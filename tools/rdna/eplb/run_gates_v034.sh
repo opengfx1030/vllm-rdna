@@ -88,6 +88,8 @@
 #
 # Exit: 0 every selected gate passed (the summary says COMPLETE or PARTIAL), 1 a gate failed
 # or is incomplete, 2 bad input, 3 abort latched (thermal, AER, serve.log fault, busy GPUs).
+# Stop between boots: write a reason into $OUT/ABORT.  The running boot finishes, no further boot
+# starts, and the chain ends with exit 3.
 # shellcheck disable=SC2030,SC2031
 set -uo pipefail
 
@@ -1116,6 +1118,13 @@ stage_ppl() {
     return "$rc"
 }
 
+# qualify_final.sh exits 0 only on "result: qualified"; the artifact is read back so that a wrapper
+# that returned 0 without a campaign cannot pass the gate.
+require_qualified() { # run directory
+    grep -q '^result: qualified$' "$1/qualification.md" 2> /dev/null \
+        || { echo "$1/qualification.md is missing or does not say 'result: qualified'" >&2; return 1; }
+}
+
 stage_r2() {
     local rc=0
     if ((DRY_RUN)); then
@@ -1126,7 +1135,8 @@ stage_r2() {
     MODE=r2 BASE_TREE=$BASE_TREE HEAD_TREE=$HEAD_TREE VENV=$VENV MODEL=$MODEL OUT=$RUN/r2 \
         QUALIFY_POLL=$QUALIFY_POLL bash "$QUALIFY_FINAL"
     rc=$?
-    return "$rc"
+    ((rc == 0)) || return "$rc"
+    require_qualified "$RUN/r2"
 }
 
 stage_r1() {
@@ -1140,6 +1150,7 @@ stage_r1() {
         QUALIFY_POLL=$QUALIFY_POLL bash "$QUALIFY_FINAL"
     rc=$?
     ((rc == 0)) || return "$rc"
+    require_qualified "$RUN/r1" || return 1
     labels=$(cat "$RUN/r1/speed-labels.txt" 2> /dev/null || echo missing)
     if [[ $labels != "0 REGRESSION labels" ]]; then
         echo "r1: the native speed verdicts are not clean (hard gate of this chain):" >&2
@@ -1187,19 +1198,24 @@ stage_soak() { stage_traffic soak; }
 # ------------------------------------------------------------------- driver
 SUMMARY_ROWS=()
 
+FOLLOW_PID=""
+stop_follow() {
+    [[ -z $FOLLOW_PID ]] || { kill "$FOLLOW_PID" 2> /dev/null; wait "$FOLLOW_PID" 2> /dev/null; }
+    FOLLOW_PID=""
+}
+
 run_stage() { # gate
-    local gate=$1 t0 rc log=$RUN/$1.log follow verdict
+    local gate=$1 t0 rc log=$RUN/$1.log verdict
     mkdir -p "$RUN/$gate"
     : > "$log"
     note "gate $gate: $(gate_label "$gate")"
     t0=$(date +%s)
     tail -n +1 -f "$log" &
-    follow=$!
+    FOLLOW_PID=$!
     "stage_$gate" >> "$log" 2>&1
     rc=$?
     sleep 0.5
-    kill "$follow" 2> /dev/null
-    wait "$follow" 2> /dev/null
+    stop_follow
     case $rc in
         0) verdict=PASS ;;
         1) verdict=FAIL ;;
@@ -1214,7 +1230,7 @@ run_stage() { # gate
 }
 
 summarize() {
-    local row g v s b pass=0 ran="" missing="" complete=1 verdict
+    local row g v s b pass=0 total=0 ledger=none ran="" missing="" complete=1 verdict
     {
         echo "# EPLB v0.34 gate chain"
         echo
@@ -1226,8 +1242,13 @@ summarize() {
         for row in ${SUMMARY_ROWS[@]+"${SUMMARY_ROWS[@]}"}; do
             IFS='|' read -r g v s b <<< "$row"
             echo "| $g | $v | $b | $((s / 60)) | $(gate_label "$g") |"
-            ran="$ran $g"
-            [[ $v == PASS ]] && pass=$((pass + 1))
+            if [[ $g == ledger ]]; then
+                ledger=$v
+            else
+                ran="$ran $g"
+                total=$((total + 1))
+                [[ $v == PASS ]] && pass=$((pass + 1))
+            fi
         done
     } > "$RUN/gates-summary.md"
     if ((DRY_RUN)); then
@@ -1242,10 +1263,10 @@ summarize() {
     for g in $GATES_ALL; do
         [[ " $ran " == *" $g "* ]] || { missing="$missing $g"; complete=0; }
     done
-    if ((pass == ${#SUMMARY_ROWS[@]} && ${#SUMMARY_ROWS[@]} > 0)); then verdict=PASS; else verdict=NOT-QUALIFIED; fi
+    if ((pass == total && total > 0)) && [[ $ledger == PASS || $ledger == none ]]; then verdict=PASS; else verdict=NOT-QUALIFIED; fi
     {
         echo
-        echo "chain: $verdict ($pass of ${#SUMMARY_ROWS[@]} gates ran passed)"
+        echo "chain: $verdict ($pass of $total gates passed, ledger $ledger)"
         if ((complete)); then
             echo "coverage: COMPLETE, every open gate of the chain ran"
         else
@@ -1333,6 +1354,7 @@ take_lease() {
     source "$LEASE_SH"
     MODEL=$saved_model
     trap 'note "interrupted"; exit 130' INT TERM
+    trap 'stop_follow; lease_release' EXIT
     lease_take "EPLB v0.34 open gates: $GATES" "$total"
     lease_check_buses
 }
@@ -1346,13 +1368,15 @@ stage_ledger() {
 }
 
 main() {
-    local g failed=0
+    local g failed=0 gpu_gates=0
     defaults
     if ((LIST)); then
         list_gates
         exit 0
     fi
     preflight
+    trap stop_follow EXIT
+    trap 'note "interrupted"; exit 130' INT TERM
     # the CPU build comes first, before the lease
     if [[ " $GATES " == *" build "* ]]; then
         run_stage build || failed=1
@@ -1360,7 +1384,10 @@ main() {
     ((failed == 0)) || { summarize; exit 1; }
     preflight_inputs
     ((DRY_RUN == 0)) || dry_plans
-    if ((DRY_RUN == 0 && LEASE_HELD == 0)); then
+    for g in $GATES; do
+        [[ $g == build ]] || gpu_gates=1
+    done
+    if ((DRY_RUN == 0 && LEASE_HELD == 0 && gpu_gates == 1)); then
         take_lease
     fi
     for g in $GATES; do
