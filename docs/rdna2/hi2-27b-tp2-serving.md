@@ -118,7 +118,7 @@ Notes on the table:
 (an index is the enumeration order and moves when cards, risers or switches change):
 `PCI_BUSES="d9 dc"` in rank order, which the launcher resolves to `HIP_VISIBLE_DEVICES` at
 launch and refuses when a bus is missing or the count is not TP. The measured pair is HIP 2,3
-= PCI buses `d9 dc` on `par1-cs25` (every arm below; `scoreboard.sh` refuses to boot when the
+= PCI buses `d9 dc` on `<build-host>` (every arm below; `scoreboard.sh` refuses to boot when the
 two do not match). Keep a tensor-parallel group on one PCIe switch when the host has several
 ([`docs/rdna/serving.md`](../rdna/serving.md)). The one-shot all-reduce
 (`VLLM_RDNA_AR_MAX_KB=256`, `VLLM_RDNA_AR_ONESHOT_KB=256`) needs PCIe peer-to-peer between
@@ -256,7 +256,7 @@ RECIPE=27b-hi2-tp2 MODEL=/path/to/Qwen3.8-27B-HI2-3.0bpw GPUS=2,3 PORT=18211 TAG
 
 All arms: quiet protocol, KFD evictions 0 in every window, junction temperature at most 86 C,
 greedy / PPL / prefix-cache / concurrency probes PASS. Arms without a suffix ran on HIP 2,3
-(PCI `d9 dc`) of `par1-cs25`, arms with the suffix `-a2` on HIP 0,1 (PCI `d1 d4`). The second
+(PCI `d9 dc`) of `<build-host>`, arms with the suffix `-a2` on HIP 0,1 (PCI `d1 d4`). The second
 pair reads 1 to 3% faster, so compare arms only within one pair. Raw files:
 `bench_results/2026-11-15_hi2-scoreboard/<arm>/` in this repository (`meta.json` and
 `scoreboard.md` of every arm named below, `scoreboard.json` of `base`, `final`, `final-mtp2`,

@@ -265,7 +265,7 @@ The recipe comment: 2112 is the 2048-token mamba block plus 4 sequences × 3 MTP
 
 ### `flashnext-tp8-mtp2`
 
-Flash-Next AWQ-W4A16 with MTP=2 as `TP=8` with expert parallel over eight V620s: two PCIe switches, four cards behind each (par1-cs25). `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` in rank order, `PORT=18098`, `HOST=127.0.0.1`, `SERVED_NAME=flash-next`, `MAXLEN=262144`, `SEQS=8`, `MAXBAT=2048`. `KV=13958643712` (13 GiB): the weights are 11.23 GiB per GPU at TP=8 and the peak driver memory is 18.9 GiB with a 3.75 GiB cache, so 13 GiB leaves about 1.8 GiB at the activation peak. A fixed `KV` skips the memory profile and `GMEM` does not check it, so size it from the memory table in [`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`](../rdna2/tp8-pp2-flashnext-2026-11-06.md) when the hardware differs.
+Flash-Next AWQ-W4A16 with MTP=2 as `TP=8` with expert parallel over eight V620s: two PCIe switches, four cards behind each (the eight-V620 build host, `<build-host>`). `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` in rank order, `PORT=18098`, `HOST=127.0.0.1`, `SERVED_NAME=flash-next`, `MAXLEN=262144`, `SEQS=8`, `MAXBAT=2048`. `KV=13958643712` (13 GiB): the weights are 11.23 GiB per GPU at TP=8 and the peak driver memory is 18.9 GiB with a 3.75 GiB cache, so 13 GiB leaves about 1.8 GiB at the activation peak. A fixed `KV` skips the memory profile and `GMEM` does not check it, so size it from the memory table in [`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`](../rdna2/tp8-pp2-flashnext-2026-11-06.md) when the hardware differs.
 
 The one-shot all-reduce gate is `VLLM_RDNA_AR_MAX_KB=128` and `VLLM_RDNA_AR_ONESHOT_KB=128`: at eight ranks one-shot beats RCCL only up to about 155 KiB, and every captured decode size (24 tokens at most, 120 KiB) stays below 128 KiB. On a tree with the hierarchical all-reduce (rdna_extras `dc35df271d` and later) the sizes from 20 KiB up to 1 MiB take that path instead (`VLLM_RDNA_AR_HIER_MAX_KB=1024`, default auto for a group over both switches): ITL p50 at c=8 is 11 % lower (41.8 to 37.2 ms) and the c=1 step is unchanged. `GPU_MAX_HW_QUEUES=4`, `TUNED_CONFIG=1`. The shipped TunableOp rows now cover device ordinals 0-7 (3330 rows per rank); before them ranks 4-7 ran rocBLAS defaults.
 
@@ -365,14 +365,14 @@ pinned buffers](../rdna2/pinned-host-evictions-2026-11-05.md)). Two host
 settings make the locks effective:
 
 - `RLIMIT_MEMLOCK` above the table size plus the other pinned blocks, which is
-  23.84 GiB plus about 1 GiB per TP4 worker. On par1-cs25:
+  23.84 GiB plus about 1 GiB per TP4 worker. On `<build-host>`:
   `/etc/security/limits.d/90-vllm-memlock.conf`
-  (`chenco_adm soft/hard memlock unlimited`), effective for new logins.
+  (`<user> soft/hard memlock unlimited`), effective for new logins.
   Check with `ulimit -l`. When the limit is lower, the worker logs `mlock of
   the pinned PLE table failed` or `mlock failed for N pinned host mappings` and
   serves without those locks.
 - `vm.compact_unevictable_allowed = 0`, so compaction does not migrate
-  locked pages. On par1-cs25: `/etc/sysctl.d/90-vllm-compact.conf`.
+  locked pages. On `<build-host>`: `/etc/sysctl.d/90-vllm-compact.conf`.
   Check with `sysctl vm.compact_unevictable_allowed`.
 
 To restore the defaults, remove both files, run
