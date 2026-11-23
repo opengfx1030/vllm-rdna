@@ -2064,6 +2064,18 @@ _INKLING2_MAX_SPLITS = 256  # kI2MaxSplits of csrc/rocm/inkling2_attn_rdna2.cu
 #: (the split factors are baked into a captured CUDA graph).
 _INKLING2_DECODE_FUSED = os.environ.get("VLLM_INKLING2_DECODE_FUSED", "1")
 
+#: ``VLLM_INKLING2_PREFILL_ATTN_TILE`` picks the tile kernel of `inkling2_attention`, the
+#: one that serves every request of two or more query tokens (prefill chunks, draft
+#: verification; ``docs/rdna2/inkling2-attn-kernels.md`` section 12): ``1`` (default) runs
+#: the pipelined kernel (four CTAs per WGP, K / V loads hidden behind the other half of
+#: the tile, the probabilities kept in registers, bank-conflict free V tile, bias / mask
+#: work skipped on the interior tiles of a long context): the same fp32 operations in
+#: the same order, so bit-identical outputs, and 1.4x-1.5x faster per visit at 16k-144k
+#: of context (sliding layers of at most 32 query tokens keep the shipped kernel, which
+#: is 1-10% faster there); ``0`` restores the shipped kernel for every call.  Read once
+#: at import (a captured CUDA graph bakes the kernel in).
+_INKLING2_PREFILL_ATTN_TILE = os.environ.get("VLLM_INKLING2_PREFILL_ATTN_TILE", "1")
+
 
 def inkling2_attention_workspace_numel(
     num_reqs: int,
@@ -2287,7 +2299,18 @@ def inkling2_attention(
     max_query_len: int,
     splits_decode: int,
     splits_tile: int,
+    *,
+    tile_impl: int | None = None,
 ) -> None:
+    """``tile_impl``: 0 = shipped tile kernel, 1 = pipelined tile kernel; ``None`` takes
+    ``VLLM_INKLING2_PREFILL_ATTN_TILE``, except that a sliding layer of at most 32 query
+    tokens (two query tiles: a few key tiles per CTA, latency bound) keeps the shipped
+    kernel (``docs/rdna2/inkling2-attn-kernels.md`` section 12.3)."""
+    if tile_impl is None:
+        small_sliding = window > 0 and max_query_len <= 32
+        tile_impl = (
+            0 if _INKLING2_PREFILL_ATTN_TILE in ("", "0") or small_sliding else 1
+        )
     torch.ops._rocm_C.inkling2_attention(
         q,
         rel,
@@ -2313,6 +2336,7 @@ def inkling2_attention(
         max_query_len,
         splits_decode,
         splits_tile,
+        tile_impl,
     )
 
 
@@ -6751,6 +6775,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_attent
         max_query_len: int,
         splits_decode: int,
         splits_tile: int,
+        tile_impl: int,
     ) -> None:
         return
 

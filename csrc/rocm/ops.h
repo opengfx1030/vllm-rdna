@@ -938,17 +938,15 @@ void inkling2_kv_prep(torch::Tensor xk, torch::Tensor xv,
                       int64_t v_stream_offset, int64_t conv_block_size,
                       bool write_state, double k_clip, double rms_eps);
 
-void inkling2_attention(torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
-                        std::optional<torch::Tensor> gate,
-                        torch::Tensor q_scale, torch::Tensor rel_scale,
-                        torch::Tensor rel_proj_t, torch::Tensor positions,
-                        torch::Tensor kv_cache, torch::Tensor block_table,
-                        torch::Tensor seq_lens, torch::Tensor query_start_loc,
-                        torch::Tensor out, torch::Tensor workspace,
-                        int64_t window, int64_t rel_extent, bool log_scale,
-                        double log_alpha, double log_n_floor, double q_clip,
-                        double rel_clip, int64_t max_query_len,
-                        int64_t splits_decode, int64_t splits_tile);
+void inkling2_attention(
+    torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
+    std::optional<torch::Tensor> gate, torch::Tensor q_scale,
+    torch::Tensor rel_scale, torch::Tensor rel_proj_t, torch::Tensor positions,
+    torch::Tensor kv_cache, torch::Tensor block_table, torch::Tensor seq_lens,
+    torch::Tensor query_start_loc, torch::Tensor out, torch::Tensor workspace,
+    int64_t window, int64_t rel_extent, bool log_scale, double log_alpha,
+    double log_n_floor, double q_clip, double rel_clip, int64_t max_query_len,
+    int64_t splits_decode, int64_t splits_tile, int64_t tile_impl);
 
 // Inkling-2-Mini DSpark draft (mtp.safetensors) on RDNA2 (gfx1030): bf16 tap
 // capture, DFlare mix + RMSNorm, skinny / dense fp16 projections, per-head Q/K
