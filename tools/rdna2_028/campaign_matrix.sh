@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2012,SC2086  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -16,14 +17,14 @@
 #                  Writes cells.csv + coherence + markers.
 #
 # Env: MODE, ARMS (space list), OUT, MODEL, CELLS, PORT base.
-# No /tmp. Captures + logs live under /home/chenco_adm/w4a8_runs/.
+# No /tmp. Captures + logs live under $HOME/w4a8_runs/.
 set -uo pipefail
 
 MODE=${MODE:-capture}
-V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
-T=/home/chenco_adm/vllm-rdna-0.28.0
-MODEL=${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+V=$HOME/Apps/vllm/venv-7.14.0_0.28.0
+T=$HOME/vllm-rdna-0.28.0
+MODEL=${MODEL:-$HOME/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+OUT=${OUT:-$HOME/w4a8_runs}
 CELLS=${CELLS:-"1 1024 512 221|8 1024 512 222|1 16384 1024 111|8 16384 1024 112"}
 ARMS=${ARMS:-"w4a16-fa-m2"}
 CAP_ROOT=$OUT/_captures

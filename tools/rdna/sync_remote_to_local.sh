@@ -11,7 +11,7 @@
 # Required env (there are no baked-in host paths):
 #   LOCAL=<local checkout>     REMOTE=<user@host>     REMOTE_PATH=<remote tree>
 # Optional env:
-#   SSH_KEY=~/.ssh/id_ed25519_ansible   BRANCH=rdna_extras
+#   SSH_KEY=~/.ssh/id_ed25519           BRANCH=rdna_extras
 #   SYNC_GIT_NAME / SYNC_GIT_EMAIL      identity for the remote mirror commit
 #
 # This script:
@@ -25,7 +25,7 @@ set -euo pipefail
 LOCAL=${LOCAL:?set LOCAL=/path/to/local/checkout}
 REMOTE=${REMOTE:?set REMOTE=user@host}
 REMOTE_PATH=${REMOTE_PATH:?set REMOTE_PATH=/path/to/remote/tree}
-SSH_KEY=${SSH_KEY:-~/.ssh/id_ed25519_ansible}
+SSH_KEY=${SSH_KEY:-$HOME/.ssh/id_ed25519}
 BRANCH=${BRANCH:-rdna_extras}
 
 echo "=== STEP 1: rsync remote validated state -> local ==="

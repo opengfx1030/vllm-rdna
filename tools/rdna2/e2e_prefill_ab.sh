@@ -28,7 +28,7 @@
 #       prefix caching serves whole prompts from cache (a 16k hit costs ~1.3 s regardless of
 #       length). Without this, per-request latency inside one case spreads 15-57x at 8k/16k.
 set -euo pipefail
-repo=/home/wsantos/work/vllm-rdna
+repo=$HOME/work/vllm-rdna
 cd "$repo"
 PORT=${PORT:-8000}
 arms=${1:-both}

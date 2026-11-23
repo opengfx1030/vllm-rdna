@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2012,SC2086  # pre-existing lint debt, script frozen with its bench evidence
 # fp32-accum matrix driver — Flash-Next, TP=4, FULL_AND_PIECEWISE cudagraphs,
 # prefix caching, FA-RDNA2, frozen TunableOp rows. Runs on GPUs 4-7.
 #
@@ -8,13 +9,13 @@
 #   w4a8-m0           : VLLM_RDNA2_MOE_FP32_ACCUM=1 + VLLM_RDNA2_W4A8_SDOT4=1, 1 cell
 #
 # Env: ARMS (space list), OUT, MODEL, TAG_PREFIX, HIP_DEVICES. No /tmp.
-# Logs + captures live under /home/chenco_adm/w4a8_runs/.
+# Logs + captures live under $HOME/w4a8_runs/.
 set -uo pipefail
 
-V=/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0
-T=/home/chenco_adm/vllm-rdna-0.28.0
-MODEL=${MODEL:-/home/chenco_adm/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+V=$HOME/Apps/vllm/venv-7.14.0_0.28.0
+T=$HOME/vllm-rdna-0.28.0
+MODEL=${MODEL:-$HOME/hfcache/hub/models--wtdcode--Qwen3.8-Flash-Next-AWQ-W4A16/snapshots/0939125b929543a783ce700c90e36dd1a575c00c}
+OUT=${OUT:-$HOME/w4a8_runs}
 TAG_PREFIX=${TAG_PREFIX:-2026-09-30_fp32-accum-matrix}
 HIP_DEVICES=${HIP_DEVICES:-4,5,6,7}
 ARMS=${ARMS:-"fp32-m0 fp32-m2 cas-m0 cas-m2 w4a8-m0"}

@@ -77,10 +77,10 @@ SUM=$OUT/summary.txt
 : > "$SUM"
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$SUM"; }
 
-# HIP indices on par1-cs25: 0-1 = W7800 (other job), 2-5 = V620 PLX-B,
+# HIP indices on <build-host>: 0-1 = W7800 (other job), 2-5 = V620 PLX-B,
 # 6-9 = V620 PLX-A. rocm-smi numbers them differently. This refusal is host
 # allocation policy, not a vLLM constraint, so it is explicit and portable:
-# REFUSED_GPUS keeps the par1-cs25 default; a host whose HIP 0/1 ARE the
+# REFUSED_GPUS keeps the <build-host> default; a host whose HIP 0/1 ARE the
 # intended V620s (e.g. a four-card 0,1,2,3 allocation) clears or repoints
 # the list via env instead of editing the driver.
 REFUSED_GPUS=${REFUSED_GPUS-0,1}
