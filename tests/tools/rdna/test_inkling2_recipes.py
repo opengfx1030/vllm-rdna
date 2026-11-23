@@ -188,3 +188,36 @@ def test_dspark_recipe_keys_follow_the_caller(venv, recipe):
     out = plan(venv, f"RECIPE={recipe}", "MAXLEN=90000", "SPEC_CONFIG=").stdout
     assert flag(out, "--max-model-len", "90000")
     assert "--speculative-config" not in out
+
+
+ADAPTIVE = "inkling2-mini-tp1-dspark-adaptive"
+
+
+def adaptive_spec(ids) -> str:
+    return (
+        '{"method":"dspark","num_speculative_tokens":7,'
+        '"num_speculative_tokens_per_batch_size":[[1,2,7]],'
+        f'"speculator_options":{{"adaptive_k":{{}},"draft_vocab":"{ids}"}}}}'
+    )
+
+
+def test_adaptive_recipe_names_the_ids_file(venv, tmp_path):
+    ids = tmp_path / "ids.npy"
+    # as a launcher argument and as an environment variable
+    for out in (
+        plan(venv, f"RECIPE={ADAPTIVE}", f"DRAFT_VOCAB={ids}").stdout,
+        plan(venv, f"RECIPE={ADAPTIVE}", DRAFT_VOCAB=str(ids)).stdout,
+    ):
+        assert flag(out, "--speculative-config", adaptive_spec(ids))
+        assert flag(out, "--max-num-seqs", "2")
+        assert flag(out, "--max-model-len", "105000")
+        assert flag(out, "--tensor-parallel-size", "1")
+    default = plan(venv, f"RECIPE={ADAPTIVE}").stdout
+    assert "/.cache/rdna/inkling2-mini-draft-vocab-32768.npy" in default
+
+
+def test_adaptive_recipe_keys_of_every_level_follow_the_caller(venv):
+    # PORT is set by inkling2-mini-tp1, two recipes below this one.
+    out = plan(venv, f"RECIPE={ADAPTIVE}", PORT="19999", DRAFT_VOCAB="x.npy").stdout
+    assert flag(out, "--port", "19999")
+    assert flag(out, "--gpu-memory-utilization", "0.92")

@@ -90,11 +90,13 @@ fi
 # Caller-set variables win over recipe defaults, so snapshot every key the
 # recipe touches (values only, setness included) and re-apply after sourcing.
 # A recipe may build on another one with `source "$RDSE_RECIPES/<name>.env"`;
-# the keys of those files are snapshotted too.
+# the keys of those files (and of the ones they build on) are snapshotted too.
 rdse_key_files=("$recipe_file")
-while IFS= read -r _base; do
-    rdse_key_files+=("$RDSE_RECIPES/$_base.env")
-done < <(sed -nE 's/^[[:space:]]*source[[:space:]]+"[$]RDSE_RECIPES\/([A-Za-z0-9_-]+)\.env".*/\1/p' "$recipe_file")
+for ((_i = 0; _i < ${#rdse_key_files[@]} && _i < 8; _i++)); do
+    while IFS= read -r _base; do
+        rdse_key_files+=("$RDSE_RECIPES/$_base.env")
+    done < <(sed -nE 's/^[[:space:]]*source[[:space:]]+"[$]RDSE_RECIPES\/([A-Za-z0-9_-]+)\.env".*/\1/p' "${rdse_key_files[_i]}")
+done
 declare -A rdse_saved=()
 declare -a rdse_keys=()
 while IFS= read -r _key; do

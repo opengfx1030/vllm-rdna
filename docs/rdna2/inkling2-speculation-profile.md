@@ -339,9 +339,9 @@ rejection sampler is touched.
   the later ones pooled (`p`), shrunk toward the engine-wide estimate (`prior_weight` 6); a new request starts from what the
   engine saw lately (content comes in runs). A per-position estimate is too noisy for the 50-150 steps of a request.
 * **Choice.** `K = argmax (1 + p1 + p1 p + ...) / step_ms(K)` with `step_ms(K) = forward(rows) + lm_head and sampling + draft(K)
-  + host`, the V620 table of 3.3 (forward at 1/3/5/8 rows = 15.9/23.0/26.9/32.7 ms; draft 4.15 + 0.13 K ms, scaled down by
+    * host`, the V620 table of 3.3 (forward at 1/3/5/8 rows = 15.9/23.0/26.9/32.7 ms; draft 4.15 + 0.13 K ms, scaled down by
   the vocabulary share when a draft vocabulary is set); the smallest K within 1 % of the best rate is taken (`k_tolerance`: the
-  rate is flat near its optimum and a smaller K costs less when the estimate is too high). `K = 0` only when the best K is slower
+  rate is flat near its optimum and a smaller K costs less when the estimate is too high).`K = 0` only when the best K is slower
   than not drafting by `stop_margin` (8 %) and the request has had `min_steps` (4) verified steps (an engine-wide dip must not
   stop a request that has not been tried: without that rule up to 17 % of the chat steps ran at K = 0, none with it); while K
   is 0, every 32nd step probes one draft.
@@ -546,9 +546,12 @@ python tools/rdna/inkling2/draft_vocab.py --ckpt ~/hfcache/inkling2-mini --size 
    --out vocab3_{size}.npy --code 'site-packages/**/*.py' --prose 'docs/**/*.md' --chat calib.jsonl --heldout 'repo/**/*.py'
 ```
 
-Serving: `--speculative-config '{"method":"dspark","num_speculative_tokens":7,"num_speculative_tokens_per_batch_size":
-[[1,2,7],[3,8,0]],"speculator_options":{"adaptive_k":{},"draft_vocab":"/path/vocab3_32768.npy"}}'` (drop `draft_vocab` for the
-exact-draft default).
+Serving: `RECIPE=inkling2-mini-tp1-dspark-adaptive` (`tools/rdna/recipes/`; the header has the one command that makes the ids
+file). Its `SPEC_CONFIG` is `{"method":"dspark","num_speculative_tokens":7,"num_speculative_tokens_per_batch_size":[[1,2,7]],
+"speculator_options":{"adaptive_k":{},"draft_vocab":"/path/ids.npy"}}`; with more slots keep the tail `[3,8,0]` of the schedule,
+and drop `draft_vocab` for the exact-draft default. Lossless check: `tools/rdna/inkling2/dspark_nll.py` forces a reference text
+through the decode path with and without the draft and compares the logprob of every forced token against the run-to-run floor
+(`docs/rdna2/inkling2-dspark.md`, "Run DSpark").
 
 Raw data (box `$M/out`, `$M/logs`; local copies `Inkling2SpecProto/data/`): `{k0,k0b,k2,adk,adk32,adk32v3,final,hex0,hexad,lang0,
 langad,langv,b4}.json` and logs, `ids_*.json` (greedy ids, `top` = best logprobs for the `lp` runs), `trace7_events.json`,
@@ -561,7 +564,10 @@ langad,langv,b4}.json` and logs, `ids_*.json` (greedy ids, `top` = best logprobs
 
 * **Statistics.** 6-12 prompts per type, one run per configuration; identical runs differ by 0.1 % (no draft) to +-5 %
   (code_edit K=7), so per-type differences under 3-5 % are not results; the mean of the six types is steadier (about +-1 %).
-  The estimator defaults were tuned on a trace of these same prompts (9.7), and no held-out prompt set was run.
+  The estimator defaults were tuned on a trace of these same prompts (9.7); 33 held-out prompts (5-6 of each kind, none used
+  for the tuning or for ranking the vocabulary) were run later through the served recipes: their means are 4 % (K = 2) and
+  7 % (adaptive + vocabulary) slower than the tuned prompts', and every kind is still faster than no draft
+  (`inkling2-dspark.md`, "Run DSpark").
 * **Draft vocabulary.** An opt-in artifact: ids are the tokenizer's, ranked on code, prose and chat text that are not the
   benchmark's outputs, 95-96 % coverage on chat / prose at 32768 ids, so text unlike the corpora (other languages, rare names)
   would lose more acceptance. First-position acceptance stayed within +-3 % here. TP=1 and greedy only (anything else raises
