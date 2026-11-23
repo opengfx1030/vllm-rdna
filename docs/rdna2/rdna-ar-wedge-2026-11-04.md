@@ -143,7 +143,7 @@ Neighbour-boot test:
 Both settings were measured as above and then persisted, with user
 approval. See [serving](../rdna/serving.md#host-settings-for-the-pinned-ple-table).
 
-- `/etc/security/limits.d/90-vllm-memlock.conf` sets `chenco_adm` soft and
+- `/etc/security/limits.d/90-vllm-memlock.conf` sets `<user>` soft and
   hard `memlock` to `unlimited`.
     - Unlimited rather than sized: a TP4 worker locks 23.84 GiB, a TP2
     worker 47.7 GiB. Only the PLE table path calls `mlock`.

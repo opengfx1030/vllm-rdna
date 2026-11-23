@@ -11,7 +11,7 @@ State at 2026-11-03, end of the design turn.
   stall profile.
 - `docs/rdna2/qwen4/monokernel-design.md`: architecture, gap table, design,
   Wave32/LDS/VGPR budgets, TP4/TP2 roofline tables, test plan, open questions.
-- `feat/qwen4-prep` (worktree `/Users/kletorch/Projects/infrastructure/gfx1030_optimized/vllm-qwen4-prep`):
+- `feat/qwen4-prep` (worktree `../vllm-qwen4-prep`):
     - `vllm/models/qwen4_prep/__init__.py`: architecture gate (Qwen4, not
     Qwen4Exp). Not imported by serving.
     - `vllm/models/qwen4_prep/mono_plan.py`: config -> stage graph, row caps,

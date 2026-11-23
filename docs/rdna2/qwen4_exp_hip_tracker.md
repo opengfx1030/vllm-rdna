@@ -67,7 +67,7 @@ box and session, `vllm bench serve` with `--dataset-name random --seed 0
 The two off-arms agree to 0.5-1.7 % on prefill and 0.2 % on TPOT, so the
 differences above are real at this workload.
 
-**What this says**
+### What this says
 
 1. **`VLLM_GDN_HIP_PREFILL=1` costs ~5.5 % prefill and buys nothing.** D and B
    are indistinguishable on prefill, so the whole regression is GDN, and QSA
@@ -261,6 +261,7 @@ unsolved part: at the production chunk size every component is *faster* on HIP
 slower. Roughly 250 ms is unaccounted for.
 
 Ruled out this round, with evidence:
+
 - **Inductor recompiles / graph breaks**: both arms log 3 compile-related
   lines; no difference.
 - **Chunk metadata build**: `gdn_attn.py:_build_chunk_metadata` runs for every
@@ -310,12 +311,12 @@ So **QSA contributes nothing to prefill and GDN accounts for all of it** — whi
 its kernels are 0.26 ms/call *faster*, i.e. ~75 ms better per 16k forward. The
 ~135-185 ms difference is **host-side Python dispatch**:
 
-* the HIP path makes **5 custom-op calls per chunk** (`gdn_prefill_prep_rdna2`
+- the HIP path makes **5 custom-op calls per chunk** (`gdn_prefill_prep_rdna2`
   in the caller, then kkt, solve_wy, delta_h, o inside
   `_gdn_prefill_chain_rdna2`), each with 12+ tensor arguments;
-* the Triton path makes **2** (`fused_post_conv_prep`, then
+- the Triton path makes **2** (`fused_post_conv_prep`, then
   `chunk_gated_delta_rule`);
-* chunked prefill at 2048 gives 288 chunks per 16k forward, so that is ~1440
+- chunked prefill at 2048 gives 288 chunks per 16k forward, so that is ~1440
   extra op dispatches per forward, and prefill is not cudagraphed here.
 
 **The fix (next action):** add one host-side C++ op that launches
@@ -350,6 +351,7 @@ kernel. So there is no Python-dispatch problem to fix after all: the fused-op
 plan in round 10 was based on a contaminated measurement and is withdrawn.
 
 **Net position after all of this:** every measurement that isolates the GDN path
+
 - offline kernel sums, offline whole-chain, and now in-server per-op - says HIP
 is faster, by 10-24 % depending on chunk size, while the end-to-end A/B says the
 gates are 0.65-1.3 % slower. The two disagree by ~1 %, which is at the edge of
@@ -1017,19 +1019,19 @@ GEMM was falling back to rocBLAS heuristics.
 Built with the README's recipe (service stopped, campaign in the sanctioned
 per-user location, never /tmp or the CWD):
 
-```
+```bash
 tune_v620_fp16.py --output-root $HOME/.cache/tunableop/campaign-decode \
   --batch-tokens 1 2 3 4 5 6 7 8 12 16 24 32
 qualify_v620_fp16.py $HOME/.cache/tunableop/campaign-decode/rocblas-d05939967b5f
 ```
 
-* **84/84 keys produced, 84/84 passed on devices 0-3** against FP32 references.
-* Solver mix 81 `Gemm_Rocblas_*`, 3 `Default`.
-* **Per-shape speedup over the heuristic 1.4x to 3.6x**, largest on the K=320 and
+- **84/84 keys produced, 84/84 passed on devices 0-3** against FP32 references.
+- Solver mix 81 `Gemm_Rocblas_*`, 3 `Default`.
+- **Per-shape speedup over the heuristic 1.4x to 3.6x**, largest on the K=320 and
   K=10240 shapes (3.57x at M=16, n=10240, k=320).
-* Merged into the build's folder: 44 prefill + 84 decode/MTP = **128 rows/rank**,
+- Merged into the build's folder: 44 prefill + 84 decode/MTP = **128 rows/rank**,
   key sets disjoint. **Lookup-hit proof 128/128, 0 misses**; coverage test passes.
-* The 84 rows are raw tuned, not curated (recorded in provenance).
+- The 84 rows are raw tuned, not curated (recorded in provenance).
 
 ### Does it move serving? TunableOp on vs off, A/B/A, all arms health 200
 
@@ -1267,21 +1269,21 @@ QSA only.
 ## Change log
 
 - **2026-09-14** — scaffolding shipped:
-  - `csrc/rocm/hc_rdna2.cu` (5 kernels)
-  - `csrc/rocm/qsa_rdna2.cu` (3 ops)
-  - `csrc/rocm/ple_short_conv_rdna2.cu` (2 kernels)
-  - `vllm/models/qwen4_exp/amd/ops/{hc,qsa,ple_conv}_rdna2.py` dispatchers
-  - `csrc/rocm/torch_bindings.cpp` (10 new ops under `#ifdef VLLM_ROCM_GFX1030`)
-  - `csrc/rocm/ops.h` (10 host-wrapper declarations)
-  - `CMakeLists.txt` (3 new files in the gfx1030 `EXT_SRC` list)
-  - `vllm/envs.py` (3 env vars: `VLLM_RDNA_HC_PREFILL_HIP`,
+    - `csrc/rocm/hc_rdna2.cu` (5 kernels)
+    - `csrc/rocm/qsa_rdna2.cu` (3 ops)
+    - `csrc/rocm/ple_short_conv_rdna2.cu` (2 kernels)
+    - `vllm/models/qwen4_exp/amd/ops/{hc,qsa,ple_conv}_rdna2.py` dispatchers
+    - `csrc/rocm/torch_bindings.cpp` (10 new ops under `#ifdef VLLM_ROCM_GFX1030`)
+    - `csrc/rocm/ops.h` (10 host-wrapper declarations)
+    - `CMakeLists.txt` (3 new files in the gfx1030 `EXT_SRC` list)
+    - `vllm/envs.py` (3 env vars: `VLLM_RDNA_HC_PREFILL_HIP`,
     `VLLM_RDNA_QSA_HIP`, `VLLM_RDNA_PLE_CONV_HIP`; default "0")
-  - `vllm/models/qwen4_exp/amd/ops/{hc,qsa}.py` (dispatcher early-returns)
-  - `vllm/models/qwen4_exp/amd/ple_layer.py` (early-return branches in
+    - `vllm/models/qwen4_exp/amd/ops/{hc,qsa}.py` (dispatcher early-returns)
+    - `vllm/models/qwen4_exp/amd/ple_layer.py` (early-return branches in
     `_short_conv_dilated_decode_batched` /
     `_short_conv_dilated_prefill_batched`)
-  - `docs/rdna2/qwen4_exp_hip_path.md` (overview + opt-in recipe)
-  - `docs/rdna2/qwen4_exp_hip_tests.md` (test specification)
+    - `docs/rdna2/qwen4_exp_hip_path.md` (overview + opt-in recipe)
+    - `docs/rdna2/qwen4_exp_hip_tests.md` (test specification)
 
 ---
 
@@ -1297,6 +1299,7 @@ its CUDA graphs** after the PLE/offload/cache fixes in `rdna_extras`
   trap, **not** a Triton compile abort (no `Fatal Python error`/`make_amdgcn`).
 
 Observations:
+
 - MoE already on RDNA2 HIP (`CompressedTensorsWNA16RDNA2MoEMethod`).
 - `Using FlashAttention version None` (no flash-attn lib on ROCm).
 - QSA forward routes via `qwen4_exp_qsa_with_output` (registered as a
@@ -1318,7 +1321,7 @@ model's actual geometry (24 heads / 2 KV / head_dim 256 / group 12, up to 512
 tokens) — no trap. So the SIGABRT is **not** the sparse-attention kernel; it is
 upstream of it in `_run_qsa`: either the **MQA paged indexer**
 (`self.indexer(...)` -> `_qsa_mqa_paged_kernel`) or the `do_kv_cache_update` /
-FlashAttention-forward integration. Probe: `/tmp/qsa_probe.py` on `.176`.
+FlashAttention-forward integration. Probe: `/tmp/qsa_probe.py` on the test box.
 
 **Refinement 2 (2026-09-14):** `qsa_mqa_paged` (the indexer, `BLOCK_N=128 /
 BLOCK_D=256 / num_warps=8`) **also passes standalone** with the model config
@@ -1367,6 +1370,7 @@ stream), pinned by
 `tests/kernels/rocm/qwen4_exp/test_qsa_rdna2.py::test_qsa_hip_ops_are_cudagraph_safe`.
 
 Changes:
+
 - `csrc/rocm/qsa_rdna2.cu`: new `qsa_mqa_paged_kernel` implementing the
   Triton `_qsa_mqa_paged_kernel` semantics (fp16, free `H`/`D`, request
   indirection through `token_to_req`, visibility from
@@ -1506,11 +1510,11 @@ head_dim 256 -> rotary_dim 64, `mrope_section` [11,11,10]), not 128, so with the
 on the server died in warmup: `qsa_sparse_paged_attention_rdna2: head_dim must be
 <= 128`. Two defects in the rewrite:
 
-* the staged K/V tiles used one 128+8 LDS row stride. The kernel is now templated on
+- the staged K/V tiles used one 128+8 LDS row stride. The kernel is now templated on
   the stride and dispatches 136 (head_dim <= 128, ~20 KB LDS, 3 workgroups/CU) or 264
   (head_dim <= 256, ~39 KB, 1 workgroup/CU). `BLOCK_N = 64` does not fit at 264 and is
   not instantiated.
-* `ACC_DIMS` was hardcoded 4, so 32 lanes covered only dims [0,128) and dims
+- `ACC_DIMS` was hardcoded 4, so 32 lanes covered only dims [0,128) and dims
   [128,256) were never written (48 % of the output). It is now derived from the LDS
   stride, with an `if constexpr` 16-byte `uint4` read in `P @ V` for the 8-dim case.
 
@@ -1650,6 +1654,7 @@ its prefill win is the gates' win, and its decode-side ports are exercised by th
 `VLLM_RDNA_ALL_HIP=1` test suite.
 
 ### Decisive measurement — order-controlled gates-only A/B/A
+
 `off -> on -> off`, three fresh servers, umbrella `0` in all three arms, prefix
 caching off, `VLLM_RDNA_DYNAMIC_PREFILL=0`, 19 cases/arm, 0 failures
 (`tools/rdna2/e2e_prefill_ab.sh gates`; logs
@@ -1676,6 +1681,7 @@ the umbrella+gates sweep, whose +2.5-5.4 % at 1k/2k showed the umbrella adds
 nothing over the gates.
 
 ### Accuracy — GSM8K parity (a substitution, not the repo eval)
+
 `.pi/gsm8k_g_{off,on}.json`: 150 GSM8K questions, 5-shot, greedy
 (`temperature=0`, `seed=42`), chat endpoint, `max_tokens=1024`. **off 0.9800
 (147/150), on 0.9800 (147/150), 0 discordant pairs, 150/150 identical answers.**
@@ -1684,11 +1690,12 @@ Not pinned at ceiling (3 wrong), so the test could have detected a difference.
 `tests/evals/qwen4_exp/test_accuracy.py` (GSM8K + AIME25 thresholds) did not run.
 
 ### Owed, not done
-* **A TP=4 PP / logit-fidelity run for the GDN gate.** The old "6.4 % lower PP"
+
+- **A TP=4 PP / logit-fidelity run for the GDN gate.** The old "6.4 % lower PP"
   claim is pre-fix (2026-10-07, `e8d1701784`) and was never re-measured; GSM8K
   cannot rule out a logit-fidelity change. Counter-evidence: the kernels have
   fp16-ulp-scaled parity tests against an fp64 oracle, and for `delta_h` HIP is
   the *more* accurate side (6.8e-4 vs 2.5e-3).
-* `tools/rdna/recipes/flashnext*.env` also had to change (they pinned
+- `tools/rdna/recipes/flashnext*.env` also had to change (they pinned
   `VLLM_GDN_HIP_PREFILL=0`, and `serve_rdna.sh` re-applies the caller env over
   the recipe, so the code default alone would not have reached the launcher).
