@@ -522,8 +522,10 @@ def replay_counts(
 def _fmt_decode(res: dict, itl_ms: dict[int, float]) -> str:
     names = ["linear", "round_robin", "pack_pairs", "pack_touch", "oracle"]
     lines = [
-        f"decode, EP{res['ranks']}, MTP{res['mtp']}: E[max]/E[mean] of touched "
-        "experts T | pairs P | time, MoE ms per step (all layers)",
+        (
+            f"decode, EP{res['ranks']}, MTP{res['mtp']}: E[max]/E[mean] of touched "
+            "experts T | pairs P | time, MoE ms per step (all layers)"
+        ),
         f"{'rows':>5} " + " ".join(f"{n:>26}" for n in names),
     ]
     for width, row in res["widths"].items():
@@ -547,10 +549,14 @@ def _fmt_decode(res: dict, itl_ms: dict[int, float]) -> str:
 
 def _fmt_red(res: dict) -> str:
     lines = [
-        f"redundancy, EP{res['ranks']}, {res['width']} rows: permutation-only T "
-        f"ratio {res['perm_T']:.3f}, layer {res['perm_layer_us']:.1f} us",
-        f"{'kind':>10} {'routing':>10} {'+slots':>6} {'T':>6} {'live':>7} "
-        f"{'gain%':>7} {'VRAM MiB':>9} {'KV lost':>8}",
+        (
+            f"redundancy, EP{res['ranks']}, {res['width']} rows: permutation-only T "
+            f"ratio {res['perm_T']:.3f}, layer {res['perm_layer_us']:.1f} us"
+        ),
+        (
+            f"{'kind':>10} {'routing':>10} {'+slots':>6} {'T':>6} {'live':>7} "
+            f"{'gain%':>7} {'VRAM MiB':>9} {'KV lost':>8}"
+        ),
     ]
     for r in res["rows"]:
         lines.append(
