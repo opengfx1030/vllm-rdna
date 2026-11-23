@@ -78,6 +78,15 @@ Every turn after the first reuses the whole earlier conversation from the cache.
 cost that remains is the new tokens attending to the long cached prefix: new-token
 prefill falls from 1845 to 600 tok/s over the fill, and decode from 54.5 to 36.1 tok/s.
 
+Same conversation, prefix cache **off** (fresh server, last 3 turns only, so each turn
+prefills its whole prompt):
+
+| Turn (prompt tokens) | TTFT, cache off (s) | Prefill tok/s | TTFT, cache on (s) |
+|---|---|---|---|
+| 10 (120,233) | 123.4 | 974 | 18.1 |
+| 11 (136,770) | 150.7 | 907 | 25.7 |
+| 12 (143,817) | 162.9 | 883 | 11.7 |
+
 ## 4. With the optional DSpark draft (adaptive K)
 
 Opt-in; not in the default recipe. Tree `0fd3e424dc` plus the adaptive-K python of the
