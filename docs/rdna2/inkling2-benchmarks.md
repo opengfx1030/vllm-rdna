@@ -159,6 +159,26 @@ Real-text prefill TP=2: 2,048: 1552 (1534-1571); 8,192: 1530 (1520-1546); 16,384
 
 TP=2 prefill is lower than TP=1 at 2K-16K ([INFERENCE] all-reduce cost), equal at 32K and higher at 64K; decode is +43%.
 
+### TP=2 load: TTFT and ITL, c=1 and c=4
+
+`inkling2-mini-tp2` on the PR head (`8ce0d65559`, `_rocm_C` a6af06d3), booted through
+`serve_rdna.sh`; max model len 1,048,576, KV pool 1,062,482 tokens, graphs 0.19 GiB per
+GPU, prefix cache on, no draft; boot 65 s. `vllm bench serve`, random prompts, 2 runs per
+cell (4 requests at c=1, 8 at c=4), mean of the 2 runs. 0 KFD `evicted_ms` jumps. The
+section 2 TP=1 numbers are on the #195 build, so TTFT is not strictly like for like.
+
+| Cell | TTFT p50 / p99 (s) | Prefill tok/s/req | ITL p50 / p99 (ms) | Decode tok/s/req | Output tok/s (agg) |
+|---|---|---|---|---|---|
+| 1k/512 c=1 | 0.61 / 0.61 | 1688 | 12.8 / 15.0 | 78.2 | 71.7 |
+| 1k/512 c=4 | 0.93 / 2.37 | 861 | 17.8 / 108.7 | 50.9 | 180.5 |
+| 16k/1k c=1 | 10.07 / 10.16 | 1633 | 13.4 / 16.6 | 74.6 | 43.1 |
+| 16k/1k c=4 | 12.22 / 41.60 | 863 | 20.1 / 133.3 | 27.5 | 67.0 |
+
+Against TP=1 (section 2, default arm): decode at c=1 is +42% (1k) and +46% (16k), the 1k/512
+c=4 aggregate +43%, the 16k/1k c=4 aggregate only +15%. c=1 TTFT is slightly worse than TP=1
+(0.61 against 0.53 s at 1k, 10.07 against 9.68 s at 16k). The c=4 ITL p99 is decode steps
+waiting behind other requests' prefill chunks.
+
 ### TP=2 conversation grown to 262,144 tokens, prefix cache on
 
 Same conversation and protocol as the TP=1 fill (single run). The fill stops at turn 22 (about 262k tokens), which is 25% of the 1,048,576 maximum, not 80%.
