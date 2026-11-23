@@ -65,6 +65,7 @@ import math
 import os
 import pathlib
 import sys
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import pytest
 import torch
@@ -86,7 +87,10 @@ def _load_attention_suite():
 
 
 base = _load_attention_suite()
-AttnWorld = base.AttnWorld
+if TYPE_CHECKING:
+    AttnWorld: TypeAlias = Any
+else:
+    AttnWorld = base.AttnWorld
 HEAD_DIM = base.HEAD_DIM
 D_REL = base.D_REL
 WINDOW = base.WINDOW
@@ -193,6 +197,7 @@ def _require_variant() -> AttnOp:
         if os.environ.get("I2_ATTN_REQUIRE_VARIANT"):
             pytest.fail(msg)
         pytest.skip(msg)
+    assert var is not None
     return var
 
 
@@ -526,6 +531,7 @@ def test_needle_worlds_are_sensitive(window):
         ratio = ((moved - ref).abs() / tol).max().item()
         assert ratio > 20, f"{name}: the oracle moves only {ratio:.1f} x the tolerance"
     # dropping every needle of the first query row's window edge (hide them)
+    assert w.k_dense[0] is not None
     kd = w.k_dense[0].clone()
     for j in w.needles[0]:
         kd[j] = 0.0

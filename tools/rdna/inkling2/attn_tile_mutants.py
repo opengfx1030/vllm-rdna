@@ -32,9 +32,10 @@ import concurrent.futures as cf
 import hashlib
 import os
 import pathlib
-import re
 import subprocess
 import sys
+
+import regex as re
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
 SRC = REPO / "csrc" / "rocm" / "inkling2_attn_rdna2.cu"
