@@ -12,7 +12,7 @@
 #   decode     input_len=128 -> ITL/TPOT is the decode cost, input is negligible
 #   mixed_2k   realistic     -> both, with a real prefill:decode ratio
 set -euo pipefail
-repo=/home/wsantos/work/vllm-rdna
+repo=$HOME/work/vllm-rdna
 label=${1:?usage: e2e_load_sweep.sh <label>}
 port=${PORT:-8000}
 model=${SERVED_NAME:-active}

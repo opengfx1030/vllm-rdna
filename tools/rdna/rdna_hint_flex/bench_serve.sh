@@ -16,7 +16,7 @@ ROOT=${ROOT:-$HOME/w4a8_runs/hi2-support}
 mkdir -p "$ROOT"
 CELLS=${CELLS:-"1024:512:1 1024:512:8:32 16384:1024:1:4 16384:1024:8:16"}
 PORT=${PORT:-18731}
-SMI_OFFSET=${SMI_OFFSET:-2}  # rocm-smi GPU[i+2] = HIP i on par1-cs25
+SMI_OFFSET=${SMI_OFFSET:-2}  # rocm-smi GPU[i+2] = HIP i on <build-host>
 # Wait until the previous arm's server has released the GPUs: a boot right
 # after a teardown sees the old process's VRAM and fails the
 # gpu-memory-utilization check.

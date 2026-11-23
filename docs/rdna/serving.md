@@ -19,7 +19,7 @@ Nothing in the launcher or the recipes bakes in a home directory, a host, or an 
 
 ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags belong to the process that runs `serve_rdna.sh`. An API client or a gateway (OpenAI SDK, OpenCode, LiteLLM, and others) receives the base URL and the served model name. It does not receive those variables or flags.
 
-`GPU_MAX_HW_QUEUES` is one of those launch-environment variables. [`rdna_launcher_common.sh`](../../tools/rdna/rdna_launcher_common.sh) defaults it to **2**. Recipes that omit the key keep that default (`27b-awq`, `27b-exl3`, `dsv4-flash`, `full`, and both `flashnext-pp3*` recipes). The Flash-Next TP=4 recipes — `flashnext`, `flashnext-exl3`, `flashnext-mtp0`, `flashnext-mtp2`, `flashnext-leapquant-mtp2`, `flashnext-dflash2` — override it to **4**; leave that recipe value. Do not change those recipes to 2. A value of 2 as a host-specific fix is only an unverified workaround reported in [ROCm/TheRock#9306](https://github.com/ROCm/TheRock/issues/9306).
+`GPU_MAX_HW_QUEUES` is one of those launch-environment variables. [`rdna_launcher_common.sh`](../../tools/rdna/rdna_launcher_common.sh) defaults it to **2**. Recipes that omit the key keep that default (`27b-awq`, `27b-exl3`, `27b-hi2-tp2`, `27b-hi2-tp2-mtp2`, `dsv4-flash`, `full`, both `flashnext-pp3*` recipes, and every `inkling2-mini-*` recipe). The other Flash-Next recipes — `flashnext`, `flashnext-exl3`, `flashnext-mtp0`, `flashnext-mtp2`, `flashnext-gguf-mtp0`, `flashnext-leapquant-mtp2`, `flashnext-dflash2`, `flashnext-tp8-mtp2` and `flashnext-tp4pp2-mtp2` — override it to **4**; leave that recipe value. Do not change those recipes to 2. A value of 2 as a host-specific fix is only an unverified workaround reported in [ROCm/TheRock#9306](https://github.com/ROCm/TheRock/issues/9306).
 
 ## Pick a recipe
 
@@ -42,6 +42,12 @@ ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags bel
 | Qwen3.8-27B HI2 3.0 bpw, two cards, MTP=2 (one to four concurrent requests) | [`27b-hi2-tp2-mtp2`](../../tools/rdna/recipes/27b-hi2-tp2-mtp2.env) | TP=2 | `127.0.0.1:18211`, name `q27hi2` |
 | DeepSeek-V4-Flash, K128 | [`dsv4-flash`](../../tools/rdna/recipes/dsv4-flash.env) | TP=4 | `127.0.0.1:18300`, name `dsv4-flash` |
 | HIP graphs, breakable capture, TP=2 | [`full`](../../tools/rdna/recipes/full.env) | TP=2 | launcher omits `--host`; port `18094`; no served name |
+| Inkling-2-Mini on one card, 180k context, images | [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | TP=1 | `127.0.0.1:18221`, name `inkling2-mini` |
+| Inkling-2-Mini on one card with the DSpark draft (one or two requests) | [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | TP=1 | `127.0.0.1:18221`, name `inkling2-mini` |
+| Same, plus adaptive K and a draft vocabulary file | [`inkling2-mini-tp1-dspark-adaptive`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark-adaptive.env) | TP=1 | `127.0.0.1:18221`, name `inkling2-mini` |
+| Inkling-2-Mini on two cards, the full 1,048,576-token context | [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | TP=2 | `127.0.0.1:18222`, name `inkling2-mini` |
+| Inkling-2-Mini on two cards with the DSpark draft | [`inkling2-mini-tp2-dspark`](../../tools/rdna/recipes/inkling2-mini-tp2-dspark.env) | TP=2 | `127.0.0.1:18222`, name `inkling2-mini` |
+| Inkling-2-Mini on four cards, the full context, 4,096-token prefill steps | [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | TP=4 | `127.0.0.1:18223`, name `inkling2-mini` |
 
 The older `tools/rdna/serve_gfx1030_*.sh` files are aliases. They exec `serve_rdna.sh` with a fixed recipe and forward every argument:
 
@@ -107,6 +113,7 @@ These are shell variables in the `.env` files. They become flags. They are not e
 | `EAGER` | `1` skips compile and graphs. | Correctness fallback. The tuning guide treats it as not a speed target. |
 | `FEATURES` | Space-separated tokens, expanded below. | Add or remove a token on the command line. |
 | `ENABLE_PREFIX_CACHING` | Used with the `prefix-caching` feature. `0` passes `--no-enable-prefix-caching`. | `full` sets 1. vLLM's own default is on; the token makes the flag explicit. |
+| `PREFIX_PROBE_WORDS` | Prompt size in words for the prefix-cache probe of `port_v031/serve_validate.sh` (default 1800, about 1.9k tokens). `PREFIX_WORDS` in the environment overrides it. | `27b-awq` sets 16000 (about 17k tokens): it reuses cached state only for long prompts (no hits at 1.9k, 3.8k and 9.5k tokens, 97 % at 16.8k). Flash-Next hits at 1.9k and keeps the default. |
 | `W4A8` | Exported as `VLLM_RDNA2_W4A8_SDOT4`. | `27b-awq` sets 1 (int8-activation prefill, M ≥ 33; decode stays W4A16). `W4A8=0` on the command line falls back to W4A16 prefill. |
 | `RDNA_AR` | Exported as `VLLM_RDNA_AR` when the recipe left `VLLM_RDNA_AR` unset. | `0` disables the one-shot all-reduce. `P2P=0` forces that too. |
 | `PLE` | `bf16` (default), `int4`, `int4-disk`, `exl3`. | See [PLE](#ple). |
@@ -168,25 +175,24 @@ Where a recipe sets these, the value is the one below. A later section names the
 
 | Variable | Value | Role |
 | --- | --- | --- |
-| `VLLM_USE_V2_MODEL_RUNNER` | `1` | V2 model runner. |
 | `VLLM_RDNA_AR` | `1` | One-shot all-reduce up to 64 KiB, RCCL past that. |
-| `VLLM_RDNA_AR_MAX_KB`, `VLLM_RDNA_AR_ONESHOT_KB` | `64` (`256` in `flashnext-mtp2`) | Size gate; the smaller of the two applies, so set both. Two-shot no longer exists. `flashnext-mtp2` runs 256 KiB because its verify batches are 77-123 KB; the other recipes stay at 64 until measured. |
-| `VLLM_RDNA_AR_BLOCKS`, `VLLM_RDNA_AR_PACE` | `0` | Set by the five Flash-Next TP=4 recipes, both PP=3 recipes, and `27b-awq`. |
-| `VLLM_FORCE_CUSTOM_ALL_REDUCE` | `0` | Set by `27b-awq`, `27b-exl3`, `dsv4-flash`, `full`. The tuning guide says to keep the stock custom all-reduce off. |
-| `HSA_FORCE_FINE_GRAIN_PCIE` | `1` | Fine-grain PCIe. Set by every recipe. |
-| `HSA_ENABLE_SDMA` | `0` | Set by every Flash-Next recipe (TP=4 and PP=3) and by `27b-awq`. |
-| `GPU_MAX_HW_QUEUES` | launcher default `2`; `4` in five recipes | `flashnext`, `flashnext-exl3`, `flashnext-mtp0`, `flashnext-mtp2`, and `flashnext-dflash2` set 4. Every other recipe omits it and keeps the launcher default. See [above](#launch-environment-then-clients). |
-| `OMP_NUM_THREADS` | `4` | Set by every recipe except `27b-exl3` and `full`. |
+| `VLLM_RDNA_AR_MAX_KB`, `VLLM_RDNA_AR_ONESHOT_KB` | `64`; `128` in `flashnext-tp8-mtp2`; `256` in `flashnext-mtp2`, `flashnext-leapquant-mtp2`, `flashnext-tp4pp2-mtp2`, both `27b-hi2-tp2*` recipes, `inkling2-mini-tp2` and `inkling2-mini-tp4` | Size gate; the smaller of the two applies, so set both. Two-shot no longer exists. `flashnext-mtp2` runs 256 KiB because its verify batches are 77-123 KB; the other recipes that set 64 stay there until measured. |
+| `VLLM_RDNA_AR_BLOCKS`, `VLLM_RDNA_AR_PACE` | `0` | Set by every `flashnext*` recipe, `27b-awq` and both `27b-hi2-tp2*` recipes. |
+| `VLLM_FORCE_CUSTOM_ALL_REDUCE` | `0` | Set by `27b-awq`, `27b-exl3`, both `27b-hi2-tp2*` recipes, `dsv4-flash`, `full`, `inkling2-mini-tp2` and `inkling2-mini-tp4`. The tuning guide says to keep the stock custom all-reduce off. |
+| `HSA_FORCE_FINE_GRAIN_PCIE` | `1` | Fine-grain PCIe. Set by every recipe except the `inkling2-mini-*` ones. |
+| `HSA_ENABLE_SDMA` | `0` | Set by every `flashnext*` recipe, `27b-awq` and both `27b-hi2-tp2*` recipes. |
+| `GPU_MAX_HW_QUEUES` | launcher default `2`; `4` in nine recipes | `flashnext`, `flashnext-exl3`, `flashnext-mtp0`, `flashnext-mtp2`, `flashnext-gguf-mtp0`, `flashnext-leapquant-mtp2`, `flashnext-dflash2`, `flashnext-tp8-mtp2` and `flashnext-tp4pp2-mtp2` set 4. Every other recipe omits it and keeps the launcher default. See [above](#launch-environment-then-clients). |
+| `OMP_NUM_THREADS` | `4`; `8` in the `inkling2-mini-*` recipes | Set by every recipe except `27b-exl3` and `full`. |
 | `TOKENIZERS_PARALLELISM` | `false` | Same recipes as `OMP_NUM_THREADS`. |
 | `PYTHONFAULTHANDLER` | `1` | Same recipes as `OMP_NUM_THREADS`. |
-| `VLLM_CAUSAL_CONV1D_RDNA2_FWD`, `VLLM_CAUSAL_CONV1D_RDNA2_UPDATE` | `0` | HIP causal conv1d off; Triton stays. Set by every Flash-Next recipe and by `27b-awq`. The tuning guide's code default is 1; these recipes override it. |
+| `VLLM_CAUSAL_CONV1D_RDNA2_FWD`, `VLLM_CAUSAL_CONV1D_RDNA2_UPDATE` | `0` | HIP causal conv1d off; Triton stays. Set by every `flashnext*` recipe, `27b-awq` and both `27b-hi2-tp2*` recipes. The tuning guide's code default is 1; these recipes override it. |
 | `VLLM_ENABLE_STARTUP_PLAN` | `0` | Same recipes as the causal-conv pair. |
-| `VLLM_RDNA_DENSE_INT8`, `VLLM_RDNA_DENSE_INT8_ONLY` | `0` on the TP=4 Flash-Next recipes and `27b-awq` | Both PP=3 recipes set these to `1`. gfx1030 FP16 decode uses the RDNA2 GEMV without a separate force switch. |
+| `VLLM_RDNA_DENSE_INT8`, `VLLM_RDNA_DENSE_INT8_ONLY` | `0` on the Flash-Next recipes other than the PP=3 ones, and on `27b-awq` | Both PP=3 recipes set these to `1`. gfx1030 FP16 decode uses the RDNA2 GEMV without a separate force switch. |
 | `VLLM_RDNA_FUSED_SE` | `1` | Fused shared expert, where the recipe sets it. `flashnext-exl3` sets `0` (EXL3 experts use `Exl3MoEMethod`). |
 | `VLLM_GDN_HIP_PREFILL` | `1` on the Flash-Next AWQ recipes | `flashnext-exl3` sets `0`. |
-| `VLLM_USE_AOT_COMPILE` | `0` and `VLLM_DISABLE_COMPILE_CACHE=1` | Per-rank JIT. Set by `flashnext-exl3`, `27b-awq`, `27b-exl3`, `dsv4-flash`, `full`. The recipe comments: a shared AOT cache replays one rank's device tensors onto the others. |
+| `VLLM_USE_AOT_COMPILE` | `0` and `VLLM_DISABLE_COMPILE_CACHE=1` | Per-rank JIT. Set by `flashnext-exl3`, `27b-awq`, `27b-exl3`, both `27b-hi2-tp2*` recipes, `dsv4-flash`, `full`. The recipe comments: a shared AOT cache replays one rank's device tensors onto the others. |
 
-`VLLM_USE_BREAKABLE_CUDAGRAPH=1` is set only by `dsv4-flash` and `full`. The other recipes leave it unset. Copying it onto a Flash-Next recipe is how an old env dump fights the current graphs.
+`VLLM_USE_BREAKABLE_CUDAGRAPH=1` is set only by `dsv4-flash` and `full`. The other recipes leave it unset; the engine turns it on by itself for some architectures (the `inkling2-mini-*` recipes rely on that; see the [tuning guide](../rdna2/tuning.md), "Other"). Copying it onto a Flash-Next recipe is how an old env dump fights the current graphs.
 
 ## Recipes
 
@@ -260,7 +266,7 @@ The recipe comment: 2112 is the 2048-token mamba block plus 4 sequences × 3 MTP
 
 ### `flashnext-tp8-mtp2`
 
-Flash-Next AWQ-W4A16 with MTP=2 as `TP=8` with expert parallel over eight V620s: two PCIe switches, four cards behind each (par1-cs25). `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` in rank order, `PORT=18098`, `HOST=127.0.0.1`, `SERVED_NAME=flash-next`, `MAXLEN=262144`, `SEQS=8`, `MAXBAT=2048`. `KV=13958643712` (13 GiB): the weights are 11.23 GiB per GPU at TP=8 and the peak driver memory is 18.9 GiB with a 3.75 GiB cache, so 13 GiB leaves about 1.8 GiB at the activation peak. A fixed `KV` skips the memory profile and `GMEM` does not check it, so size it from the memory table in [`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`](../rdna2/tp8-pp2-flashnext-2026-11-06.md) when the hardware differs.
+Flash-Next AWQ-W4A16 with MTP=2 as `TP=8` with expert parallel over eight V620s: two PCIe switches, four cards behind each (the eight-V620 build host, `<build-host>`). `PCI_BUSES="ce d3 d8 db 0a 0f 14 17"` in rank order, `PORT=18098`, `HOST=127.0.0.1`, `SERVED_NAME=flash-next`, `MAXLEN=262144`, `SEQS=8`, `MAXBAT=2048`. `KV=13958643712` (13 GiB): the weights are 11.23 GiB per GPU at TP=8 and the peak driver memory is 18.9 GiB with a 3.75 GiB cache, so 13 GiB leaves about 1.8 GiB at the activation peak. A fixed `KV` skips the memory profile and `GMEM` does not check it, so size it from the memory table in [`docs/rdna2/tp8-pp2-flashnext-2026-11-06.md`](../rdna2/tp8-pp2-flashnext-2026-11-06.md) when the hardware differs.
 
 The one-shot all-reduce gate is `VLLM_RDNA_AR_MAX_KB=128` and `VLLM_RDNA_AR_ONESHOT_KB=128`: at eight ranks one-shot beats RCCL only up to about 155 KiB, and every captured decode size (24 tokens at most, 120 KiB) stays below 128 KiB. On a tree with the hierarchical all-reduce (rdna_extras `dc35df271d` and later) the sizes from 20 KiB up to 1 MiB take that path instead (`VLLM_RDNA_AR_HIER_MAX_KB=1024`, default auto for a group over both switches): ITL p50 at c=8 is 11 % lower (41.8 to 37.2 ms) and the c=1 step is unchanged. `GPU_MAX_HW_QUEUES=4`, `TUNED_CONFIG=1`. The shipped TunableOp rows now cover device ordinals 0-7 (3330 rows per rank); before them ranks 4-7 ran rocBLAS defaults.
 
@@ -323,6 +329,26 @@ The recipe header calls this the full-HIP serve: breakable `FULL_AND_PIECEWISE` 
 
 `MAXLEN=200000`, `MIN_MAXLEN=32768`, `BLOCK_SIZE=16`, `SEQS=6`, `MAXBAT=2048`, `KV=7000000000`, `GMEM=0.90`, `DIST_TIMEOUT=1800`. `ALLOC_CONF=auto`. Features: `prefix-caching language-model-only skip-mm-profiling trust-remote-code`, with `ENABLE_PREFIX_CACHING=1`. AOT compile off. RCCL uses `NCCL_P2P_LEVEL=pix` (the TP=4 EXL3 and DeepSeek recipes use `pxb`). `VLLM_RDNA_AR=1` at 64 KiB, `VLLM_FORCE_CUSTOM_ALL_REDUCE=0`. The decode-stall cap is unset.
 
+### `inkling2-mini-*`
+
+Inkling-2-Mini (`thinkingmachines/Inkling-2-Mini`) on native HIP kernels: no rocBLAS and no Triton in the serving path, so every recipe sets `TUNABLEOP=0`. `SERVE_ENTRY=cli`, `HOST=127.0.0.1`, `SERVED_NAME=inkling2-mini`, `MTP=0`, `ATTN=none`, `EAGER=0`, `FULL_AND_PIECEWISE` with the engine's default capture grid (`CG_CAPTURE_SIZES=0`), `KV=auto`, `GMEM=0.92`, `FEATURES=prefix-caching`, one image per prompt (`EXTRA_ARGS='--limit-mm-per-prompt {"image":1}'`; the Inkling processor takes no `--mm-processor-kwargs`, so `vision-cap` is not used). `OMP_NUM_THREADS=8`. The engine enables breakable graphs for this architecture by itself, so no recipe sets `VLLM_USE_BREAKABLE_CUDAGRAPH`. Serving guide, switches, limits and the measured tables: [`docs/rdna2/inkling2-serving.md`](../rdna2/inkling2-serving.md).
+
+| Recipe | Cards | Port | `MAXLEN` | `SEQS` | `MAXBAT` | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `inkling2-mini-tp1` | 1 | 18221 | 180000 | 16 | 1024 | `RDNA_AR=0`. |
+| `inkling2-mini-tp1-dspark` | 1 | 18221 | 125000 | 2 | 1024 | Sources `inkling2-mini-tp1`; adds the model's own draft (`mtp.safetensors` must sit in the checkpoint directory): 7 drafted tokens, 2 verified per step for one or two requests. |
+| `inkling2-mini-tp1-dspark-adaptive` | 1 | 18221 | 105000 | 2 | 1024 | Sources `inkling2-mini-tp1-dspark`; adaptive K and a draft vocabulary file (`DRAFT_VOCAB`, default `$HOME/.cache/rdna/inkling2-mini-draft-vocab-32768.npy`, made once with `tools/rdna/inkling2/draft_vocab.py`). TP=1 and greedy decoding only. |
+| `inkling2-mini-tp2` | 2 | 18222 | 1048576 | 8 | 184 | `RDNA_AR=1`, one-shot gate 256 KiB, `VLLM_KV_CACHE_MARGIN_FLOOR_MIB=2048` so the whole context fits. |
+| `inkling2-mini-tp2-dspark` | 2 | 18222 | 780000 | 2 | 184 | Sources `inkling2-mini-tp2`; the draft's per-rank KV takes context, so this is the longest that boots. |
+| `inkling2-mini-tp4` | 4 | 18223 | 1048576 | 8 | 4096 | `RDNA_AR=1`, one-shot gate 256 KiB; the default engine margin stays. DSpark was not run at TP=4. |
+
+The `-dspark*` files source their base recipe through `$RDSE_RECIPES`; override any key after `RECIPE=` or in the caller's environment as for every other recipe. Draft, kernels and tables: [`docs/rdna2/inkling2-dspark.md`](../rdna2/inkling2-dspark.md).
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp2 \
+  MODEL=/path/to/inkling2-mini HIP_VISIBLE_DEVICES=4,5
+```
+
 ## Host settings for the pinned PLE table
 
 On gfx10x, each worker `mlock()`s its exact-size pinned PLE table, and after
@@ -340,14 +366,14 @@ pinned buffers](../rdna2/pinned-host-evictions-2026-11-05.md)). Two host
 settings make the locks effective:
 
 - `RLIMIT_MEMLOCK` above the table size plus the other pinned blocks, which is
-  23.84 GiB plus about 1 GiB per TP4 worker. On par1-cs25:
+  23.84 GiB plus about 1 GiB per TP4 worker. On `<build-host>`:
   `/etc/security/limits.d/90-vllm-memlock.conf`
-  (`chenco_adm soft/hard memlock unlimited`), effective for new logins.
+  (`<user> soft/hard memlock unlimited`), effective for new logins.
   Check with `ulimit -l`. When the limit is lower, the worker logs `mlock of
   the pinned PLE table failed` or `mlock failed for N pinned host mappings` and
   serves without those locks.
 - `vm.compact_unevictable_allowed = 0`, so compaction does not migrate
-  locked pages. On par1-cs25: `/etc/sysctl.d/90-vllm-compact.conf`.
+  locked pages. On `<build-host>`: `/etc/sysctl.d/90-vllm-compact.conf`.
   Check with `sysctl vm.compact_unevictable_allowed`.
 
 To restore the defaults, remove both files, run
@@ -359,5 +385,7 @@ To restore the defaults, remove both files, run
 - [`docs/rdna2/hi2-27b-tp2-serving.md`](../rdna2/hi2-27b-tp2-serving.md) — HI2 27B on two cards: serving guide, switch table, memory, limits and scoreboard results.
 - [`docs/rdna/monokernel/README.md`](monokernel/README.md) — MonoKernel scope on gfx1030.
 - [`docs/rdna2/mixed-batch-stall-probe.md`](../rdna2/mixed-batch-stall-probe.md) — decode-stall cap.
+- [`docs/rdna2/inkling2-serving.md`](../rdna2/inkling2-serving.md) — Inkling-2-Mini at TP=1, 2 and 4: switches, memory, long context, measured tables.
+- [`docs/rdna2/README.md`](../rdna2/README.md) — index of every RDNA2 note, guide or dated record.
 - [`docs/rdna2/gguf-flashnext-2026-11-16.md`](../rdna2/gguf-flashnext-2026-11-16.md) — GGUF Flash-Next: plugin fork, the MMQ expert-bound defect, measurements.
 - [gfx1030 wiki](https://blivioniag.github.io/gfx1030-wiki/) — host setup, the ROCm pin, and the published images.

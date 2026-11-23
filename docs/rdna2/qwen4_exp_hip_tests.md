@@ -1,6 +1,6 @@
 # Qwen4Exp / Qwen3.8-Flash-Next HIP path — test plan
 
-**Status**: scaffolding shipped 2026-09-14; tests not yet run on `.176`.
+**Status**: scaffolding shipped 2026-09-14; tests not yet run on the test box.
 This document is the test specification someone picks up the next time
 the build server is reachable. The HIP code is **default-off** (Triton
 path stays the source of truth) so any new test should be guarded by
@@ -99,6 +99,7 @@ def test_grouped_gemma_rmsnorm_rdna2_parity(N, DIM, NG, W_SHARED):
 ```
 
 Repeat the same pattern for:
+
 - `hc_silu_rdna2` — exact fp16 elementwise, `atol=1e-3`
 - `hc_gate_mix_rdna2` — reduction over HC streams, `atol=5e-3`
 - `hc_combine_rdna2` — elementwise affine, `atol=1e-3`
@@ -158,6 +159,7 @@ def test_qsa_op_registered(op): ...
 ### 2.2 `qsa_store_cache_rows_rdna2` parity
 
 Shape matrix:
+
 - `num_rows`: `[1, 8, 64, 1024]` (decode batches)
 - `WIDTH`: `[32, 64, 128]` (QSA head_dim variants)
 - `PAGE_SIZE`: `[16, 784]` (Qwen3.5 hybrid forced by GDN page alignment)
@@ -186,13 +188,14 @@ def test_store_cache_rows_parity(N, width, page_size, num_blocks):
 ### 2.3 `qsa_compress_groups_rdna2` parity
 
 Shape matrix:
+
 - `rows`: `[1, 8, 64]`
 - `head_dim`: `[32, 64, 128]`
 - `compress_ratio`: `[1, 2, 4, 8]`
 - `compressor_state_size`: `[compress_ratio * 2]` (always > ratio)
 - `num_requests`: `[1, 4]`
 - `LOAD_ROPE_POSITIONS`: `[False, True]`
-- `*_BLOCK_TABLE valid mix*: half valid slots, half `NULL_BLOCK_ID`
+- `*_BLOCK_TABLE valid mix*: half valid slots, half`NULL_BLOCK_ID`
 
 ```python
 def test_compress_groups_parity(rows, head_dim, compress_ratio,
@@ -212,6 +215,7 @@ def test_compress_groups_parity(rows, head_dim, compress_ratio,
 ```
 
 Edge cases worth pinning:
+
 - All-zero `compressor_state_table` (every request falls back to raw
   rows — exercises the `state_ok = False` branch).
 - `end_position < COMPRESS_RATIO - 1` (early tokens that don't form a
@@ -262,6 +266,7 @@ HIP source: `csrc/rocm/ple_short_conv_rdna2.cu`
 
 Shape matrix (Qwen4Exp PLE defaults; parametrize for variations once we
 see other checkpoints):
+
 - `B` (batch): `[1, 8, 64]`
 - `D` (hidden_size): `[2560, 5120]` (Qwen3.8 hidden_size variants)
 - `state_len`: `[2, 4, 8]` (PLE conv kernel sizes)
@@ -319,6 +324,7 @@ def test_ple_short_conv_decode_parity(B, D, state_len, dilation, silu):
 ### 3.3 Prefill batched parity
 
 Shape matrix:
+
 - `num_prefills`: `[1, 4, 8]`
 - `max_len`: `[128, 512, 2048]` (constrained to <= 128 in current HIP
   build — extend once we add the larger variant)
@@ -345,6 +351,7 @@ size). Test that `K=65` raises a `TORCH_CHECK`.
 ### 3.5 Dispatcher gate
 
 Same env-var template as §1.4:
+
 ```python
 def test_ple_conv_env_gate(monkeypatch): ...
 ```
@@ -395,7 +402,7 @@ sufficient.
 
 ---
 
-## 5. Performance tests (deferred — run on `.176`)
+## 5. Performance tests (deferred — run on the test box)
 
 Once the parity tests pass, add a thin bench module:
 
@@ -470,5 +477,5 @@ calls in `csrc/rocm/torch_bindings.cpp` are inside the
   prefill opt-in path exercised in production (matches the torch
   reference exactly).
 - **Bench module** (§5) — once the parity tests are green, run on
-  `.176` with the canonical env vars and lock in the row in
+  the test box with the canonical env vars and lock in the row in
   `docs/rdna2/qwen4_exp_hip_path.md`.

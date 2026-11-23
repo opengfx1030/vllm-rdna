@@ -33,6 +33,12 @@ Where to get started with vLLM depends on the type of user. If you are looking t
 - Build applications with vLLM, we recommend starting with the [User Guide](./usage/README.md)
 - Build vLLM, we recommend starting with [Developer Guide](./contributing/README.md)
 
+This checkout is the RDNA fork [`opengfx1030/vllm-rdna`](https://github.com/opengfx1030/vllm-rdna) (AMD gfx1030). Its documents are not part of upstream's guides:
+
+- [RDNA launcher and recipes](./rdna/serving.md): how to serve with `tools/rdna/serve_rdna.sh`, every recipe and every recipe key
+- [RDNA fork rules](./rdna/agent-rules.md) (read before touching kernels, the platform layer or a recipe) and the [MonoKernel notes](./rdna/monokernel/README.md)
+- [RDNA2 document index](./rdna2/README.md): the tuning guide, the model and subsystem guides, and the dated measurement records, grouped by topic
+
 For information about the development of vLLM, see:
 
 - [Roadmap](https://roadmap.vllm.ai)

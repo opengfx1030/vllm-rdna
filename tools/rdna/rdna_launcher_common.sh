@@ -106,7 +106,7 @@ rdna_init() {
 
 # rdna_resolve_pci_buses BUS...  ->  comma-separated HIP indices, in the order given.
 # A HIP index is enumeration order and moves when cards, risers or switches change
-# (par1-cs25 re-enumerated on 2026-11-05); a PCI bus does not. BUS is the hex bus number
+# (a reference box re-enumerated on 2026-11-05); a PCI bus does not. BUS is the hex bus number
 # ("ce", "0a") or "domain:bus". Needs $VENV (torch) and the ROCm libraries from
 # rdna_init. Exits non-zero (message on stderr) when a bus has no GPU or is repeated.
 rdna_resolve_pci_buses() {

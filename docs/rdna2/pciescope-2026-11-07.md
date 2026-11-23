@@ -1684,7 +1684,7 @@ switch A  upstream c5:00.0  serial 00-80-5e-10-fa-53-6b-2a  traffic counters off
 ### MCP over ssh, from the Mac
 
 A Python SDK client (`mcp` 2.3.0, `stdio_client` with `command="ssh"`) talking to
-`ssh chenco_adm@par1-cs25 ~/Apps/pciescope-venv/bin/python -m pciescope mcp`:
+`ssh <user>@<build-host> ~/Apps/pciescope-venv/bin/python -m pciescope mcp`:
 
 ```text
 server: pciescope

@@ -42,8 +42,8 @@ Nesting (slot B; slot A is identical with c5/c6/c7.. buses): `00:01.1 > 01:00.0 
 02:04.0 > 0b:00.0 > 0c:00.0 > 0f, 02:08.0 > 10:00.0 > {11:00.0 14, 11:10.0 17}, 02:0c/02:1c mgmt}`. V620 pairs
 (14,17) and (d8,db) share a second-level virtual switch; measured latency and bandwidth show no difference for them.
 rocm-smi `--showtopo{access,hops,weight,type}` report every pair as PCIE, weight 40, 2 hops, access True: it does not
-distinguish intra-switch from cross-root, so it cannot be used to place ranks. The 2026-09-23 topology file
-(`docs/topology/build_server_topology_2026-09-23.txt`) had the same two-switch layout on roots 00 and 40, all rocm-smi
+distinguish intra-switch from cross-root, so it cannot be used to place ranks. The 2026-09-23 topology capture
+(`build_server_topology_2026-09-23.txt`, not tracked in this repository) had the same two-switch layout on roots 00 and 40, all rocm-smi
 pairs also weight 40 / 2 hops; the second switch moved from root 40 to root c0 (c0 also carries 2 NICs and 2 NVMe).
 
 ## Links, MPS, ACS (lspci -vvv, 2026-11-06 08:29)
@@ -420,7 +420,7 @@ sudo grubby --add-kernel=/boot/vmlinuz-7.1.7-100.p2p_post7.fc43.x86_64 --initrd=
   --copy-default --title=par-test --args="..."; sudo grub2-reboot <entry id>; sudo systemctl reboot
 ```
 
-Out of band: the BMC (192.168.1.82, ipmitool lanplus; credentials in the box owner's hands) answers `chassis power status` and
+Out of band: the BMC (ipmitool lanplus) answers `chassis power status` and
 `sol activate` without the OS; used as the recovery path for these reboots, never needed (the box was back on ssh in 96-190 s every time).
 Risk that remains with `pcie_ports=native`: a platform that says no to AER/DPC in `_OSC` may still raise firmware SERR/sync flood on a
 real fatal error; the kernel path adds an extra handler, it does not remove the firmware one [INFERENCE].

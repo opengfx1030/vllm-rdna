@@ -6,8 +6,8 @@
 # `pip install -e .` instead re-configures from scratch and fails on the
 # ROCm 7.14 non-standard SDK layout (/opt/rocm/core-7.14).
 set -uo pipefail
-T=${T:-/home/chenco_adm/vllm-rdna-0.28.0}
-V=${V:-/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0}
+T=${T:-$HOME/vllm-rdna-0.28.0}
+V=${V:-$HOME/Apps/vllm/venv-7.14.0_0.28.0}
 BD=$T/build/temp.linux-x86_64-cpython-312
 
 ROCM_SDK_LIB="$V/lib/python3.12/site-packages/_rocm_sdk_libraries/lib"

@@ -601,7 +601,7 @@ bash compare_pr170.sh "$(cat matrix-flashnext.path)"
 
 ## Commands
 
-Run on par1-cs25 as `chenco_adm`. The scripts are on the box, not in the
+Run on par1-cs25 as `<user>`. The scripts are on the box, not in the
 repository: `~/w4a8_runs/leapquant/pr170-gpu/` holds them and every log of this
 note (`build_pr170.log`, `kernel-tests-*`, `cpu-tests-*`, `negative-*`,
 `quality-*`, `compare.txt` inside the quality run). Every GPU command sets

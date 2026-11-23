@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2126,SC2086  # pre-existing lint debt, script frozen with its bench evidence
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -9,16 +10,16 @@
 # Usage: EAGER=1 TAG=... PORT=... bash exl3_mtp2_validate.sh
 set -uo pipefail
 
-V=${VENV:-/home/chenco_adm/Apps/vllm/venv-7.14.0_0.28.0}
-T=${VLLM_TREE:-/home/chenco_adm/vllm-rdna-0.28.0}
-OUT=${OUT:-/home/chenco_adm/w4a8_runs}
+V=${VENV:-$HOME/Apps/vllm/venv-7.14.0_0.28.0}
+T=${VLLM_TREE:-$HOME/vllm-rdna-0.28.0}
+OUT=${OUT:-$HOME/w4a8_runs}
 TAG=${TAG:-2026-10-01_exl3-27b-mtp2}
 PORT=${PORT:-18107}
 MTP=${MTP:-2}
 EAGER=${EAGER:-0}
 CG_MODE=${CG_MODE:-FULL_AND_PIECEWISE}
 HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-4,5,6,7}
-MODEL=${MODEL:-/home/chenco_adm/models/Qwen3.8-27B-exl3-3.00bpw}
+MODEL=${MODEL:-$HOME/models/Qwen3.8-27B-exl3-3.00bpw}
 TRITON_CACHE=${TRITON_CACHE:-$T/cache/triton}
 CELLS=${CELLS:-"1 1024 512 301|8 1024 512 302|1 16384 1024 303|8 16384 1024 304"}
 D=$OUT/$TAG

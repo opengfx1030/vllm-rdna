@@ -4,7 +4,7 @@
 
 💬 [Discord](https://discord.gg/n4VYYE9vAZ) · [gfx1030 wiki](https://blivioniag.github.io/gfx1030-wiki/) · [Recipes](docs/rdna/serving.md) · [Tuning](docs/rdna2/tuning.md)
 
-This is [`opengfx1030/vllm-rdna`](https://github.com/opengfx1030/vllm-rdna). The default branch, **`rdna_extras`**, is upstream vLLM **v0.33.0** plus the RDNA port. Serve from this checkout with [`tools/rdna/serve_rdna.sh`](tools/rdna/serve_rdna.sh) and a recipe. The logo section further down is upstream's README.
+This is [`opengfx1030/vllm-rdna`](https://github.com/opengfx1030/vllm-rdna). The default branch, **`rdna_extras`**, is upstream vLLM **v0.34.0** plus the RDNA port. Serve from this checkout with [`tools/rdna/serve_rdna.sh`](tools/rdna/serve_rdna.sh) and a recipe. The logo section further down is upstream's README.
 
 ## Hardware
 
@@ -16,7 +16,7 @@ gfx1030 has no BF16 dot (`kHasDot2Bf16` is false for RDNA2 in [`csrc/rocm/rdna/c
 
 ## What this fork adds
 
-On top of upstream v0.33.0, for gfx1030:
+On top of upstream v0.34.0, for gfx1030:
 
 - **FA-RDNA2 attention** (`--attention-backend RDNA_ATTN`), including GQA decode. An opt-in packed KV dtype, `--kv-cache-dtype int4_fp16_block`, is read by that backend ([`docs/explore/kv-int4-fp16-scales/README.md`](docs/explore/kv-int4-fp16-scales/README.md)). No recipe turns it on.
 - **W4A16** HIP GEMMs for AWQ / compressed-tensors, and an opt-in **W4A8** sdot4 prefill path. `27b-awq` sets `W4A8=1`. Decode stays W4A16 ([tuning guide](docs/rdna2/tuning.md)).
@@ -28,7 +28,10 @@ On top of upstream v0.33.0, for gfx1030:
 - **DeepSeek-V4-Flash** (fp8 dense, MXFP4 experts, fp8 KV) via `dsv4-flash`.
 - **GGUF** Flash-Next (Unsloth `UD-Q4_K_XL`, `--load-format qwen4exp_gguf`) via `flashnext-gguf-mtp0`: PPL 4.80, 16k TTFT 8.2 s, text only, no MTP. It needs the plugin fork [`opengfx1030/vllm-gguf-plugin`](https://github.com/opengfx1030/vllm-gguf-plugin) (the container image has it); see [`docs/rdna2/gguf-flashnext-2026-11-16.md`](docs/rdna2/gguf-flashnext-2026-11-16.md).
 - **Expert load balancing** for the expert-parallel MoE (W4A16 and W4A8), opt-in, no speedup measured and still owed a soak before it is called qualified (two server runs showed no fault and no added stall): `VLLM_RDNA_EPLB=1` swaps experts between ranks while serving, in small chunks at step boundaries ([`docs/rdna2/eplb-online-2026-11-17.md`](docs/rdna2/eplb-online-2026-11-17.md)); `VLLM_RDNA_EPLB_STATS_DIR` only records the loads. Both off by default and byte-identical when off. Upstream `--enable-eplb` does not start on our quantized MoE ([study](docs/rdna2/eplb-lean-design-2026-11-16.md), knobs in the [tuning guide](docs/rdna2/tuning.md)).
-- **Pipeline parallel** for three gfx1030 cards (`flashnext-pp3`, `flashnext-pp3-mtp2`) and for two stages of four cards (`flashnext-tp4pp2-mtp2`). Tensor parallel in the other recipes is 4, 2 for `full`, and 8 for `flashnext-tp8-mtp2`.
+- **Pipeline parallel** for three gfx1030 cards (`flashnext-pp3`, `flashnext-pp3-mtp2`) and for two stages of four cards (`flashnext-tp4pp2-mtp2`). Tensor parallel in the other Flash-Next and 27B recipes is 4, 2 for `full` and the HI2 recipes, 8 for `flashnext-tp8-mtp2`, and 1, 2 or 4 for the Inkling-2-Mini recipes.
+- **HI2** (`rdna_hint_flex`, HadamardINT2-FP16 3.0 bpw) Qwen3.8-27B on two cards (`27b-hi2-tp2`, `27b-hi2-tp2-mtp2`): [serving guide](docs/rdna2/hi2-27b-tp2-serving.md).
+- **LeapQuant** INT8 GDN recurrent state, opt-in and lossy, for Flash-Next (`flashnext-leapquant-mtp2`): [`docs/rdna2/leapquant-gdn-2026-11-13.md`](docs/rdna2/leapquant-gdn-2026-11-13.md).
+- **Inkling-2-Mini** (`thinkingmachines/Inkling-2-Mini`) on native HIP kernels at TP=1, 2 and 4, up to the model's 1,048,576-token context, with an optional DSpark draft (`inkling2-mini-*` recipes): [serving guide](docs/rdna2/inkling2-serving.md).
 - **TunableOp** rocBLAS rows for the ROCm 7.14 build, under [`tunableop/rocm7.14-rocblas5.5/`](tunableop/rocm7.14-rocblas5.5/).
 
 Knobs and the measurements already written down live in [`docs/rdna2/tuning.md`](docs/rdna2/tuning.md).
@@ -104,7 +107,7 @@ VENV=/path/to/venv-7.14.0 PRINT=1 \
   bash tools/rdna/serve_rdna.sh RECIPE=flashnext-exl3
 ```
 
-The first launch compiles graphs into `<repo>/cache/`. The process stays in the foreground.
+The first launch compiles graphs into `<repo>/cache/`; the vLLM cache root there is per GPU set and port (`cache/vllm-<gpu ids>-<port>`), so two servers of one checkout on different cards do not stop each other. The process stays in the foreground.
 
 ### It is up when HTTP answers
 
@@ -143,21 +146,30 @@ branch clone. It publishes Linux x86-64 images to GHCR:
 
 | Source event | Tags on `ghcr.io/opengfx1030/vllm-rdna` |
 | --- | --- |
-| Push to `rdna_extras` | `sha-<full-commit>`; the current branch tip also updates `nightly` |
-| Create a version tag, e.g. `v0.33.1` (Git push, GitHub UI or API) | `v0.33.1`, without changing nightly |
+| Push to `rdna_extras` | `nightly-<vllm version>-rocm7.14.0`, e.g. `nightly-0.34.0-rocm7.14.0`, plus the floating `nightly` and `nightly-rocm7.14.0`; every newer build moves all three |
+| Create a version tag, e.g. `v0.34.0` (Git push, GitHub UI or API) | `v0.34.0` and `v0.34.0-rocm7.14.0`, without changing nightly |
 | Manual run | Same behavior for the selected `rdna_extras` branch or version tag |
 
-Each tag also has a `-rocm7.14.0` alias. "Nightly" is a rolling channel built
-on each push, not a daily cron; a multi-commit push builds its final commit.
-Builds are not cancelled by subsequent pushes. Only promotion is serialized:
-the current branch tip can promote its built manifest digest, while stale
-builds retain their commit tags. Ref deletions do not publish images.
+The nightly's vLLM version is the nearest `v<major>.<minor>.<patch>` tag in the
+history of the built commit (`git describe --tags --abbrev=0 --match 'v[0-9]*'`),
+so tagging `v0.35.0` switches later builds to `nightly-0.35.0-rocm7.14.0`.
+Branch builds are pushed by digest with no per-commit tag; the promote job then
+moves the three nightly tags onto the newest digest. "Nightly" is a rolling channel
+built on each push, not a daily cron; a multi-commit push builds its final
+commit. A newer push cancels an in-flight branch build (version tag builds are
+never cancelled), and a build whose commit is no longer the branch tip is not
+promoted. Ref deletions do not publish images.
 
-Untagged package versions older than seven days are pruned daily by
-[the package cleanup workflow](.github/workflows/package-cleanup.yml). It keeps
-every version a retained image references (a tagged index's platform manifest
-and buildx provenance attestation are untagged versions of this package) and
-never deletes a tagged version. Manual runs are a dry run by default.
+The previous nightly digest becomes untagged when the tags move. The daily
+[package cleanup workflow](.github/workflows/package-cleanup.yml) deletes, once
+older than seven days, every version that is untagged or carries only legacy
+`sha-*` tags (`DISPOSABLE_TAGS`, default `sha-*`), together with its child
+manifests. A version that also has `nightly`, `nightly-*` or a release tag is
+never deleted, and neither is anything a retained image references (the
+platform manifest and buildx provenance attestation of a tagged image are
+untagged versions of this package). Manual runs are a dry run by default. Old
+`nightly-<version>-rocm…` tags of an earlier vLLM version stay until deleted by
+hand.
 
 The image also carries the GGUF plugin fork (`opengfx1030/vllm-gguf-plugin`),
 built for gfx1030 from the commit pinned in `docker/Dockerfile.rdna`
@@ -177,8 +189,9 @@ git push origin v0.33.1
 ```
 
 Lightweight and annotated tags are supported. Use Docker-compatible names of
-at most 117 characters, such as `v0.33.1` or `v0.33.1-rc.1`; `/` and `+` are
-not valid. `nightly`, `nightly-*`, `sha-*` and `latest` are reserved.
+at most 117 characters, such as `v0.34.0` or `v0.34.0-rc.1`; `/` and `+` are
+not valid. The tag is the image name: tag `v0.34.0` builds `:v0.34.0`.
+`nightly`, `nightly-*`, `sha-*` and `latest` are reserved.
 
 ### Registry and runner setup
 
@@ -263,16 +276,25 @@ affect the native RDNA2 backend; see the
 | Flash-Next AWQ, MTP=2 | `flashnext-mtp2` | 4, TP=4 |
 | Flash-Next UD-Q4_K_XL GGUF, plain decode, text only | `flashnext-gguf-mtp0` | 4, TP=4 |
 | Flash-Next AWQ plus an Inco DFlash2 drafter | `flashnext-dflash2` | 4, TP=4 |
+| Flash-Next AWQ, lossy LeapQuant GDN state, MTP=2 + MonoKernel | `flashnext-leapquant-mtp2` | 4, TP=4 |
 | Flash-Next AWQ on three cards | `flashnext-pp3` | 3, PP=3 |
 | Three cards, MTP=2, about four streams | `flashnext-pp3-mtp2` | 3, PP=3 |
 | Flash-Next AWQ, MTP=2, tensor parallel over eight cards on two PCIe switches | `flashnext-tp8-mtp2` | 8, TP=8 |
 | Flash-Next AWQ, MTP=2, two pipeline stages of four cards | `flashnext-tp4pp2-mtp2` | 8, TP=4 x PP=2 |
 | Qwen3.8-27B AWQ, W4A8 prefill | `27b-awq` | 4, TP=4 |
 | Qwen3.8-27B EXL3 (`mul1`) | `27b-exl3` | 4, TP=4 |
+| Qwen3.8-27B HI2 3.0 bpw (`rdna_hint_flex`) | `27b-hi2-tp2` | 2, TP=2 |
+| Qwen3.8-27B HI2 3.0 bpw, MTP=2, one to four concurrent requests | `27b-hi2-tp2-mtp2` | 2, TP=2 |
 | DeepSeek-V4-Flash (K128, fp8 KV) | `dsv4-flash` | 4, TP=4 |
 | HIP graphs, breakable capture, TP=2 | `full` | 2, TP=2 |
+| Inkling-2-Mini, 180k context | `inkling2-mini-tp1` | 1, TP=1 |
+| Inkling-2-Mini, DSpark draft | `inkling2-mini-tp1-dspark` | 1, TP=1 |
+| Inkling-2-Mini, DSpark with adaptive K and a draft vocabulary | `inkling2-mini-tp1-dspark-adaptive` | 1, TP=1 |
+| Inkling-2-Mini, full 1,048,576-token context | `inkling2-mini-tp2` | 2, TP=2 |
+| Inkling-2-Mini, DSpark draft, 780k context | `inkling2-mini-tp2-dspark` | 2, TP=2 |
+| Inkling-2-Mini, full context, 4,096-token prefill steps | `inkling2-mini-tp4` | 4, TP=4 |
 
-Every knob those files set is in [`docs/rdna/serving.md`](docs/rdna/serving.md). Dry-run any of them with `PRINT=1`.
+Every knob those files set is in [`docs/rdna/serving.md`](docs/rdna/serving.md); the notes behind them are indexed in [`docs/rdna2/README.md`](docs/rdna2/README.md). Dry-run any of them with `PRINT=1`.
 
 ---
 
