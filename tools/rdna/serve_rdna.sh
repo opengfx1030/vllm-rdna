@@ -77,8 +77,26 @@ if [[ ! -r $recipe_file ]]; then
     exit 2
 fi
 
+# KEY=value arguments are already in effect while the recipe is sourced (it can
+# build a value from one, e.g. a path inside SPEC_CONFIG) and win again after it.
+if ((${#rdse_overrides[@]})); then
+    for _ov in "${rdse_overrides[@]}"; do
+        _key=${_ov%%=*}
+        [[ $_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || rdna_die "bad override '$_ov' (expected KEY=value)."
+        printf -v "$_key" '%s' "${_ov#*=}"
+    done
+fi
+
 # Caller-set variables win over recipe defaults, so snapshot every key the
 # recipe touches (values only, setness included) and re-apply after sourcing.
+# A recipe may build on another one with `source "$RDSE_RECIPES/<name>.env"`;
+# the keys of those files (and of the ones they build on) are snapshotted too.
+rdse_key_files=("$recipe_file")
+for ((_i = 0; _i < ${#rdse_key_files[@]} && _i < 8; _i++)); do
+    while IFS= read -r _base; do
+        rdse_key_files+=("$RDSE_RECIPES/$_base.env")
+    done < <(sed -nE 's/^[[:space:]]*source[[:space:]]+"[$]RDSE_RECIPES\/([A-Za-z0-9_-]+)\.env".*/\1/p' "${rdse_key_files[_i]}")
+done
 declare -A rdse_saved=()
 declare -a rdse_keys=()
 while IFS= read -r _key; do
@@ -87,7 +105,7 @@ while IFS= read -r _key; do
     if [[ -v $_key ]]; then
         rdse_saved[$_key]=${!_key}
     fi
-done < <(grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$recipe_file" | tr -d ' =')
+done < <(grep -ohE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "${rdse_key_files[@]}" | tr -d ' =')
 
 # shellcheck disable=SC1090
 source "$recipe_file"
@@ -242,6 +260,10 @@ if [[ -n $PCI_BUSES && $rdse_hip_explicit == 0 ]]; then
 elif [[ -n $PCI_BUSES ]]; then
     rdse_gpu_line="HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$GPUIDS} (PCI_BUSES='$PCI_BUSES' ignored: an explicit device list wins)"
 fi
+
+# VLLM_CACHE_ROOT defaults per device list and port, so the stale-server kill below
+# cannot reach a sibling server of this tree on other cards. An explicit one is kept.
+rdna_default_cache_root
 
 case $PLE in
     bf16)
@@ -455,12 +477,12 @@ RDSE_ENV_KEYS=(
     PYTORCH_TUNABLEOP_RECORD_UNTUNED PYTORCH_TUNABLEOP_UNTUNED_FILENAME
     VLLM_USE_RDNA2_FA VLLM_FA_RDNA2_GQA_DECODE VLLM_FA_RDNA2_GQA_MODE
     FLASH_ATTENTION_TRITON_AMD_ENABLE
-    VLLM_USE_V2_MODEL_RUNNER VLLM_USE_AOT_COMPILE VLLM_DISABLE_COMPILE_CACHE
+    VLLM_USE_AOT_COMPILE VLLM_DISABLE_COMPILE_CACHE
     RDNA_DFLASH2_DRAFT_BF16
     VLLM_USE_BREAKABLE_CUDAGRAPH VLLM_RDNA_FUSED_HC VLLM_RDNA_HC_PREFILL_FUSED
     VLLM_GDN_HIP_PREFILL VLLM_RDNA_FUSED_SE
     VLLM_RDNA_GDN_LEAPQUANT_PACK
-    VLLM_RDNA_DENSE_INT8 VLLM_RDNA_DENSE_INT8_ONLY VLLM_RDNA_DENSE_GEMV
+    VLLM_RDNA_DENSE_INT8 VLLM_RDNA_DENSE_INT8_ONLY
     VLLM_RDNA2_W4A8_SDOT4 VLLM_RDNA2_W4A8_DEBUG
     VLLM_RDNA2_W4A8_BLOCK_M VLLM_RDNA_W4A8_KBLOCK
     VLLM_FORCE_CUSTOM_ALL_REDUCE VLLM_RDNA_AR VLLM_RDNA_AR_MAX_KB
@@ -479,7 +501,7 @@ RDSE_ENV_KEYS=(
     VLLM_RDNA_EPLB_MAX_SWAPS VLLM_RDNA_EPLB_OBJECTIVE VLLM_RDNA_EPLB_CHAOS
     VLLM_RDNA_EPLB_CHAOS_SEED
     VLLM_ENABLE_STARTUP_PLAN VLLM_TUNED_CONFIG_FOLDER
-    VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+    VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS VLLM_KV_CACHE_MARGIN_FLOOR_MIB
     VLLM_PLE_CPU_OFFLOAD VLLM_PLE_OFFLOAD_READY_TIMEOUT VLLM_PLE_QUANT_DIR
     VLLM_EXL3_DEBUG
     VLLM_RDNA_HINT_FLEX_COMPUTE_MODE RDNA_HINT_FLEX_GEMV RDNA_HINT_FLEX_GEMV_SPLIT

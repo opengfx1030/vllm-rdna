@@ -64,16 +64,6 @@ def gfx10x(monkeypatch):
 
 
 @pytest.fixture
-def v2_runner(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-
-
-@pytest.fixture
-def v1_runner(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-
-
-@pytest.fixture
 def make_model(tmp_path):
     """Save a tiny Qwen3-Next config. A fresh directory per call: ModelConfig
     applies the model-specific config update once per ModelConfig object."""
@@ -149,34 +139,33 @@ def test_flag_defaults_to_auto_and_rejects_other_values():
         CacheConfig(replayssm_state_dtype="fp8")
 
 
-def test_cli_flag_parses_and_restricts_its_values():
+def test_cli_flag_parses_and_restricts_its_values(make_model):
+    model = make_model()
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(["--model", "dummy"])
+    args = parser.parse_args(["--model", model])
     assert EngineArgs.from_cli_args(args).replayssm_state_dtype == "auto"
-    args = parser.parse_args(
-        ["--model", "dummy", "--replayssm-state-dtype", "leapquant"]
-    )
+    args = parser.parse_args(["--model", model, "--replayssm-state-dtype", "leapquant"])
     assert EngineArgs.from_cli_args(args).replayssm_state_dtype == "leapquant"
     with pytest.raises(SystemExit):
-        parser.parse_args(["--model", "dummy", "--replayssm-state-dtype", "fp8"])
+        parser.parse_args(["--model", model, "--replayssm-state-dtype", "fp8"])
 
 
 def test_flag_is_not_a_compile_cache_factor():
     # The flag picks HIP ops inside the opaque GDN layer op and the page
     # layout. It does not change the compiled graph.
     assert (
-        CacheConfig().compute_hash()
-        == CacheConfig(replayssm_state_dtype="leapquant").compute_hash()
+        CacheConfig().compile_factors()
+        == CacheConfig(replayssm_state_dtype="leapquant").compile_factors()
     )
 
 
 # --- the supported setup ---------------------------------------------------
 
 
-def test_supported_setup_stores_the_gdn_state_as_blobs(gfx10x, v2_runner, make_model):
+def test_supported_setup_stores_the_gdn_state_as_blobs(gfx10x, make_model):
     config = engine_config(make_model(), replayssm_state_dtype="leapquant")
     assert config.cache_config.replayssm_state_dtype == "leapquant"
-    # Prefix caching on a hybrid model: align mode, which needs the V2 runner.
+    # Prefix caching on a hybrid model selects align mode.
     assert config.cache_config.mamba_cache_mode == "align"
 
     # The model classmethods feed the page size unification.
@@ -186,7 +175,7 @@ def test_supported_setup_stores_the_gdn_state_as_blobs(gfx10x, v2_runner, make_m
     assert temporal_dtype == torch.uint8
 
 
-def test_mtp_stays_supported(gfx10x, v2_runner, make_model):
+def test_mtp_stays_supported(gfx10x, make_model):
     # The RFC rejects speculative decoding. This fork keeps MTP.
     config = engine_config(
         make_model(),
@@ -203,15 +192,6 @@ def test_mtp_stays_supported(gfx10x, v2_runner, make_model):
         config, model_config=config.speculative_config.draft_model_config
     )
     assert drafter.cache_config.replayssm_state_dtype == "leapquant"
-
-
-def test_validator_allows_the_v1_runner_without_align_mode(
-    gfx10x, v1_runner, make_model
-):
-    config = engine_config(
-        make_model(), replayssm_state_dtype="leapquant", enable_prefix_caching=False
-    )
-    assert config.cache_config.mamba_cache_mode == "none"
 
 
 # --- the refused setups ------------------------------------------------------
@@ -259,7 +239,7 @@ def test_refuses_offloading_before_its_connector_exists(gfx10x):
 
 @pytest.mark.parametrize(
     "predicate",
-    ["are_gdn_triton_kernels_available", "is_rdna_gdn_triton_kernels_available"],
+    ["are_gdn_triton_kernels_available", "are_rdna_gdn_triton_kernels_available"],
 )
 def test_refuses_the_aiter_gdn_path(gfx10x, monkeypatch, predicate):
     monkeypatch.setattr(rocm_aiter_ops, predicate, lambda: True)
@@ -267,21 +247,14 @@ def test_refuses_the_aiter_gdn_path(gfx10x, monkeypatch, predicate):
         make_vllm_config(cache={"replayssm_state_dtype": "leapquant"})
 
 
-def test_refuses_align_mode_on_the_v1_runner(gfx10x, v1_runner, make_model):
-    # `mamba_cache_mode` becomes "align" inside the model-specific config
-    # update, so the validator must run after that update.
-    with pytest.raises(ValueError, match="V2 model runner"):
-        engine_config(make_model(), replayssm_state_dtype="leapquant")
-
-
-def test_refuses_head_dims_other_than_128(gfx10x, v2_runner, make_model):
+def test_refuses_head_dims_other_than_128(gfx10x, make_model):
     with pytest.raises(
         ValueError, match="head_k_dim == head_v_dim == 128, got 64 / 64"
     ):
         engine_config(make_model(head_dim=64), replayssm_state_dtype="leapquant")
 
 
-def test_refuses_a_model_without_gdn_layers(gfx10x, v2_runner, tmp_path):
+def test_refuses_a_model_without_gdn_layers(gfx10x, tmp_path):
     OPTConfig(architectures=["OPTForCausalLM"]).save_pretrained(tmp_path)
     with pytest.raises(ValueError, match="Gated DeltaNet"):
         engine_config(str(tmp_path), replayssm_state_dtype="leapquant")
@@ -324,9 +297,8 @@ def test_config_refusal_names_the_flag(gfx10x, cache, kv_transfer_config):
         )
 
 
-def test_auto_accepts_what_leapquant_refuses(v1_runner):
-    # The validator runs only for --replayssm-state-dtype leapquant. (Triton
-    # ReplaySSM needs the V1 runner: that is a check of its own.)
+def test_auto_accepts_what_leapquant_refuses():
+    # The validator runs only for --replayssm-state-dtype leapquant.
     make_vllm_config(cache={"use_replayssm": True})
     make_vllm_config(cache={"kv_offloading_size": 1.0})
     make_vllm_config(kv_transfer_config=CONNECTOR)
@@ -383,9 +355,7 @@ def test_state_shape_refuses_head_dims_other_than_128():
         )
 
 
-def test_max_memory_usage_follows_the_flag_not_the_environment(
-    gfx10x, v2_runner, monkeypatch
-):
+def test_max_memory_usage_follows_the_flag_not_the_environment(gfx10x, monkeypatch):
     monkeypatch.setenv("VLLM_RDNA_GDN_LEAPQUANT", "1")  # the removed switch
     spec = make_spec()
     page = spec.page_size_bytes

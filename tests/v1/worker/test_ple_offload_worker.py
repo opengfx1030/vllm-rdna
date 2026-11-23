@@ -98,7 +98,7 @@ def _load_test_ple_weights(
     )
     runner.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.float32),
-        load_config=SimpleNamespace(),
+        load_config=SimpleNamespace(download_dir=None),
     )
     runner._layers = {}
     runner._load_weights()
@@ -147,9 +147,12 @@ def test_ple_offload_rejects_missing_materialized_parameters(
         )
 
 
+@pytest.mark.parametrize("is_hip", [False, True])
 def test_ple_offload_wait_only_waits_for_done(
     monkeypatch: pytest.MonkeyPatch,
+    is_hip: bool,
 ) -> None:
+    monkeypatch.setattr(torch.version, "hip", "7.14.0" if is_hip else None)
     wait_calls = []
     error = SimpleNamespace(value=0)
     stream = SimpleNamespace(cuda_stream=17)
@@ -185,21 +188,25 @@ def test_ple_offload_wait_only_waits_for_done(
         lambda *args: pytest.fail(f"wait unexpectedly wrote the flag: {args}"),
     )
 
-    result = ple_offload_layer._ple_offload_wait_impl(
+    ple_offload_layer._ple_offload_wait_impl(
         flag_tensor,
         torch.empty(4, 2),
         torch.empty(4, 2),
     )
 
-    assert result is None
-    assert wait_calls == [
-        (
-            stream.cuda_stream,
-            flag_tensor.data_ptr(),
-            ple_offload_layer.CpuGpuSemaphore.DONE_VALUE,
-            ple_offload_layer.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
-        )
-    ]
+    expected_wait_calls = (
+        []
+        if is_hip
+        else [
+            (
+                stream.cuda_stream,
+                flag_tensor.data_ptr(),
+                ple_offload_layer.CpuGpuSemaphore.DONE_VALUE,
+                ple_offload_layer.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ.value,
+            )
+        ]
+    )
+    assert wait_calls == expected_wait_calls
 
 
 def test_offloaded_forward_waits_then_releases_output(
@@ -292,7 +299,6 @@ def test_ple_offload_accepts_supported_configurations(
     unsupported_setting: str | None,
 ) -> None:
     worker = Worker.__new__(Worker)
-    worker.use_v2_model_runner = True
     worker.parallel_config = SimpleNamespace(
         distributed_executor_backend="mp",
         nnodes=1,
@@ -408,6 +414,7 @@ def test_offload_distributed_sets_config_only_for_model_parallel(
     ple_offload_worker._init_offload_distributed()
 
     offload_config = calls[1][1]
+    assert offload_config is not None
     assert offload_config is not vllm_config
     assert offload_config.parallel_config.data_parallel_size == 1
     assert offload_config.parallel_config.tensor_parallel_size == 1
@@ -464,9 +471,7 @@ def test_ple_offload_runner_groups_registrations_by_dp_rank(
             hf_text_config=SimpleNamespace(ple_embed_dim=2),
         ),
     )
-    runner._layers = {
-        "ple": SimpleNamespace(get_offload_output_dtype=lambda default: default)
-    }
+    runner._layers = {"ple": _TestPleOffloadLayer()}
     runner._worker_targets = {}
     runner._pinned_bufs = {}
     runner._input_bufs = {}
@@ -522,23 +527,28 @@ def test_ple_offload_runner_routes_requests_in_arrival_order(
 ) -> None:
     events = []
 
-    class FakeLayer:
-        def __init__(self, name: str):
-            self.name = name
+    class FakeLayer(_TestPleOffloadLayer):
+        name: str
 
         def forward_impl(
             self,
-            hidden_states,
-            input_ids,
-            query_start_loc,
-            ngram_context,
-            output_buffer,
-        ):
-            del hidden_states, query_start_loc, ngram_context
+            hidden_states: torch.Tensor,
+            input_ids: torch.Tensor,
+            *args: object,
+            **kwargs: object,
+        ) -> torch.Tensor:
+            del hidden_states, args
             events.append((self.name, int(input_ids[0].item())))
+            output_buffer = kwargs["output_buffer"]
+            assert isinstance(output_buffer, torch.Tensor)
             result = input_ids.unsqueeze(-1).expand(-1, 2)
             output_buffer[: result.shape[0]].copy_(result)
             return output_buffer[: result.shape[0]]
+
+    def named_fake_layer(name: str) -> FakeLayer:
+        layer = FakeLayer()
+        layer.name = name
+        return layer
 
     class FakeStream:
         def synchronize(self) -> None:
@@ -572,7 +582,10 @@ def test_ple_offload_runner_routes_requests_in_arrival_order(
     runner._t_total = 0.0
     runner._n_timed = 0
     runner._n_fused = 0
-    runner._layers = {"ple0": FakeLayer("ple0"), "ple1": FakeLayer("ple1")}
+    runner._layers = {
+        "ple0": named_fake_layer("ple0"),
+        "ple1": named_fake_layer("ple1"),
+    }
     runner._worker_targets = {
         0: {"ple0": [target()], "ple1": [target()]},
         1: {"ple0": [target()], "ple1": [target()]},
@@ -623,12 +636,16 @@ def test_ple_offload_runner_routes_requests_in_arrival_order(
         ("ple0", 20),
         ("ple1", 20),
     ]
+    out_buf_dp0 = runner._worker_targets[0]["ple1"][0].out_buf
+    assert out_buf_dp0 is not None
     torch.testing.assert_close(
-        runner._worker_targets[0]["ple1"][0].out_buf[:2],
+        out_buf_dp0[:2],
         torch.tensor([[0, 0], [11, 11]], dtype=torch.int32),
     )
+    out_buf_dp1 = runner._worker_targets[1]["ple1"][0].out_buf
+    assert out_buf_dp1 is not None
     torch.testing.assert_close(
-        runner._worker_targets[1]["ple1"][0].out_buf[:1],
+        out_buf_dp1[:1],
         torch.tensor([[20, 20]], dtype=torch.int32),
     )
 

@@ -827,6 +827,216 @@ void moe_mxfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
                           int64_t block_size_m, bool mul_topk_weight,
                           int64_t output_topk);
 
+// Inkling-2-Mini expert formats: modelopt NVFP4 (E2M1 + E4M3 block scales +
+// per-expert global) and MXFP8 (E4M3 + UE8M0).  Same MoE calling contract as
+// moe_mxfp4_gemm_rdna2; NVFP4 takes one extra per-expert global scale tensor.
+void moe_nvfp4_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales,
+                          torch::Tensor b_globals, torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk);
+
+void moe_mxfp8_gemm_rdna2(torch::Tensor a, torch::Tensor c,
+                          torch::Tensor b_q_weight, torch::Tensor b_scales,
+                          torch::Tensor topk_weights,
+                          torch::Tensor sorted_token_ids,
+                          torch::Tensor expert_ids,
+                          torch::Tensor num_tokens_post_padded, int64_t top_k,
+                          int64_t block_size_m, bool mul_topk_weight,
+                          int64_t output_topk);
+
+// Prefill-sized (32-row blocks, whole K, no atomics for w13) variants of the
+// two kernels above, for token counts where an expert receives tens of rows.
+// The work list comes from moe_prefill_cta_rdna2 (once per layer visit) and
+// groups consecutive block_size_m-row blocks of one expert of the router's
+// layout (inkling2_glue_moe_route, block_size_m 8).  See
+// moe_prefill_bm_rdna2.cu.
+torch::Tensor moe_prefill_cta_rdna2(torch::Tensor expert_ids,
+                                    torch::Tensor num_tokens_post_padded,
+                                    int64_t num_experts, int64_t block_size_m);
+
+void moe_nvfp4_bm_rdna2(torch::Tensor a, torch::Tensor c,
+                        torch::Tensor b_q_weight, torch::Tensor b_scales,
+                        torch::Tensor b_globals, torch::Tensor topk_weights,
+                        torch::Tensor sorted_token_ids, torch::Tensor cta_info,
+                        int64_t top_k, bool mul_topk_weight,
+                        int64_t output_topk);
+
+void moe_mxfp8_bm_rdna2(torch::Tensor a, torch::Tensor c,
+                        torch::Tensor b_q_weight, torch::Tensor b_scales,
+                        torch::Tensor topk_weights,
+                        torch::Tensor sorted_token_ids, torch::Tensor cta_info,
+                        int64_t top_k, bool mul_topk_weight,
+                        int64_t output_topk);
+
+// W4A8 variant of the NVFP4 prefill kernel (OFF by default in the model path):
+// the activations are quantised to int8 per (row, 32 K) first.
+std::tuple<torch::Tensor, torch::Tensor> moe_prefill_act_quant_rdna2(
+    torch::Tensor a);
+
+void moe_nvfp4_bm_i8_rdna2(torch::Tensor a8, torch::Tensor sa, torch::Tensor c,
+                           torch::Tensor b_q_weight, torch::Tensor b_scales,
+                           torch::Tensor b_globals, torch::Tensor topk_weights,
+                           torch::Tensor sorted_token_ids,
+                           torch::Tensor cta_info, int64_t top_k,
+                           bool mul_topk_weight, int64_t output_topk);
+
+// The second expert GEMM with the softcapped SwiGLU of the first GEMM's
+// [rows, 2K] [gate | up] output fused into its activation load (bit-identical
+// activations to inkling2_glue_swiglu followed by the plain GEMM).
+void moe_nvfp4_gemm_swiglu_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor b_globals, torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
+    bool mul_topk_weight, int64_t output_topk, double gate_cap, double up_cap);
+
+void moe_mxfp8_gemm_swiglu_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor b_q_weight,
+    torch::Tensor b_scales, torch::Tensor topk_weights,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
+    bool mul_topk_weight, int64_t output_topk, double gate_cap, double up_cap);
+
+// Inkling-2-Mini attention core on RDNA2 (gfx1030): paged short convolutions,
+// K/V prep and paged attention with learned relative bias and sink logit.
+// See docs/rdna2/inkling2-attn-kernels.md.
+void inkling2_sconv_static(torch::Tensor x, torch::Tensor weight,
+                           torch::Tensor out, torch::Tensor conv_cache,
+                           torch::Tensor block_table, torch::Tensor seq_idx,
+                           torch::Tensor query_start_loc,
+                           torch::Tensor seq_lens, int64_t stream_offset,
+                           int64_t num_kv_heads, int64_t block_size,
+                           bool write_state);
+
+void inkling2_sconv_dynamic(torch::Tensor x, torch::Tensor static_weight,
+                            torch::Tensor dyn, torch::Tensor out,
+                            torch::Tensor conv_cache, torch::Tensor block_table,
+                            torch::Tensor seq_idx,
+                            torch::Tensor query_start_loc,
+                            torch::Tensor seq_lens, int64_t stream_offset,
+                            int64_t num_kv_heads, int64_t block_size,
+                            bool write_state);
+
+void inkling2_conv_state_write(torch::Tensor x, torch::Tensor conv_cache,
+                               torch::Tensor block_table, torch::Tensor seq_idx,
+                               torch::Tensor query_start_loc,
+                               torch::Tensor seq_lens, int64_t stream_offset,
+                               int64_t num_kv_heads, int64_t block_size);
+
+void inkling2_kv_prep(torch::Tensor xk, torch::Tensor xv,
+                      torch::Tensor k_weight, torch::Tensor v_weight,
+                      std::optional<torch::Tensor> k_dyn,
+                      std::optional<torch::Tensor> v_dyn,
+                      torch::Tensor conv_cache, torch::Tensor conv_block_table,
+                      torch::Tensor seq_idx, torch::Tensor query_start_loc,
+                      torch::Tensor seq_lens, torch::Tensor kv_cache,
+                      torch::Tensor kv_slot_mapping, int64_t k_stream_offset,
+                      int64_t v_stream_offset, int64_t conv_block_size,
+                      bool write_state, double k_clip, double rms_eps);
+
+void inkling2_attention(
+    torch::Tensor q, torch::Tensor rel, torch::Tensor sink,
+    std::optional<torch::Tensor> gate, torch::Tensor q_scale,
+    torch::Tensor rel_scale, torch::Tensor rel_proj_t, torch::Tensor positions,
+    torch::Tensor kv_cache, torch::Tensor block_table, torch::Tensor seq_lens,
+    torch::Tensor query_start_loc, torch::Tensor out, torch::Tensor workspace,
+    int64_t window, int64_t rel_extent, bool log_scale, double log_alpha,
+    double log_n_floor, double q_clip, double rel_clip, int64_t max_query_len,
+    int64_t splits_decode, int64_t splits_tile, int64_t tile_impl);
+
+// Inkling-2-Mini DSpark draft (mtp.safetensors) on RDNA2 (gfx1030): bf16 tap
+// capture, DFlare mix + RMSNorm, skinny / dense fp16 projections, per-head Q/K
+// RMSNorm + RoPE + paged KV write, bidirectional block attention, the residual
+// glue and the Markov head. See docs/rdna2/inkling2-dspark.md.
+void inkling2_dspark_store_taps(std::vector<torch::Tensor> const& srcs,
+                                torch::Tensor dst, int64_t num_rows);
+
+void inkling2_dspark_mix_rms(torch::Tensor taps, torch::Tensor fuse_weight,
+                             torch::Tensor norm_w, torch::Tensor out,
+                             std::optional<torch::Tensor> qsl,
+                             std::optional<torch::Tensor> num_rejected,
+                             int64_t num_rows, int64_t alpha_row0, double eps);
+
+void inkling2_dspark_embed_block(torch::Tensor ids, torch::Tensor embed,
+                                 torch::Tensor embed_norm_w,
+                                 torch::Tensor mask_embed,
+                                 torch::Tensor in_norm_w, torch::Tensor resid,
+                                 torch::Tensor xn, int64_t num_rows,
+                                 int64_t block, double eps);
+
+void inkling2_dspark_add_rmsnorm(torch::Tensor resid, torch::Tensor delta,
+                                 torch::Tensor norm_w, torch::Tensor out,
+                                 int64_t num_rows, int64_t splits, double eps);
+
+void inkling2_dspark_silu_mul(torch::Tensor gu, torch::Tensor out,
+                              int64_t num_rows);
+
+void inkling2_dspark_gather_rows(torch::Tensor src, torch::Tensor idx,
+                                 torch::Tensor dst, int64_t num_rows);
+
+void inkling2_dspark_gemv(torch::Tensor x, torch::Tensor w, torch::Tensor out,
+                          std::optional<torch::Tensor> x_index,
+                          int64_t num_rows, int64_t splits, int64_t variant);
+
+void inkling2_dspark_gemm(torch::Tensor x, torch::Tensor w, torch::Tensor out,
+                          int64_t num_rows, int64_t design);
+
+void inkling2_dspark_qkv_prep(torch::Tensor qkv, torch::Tensor positions,
+                              torch::Tensor slots, torch::Tensor q_norm_w,
+                              torch::Tensor k_norm_w, torch::Tensor inv_freq,
+                              std::optional<torch::Tensor> q_out,
+                              torch::Tensor kv_cache, int64_t num_tokens,
+                              int64_t q_heads, int64_t kv_heads, double eps);
+
+void inkling2_dspark_attention(torch::Tensor q, torch::Tensor kv_cache,
+                               torch::Tensor block_table,
+                               torch::Tensor seq_lens, torch::Tensor out,
+                               torch::Tensor part, int64_t num_reqs,
+                               int64_t window, int64_t splits);
+
+void inkling2_dspark_markov_step(torch::Tensor prev, int64_t prev_stride,
+                                 torch::Tensor state, torch::Tensor w1,
+                                 torch::Tensor wt, torch::Tensor bias,
+                                 torch::Tensor ctx_h, torch::Tensor ctx_f,
+                                 torch::Tensor latent, int64_t num_reqs,
+                                 int64_t step, int64_t nsteps, bool first);
+
+void inkling2_dspark_head_logits(torch::Tensor base, torch::Tensor latent,
+                                 torch::Tensor fold_w, torch::Tensor fold_b,
+                                 torch::Tensor logits, int64_t num_reqs,
+                                 int64_t step, int64_t nsteps, double softcap);
+
+void inkling2_dspark_fold_bias(torch::Tensor head, torch::Tensor b,
+                               torch::Tensor out);
+
+void inkling2_dspark_argmax(torch::Tensor logits, torch::Tensor out,
+                            int64_t num_rows, int64_t vocab);
+
+void inkling2_dspark_argmax_partial(torch::Tensor logits, torch::Tensor part,
+                                    int64_t num_rows, int64_t vocab,
+                                    int64_t first_id);
+
+void inkling2_dspark_prepare_inputs(
+    torch::Tensor input_ids, torch::Tensor positions, torch::Tensor is_padding,
+    torch::Tensor query_start_loc, torch::Tensor seq_lens,
+    torch::Tensor query_slot_mapping, torch::Tensor context_positions,
+    torch::Tensor context_slot_mapping, torch::Tensor sample_indices,
+    torch::Tensor sample_pos, torch::Tensor sample_idx_mapping,
+    torch::Tensor out_temperature, torch::Tensor out_seeds,
+    torch::Tensor target_positions, torch::Tensor target_query_start_loc,
+    torch::Tensor idx_mapping, torch::Tensor last_sampled,
+    torch::Tensor next_prefill_tokens, torch::Tensor num_sampled,
+    torch::Tensor num_rejected, torch::Tensor temperature, torch::Tensor seeds,
+    torch::Tensor block_table, int64_t block_size,
+    int64_t parallel_drafting_token_id, int64_t num_query_per_req,
+    int64_t num_speculative_steps, int64_t max_num_reqs, int64_t max_num_tokens,
+    int64_t max_model_len, int64_t num_reqs, int64_t max_tokens_per_req,
+    bool sample_from_anchor);
+
 void moe_w8a16_fp8_gemm_rdna2(
     torch::Tensor a, torch::Tensor c, torch::Tensor b_q_weight,
     torch::Tensor b_scales, torch::Tensor b_qzeros, torch::Tensor topk_weights,
@@ -1050,6 +1260,165 @@ torch::Tensor bilinear_pos_embed_rdna2(
     torch::Tensor out,           // [t * h * w, hidden_dim], written
     int64_t H, int64_t W, double h_scale, double w_scale, int64_t num_grid,
     int64_t m_size);
+
+// ---------------------------------------------------------------------------
+// Inkling-2-Mini vision encoder kernels for gfx1030 (RDNA2); see
+// csrc/rocm/inkling2_vit_rdna2.cu and docs/rdna2/inkling2-vision.md. `meta` is
+// the per-image int32 [n_img, 4] = {rows, cols, tok0, patch0} table.
+// ---------------------------------------------------------------------------
+
+void inkling2_vit_gather_patches(
+    torch::Tensor raw,  // [cells, 40, 40, 3] fp16/bf16 raw 0..255 (-1 padding)
+    torch::Tensor out,  // [4 cells, kpad] fp16, written
+    int64_t mode);  // 0 exact 2 raw / 255 - 1, 1 CLIP normalise + bf16 round
+
+void inkling2_vit_gemm(
+    torch::Tensor a,    // [M, K] fp16
+    torch::Tensor w,    // [N, K] fp16
+    torch::Tensor out,  // [M, N] fp16 (fp32 for epilogue 4), written
+    const std::optional<torch::Tensor>& bias,  // [N] fp32 (epilogues 1, 2)
+    int64_t epilogue);  // 0 plain, 1 +bias, 2 gelu(+bias), 3 gelu, 4 fp32 out
+
+void inkling2_vit_gemm_residual(
+    torch::Tensor a,      // [M, K] fp16
+    torch::Tensor w,      // [N, K] fp16
+    torch::Tensor bias,   // [N] fp32
+    torch::Tensor gamma,  // [N] fp32
+    torch::Tensor res);   // [M, N] fp32, res += gamma * (a w^T + bias)
+
+void inkling2_vit_embed(torch::Tensor emb, torch::Tensor pos, torch::Tensor cls,
+                        torch::Tensor ln_w, torch::Tensor ln_b,
+                        torch::Tensor meta, torch::Tensor h, double eps);
+
+void inkling2_vit_layernorm(torch::Tensor h, torch::Tensor w, torch::Tensor b,
+                            torch::Tensor out, double eps);
+
+void inkling2_vit_rope_tables(torch::Tensor meta, torch::Tensor inv_freq,
+                              torch::Tensor cs);
+
+void inkling2_vit_rope_qk(torch::Tensor qkv, torch::Tensor cs);
+
+void inkling2_vit_attention(torch::Tensor qkv, torch::Tensor out,
+                            torch::Tensor meta, torch::Tensor blk_prefix,
+                            int64_t num_qblocks);
+
+void inkling2_vit_pool(torch::Tensor h, torch::Tensor meta, torch::Tensor out);
+
+// Inkling-2-Mini dense linears on RDNA2 (gfx1030): grouped fp16 GEMV / GEMM
+// with per-segment inputs, outputs and epilogues, the lm_head with softcap
+// and argmax partials, and the fp32-weight router / controller linears.
+// See docs/rdna2/inkling2-linear-kernels.md.
+void inkling2_linear_grouped(
+    const std::vector<torch::Tensor>& xs, torch::Tensor w,
+    const std::vector<torch::Tensor>& outs, const std::vector<int64_t>& seg_x,
+    const std::vector<int64_t>& seg_n, const std::vector<int64_t>& seg_act,
+    const std::vector<double>& seg_p, const std::vector<int64_t>& seg_valid,
+    int64_t variant);
+
+void inkling2_linear_f32w(const std::vector<torch::Tensor>& xs, torch::Tensor w,
+                          const std::vector<torch::Tensor>& outs,
+                          const std::vector<int64_t>& seg_x,
+                          const std::vector<int64_t>& seg_n,
+                          const std::vector<int64_t>& seg_act, int64_t variant);
+
+void inkling2_linear_lm_head(torch::Tensor x, torch::Tensor w,
+                             const std::optional<torch::Tensor>& logits,
+                             const std::optional<torch::Tensor>& part_val,
+                             const std::optional<torch::Tensor>& part_idx,
+                             double softcap, int64_t n_valid, int64_t col_base,
+                             int64_t variant);
+
+void inkling2_linear_argmax_partial(torch::Tensor logits,
+                                    torch::Tensor part_val,
+                                    torch::Tensor part_idx, int64_t n,
+                                    int64_t col_base);
+
+void inkling2_linear_argmax_reduce(torch::Tensor part_val,
+                                   torch::Tensor part_idx, torch::Tensor out);
+
+// Inkling-2-Mini glue kernels on RDNA2 (gfx1030): block / message attention
+// residual, message gates, RMS norms, router + align and SwiGLU.  Everything
+// between the GEMMs, attention and short convolutions of a layer visit.
+// See docs/rdna2/inkling2-glue-kernels.md.
+void inkling2_glue_attn_res(const torch::Tensor& blocks, int64_t n_blocks,
+                            const torch::Tensor& x0,
+                            const std::optional<torch::Tensor>& x1,
+                            const std::optional<torch::Tensor>& partial_out,
+                            const std::optional<torch::Tensor>& append,
+                            const torch::Tensor& query,
+                            const std::optional<torch::Tensor>& norm_w,
+                            const torch::Tensor& out, double eps,
+                            double norm_eps);
+
+// Inkling-2-Mini attention-chain node fusions on RDNA2 (gfx1030): the static
+// short conv fused into the attn_res that consumes it, and the messages of a
+// whole loop pass in one launch.  Bit-identical to the launches they replace.
+// See docs/rdna2/inkling2-fuse-attn-chain.md.
+void inkling2_fuse_attn_res_conv(
+    const torch::Tensor& blocks, int64_t n_blocks,
+    const std::optional<torch::Tensor>& x0, const torch::Tensor& conv_x,
+    const torch::Tensor& conv_w, const torch::Tensor& conv_cache,
+    const torch::Tensor& block_table, const torch::Tensor& seq_idx,
+    const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
+    int64_t stream_offset, int64_t num_kv_heads, int64_t block_size,
+    const std::optional<torch::Tensor>& x1_out,
+    const std::optional<torch::Tensor>& partial_out,
+    const std::optional<torch::Tensor>& append, const torch::Tensor& query,
+    const std::optional<torch::Tensor>& norm_w, const torch::Tensor& out,
+    double eps, double norm_eps);
+
+void inkling2_fuse_msgs_fill(const torch::Tensor& blocks, int64_t n_blocks,
+                             const torch::Tensor& x0, const torch::Tensor& x1,
+                             const torch::Tensor& queries,
+                             const torch::Tensor& out, double eps);
+
+void inkling2_glue_msg_gate_down(const torch::Tensor& h, const torch::Tensor& m,
+                                 const torch::Tensor& wd,
+                                 const torch::Tensor& d, double eps);
+
+void inkling2_glue_msg_gate_mix(const torch::Tensor& h, const torch::Tensor& m,
+                                const torch::Tensor& d, const torch::Tensor& wf,
+                                const torch::Tensor& wg,
+                                const std::optional<torch::Tensor>& norm_w,
+                                const torch::Tensor& out,
+                                const std::optional<torch::Tensor>& scratch,
+                                const std::optional<torch::Tensor>& partials,
+                                const std::optional<torch::Tensor>& counters,
+                                double norm_eps);
+
+void inkling2_glue_rms_norm(const torch::Tensor& x,
+                            const std::optional<torch::Tensor>& x1,
+                            const std::optional<torch::Tensor>& weight,
+                            const torch::Tensor& out,
+                            const std::optional<torch::Tensor>& sum_out,
+                            double eps, bool round_fp16);
+
+void inkling2_glue_embed_norm(const torch::Tensor& ids,
+                              const torch::Tensor& table,
+                              const torch::Tensor& weight,
+                              const torch::Tensor& out, double eps);
+
+void inkling2_glue_embed_lookup(const torch::Tensor& ids,
+                                const torch::Tensor& table,
+                                const torch::Tensor& out, int64_t vocab_first,
+                                int64_t vocab_total);
+
+void inkling2_glue_moe_route(
+    const torch::Tensor& x, const torch::Tensor& gate_w,
+    const torch::Tensor& bias, const torch::Tensor& logits,
+    const torch::Tensor& topk_weights, const torch::Tensor& topk_ids,
+    const torch::Tensor& sorted_ids, const torch::Tensor& expert_ids,
+    const torch::Tensor& post_pad, const torch::Tensor& counters,
+    const std::optional<torch::Tensor>& zero1,
+    const std::optional<torch::Tensor>& zero2, int64_t block_size_m,
+    double route_scale);
+
+void inkling2_glue_swiglu(const torch::Tensor& gate_up,
+                          const torch::Tensor& out, double gate_cap,
+                          double up_cap);
+
+void inkling2_glue_copy_states(const torch::Tensor& src,
+                               const torch::Tensor& dst);
 
 // ---------------------------------------------------------------------------
 // PLE dilated short-conv HIP kernels for Qwen4Exp / Qwen3.8-Flash-Next on
@@ -1315,8 +1684,9 @@ void spec_update_draft_inputs_rdna2(
     torch::Tensor input_ids, torch::Tensor positions,
     torch::Tensor sample_src_positions, torch::Tensor seq_lens,
     torch::Tensor draft_tokens, torch::Tensor current_draft_step,
-    torch::Tensor hidden_states, int64_t hidden_size, int64_t max_model_len,
-    int64_t num_speculative_steps, bool advance_draft_positions);
+    torch::Tensor hidden_states, int64_t hidden_size,
+    torch::Tensor max_model_len, int64_t num_speculative_steps,
+    bool advance_draft_positions);
 
 void spec_gather_draft_sampled_rdna2(torch::Tensor draft_sampled,
                                      torch::Tensor pos, torch::Tensor input_ids,
@@ -1459,3 +1829,10 @@ void rdna_hint_flex_moe_gemm_rdna2(
     torch::Tensor blk_params, torch::Tensor param_off, torch::Tensor row_consts,
     torch::Tensor row_nbits, torch::Tensor row_block, int64_t n_out,
     torch::Tensor out);
+// RDNA3.5 only: Fused Gated Delta Net prefill kernel.
+// Mutates `out` and `final_state` in place.
+void rdna35_gdn_chunked(torch::Tensor& q, torch::Tensor& k, torch::Tensor& v,
+                        torch::Tensor& g, torch::Tensor& beta,
+                        std::optional<torch::Tensor> initial_state,
+                        torch::Tensor& cu_seqlens, torch::Tensor& out,
+                        torch::Tensor& final_state, double scale);

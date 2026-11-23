@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -193,6 +194,23 @@ class KVConnectorBase_V1(ABC):
         full-attention group reaches a deeper boundary. Defaults to False.
         """
         return False
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether the connector supports core lookahead hashing."""
+        return False
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
+        """How the connector's workers reach the device KV cache, as
+        `KVCacheAccess` flags, which decide how the extensible KV cache
+        allocates it, or whether it can be used: e.g. `REGISTERS` if they
+        register it with a UCX or RDMA engine, which requires each segment to
+        be backed by a single physical allocation. Defaults to `IN_PROCESS`.
+        """
+        return KVCacheAccess.IN_PROCESS
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -618,6 +636,18 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def may_load_async(self, request: "Request") -> bool:
+        """Whether ``get_num_new_matched_tokens`` may return
+        ``load_kv_async=True`` for this request. With --max-num-inflight-kv-loads,
+        such requests can start loading while the running batch is full.
+
+        Called whenever the request enters the waiting queues, so must be cheap.
+        A false positive holds back other async loads until a slot is free.
+        Defaults to the P/D ``do_remote_prefill`` flag.
+        """
+        params = request.kv_transfer_params
+        return bool(params and params.get("do_remote_prefill"))
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 
@@ -636,7 +666,7 @@ class KVConnectorBase_V1(ABC):
         """Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:

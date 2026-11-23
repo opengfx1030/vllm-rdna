@@ -113,8 +113,6 @@ def config_refusal(vllm_config) -> str | None:
     if not is_qwen4exp(vllm_config):
         archs = getattr(vllm_config.model_config, "architectures", None)
         return f"on gfx10x supports Qwen4Exp only, not {archs}"
-    if not vllm_config.use_v2_model_runner:
-        return "needs Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1)"
     if vllm_config.parallel_config.pipeline_parallel_size > 1:
         return "does not support pipeline parallelism (PP > 1)"
     cache_dtype = getattr(

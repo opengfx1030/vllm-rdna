@@ -1,0 +1,69 @@
+{
+ "source": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/__init__.py",
+ "modules": {
+  "_C": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_C.abi3.so",
+  "_C_stable_libtorch": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_C_stable_libtorch.abi3.so",
+  "_moe_C_stable_libtorch": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_moe_C_stable_libtorch.abi3.so",
+  "_rocm_C": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_rocm_C.abi3.so",
+  "cumem_allocator": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/cumem_allocator.abi3.so",
+  "fs_io_C": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/fs_io_C.abi3.so",
+  "spinloop": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/spinloop.abi3.so"
+ },
+ "module_count": 7,
+ "rocm_schema_count": 186,
+ "rocm_C_sha256": "579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042",
+ "import_status": {
+  "_C": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_C.abi3.so",
+   "rc": 0,
+   "tail": [
+    "LOADED"
+   ]
+  },
+  "_C_stable_libtorch": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_C_stable_libtorch.abi3.so",
+   "rc": 0,
+   "tail": [
+    "LOADED"
+   ]
+  },
+  "_moe_C_stable_libtorch": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_moe_C_stable_libtorch.abi3.so",
+   "rc": 0,
+   "tail": [
+    "LOADED"
+   ]
+  },
+  "_rocm_C": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_rocm_C.abi3.so",
+   "rc": 0,
+   "tail": [
+    "LOADED"
+   ]
+  },
+  "cumem_allocator": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/cumem_allocator.abi3.so",
+   "rc": 0,
+   "tail": [
+    "LOADED"
+   ]
+  },
+  "fs_io_C": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/fs_io_C.abi3.so",
+   "rc": 0,
+   "tail": [
+    "LOADED"
+   ]
+  },
+  "spinloop": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/spinloop.abi3.so",
+   "rc": 0,
+   "tail": [
+    "LOADED"
+   ]
+  }
+ },
+ "rocm_schema_probe": "{\"schemas\": 186, \"cast\": 1, \"gumbel\": 1}",
+ "update_draft_schema_count": 1,
+ "gumbel_schema_count": 1
+}

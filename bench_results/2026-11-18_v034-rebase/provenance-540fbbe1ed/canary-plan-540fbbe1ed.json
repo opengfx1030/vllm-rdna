@@ -1,0 +1,80 @@
+{
+ "schema": "v034-narrow-canary-plan/1",
+ "status": "parked_waiting_explicit_b4_release_after_triton",
+ "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+ "artifact": "579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042",
+ "native_receipt": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/native-receipt-540fbbe1ed.json",
+ "prerequisites": [
+  "parent explicit b4 release after Triton release; no lease yet",
+  "root/source-commit.txt updated by parent to 540fbbe1ed...",
+  "no GPU_PAUSED; no other b4 holder; /dev/kfd clear",
+  "strict native guard passes on current artifact",
+  "parent-approved lease owner and quiet window"
+ ],
+ "strict_guard": {
+  "operator": "env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= python3 /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034_operator_gate.py --native-self-test --source-sha 540fbbe1ed84968b2f54a126bbacafa164f9c52d --root /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340 --native-receipt /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/native-receipt-540fbbe1ed.json",
+  "runtime": "env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= python3 /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034_runtime_gate.py --native-self-test --source-sha 540fbbe1ed84968b2f54a126bbacafa164f9c52d --root /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340 --native-receipt /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/native-receipt-540fbbe1ed.json",
+  "must_pass": "actual-artifact PASS + 5 negative cases on both"
+ },
+ "focused_tests": {
+  "purpose": "gumbel cache4 + graph-captured draft Tensor cases only; no full 504",
+  "preflight": "HIP_VISIBLE_DEVICES=2,3,4,5 PYTHONPATH=/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree /home/chenco_adm/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python -c \"import sys; sys.path.insert(0,'/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340'); from pathlib import Path; import v034_runtime_gate as g; g.preflight(g.RECIPES[0], Path('/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree'), Path('/home/chenco_adm/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340'), Path('/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/gpus-focus.json'))\"",
+  "command": [
+   "cd /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree",
+   "env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=2,3,4,5 PYTHONPATH=/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree PYTHONNOUSERSITE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 VLLM_ROCM_USE_AITER=0 VLLM_ROCM_USE_AITER_MOE=0 /home/chenco_adm/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python -m pytest -q --capture=tee-sys -rfs --junitxml=/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/focused.xml tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[False-0] tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[False-1000003] tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[True-0] tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[True-1000003] tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype0] tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype1] tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype2]"
+  ],
+  "nodeids": [
+   "tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[False-0]",
+   "tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[False-1000003]",
+   "tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[True-0]",
+   "tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[True-1000003]",
+   "tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype0]",
+   "tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype1]",
+   "tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype2]"
+  ],
+  "expected": "7 passed, 0 failed, 0 skipped; no fallback assertions",
+  "thermal": "run under pciescope/approved thermal monitor; abort >=95 C any sample or >=90 C 5-sample mean"
+ },
+ "runtime_canary": {
+  "purpose": "both recipes: FlashNext TP4 F&P/MTP2 and HI2 TP2 F&P/MTP2; startup + request2+ + greedy/PPL/prefix/concurrency + KFD/AER/thermal",
+  "command": "env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= python3 /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034_runtime_gate.py --source-sha 540fbbe1ed84968b2f54a126bbacafa164f9c52d --root /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340 --tree /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree --venv /home/chenco_adm/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340 --cpu-receipt /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/capture-fixture-00295ed66c16/cpu-receipt.json --cpu-source-sha 5d388329bb5a5333f677de6fcb7ff36bbb263bfa --native-receipt /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/native-receipt-540fbbe1ed.json --out /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/runtime --cells '1024:512:1:2 1024:512:8:8' --owner V034RuntimeCanary",
+  "recipes": [
+   "flashnext-mtp2 (tp4)",
+   "27b-hi2-tp2-mtp2 (tp2)"
+  ],
+  "cells": [
+   "1024:512:1:2",
+   "1024:512:8:8"
+  ],
+  "no_16k": true,
+  "no_full_504": true,
+  "expected": "both recipe receipts passed; no new dmesg/AER faults; thermal bounds; lease released",
+  "cells_detail": {
+   "1024:512:1:2": "1k prompt/512 output, concurrency 1, requests 2",
+   "1024:512:8:8": "1k prompt/512 output, concurrency 8, requests 8"
+  },
+  "quality": "greedy correctness probe plus bounded PPL startup/corruption smoke; no baseline parity claim",
+  "request2_plus": true,
+  "prefix": true,
+  "concurrency": true,
+  "cells_human": [
+   "1k c1 request2",
+   "1k c8 request8"
+  ]
+ },
+ "stop_conditions": [
+  "any new GPU fault or AER increment",
+  "thermal breach",
+  "lease collision",
+  "strict guard failure"
+ ],
+ "not_claimed": [
+  "new binary GPU qualification until canary passes",
+  "performance improvement",
+  "full 504 rerun"
+ ],
+ "source_pointer_verified": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+ "docs_commit": "87cb7f2555354db9e799712498de75fd5f6cc408",
+ "artifact_unchanged": true,
+ "note": "Root source-commit.txt now verified as full 540fbbe1ed; docs/provenance commit 87cb7f2555 changed no ABI/code and did not trigger a rebuild. Artifact remains 579d8..."
+}

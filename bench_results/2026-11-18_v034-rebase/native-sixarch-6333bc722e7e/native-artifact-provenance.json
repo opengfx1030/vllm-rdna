@@ -1,0 +1,74 @@
+{
+  "cumem_allocator": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/cumem_allocator.abi3.so",
+    "bytes": 113264,
+    "sha256": "9e81d5b10db0acb01199c3e8ae61517c938e5692c9e285f0a95118c0115c369a",
+    "hip_bundle_architectures": []
+  },
+  "spinloop": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/spinloop.abi3.so",
+    "bytes": 35064,
+    "sha256": "3fc4ebf2185f9aef1e172e1211cfa449f788a0959b0f7b0d98706db67e42d986",
+    "hip_bundle_architectures": []
+  },
+  "fs_io_C": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/fs_io_C.abi3.so",
+    "bytes": 376344,
+    "sha256": "0b2f1b92f4db6fd25082914448be28e04ff385f65768d3d120a3f2d70cf04bde",
+    "hip_bundle_architectures": []
+  },
+  "_rocm_C": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_rocm_C.abi3.so",
+    "bytes": 201614968,
+    "sha256": "63f6bba42731a9163b604161f2f332fa32708c922e4f3f6ed677e198fed9576d",
+    "hip_bundle_architectures": [
+      "gfx1030",
+      "gfx1100",
+      "gfx1200",
+      "gfx90a",
+      "gfx942",
+      "gfx950"
+    ],
+    "bundle_parser": "/opt/rocm/core-7.14/lib/llvm/bin/llvm-objdump --offloading",
+    "offload_image_count": 630
+  },
+  "_C": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_C.abi3.so",
+    "bytes": 63553832,
+    "sha256": "67476ec930d2daccbf86108eb0b66ddfa6a6bb6b1e7e8b216b050afdb0b9e2e6",
+    "hip_bundle_architectures": [
+      "gfx1030",
+      "gfx1100",
+      "gfx1200",
+      "gfx90a",
+      "gfx942",
+      "gfx950"
+    ]
+  },
+  "_C_stable_libtorch": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_C_stable_libtorch.abi3.so",
+    "bytes": 364133136,
+    "sha256": "1af92818348c007e6f764a3fba91f85b0d3b67ade86ced0506ea6ced749395a0",
+    "hip_bundle_architectures": [
+      "gfx1030",
+      "gfx1100",
+      "gfx1200",
+      "gfx90a",
+      "gfx942",
+      "gfx950"
+    ]
+  },
+  "_moe_C_stable_libtorch": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_moe_C_stable_libtorch.abi3.so",
+    "bytes": 168895224,
+    "sha256": "2a2e2a35855e3fe6d5f77b0f173059d0cbcfea607913e20917acbdb15cd998d9",
+    "hip_bundle_architectures": [
+      "gfx1030",
+      "gfx1100",
+      "gfx1200",
+      "gfx90a",
+      "gfx942",
+      "gfx950"
+    ]
+  }
+}

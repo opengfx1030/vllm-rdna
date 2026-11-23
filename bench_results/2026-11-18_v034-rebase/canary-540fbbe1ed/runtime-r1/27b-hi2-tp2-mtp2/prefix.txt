@@ -1,0 +1,4 @@
+cold TTFT 2.400805 s, warm TTFT 1.199632 s, speedup 2.00x; probe PASS
+prefix cache: prompt 1927 tokens, queries +3854, hits +1024, warm hit rate 53.1% (required > 50%); latency target: none (TTFT reported as context)
+cold text: '\n\nThe text is a disorganized list of computer graphics and hardware terminology—such as "kernel," "barrier," "wavefront,'
+warm text: '\n\nThe text is a disorganized list of computer graphics and hardware terminology—such as "kernel," "barrier," "wavefront,'

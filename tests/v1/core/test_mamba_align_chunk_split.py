@@ -99,7 +99,6 @@ def test_flash_next_tp4_materializes_replay_state(tmp_path, monkeypatch, prompt_
         architectures=["OPTForCausalLM"], max_position_embeddings=8192
     ).save_pretrained(tmp_path)
     base = create_scheduler(model=str(tmp_path), skip_tokenizer_init=True)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     config = base.vllm_config
     config.model_config.hf_config.model_type = "qwen4_exp"
     config.parallel_config.tensor_parallel_size = 4

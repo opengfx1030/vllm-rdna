@@ -350,8 +350,9 @@ __global__ void gumbel_sample_kernel(
 
   const T* __restrict__ row = logits + token_idx * logits_stride;
 
+  int32_t col = 0;
   if (has_cache && is_valid_req) {
-    const int32_t col = per_token_col ? cache_col[token_idx] : cache_col[0];
+    col = per_token_col ? cache_col[token_idx] : cache_col[0];
     T* __restrict__ dst = logits_cache +
                           (int64_t)req_state_idx * cache_stride_0 +
                           (int64_t)col * cache_stride_1;
@@ -361,7 +362,12 @@ __global__ void gumbel_sample_kernel(
     }
   }
 
-  const int64_t seed = is_valid_req ? seeds_ptr[req_state_idx] : 0;
+  int64_t seed = is_valid_req ? seeds_ptr[req_state_idx] : 0;
+  if (has_cache) {
+    // Match Triton's spec_step_seed(): a cached draft step draws from a
+    // distinct Gumbel stream, keyed by the cache column in the high bits.
+    seed ^= (int64_t)col << 32;
+  }
   int64_t pos = pos_ptr[token_idx];
   if (is_drafting) pos += (int64_t)1 << 30;
 
@@ -794,7 +800,9 @@ __global__ void topk_log_softmax_kernel(
     // elements [r * 128 * VEC + t * VEC, + VEC) in register order.
     bool vectorised = false;
     if constexpr (std::is_same_v<T, float>) {
-      if (VEC == 4 && begin + 4 * threadIdx.x < limit) {
+      // Both 512-element groups are loaded below, so the fast path needs the
+      // whole 1024 block in range; a partial last block takes the masked path.
+      if (VEC == 4 && begin + kTopkBlock <= vocab_size) {
 #pragma unroll
         for (int g = 0; g < 8; g += 4) {
           const int64_t base = begin + (g / 4) * 512 + 4 * threadIdx.x;

@@ -1,0 +1,7 @@
+NATIVE-GUARD PASS actual artifact 579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042
+NATIVE-GUARD FAILS-CLOSED artifact sha mismatch: /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034-native-guard-n98sompx/receipt.json: artifact sha256 mismatch
+NATIVE-GUARD FAILS-CLOSED wrong source commit: /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034-native-guard-n98sompx/receipt.json: receipt source_commit != --source-sha
+NATIVE-GUARD FAILS-CLOSED missing architecture: /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034-native-guard-n98sompx/receipt.json: architectures are not all six required arches
+NATIVE-GUARD FAILS-CLOSED build_rc mismatch: /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034-native-guard-n98sompx/receipt.json: build_rc is not 0
+NATIVE-GUARD FAILS-CLOSED source outside tree: /home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034-native-guard-n98sompx/receipt.json: import source is not inside --tree
+NATIVE-SELFTEST PASS (5 negative cases + actual-artifact positive)

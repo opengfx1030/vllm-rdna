@@ -9,7 +9,7 @@ from typing import Any, ClassVar, Literal, Protocol, get_args, runtime_checkable
 import torch
 from pydantic import Field, field_validator, model_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -184,7 +184,8 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 64
+    DEFAULT_GPU_MEMORY_UTILIZATION: ClassVar[float] = 0.92
 
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
@@ -214,24 +215,33 @@ class CacheConfig:
 
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
-    gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
+    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
-    utilization. If unspecified, will use the default value of 0.92. This is a
-    per-instance limit, and only applies to the current vLLM instance. It does
-    not matter if you have another vLLM instance running on the same GPU. For
-    example, if you have two vLLM instances running on the same GPU, you can
-    set the GPU memory utilization to 0.5 for each instance. On non-GPU
-    installs, this value controls the corresponding device memory utilization.
-    """
+    utilization. This is a per-instance limit, and only applies to the current
+    vLLM instance. It does not matter if you have another vLLM instance running
+    on the same GPU. For example, if you have two vLLM instances running on the
+    same GPU, you can set the GPU memory utilization to 0.5 for each instance.
+    On non-GPU installs, this value controls the corresponding device memory
+    utilization.
+
+    If unspecified, 1.0 with the extensible KV cache (sized from measured
+    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`.
+
+    With the extensible KV cache (the default on CUDA and ROCm), leave this
+    unset unless something needs memory that vLLM does not measure: other
+    processes sharing the GPU (including ones that allocate after vLLM has
+    started), unified-memory devices whose memory the CPU also uses, weight
+    transfer buffers for weight updates, or KV connectors that allocate their
+    own device buffers. A lower value takes memory away from the KV cache."""
 
     @property
-    def device_memory_utilization(self) -> float:
+    def device_memory_utilization(self) -> float | None:
         """Device-neutral alias for ``gpu_memory_utilization``."""
         return self.gpu_memory_utilization
 
     @device_memory_utilization.setter
-    def device_memory_utilization(self, value: float) -> None:
+    def device_memory_utilization(self, value: float | None) -> None:
         self.gpu_memory_utilization = value
 
     cache_dtype: CacheDType | str = "auto"
@@ -329,15 +339,14 @@ class CacheConfig:
     RDNA2 (gfx10x) ROCm, for Qwen-style GDN layers with head dimension 128.
     It does not use `use_replayssm` or `replayssm_buffer_len` (the window is
     fixed at 32 records) and is rejected at startup with `use_replayssm`, KV
-    connectors, KV offloading, stochastic rounding, AITER GDN, or the V1 model
-    runner with `mamba_cache_mode='align'`. See
+    connectors, KV offloading, stochastic rounding, or AITER GDN. See
     docs/rdna2/leapquant-config-guards-2026-11-14.md."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
-    Requires the Triton or FlashInfer mamba backend; FlashInfer does not support
-    prefix caching yet. Mamba2 speculative decode requires FlashInfer. With
-    prefix caching, flushes are most efficient when mamba_block_size is a
+    Triton and FlashInfer support the 'none' and 'align' Mamba cache modes.
+    Mamba2 speculative decoding requires FlashInfer. Pipeline parallelism is not
+    supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
@@ -374,7 +383,9 @@ class CacheConfig:
     """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overridden with metadata
-    necessary for implementing this optimization in some models (e.g. Gemma3n)
+    necessary for implementing this optimization in some models (e.g. Gemma3n).
+    In Model Runner V2, batches containing LoRA requests use regular prefill;
+    batches without LoRA requests can still use fast prefill.
     """
 
     swa_bounded_replay: bool = True
@@ -393,6 +404,18 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    enable_extensible_kv_cache: bool = Field(default=None)  # type: ignore[assignment]
+    """Reserve the KV cache address range with device virtual memory and commit
+    physical pages after warmup, so the cache is sized from the memory actually
+    free after CUDA graph capture rather than from a profiling estimate. If
+    unspecified, enabled on CUDA and ROCm unless kv_cache_memory_bytes is set,
+    or NIXL on device memory has no IMEX channel; falls back to estimate-based
+    sizing where the driver lacks VMM support. Explicitly requesting it where
+    unsupported is an error. When a KV connector registers the KV cache for
+    RDMA or exports it to another process, each segment is backed by a single
+    physical allocation; connectors declare this by overriding
+    `KVConnectorBase_V1.kv_cache_access`."""
+
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
     the total buffer size summed across all TP ranks. By default, this is set
@@ -404,10 +427,9 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -431,6 +453,7 @@ class CacheConfig:
             "skip_page_size_padded",
             "user_specified_block_size",
             "_block_size_resolved",
+            "_extensible_kv_cache_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
@@ -446,12 +469,11 @@ class CacheConfig:
             # Picks the HIP ops that run inside the opaque GDN layer op and the
             # KV-cache page layout; the compiled graph does not change.
             "replayssm_state_dtype",
+            # Runtime memory allocation strategy, not graph structure.
+            "enable_extensible_kv_cache",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -461,7 +483,10 @@ class CacheConfig:
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
-    @field_validator("block_size", mode="wrap")
+    _extensible_kv_cache_resolved: bool = field(default=False, init=False)
+    """Set once `enable_extensible_kv_cache` has been settled for the model."""
+
+    @field_validator("block_size", "enable_extensible_kv_cache", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         if value is None:
@@ -480,6 +505,15 @@ class CacheConfig:
         else:
             self.user_specified_block_size = True
         return self
+
+    @property
+    def resolved_gpu_memory_utilization(self) -> float:
+        """`gpu_memory_utilization`, or its default given the sizing mode."""
+        if self.gpu_memory_utilization is not None:
+            return self.gpu_memory_utilization
+        if self.enable_extensible_kv_cache:
+            return 1.0
+        return self.DEFAULT_GPU_MEMORY_UTILIZATION
 
     @field_validator("cache_dtype", mode="after")
     @classmethod

@@ -1,0 +1,3782 @@
+[
+  {
+    "file": "_rocm_C.abi3.so.0.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.0.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 333528,
+    "sha256": "01acaae31782dfee7775584bedad254db775d4aefd0f375cceb1f34fc5c5a357",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.0.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 327368,
+    "sha256": "4d0086092fecdcfdd8f6d568f445fbb20f04fb9bf9dc9c65d7a742ab909ebbce",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.0.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 328984,
+    "sha256": "198ce64f6c3a6972d7e575043c216101ce0061b213237f216825994bfe564440",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.0.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 318152,
+    "sha256": "33dcf95ade2e77c6aca33deda9eb3ed2c03013f1bd5fd0fd1a88830c813b31e2",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.0.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 323320,
+    "sha256": "82b1ba2d9b749ab82ee21e936dedb06fa4dbacd45930bb97885df7a00db07c72",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.0.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 310208,
+    "sha256": "417e233093841dc2aa4eccb6912857196f42f0194c30d1de7010bd978017f2b0",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.1.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.1.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1184104,
+    "sha256": "3a95158d5f18035a072f0fb0e4efccf8dfcc24b598ac57518e6fe590b24bc214",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.1.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 8021440,
+    "sha256": "57b1ba46b683b358ad77c29acd4fcf6b2b2d5cbd229a2cbc5305cb5a6445a49e",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.1.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 8115096,
+    "sha256": "6beae50e5179d742694ecc327f91af421a70346c8f2fa74e0b326b7df6431ed2",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.1.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 7197360,
+    "sha256": "838fb51b72af9cc743ea5e44b998ee0eb4e831d2d96a65d4e5555d59504d2bc3",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.1.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 7015440,
+    "sha256": "330f393bdbb24438b67cd8c890fee6a4cc049e72ce16ff0ead53d3e0045ca364",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.1.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6925192,
+    "sha256": "dfa3e4d7fcbf231771389d0abf8bfffd97498357467d023f1c0a93eff7f36c67",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.2.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.2.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 239352,
+    "sha256": "ac96598001b3b1bbb34c75510c1b3c5a5f693220f9bf54de1b11f0857e388e74",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.2.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 239400,
+    "sha256": "648e9ccafe3a274a9e209640b63140f4166fd03fe3f21c061d201564298e4da6",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.2.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 239352,
+    "sha256": "c485a8aa42710db295b2fc83ff278c1a54b0f2ab1e6ad8b51d9b1b10b18a60d8",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.2.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 239352,
+    "sha256": "ccff6d49420c158a3ac3ac51eaab91c3483afd8cd6124b1d53bb7adb5c8f2281",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.2.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 239352,
+    "sha256": "92d86720e036cbebf139d4ad2c32099c13465b4ef0c3d946fe4b37f3fcadc43e",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.2.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 488608,
+    "sha256": "705611f296876ccd945457d872aef261c51706373c15993a12ac6049fb159e70",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.3.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.3.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 555408,
+    "sha256": "dd67a48abd2b98f45cb45a3c2ea2317e55541ee5401ffc882b79c7e58a3dec6d",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.3.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 555456,
+    "sha256": "38fda0342837444bb06085f098fd714887d2ad97219e1a97fcff084bef6611e5",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.3.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 1167800,
+    "sha256": "c61301e669e939a73584f33bb6124b9905ae8eab5cb47a440a673520ae9b4ff3",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.3.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 554384,
+    "sha256": "22c61585ed0ad93b417134343f98401b1e1548cb8f33c8cb96c78cd4e5b2bcfe",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.3.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1457360,
+    "sha256": "6ff95bce4a7825f690eacc49ca58fc2245d47e275bc4fa493335e2b6ed74e742",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.3.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1451968,
+    "sha256": "f0b5a5a8fe1e575eaee5c0131530217ca06e3bd4ee3bd72c15825a3e234aaf99",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.4.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.4.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 8057616,
+    "sha256": "30398a97189e52631c9875b3faf8d3f64e14ef47a8ac5a7b6fd4ec5349cf3965",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.4.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 9038752,
+    "sha256": "c76c93bd84901b5fdd16990e3524c550191b27ecf12ca3746a6a73df8e4db501",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.4.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 9197136,
+    "sha256": "fb72954f0cb406b852b382ad787d05c305ff84bf7a676d9950d3b40356afeb2c",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.4.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1410288,
+    "sha256": "2c5ea8cbadfc2636bd26195b1e68561a34ff38a6902a423600337c230e1e3d02",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.4.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1408704,
+    "sha256": "921e70d4d0da5e71a85e61f97b507b771869a4c4f970b9745610443b2c16a9a5",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.4.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1408968,
+    "sha256": "e906c4556fc3d74266995b2313d5a059c54815ce665dfe0da30e59f93829c599",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.5.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.5.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 6069440,
+    "sha256": "73c090770a01a484693a1c423e134e848aaf33ff2ad41b6156ee10554be394be",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.5.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6745760,
+    "sha256": "8843ce06adb96d5375ebd9269697ef08459a1bc4d54a3781bd4620a9167aca3c",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.5.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 6996200,
+    "sha256": "2c33703fff08d5be069c3a8ed22864f69fe74ca95ad61e774ae3cb18ed308501",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.5.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1089408,
+    "sha256": "a7f93c28060d84f0b1bde3bd161fc30449357af3c89d528142ff4a196eeaefac",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.5.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1087912,
+    "sha256": "06d73d833cff4e420fb6b307b85e510e1252dee5505662995ddd645bc9946fe4",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.5.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1088184,
+    "sha256": "3e272c20f04c7b995ac9b9862e7caea3d859d6bd888dcd02607b5dd077f621b5",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.6.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.6.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 8283192,
+    "sha256": "baa63f348b2f0545ebf85dd2ff5b1b4e49413873fea90bb7417124c0b5a7e99f",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.6.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 10005512,
+    "sha256": "081c18e824f08efeee59eb50f7d9ac43a861c045267099ffdc04171b0eb5d3cd",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.6.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 10620936,
+    "sha256": "98f96dc96d931b31c3148d73603b5ef8ed2ecbad47574894e7cad9324d3715f2",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.6.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1135360,
+    "sha256": "d0a530c3ad299b5c392f2bdd6e64e5a3c1f6a88ec747c964f85f21dab66c4c11",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.6.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1133848,
+    "sha256": "83929ed8abe177faf6d569bb7160fc829de8161d78082f873817836571f16c4d",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.6.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1134112,
+    "sha256": "395f8e1d1c40181ad22fe6eaa3b189c69974ad3010576fa4b9caecdf0ae773ef",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.7.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.7.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 10309568,
+    "sha256": "3f43748ae9dc76ea24f58e0692b9c4be73fe324d0694fafdeb0c5f6df0bb0ad0",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.7.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 13724880,
+    "sha256": "237fac1b224a4935f09aca572f9d25d702bf53123dd13cf2542476e7966fbf90",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.7.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 14687456,
+    "sha256": "59d410ebc557db8b92512e93975d474205167e732831e7fdaa3b2da20f777574",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.7.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1158584,
+    "sha256": "3f96bb25b62c8a79dcf819ce3e5bca375e6a2df42b8bb3a73cd6c90d1b1a6e59",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.7.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1157080,
+    "sha256": "68156851521d3adada9e451b89c90ebc58416db9e90a4234144b0efc55677e3b",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.7.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1157344,
+    "sha256": "8a149ad22e945afe529d82a559d183d50209a9a4e293080b4672dcc16ea21511",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.8.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.8.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 12062816,
+    "sha256": "31982d27887286babf13198c6b1542146d93719434cce769de99e8e452c6ab62",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.8.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 16812016,
+    "sha256": "a1007aea9cde8185a0d3c96da9d9b040ee437aa4f902004537a48e2f6d71a78b",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.8.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 18035448,
+    "sha256": "b8c5f90ddc05ef9ee277250df614c25e7e6f66408707e84454f351d1890eaffb",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.8.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1044096,
+    "sha256": "f7a51e32fb2e89132e42c2b4688b57a2a09e666e065fb3f684b93d5d7684e6dd",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.8.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1042608,
+    "sha256": "7e71796a4175b0caf7b9a7a59868b12dd948952f8c4e36d8e3e6abcccb47eedd",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.8.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1042872,
+    "sha256": "b65b7f18038666bb5b633a9f5ee6dec253ec2aa19915099dd39a391c8a143573",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.9.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.9.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1160632,
+    "sha256": "36ea5937eaae0b6b2db159dee28235c42f6179c363401e7321657bcb8871ed29",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.9.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 1305544,
+    "sha256": "f77c5ecc83bcffded582075dafb2955b2a7c05eea9fde815e112b9a8015c9688",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.9.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 1412992,
+    "sha256": "66f3cad20f80daf8c5a4e00c28820a747659c496314ae09345a072c1d8a4bb74",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.9.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1129176,
+    "sha256": "c5af75cc8fdf38dd9d9963cb9c1bc11fe7525a0f8f5685920479ad05e10decba",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.9.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1123552,
+    "sha256": "b0d4de5127bcae597427fb9840a5ffa31125bbee34781b5635aa5c1352ded03e",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.9.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1124752,
+    "sha256": "d652f76df93323711ae448afe9ed578ec014ba8da79a4bc1614dec2685123623",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.10.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.10.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 410184,
+    "sha256": "d0643c83ee1dfcdfb6632339f03aee6a53928b2b9d37d3d60df2dd4fc59385ef",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.10.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 411000,
+    "sha256": "b8d9e5bdd7e5e02ae44b14dd53c027e2aa37b703ebe81313d7bf219e1e572ac5",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.10.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 411616,
+    "sha256": "17d7b14dee0a41fa37ec4d178863583b09740f90733f3ee13a989d101117f8f8",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.10.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 409664,
+    "sha256": "1b976d66d0a426c1789a9e9f7b650425ad8b0b5161ed926e9b38d5f1c2a1150a",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.10.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 409360,
+    "sha256": "aa008a57e1d8023852e74e824720420bfe225b05de72215136719e9d2e53d412",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.10.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 409384,
+    "sha256": "f5cf3dbd271b22f915828435b2efab5881aaaa267cfe11d6fcdaa49f38e4519b",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.11.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.11.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1086528,
+    "sha256": "a54d0ed4228e49e4fdeb1ce74c4e3c82a66758dfbc55c14cba00053ec05e6b9c",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.11.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6272872,
+    "sha256": "a827deed4de7a4dac254a098a5915ef21a84fd1557c269e47c8a8f99e8f99347",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.11.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 7913424,
+    "sha256": "61b45340e6e8202f59ab5f5232dc921645245559bedb7c2f61b2215699a8fc76",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.11.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 3170272,
+    "sha256": "9ce174bcb8f4d82882d6047246f25cc472b35cff2340fbf3f2df73e2baa5047e",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.11.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6231904,
+    "sha256": "bf8214bbc364401d391627e6c56d124ae222a3e9a6359782f9ab4f43be1a9a73",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.11.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6217208,
+    "sha256": "74474e7b27b146b5502d9ec3414eed0776b56f2c7d45d10149deaeba89cd586a",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.12.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.12.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1086528,
+    "sha256": "6c4abe3363f7a1d9940f107a1e07a512ad4b193c7dd2945ded2217324a069c90",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.12.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6201768,
+    "sha256": "8fa8ed7ad44ff3d9489ee618bcf46824a3432e3cbfbebac8d4e5208f7671184f",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.12.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 7864320,
+    "sha256": "cd5648b988f6d7a5feb6d84c71ff3e55d05b3eb624da2cc91615c2322d1eb396",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.12.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 3196904,
+    "sha256": "ed0ad732de1a23180c9ad280e89804a8c2a699e3c3b3ca47c98f2e8ee407615a",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.12.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6249640,
+    "sha256": "3ba9365e9d225e4cc0c821d457dbb9edbd9f0dec7de676c188d0a97f472e721f",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.12.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6244472,
+    "sha256": "88ed28d3571a7017e0204e3fc2093baf83aa9793f842cb27e8543d0ce710ea22",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.13.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.13.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1088384,
+    "sha256": "1ec5a8f6bc7006dc664872d86c23c9aa72b747481453b6f43662c47d61524dc6",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.13.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6309576,
+    "sha256": "3ddb694c9b04ca7225abb14da2183570f96058fb19df4db9649ef991a9f44cc2",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.13.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 8763856,
+    "sha256": "133e01a149ff116c13b95dc2a10959527b653ef68dce09e200a59420f8b11a06",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.13.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 6245456,
+    "sha256": "b6342c18b548b18adb0f545dd1be1ec0132eb9cefb7663801a484689b809252c",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.13.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 12388880,
+    "sha256": "25f6daa677b88b50457627636fa7c125f1414f0b1877425dab120f5558b62cc6",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.13.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 12377280,
+    "sha256": "0faaf048ea4550acd7d5898f1dd7d826a417d1cf98bbd22fe43f45eb4b845258",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.14.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.14.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1088384,
+    "sha256": "4afa1e6e1c21435128d88007b49785b2889f602916e401ed36f052098eec390a",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.14.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6292392,
+    "sha256": "fd08d81b7d3cdc838799b53d69703ecd1f1115e7a5df3ce5197f216d2f7b0d0e",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.14.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 8699976,
+    "sha256": "c6033b0d43d915fe355e1adb6d728e20ee3f9006b4c2ac5212e8f918f871d8fc",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.14.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 6156272,
+    "sha256": "97a832ad3ccddb75745f22de2ec52ad0a6cbb01b3d3f5f41bd134f2bc2fa382c",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.14.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 11614824,
+    "sha256": "6d47e246aee74fc2888efbbaef5f5ccc06db56ecff3455e370c895bfa0377328",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.14.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 11586552,
+    "sha256": "39b9536c0b947456fbb3eeb8ce74c55b7eb3ee2528ef1f6eb0dd543f67164e39",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.15.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.15.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1101840,
+    "sha256": "dd99ad26929621d31662561641ed7324b9f8ca832ab1ea3329b976cc2e849eec",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.15.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6652072,
+    "sha256": "e5da046c674beed99042aa6974f03eaed29231285217df380ea94bfbacd694db",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.15.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 8403856,
+    "sha256": "d874928fd83908399134dc8c43520d1c952cf3c235b33cad7be051a3961a2267",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.15.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 3547504,
+    "sha256": "259e2e5e853cd2bc8cc17dbf0f8f6e42ac96816d1db9a8e04723d9d53f5fc74e",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.15.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6940776,
+    "sha256": "6a7340c27f797f1d84326b662919e16b2181d02987834571b563d3a73ddebf82",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.15.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6935904,
+    "sha256": "1dd7f65f1e61c186727e05bfc5fc4889d442c3839a39b8bbc455da55fa83080b",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.16.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.16.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1101840,
+    "sha256": "1b5cf52012cef691df5eedd80438c979afbe97d86e78c2a85ce15b07732e4ffd",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.16.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6589456,
+    "sha256": "f73b34cf0e7e9b179c80843ecaa068e5d943a6037f457f85eed38b0d2dab20cd",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.16.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 8331240,
+    "sha256": "8be48fbe4dca84af302964d227188b03ebf3d9758118c2dd505837ff60539ec5",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.16.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 3570152,
+    "sha256": "c5b7f3c9bbf577f200874c74c09df5a64bf02bc9ba23e33486112f08cda4db7b",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.16.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6947752,
+    "sha256": "e53cea55b9390972d8d1ca396945493017496d1b4819dd1fb3541cac133729e5",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.16.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6942624,
+    "sha256": "926369fe0127991fdf294319ed2fe2a3aca5d53536f687f471c17de1fa14f103",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.17.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.17.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1103696,
+    "sha256": "565dba3d84b4ad628113d1c2fc9151cd03ab486807a8c0bfe52f023724b1251f",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.17.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6699448,
+    "sha256": "8a86692e847d660ee23e074418fc46781f5764297ceee10c61a5ec4763b38f9a",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.17.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 9250488,
+    "sha256": "829c43ec2f25cb790cb26b6a1c042cc299390f9e51faa8152fdad5077c6661a1",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.17.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 6545120,
+    "sha256": "fc2acf415e1a8b8286f5310c3a91ab1089de45e0a15d5c6acac01b42245cea3f",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.17.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 13016800,
+    "sha256": "a4d4e7f5dab619ea5c109e44b8c9e1d8c094e88d26bfeb08156c11765c876284",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.17.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 13016944,
+    "sha256": "9e507d51d66ebe528215d3027e1574b580e73772c72a7cf3a90f6ff94f4d9a25",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.18.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.18.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1103696,
+    "sha256": "4d34467eafda1217a632014912e2648438ce90682c485eff8fa68ceb92bb8bfe",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.18.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6684488,
+    "sha256": "92f16dd60f12fd078100eaccad727e8050878a6e683c6222ba8c1cba6fcd32e8",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.18.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 9184352,
+    "sha256": "7a0ffd98dc67ede4cf8ea6654ffc2e06028cdc18f449db3cd3eaf6b01a937a1a",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.18.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 6514448,
+    "sha256": "34afca2d728de550d01e269c604e84540c6bae0927f65799220d1451755e6d41",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.18.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 12288552,
+    "sha256": "d387aaac20c7db4c2a4cb2ce37271d5671e6d3f63cc9411004197dca85f247c7",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.18.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 12285488,
+    "sha256": "8148112396896bfe4ee81e917cb846da3b36d4f86f4c2a5002b69485c645122f",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.19.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.19.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1084520,
+    "sha256": "490ec56ad15c3de2040cd00d67aca8db13d8fbba22c621047b6ee08aa11d0b30",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.19.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4732728,
+    "sha256": "fae2a51c78d660ec502543a0bbe936a6913568bb97b423f6212215f205efe256",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.19.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4446824,
+    "sha256": "20f18bcdb56880df5a1e5605757662846dbd88402edd56d665211b5db9066f2a",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.19.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 9381752,
+    "sha256": "7262072baa110c43a813bb92a968c12edad5a73861e1dd669b2a2bbbb905f5b0",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.19.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 5413080,
+    "sha256": "f4d899cb9e02a326e3aac8623fa3332ece6f3343a2eeb1338c87449683d4ec5d",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.19.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 5406496,
+    "sha256": "2885c5f2a29eca8a0763fc74ff258141ca95c4612877ad3ef21c1dcaac813020",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.20.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.20.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1084520,
+    "sha256": "53152d1c2805f664df26c8f0fa4691f4be1516ac56482c6d913abfca01c81ef3",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.20.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4657032,
+    "sha256": "c2d18ff0eedd7e3d1bbc8ab58adb96fa6fd23aaf3a2bfee74258fb6a12c447cd",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.20.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4454872,
+    "sha256": "384e77cf2df868173c77409cda8c48a5f4a6abafc18715fb6cb9e5973b86d243",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.20.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 9385400,
+    "sha256": "0f4af0c3ec094573538bd809455e1c2c22bb39e5f0f7dad3bd25742f43d97bd0",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.20.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 5446384,
+    "sha256": "b72e5aac370c55593c0a3ea14bbc57708cf20a88a25f69c00995b2da3001331f",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.20.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 5436672,
+    "sha256": "4fbc26e872a9fdb5a5c8265c8449d263e47da8fb50f80b091d19af7aed1ad224",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.21.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.21.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1086376,
+    "sha256": "ec162c6f5dac6285a0a8c462882aa401d23e72a5686852b7eaed64af965df11e",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.21.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4658184,
+    "sha256": "40fb2841df465300217d459eb7be75f97e64eec370680621027b093d7d9798b5",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.21.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4689160,
+    "sha256": "bcb089430b46e3de548cb48ffe27ee22fc2d025e8d4b96d747ce56d8c6442863",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.21.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 12179880,
+    "sha256": "9b529f47b967c4427dfcaaaa31efb63ae4acc05b87aff069d7614cdcfaa78e1b",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.21.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 8344368,
+    "sha256": "e697e49918656c4626d432265b2c90a593c46ca1cecef532b5155a36c9ba46eb",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.21.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 8309064,
+    "sha256": "2771b29bf4391202ab83e4e0778fff9084ba7a97e8ae2e10a962d350494bf5be",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.22.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.22.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1086376,
+    "sha256": "4d9ed64053d0c3fd764fa026ccc17acccfba409e7b8ed5f1a1c4baaa9f0235f8",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.22.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4575048,
+    "sha256": "aed3bdf1319ad39d31fded33a3db03cfdc3aa7ed489f766877b9702cf8e11a2c",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.22.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4638328,
+    "sha256": "80c342676c70e06710b16a70d60feceb23a3dc1c5685d6c6abe3d2f363fb2e61",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.22.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 12190864,
+    "sha256": "4ec39331e0de74b19e2a218d79b18c4f534cb5bfc779a55fc15fae9425f025a8",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.22.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 8268192,
+    "sha256": "e4d922e495661e1a5dcb5fe4c5a082d51f3cef88d7f1f9be71f9145c29185bd8",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.22.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 8260968,
+    "sha256": "925cbf5124af49eec409b0eeb0ec915b2e36ef3c6c72baf342a930a111addbb4",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.23.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.23.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1084520,
+    "sha256": "324b92b5ba6caf05d338f053556060495d68710d41292e5b101289630641aed3",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.23.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4732728,
+    "sha256": "48c09ff92c52d7e6389ce05c4d4af92ea60de6dda299ba9e61d6682bb01fa65e",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.23.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4446824,
+    "sha256": "686c7fd8a938eb9c58c4b1b3c547be52964c122b9d1103934dda1c8ae6e98a30",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.23.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 3584288,
+    "sha256": "8392043c8b37d996f919772e3f05784eca149d6c0b2f74805a8e87848de2e743",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.23.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 5095464,
+    "sha256": "910eb6bb16a947337d9787751e417c283be7987f20a062bc689b1c13bae734c1",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.23.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 5042712,
+    "sha256": "8613b561d1248fdd8eeecb3533c64f909fad773d7c49caede8026e4b19645d69",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.24.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.24.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1084520,
+    "sha256": "53e869600dce5bc9506bc45fc139b46b1a0e301724b01081a404bad5753e6086",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.24.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4657032,
+    "sha256": "cb5d157efc1d25af9567cc5363d0d9f6c83326a001653ad0f03483f9dd1c3e88",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.24.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4454872,
+    "sha256": "32c104d745d4584c6caf1a99709cbd8272bc572dc43167c48d0eafd3af377956",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.24.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 3574968,
+    "sha256": "100e232917e2e7a88622b3b912854cb5c668402ffa9b0e95f0bb2dd4f7315111",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.24.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 5052176,
+    "sha256": "c710125d353b192ae9019f1e99878bd7901be33e63da54d8bef074261f505c04",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.24.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 5041648,
+    "sha256": "fdf8b0e1b9ebf28ab6ba1be03613f6f8d37ba313797ff93c1e82d3c874f186e5",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.25.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.25.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1086376,
+    "sha256": "b76a208f666fa98e60f2f6544d2b8447b56754928b17ec3f1c41090035795f4e",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.25.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4658184,
+    "sha256": "1c67bd9277f8c085905105118fb07afab00888c502bf73f1ccf74720ab920222",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.25.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4689160,
+    "sha256": "534e7884c95b70234a33cf9234c9cb2fd0eac87fc76ec420d7579b59c5332a19",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.25.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 4607704,
+    "sha256": "801fa297fa8efcf4cf1e1c3853da8f54d710837dcc8ee3c7dcb587a2de4dfa39",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.25.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 7645600,
+    "sha256": "be8849357a8e18bcb5d1d5ee2cf8b5ef7464b55e884b493605110ae8597eb17c",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.25.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 7638328,
+    "sha256": "e799ea2cfa67a43dd9beff62193bf41eb237d94ed8bc2aaa0c37180db60e65c7",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.26.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.26.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1086376,
+    "sha256": "19c9df4c3c942da5fb6fde1fd859ebacaa02cc309ab9926478f9968c2cd6bd86",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.26.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4575048,
+    "sha256": "6dd13705ffcf269d72dc26ad450cf451f5964e88b60f65ef852daeb105275b9a",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.26.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4638328,
+    "sha256": "ac1ef3d9f33e84fed22daea3c63809296e100da84e8ec274d236da64a94ef2e9",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.26.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 4601288,
+    "sha256": "cd0442cf021c3a63ecca44260e924d97c256109614b24917b52eecae1b3ba2a6",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.26.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 7618112,
+    "sha256": "839a2012b3a9309e7a30b25951c9ef1ad24601c55e9f46515b8dd51c77da588e",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.26.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 7593144,
+    "sha256": "fb2e06ae6a94c2b8bfd6d079659921ebc04480945ee1aa4c2d3df872e635ce11",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.27.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.27.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1100080,
+    "sha256": "386f105afe342d7126eaaaa8b19921a4d4a19966ce90567be6b974108164edb2",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.27.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 5086920,
+    "sha256": "82538faddcac8ea47820b6b7a801500b01b22a6819bd4c113f853f7845cb1965",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.27.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4907240,
+    "sha256": "31707c7c594f0ea99eb93fbf87c17d17ca56cf90e5b7401e6aaf7e8362d6fa55",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.27.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 10158208,
+    "sha256": "ac667bab6d0f2fb7e17b8079813da9099c1c245dc2dd2c905ebd4a9b3af70898",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.27.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6839544,
+    "sha256": "b2c303be2d9b3238cbe5c1f9f2404655d9dac1785292c3403883b996f4f9fda5",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.27.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6835416,
+    "sha256": "d2fe7ac0e6be0b66a128ac12e72c3018ba2d26f252484cd1a0ad77cf3b89f23a",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.28.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.28.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1100080,
+    "sha256": "8d71facbe7c2040ba67e902e525aeb4a20e99a561ea70008d5ea4431bbb36cfd",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.28.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 5011808,
+    "sha256": "236fb04d204de8252136a0bd4442aa9b3c8994fdb8373461c82577ff82a5848a",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.28.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4915096,
+    "sha256": "3136489b518b26fffb5fac2d818c75d9ac2afa2d1f6d2db88e6d35b8cef0db29",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.28.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 10170016,
+    "sha256": "c14549e32f78cc1b844a1bd5a7fe8e4a8f56d816b9f1a3f4ba3ee71787ddd301",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.28.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6994096,
+    "sha256": "c4e9ce773a050320efe7de59aca86d4751d6241ec91ba65eb0a47416918eb4a8",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.28.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6989376,
+    "sha256": "e6692184ed0ca300c3562ea756b82a1c4982ef4fce53c94797a36470e560934c",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.29.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.29.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1101936,
+    "sha256": "d9df3ff420d08644088035d80a1436b532f02a1127ad985f6dd5c917b309eae6",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.29.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 5020496,
+    "sha256": "2ab82d862d07626a8cbeb315ea41161b1599199fc1132bcdad8f3460f13e1337",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.29.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 5133784,
+    "sha256": "9db42412c381bafda5f7f285d2eec59c79a5197ebaad7f12d1fe6837765ad793",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.29.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 13042272,
+    "sha256": "57a903fcfc9008951cb01d03a0ad48a3e162841fbdf3b68ad81ceaeddee2116c",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.29.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 10314440,
+    "sha256": "a818d0bcb1eaeb19c9823d98285f243d9445b0204d7ee5cdb943671b4c5c4840",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.29.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 10309024,
+    "sha256": "a49b50767eff2330f24fe7591ca774490f85977885d74bb439d63ea2697471e9",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.30.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.30.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1101936,
+    "sha256": "a5901a80320e43db120c45a9fabc2d4e37bb509ebd5f32e54ddcfb70594ac8bf",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.30.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4954336,
+    "sha256": "1ceb5a15a9ee09fca0146c0a192c29984d244ee33c0350fad44e80a27561462f",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.30.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 5075672,
+    "sha256": "19b44e031f615228e8230136b3a0e71afb1b93fbe47e6d726a81cfeaaf54fa2d",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.30.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 13048648,
+    "sha256": "efd9de5673df908825ad1bc2db4c540478e9f5b1a5df98db6f630fcf40f4fe74",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.30.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 10418464,
+    "sha256": "26772f13cbc9ce20164516c36d8ecf3c1736e4a559a2dd81fa5219469ce210eb",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.30.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 10417744,
+    "sha256": "f88888e31b40ee0ab2a6cc4ce2f4428e90ee4336dade99b3c37ec842646b9cef",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.31.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.31.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1100080,
+    "sha256": "60ba7c1c6d4be47394100d7ebd6f615011f537a3d4ad48fbee993e7c4db9d20a",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.31.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 5086920,
+    "sha256": "323edfada6af8612e91992bd2fa3fa50815f3c36a1e79669a3463a34a8dc4d44",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.31.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4907240,
+    "sha256": "9e2a89857287dd1ac8ea3874a2f7d8920936b6cc1f7770d88916a7e3802bee6d",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.31.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 4104560,
+    "sha256": "84fdfd651f5a8712da014ec768da96dc4ebaf2f3496c8ea62e931dbc938931bd",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.31.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6372592,
+    "sha256": "ab79e02b8a693ffb9990bbcb42d4cf16b055700a6aedbf841e93bd6b2674333f",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.31.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6241448,
+    "sha256": "413a71870c23661aac6515dae6297b6249db19f5c7c6668899111b95115efbbd",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.32.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.32.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1100080,
+    "sha256": "1488f1959bac8d65f14d8daf4c6fdea15d716f61ddec70b2c69e3eb895f0725a",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.32.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 5011808,
+    "sha256": "f9a04ff2aebf14d5e673ee2ffad90c472fc2d0e2947bb6a864afe6f39dfc93aa",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.32.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4915096,
+    "sha256": "410afa5836584da48312d461a205f6903d46e39b48b8239d96b3cd1ea1212b75",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.32.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 4095304,
+    "sha256": "971810f0be69a174fa39cc3a99ddf45c569ec3e11484b5dc926ebbecd20761b3",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.32.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6403928,
+    "sha256": "4822e6e42e028d9fcc18d6c93293f10bb10352a85a1ad74f5d6dc330083e4332",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.32.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6240944,
+    "sha256": "8cb429268c8dfbca7730cd646736bf8e60f5c60f7ca280de32aef8d908382bf8",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.33.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.33.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1101936,
+    "sha256": "8b90af0373c89a18fec47cd059e6c14a6419b9d31901f487b283c2c95fbc2274",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.33.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 5020496,
+    "sha256": "9d1d33139a056bf36d605ce288d4a417dec111887d9c90cc033e6b4542792f49",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.33.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 5133784,
+    "sha256": "d2b10bbbfb65401d899e543b24c7d9ce3bbbcae16044ddeb1882b7b027d1bbb5",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.33.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 5167112,
+    "sha256": "6ac646f2cce8ff32fb03ff122edddd9668b28118ba10f276c30fac27284437f7",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.33.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 8975328,
+    "sha256": "734be11572ed5b46142e9b7354816d192b90c07ee8407395bef368b58df0b69f",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.33.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 8855992,
+    "sha256": "da6b26f230c027f5762577cc1ea4a66804ff845f4f89845d611a64e6cd178178",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.34.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.34.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1101936,
+    "sha256": "3791cc3ab2076f576b8e5a748704ec76496b58528403986a4f51c45ad08c3b23",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.34.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4954336,
+    "sha256": "4470e9493fb6b181e40b42d72792cfed1e429a2a6d25a82dfd1410ac0694027d",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.34.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 5075672,
+    "sha256": "ea2f7c38788f442f99fb0036d20262c49994ae107f76edf8657008825e1aa7f2",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.34.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 5160808,
+    "sha256": "2e812f6af68b9463dc2c19b434e0415142e731b639931f83a578b4d2e4242aba",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.34.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 9114480,
+    "sha256": "e68cbf8bd13e571f8c9e18ad81af435fe6518814a67eb102494d3d4cf8a903e6",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.34.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 8896344,
+    "sha256": "9b74be1fcbcd650dd1010aaad102e8944a8143ae2ee120f297ae9dcbb3accdcb",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.35.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.35.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1110768,
+    "sha256": "2f98ec6ef1427788e6b752cd1981bc59ae67c379780a80fe5c36d8db64a81acf",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.35.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 1104376,
+    "sha256": "e0a86b1a723705e71269b70aeab0fbfe4914f52490d453fd790203485ebf275b",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.35.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 1132184,
+    "sha256": "dce4a69705630849bd6e5f2d319788812425102a7484e4b2bfe4f2b9f4cfa73a",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.35.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1061464,
+    "sha256": "48f890a0a3a92e042f3ce01fc690a7bc1080b4dd66057f2011f01505f4c6f0b3",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.35.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1058480,
+    "sha256": "c8bc9571166b452f24b7c6da21cd876e0cd6983b4145ae1d5bf94a56b8efe35d",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.35.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1056112,
+    "sha256": "6884cb1ab0973cd0dc79446130e52cc6109fe287438df7c393ec60e0cfb1edc3",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.36.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.36.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 605648,
+    "sha256": "24b807b508e1e207df36cce00b153eefacd44f9c128714ee346383543d498287",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.36.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 386464,
+    "sha256": "c5af7163b2b8eecd526a4ad5b4d160a9ce2b88d4b6a21833bf025497f5e08603",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.36.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 386464,
+    "sha256": "ca7bc6a3e5f0c33d75dce83a86b6dd7a242ccb138a7b3c27247fcfcc6e7e5b46",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.36.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 386464,
+    "sha256": "758f3aec79c8393f5e0c7c254e1fe3b06d015c3aeb601b38bc74f66680f6c9b4",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.36.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 386464,
+    "sha256": "4682faeb9f2950f74f378fa1f3fcd5f0d96022a5b1fbc8710ca87963c22dcd59",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.36.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 386464,
+    "sha256": "727b9f2288d2fb3ba0c00f279729f47cd49cf5d6dd7a2182c670f87aa60d7372",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.37.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.37.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 3019104,
+    "sha256": "21b0434e14da08fb3962f23ecea385d449c9c4c24739251e7d7dcc82e46dfd46",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.37.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 410328,
+    "sha256": "a3e8674dc982b3ac0e75d6477690d117f021109078e3928a5876802a3075336c",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.37.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 410328,
+    "sha256": "cf533cb7f8c01bd086b1e19535007c90651040cca2a5b2dd5d9d58adcae6660c",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.37.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 410328,
+    "sha256": "9042c7da5d71822a14dc1451bd7882556983aea8d909dfccbe8c5862e5e8f4ba",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.37.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 410328,
+    "sha256": "ac089e0a229469e8580d9c69cdaeb6e6dbc65a8abe185247561e362376a68776",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.37.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 410328,
+    "sha256": "5c4869a53e893509f67a5af2dd56e64060e05eba6fd2d452b82774cf92e74420",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.38.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.38.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 831360,
+    "sha256": "f69259c88ab74ac4bda171fb0a132933686187a0000c29ed83e6d95c1ffbf305",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.38.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 391648,
+    "sha256": "9aec725a58d45741969b6c7e207bce30956034e207d9f422f624680ba7e80602",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.38.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 391648,
+    "sha256": "1425871e62016ecdf8807ac722d37a90e5c2143bd4d9caaeb613edef1dfca5aa",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.38.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 391648,
+    "sha256": "357bdcbc0469ac2728fb775fd707d60e73db6ac3c5815f89ed71074eb7b8251b",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.38.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 391648,
+    "sha256": "0d6905e7d2544d5a82cfb960bf9866f71112fb34ba68ea4a737d3ada207c8a8c",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.38.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 391648,
+    "sha256": "e72452000923cc2bebd41e5f5abde434e88afe308d78a24704a01514643db6dc",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.39.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.39.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 7428904,
+    "sha256": "4e757d30580c121e1743196e9f54bc515fc0ba605de9236725db53b0a04f820e",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.39.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 7838824,
+    "sha256": "338bac9207b89975f4bf5c2a1be4ad5f1999f809ab9f43039e88bcc6266a3262",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.39.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 8229496,
+    "sha256": "6283ced07fa6e6cce8af1a68c315567592693d08b0d7347bea4f6c2e37dbaf6a",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.39.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 6586168,
+    "sha256": "cf8ba8cde86ccae8e7e1f046b124456df1bdeeace6969d80f4337607b81f3032",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.39.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6578168,
+    "sha256": "3bf2fb6a36c434fab8bd1986aa738aa922b8de9cf86a19e590d16b6badb2f252",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.39.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6588608,
+    "sha256": "a7d31d54542356b33ec2622a608354fae634b2b30f6de0c60eeed9204da8e395",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.40.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.40.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1857000,
+    "sha256": "3f69c202e94c6d06a60be29915e83b865c2be24a0be3fd9815b268458e239232",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.40.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 1323784,
+    "sha256": "a1aa4f354fd5d02511b39c2ff9cb2485aaff4f5a77e1835305fc7a510212fb75",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.40.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 2301152,
+    "sha256": "1c03a5d954ee9f04e7c384f69abeefb373074e41ab8b48d61a7b2c6e37dbf9b8",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.40.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1229160,
+    "sha256": "e06f9dc1dd4c7ae2632abec92be172ab84ea4bd8136579c8458605678b592a71",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.40.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1228360,
+    "sha256": "90de40975e3c6684a68dbc04747cd1193dab1c737b74c16fcb302ee83360dc15",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.40.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1235680,
+    "sha256": "4f3df9005e8d6cd8c73e8068269a062985ae3893541a31524a2837819ad7016a",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.41.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.41.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 3368600,
+    "sha256": "b5c25ffbabbe144f02d60978771a9dc93a4cc30c34b59bcd60fe2594843d8897",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.41.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 3371104,
+    "sha256": "8f6f9d0da6f3c893adcaefabaf6df4a86411edcfecf2303ca9eccac06d28a3b0",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.41.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 3723528,
+    "sha256": "4d422780aa13c78a4eec875dfa47bdf307a3a8f67b66c859f666377550e04bc7",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.41.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 3267296,
+    "sha256": "16191f53150e8a2a3542d0dc995ed176e3dfa82d57275a5a4d5f0959d0a7b85f",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.41.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 3197160,
+    "sha256": "e18afa73a4b729d12be914a2568348e613aabf9f5d1294bc67736c3b9107bf95",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.41.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 3203904,
+    "sha256": "b7dcfba3eb4f4543ce2f6eed488745f45855b0fab04dbf7067c3ee1363ca7670",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.42.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.42.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1875312,
+    "sha256": "4c64fe53a2a3171e783ed7a1f418a84e6f393b3b562ce42b647d3f1632abaef1",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.42.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 1991976,
+    "sha256": "bb8a49478f6af51617380b098f225589dbcce20570d9dd895b79709725b0df7f",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.42.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 2194424,
+    "sha256": "bcc626d5492dce47a360b1cfccb2b2ba14183dbd42509721337c3bde576cfd85",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.42.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1818360,
+    "sha256": "574aebdd210e3b8fcc184abd70f9695affec5109688de6e2cae495578703927f",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.42.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1757248,
+    "sha256": "48aa33f069ebdca3a58f4eb601b20c9e9df0fc39078511ab7d4c166307db4c09",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.42.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1770040,
+    "sha256": "cf594227eaec1dadd0b4e48b9a16972e408d1d867da07b356a875f8ffc170eae",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.43.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.43.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 6712088,
+    "sha256": "e194405ff9f080391d2a0c439ded4bd58fa22a6a3774750b62a9ff4f4fcaaabd",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.43.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6282056,
+    "sha256": "0731c648df09a53a6351c2b9d1e0e4726e005909f16bdf5d50335868a5ad519c",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.43.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 6351648,
+    "sha256": "93ce5ecd2e8177fb1224e935ab787a6cb20e0557b46e6188fbc2de2851e15bf8",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.43.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 6852304,
+    "sha256": "31f70acdd311683f65bd3585098087866f65ff3b1f566f2554a10ec34fab0c8a",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.43.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 6808128,
+    "sha256": "b7db946678bb4c301849a24a1fe067de1fd8215911482ea7ffea2cc1da44cef3",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.43.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 6807488,
+    "sha256": "f386fa61a9ba7a28690ef2f557ffc6c831a0487916406f1784c8a9f7eb28e785",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.44.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.44.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1444008,
+    "sha256": "d65c6099faf9656eb5d8c10d8a396f9bb32d07d36121754f4d0f236e5b300ec4",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.44.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 1464392,
+    "sha256": "c7f71001d63ab5f24b674192b7e437ca240a7f646df145585bfd6b55d2d1a59d",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.44.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 1532736,
+    "sha256": "e224b452180713a38a58a06f376c599a56ae4385ef35daef56994123b4220866",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.44.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1403488,
+    "sha256": "8cdeea0c6941c444ac61535a38139ebdefedc2491d1ecf95c4b80e13d31e0212",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.44.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1399376,
+    "sha256": "123fcee0015f78d3d822a74a818dea6cad252c35e3fb1cac6e1e1f909355ff0b",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.44.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1393296,
+    "sha256": "0392c9aa55193a7321f04a4a5962794f6c95871819d69eb6e2d7e977ce60e00a",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.45.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.45.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 22673064,
+    "sha256": "0dc30f3d31f9974de6d174454a016325db6069a26339afdfcd95a2278dc92fb9",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.45.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 606368,
+    "sha256": "29e7735695578c115d36e2635fc8ec63c790359ac75ab22d2e48291186405cdd",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.45.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 606368,
+    "sha256": "fd3d5fc2cb8e06a475a81d7abe457e841604036c55be34037699028778a12382",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.45.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 605856,
+    "sha256": "387b7164199cb037b458c345dc820191222b965e773643b0331e71e9c57c53b8",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.45.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 605856,
+    "sha256": "413d5a41ee523896519b7bc1e933292b19d19dfe39d0fe8319836fe99c38bf3f",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.45.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 605856,
+    "sha256": "8999e186c90620829ed2fa4d756d06720cc39673221015df71a473d934d63a9c",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.46.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.46.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 2470672,
+    "sha256": "32d7b4a1786117c618172fba6ccda2170225bffdd2266e6a7b118928b0e9f75f",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.46.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 396824,
+    "sha256": "02b9359f4ea8863559397955e3c269cff67ba8cdceb751e3acffda0f5e660c19",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.46.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 396824,
+    "sha256": "b4a7245f98d95a0270ec1c377edd8204a9c229a057885065e0455bdffbd57d3e",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.46.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 396824,
+    "sha256": "d26d0d65217b6434767956bbe005b7c0c7fb955a57a0bbdda26c75a7fc244ae9",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.46.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 396824,
+    "sha256": "5975467955cc9f1d2557294e761c061ca1061526308407861380e4516cca8d48",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.46.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 396824,
+    "sha256": "c946f4eb85981140c9ad499a23eb0a0428349110ece63eaf9daa0a5b790ea5c9",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.47.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.47.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 419536,
+    "sha256": "f83c7c3e92127ebfbdcd6623cf108eaa579bb0c5bd062a6a660188e64cc1a56b",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.47.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 420704,
+    "sha256": "aaf23eca36577cf8ac74701f9c426e7539d2049c4a06080d615d9c080b2703f9",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.47.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 421168,
+    "sha256": "d6fbca86544f2d5ca12607d79c9e9a34eb572232108669b880192d5f6d064ee5",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.47.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 418744,
+    "sha256": "b33ad9e46d7388e0928b2988cf1e8884b89c52f412b3f5ed29aab345f055216c",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.47.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 419232,
+    "sha256": "5a7400f2e9ee6896f95e8ceae35e454d8d9f7e16cd6f6369c1b16058275c774b",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.47.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 419256,
+    "sha256": "a89d6d105a3540ae47bae13e537328a7b4123ef9f1b37d3213499b55894c1fd1",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.48.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.48.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 606296,
+    "sha256": "f5508e2fe18045b4477ecf2212251379b3e8d3f91f25736ea8d941c190e3d687",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.48.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 614336,
+    "sha256": "66d712b365b9c86b6a31752117bf6960cf0b31a59ac32e7fe8f2571bba406e93",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.48.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 605672,
+    "sha256": "7471375f3a4a1bc89c99a96dac0bacee67892d51577eeb80772fc099e601ee5a",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.48.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 528064,
+    "sha256": "5a3c5c765bd5d711884e608baf84832f0698a664d202b6a412496b7a422665bb",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.48.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 550384,
+    "sha256": "eb5d2ebe586618eb5b216b95e2a9edf5b4c2b285a48a61ee421f157b13a9980d",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.48.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 549264,
+    "sha256": "2ef86be72289563dafec6165b69f95021fcad8b79de95e9e364a22691ecb5df6",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.49.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.49.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1075640,
+    "sha256": "1e696f9ec02f6b5484f348bcb65b37826144c7959810783578e083b7b341ffd2",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.49.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 418760,
+    "sha256": "52f9202c2926c6fb312d005e1d3d5f6819ce8bcc1bf9bc395c0ffa8511b3900a",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.49.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 419024,
+    "sha256": "63bfd84432a7649c0e80fc46d0be734c847f947e202c4ab20c3b643ac7d38555",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.49.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 418792,
+    "sha256": "a42a6f6ed0412e61115dc58be1f14a967b87929bda94c094c3021e123edd8d84",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.49.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 418872,
+    "sha256": "b37afcb6a2018a1f7e1afe11773e98617374a8b9ba18dc777251de6aa6054ee9",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.49.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 418872,
+    "sha256": "b2b09db4b5cbc85f72e7154154f76202704bf44f97a8066ef4fb8b11020cef51",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.50.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.50.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 6805464,
+    "sha256": "080195d71ab9616878b4b4c78e8368fedeb9c92a8f5113e3e620967ff05397bb",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.50.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 509736,
+    "sha256": "ab5571ce57c7d39a7365e78e37910925fc2953755b1a3f261297be61bf1ad7cb",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.50.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 509728,
+    "sha256": "aabf97e2cc66d7bb6fcfdc0b40b2f967fa1ce0182b9017ea7bbeb9dcd5a90479",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.50.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 508856,
+    "sha256": "b0a92da5ecb2cb5e636cb6c0c44da19905226ea86e4481c6b3c033f3e49efe9b",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.50.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 508880,
+    "sha256": "4c29483f9f8a42ce4424b711dd00d68782ce5c539623ac5b97147022fb5c6904",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.50.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 508880,
+    "sha256": "85c440f2262683023c4837e0c65577185b55300ef11e4c3dd93caa4f02a4a582",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.51.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.51.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 616344,
+    "sha256": "3e15ac9bd234c914c66a7921f227b9267bc1eb13dbc6cf99e5ffbb1b4ccb1f82",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.51.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 615424,
+    "sha256": "e78043b293d758ddb882bb2c2fb02531baf7b59973e11a8bdbe34473839ec8ba",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.51.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 620728,
+    "sha256": "86e75efbcc5ad68e01cb3f7605fcf231eeb58331f0bb1af94ef8b560c0671738",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.51.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 594296,
+    "sha256": "b99a02d9196c2c21ef9a2d2b49c9718e70d5357410bdaf0df1f7e62e608b4a5c",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.51.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 596448,
+    "sha256": "6feb798c7dabdcfaedd95b8002add278a3a883f61bdb2d3024ff1f2511be9190",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.51.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 594496,
+    "sha256": "7912f7beb060ccf93455bc96aca640acd7860162a8b4512fb9a7b62595090e82",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.52.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.52.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1018144,
+    "sha256": "965c60c57276dfb22c816b5f83db05ce9a2a9d16ac595d18d96eaca9495f4518",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.52.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 1010896,
+    "sha256": "8f0b58a44e1b3ba1ca28f2279ed8f3a8826dd135fa87fd02b65ba87abc8b1ac1",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.52.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 1016824,
+    "sha256": "8d31e06c900cfa2e34132af053a6346723772a09b4641481df9d31e70c4d4fb4",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.52.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 967344,
+    "sha256": "d26a7c37f94c358bd08267a2c7043ea2c2b0aaf0be942122f50b8e5bbf3e4cfa",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.52.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 962464,
+    "sha256": "53809bfa1a5f9021119e22e426823bdfce105b5494019cdd12292bf3f9ef7d7c",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.52.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 967432,
+    "sha256": "da4e6fd616d6a6e4b304b96bc2232944fedcb889fa21f3080a2c2c3cd9dafea9",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.53.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.53.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 402120,
+    "sha256": "46de3c1736213c99827e5ae045b2b8814d750d9f5a9797f37f1624303d692eb4",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.53.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 403056,
+    "sha256": "8d24f4fd2556c554b2884b2ca28c94c721b31bb79386b98d6e9c352600fd807c",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.53.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 403368,
+    "sha256": "852362105eda8366a0eff2d301f9bb4e9c860e1b72aab8ad94f33537b290cd80",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.53.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 402024,
+    "sha256": "a90497338c53d33603f6547fc65a1c2fefe1d685730ce2bdcd5277b81df6860c",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.53.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 402024,
+    "sha256": "d11dea3aea20956f748b80a9c32604f9738b879287f62717cabc55abf45f974d",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.53.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 402088,
+    "sha256": "be4cfb25bef839d2dab368ef2bd74fe604889f534ab5990684a010178d5f3f2e",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.54.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.54.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 810064,
+    "sha256": "679f9584b5cd2a0a8ff943bd09f2008ea7884721d8b831a72ee9657396bd5b6c",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.54.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 784888,
+    "sha256": "99d2eaa9b1f2982cc5be3c33be07535f3e3bf863f2f1f53dcc139fab399028bb",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.54.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 781568,
+    "sha256": "cea24f470b32e4bf2112e2caf9a4327c8c92f6450d9d7adeabecf6cc1e86e395",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.54.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 625032,
+    "sha256": "7d7d70c0b57b385b6da01ae269225cc80de3cf3cdf7635b88f092e1974cc3f33",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.54.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 641288,
+    "sha256": "0d467d60f04df5c17a9761a76fb3ce1d055b1822dd9c90625e471392132547c2",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.54.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 634320,
+    "sha256": "851a25719cbf35bd936c53fd3b3ca43341496a53fdfe1a9874f8f677a3aa20c0",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.55.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.55.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 414128,
+    "sha256": "ffa835ddc6ab5ba54e07b45e48f417b4e62b9aff29c60487987d7f0b840702d0",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.55.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 419536,
+    "sha256": "bb509108d2a8b6376448fe9f96a6007da44c899f6b8f4d9823628e3c69be5f7e",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.55.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 421496,
+    "sha256": "a52708b586ffd67a2fce2f5ee28570d25710026745e0bf90200215caba040838",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.55.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 412904,
+    "sha256": "e0064733fb27d1cdabb0ce4282e2c1f7e3610b6bd4a6461deb6890fde75df172",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.55.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 413072,
+    "sha256": "49ca85c5e05f002729c1438099fd7a2c3c6d5d22ca7a72d0ff3d3a14b329f6a1",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.55.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 424608,
+    "sha256": "5a33c1a49afbb708f3207416e91dee1bb862841a3ed736bc266d7498e2236c5e",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.56.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.56.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 586344,
+    "sha256": "450d9638b18481c65eebdbc08b21ac0563e51a00b261b0306fc37512cabd8ee3",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.56.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 610240,
+    "sha256": "61949a2a0a1325644d29a9cf6b51a54a6f03f4d2dbee3a099e5d15c57e1bf1fa",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.56.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 633688,
+    "sha256": "7016a48da0ad87de42f7262216a8cde0f0c8be66f69a98540336dc5f7e52651a",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.56.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 582296,
+    "sha256": "7c88fa77208907b6b86576d57b95b154bfdb934699becd326bf2216503256d08",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.56.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 582208,
+    "sha256": "82a05971e57d30d873122bca349e846885e386313462ca0c1c733cc0e2637bf8",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.56.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 577768,
+    "sha256": "95ed1e28f70d3e78dd3607cd2b6ac707d50ee5275695e47bd4c4f6d5cfe4101d",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.57.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.57.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 644416,
+    "sha256": "b5ae8cd8681d75dfddfae2eae0f7e6541a30c65d420dab8bd195fbf6c7d9a3c7",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.57.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 635176,
+    "sha256": "764e1b9c0e8abe3f1ff0673e95d6c92f67f81fd8442a2be4bb528ae1b721e1e6",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.57.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 643864,
+    "sha256": "a6520f8fbb6b58bab05c707dac3080279862079d14eebf213b2673f1cd450773",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.57.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 623048,
+    "sha256": "39d194b69cf6ebed4e770246b93de1ddf1f5ff8ccad5f7a98be491621c74ca7a",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.57.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 624448,
+    "sha256": "9f14876a799bb893170c1bdc591523f68e38f11e96ca87696ba194a9f4c28287",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.57.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 628744,
+    "sha256": "a3cac69a8568b6ceaf6f4dc09045426feece34e409198ebd2af2d4f8087bae4a",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.58.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.58.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 495024,
+    "sha256": "65f89d9ad9b3cd556cfa0215b257b6503c7c190f7bd16f18284479c23a8e768f",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.58.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 470224,
+    "sha256": "41629d0936f525fcc23ed15c6a0d9617e6a136068311b56e12edaa0f36511cd8",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.58.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 481080,
+    "sha256": "af936533acc1f6bcf12f6a9dda576bf2f91019caaa2c6f30e5a31b2c00ebf95c",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.58.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 473248,
+    "sha256": "de95de074e1f0d919ae72b511bee3dc7f65acbcc4bee94e92ca947d08efe262a",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.58.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 472184,
+    "sha256": "7ab434efbee30a0e18cceb3a058fc475b09d3eb8243ff9d330a5f085bfacbf5d",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.58.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 471728,
+    "sha256": "0cfa95dc24618b88126f527e1abc13c0dafb09823b9b1f43e9bb03d364a76dd3",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.59.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.59.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 566992,
+    "sha256": "aa8ca7859209e32a6907959d425447709e58951346d6c4d48dbc06f98a03a705",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.59.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 387312,
+    "sha256": "046f69698256da61c7a5be0d294ce91bb157f2e9580c29ee4f9a6ff934aad399",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.59.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 387312,
+    "sha256": "ba11816eb76c597df4de30f1b6588e04af37d2082286231c614218d33251e515",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.59.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 387056,
+    "sha256": "44191fbd46fd2da72943976a77fb7c67f23c1a5a44e694401fb9fe01547b6229",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.59.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 387056,
+    "sha256": "bdad37b1b6480eaac784a4d51acd15b22c8f35ab1fe74c8d2149eafa48ba2f33",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.59.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 387056,
+    "sha256": "013c200a70399ae4a208c51c3ec60d1cde1a9bfe38bb38a6de6730b5a642a423",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.60.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.60.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 555544,
+    "sha256": "8ebb8198b21ddb31881b50e9b51e1979c58fe94d8a7639377b17c2d9b21d88d4",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.60.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 384976,
+    "sha256": "4452b375c8fc656c74344341abf66fa14a189b260de33790557fd24521124383",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.60.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 384976,
+    "sha256": "ee0695bece5fb6de35def40e731321b3ed280aa866750023f2ad09b3606ec672",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.60.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 384976,
+    "sha256": "ff18063b129a28554b87eaecbe8eea06b2d7b453ff7710da9ad882020a9fd28c",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.60.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 384976,
+    "sha256": "550e1f797abeb64cedb0b4138bd3f085cea18a877bf115a9d399548477dc52a8",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.60.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 384976,
+    "sha256": "59208152d0562ced1ca2db1579bfb17edb7fbcbd2577633568fc8b15c52d51b1",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.61.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.61.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 583320,
+    "sha256": "b0e813d2e17270a8d0ef65ae0c7291c3dd134ebd82018710cf3c359dd456fafa",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.61.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 588400,
+    "sha256": "b9efca962adc373667df309de371f873a3b65c585280d61ccbe802bd180252a1",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.61.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 603112,
+    "sha256": "0f20e4bac05ef71e648532a247b232fc2533c600b34276bf8f0a22c713de43b9",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.61.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 571952,
+    "sha256": "39357cd7bf3b3b38d983e4b544451e34628563f6ea1f224dee2b31b39fd079ad",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.61.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 572512,
+    "sha256": "c394e75315adba0d1ae1c8a5a14968fe9b29ef4d9e15967fbcb377afaeca544b",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.61.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 571576,
+    "sha256": "fbfe1132abf2c47dbd54c9c53db9b3c8535c14715f3e44b1c1a9ed2e9b1a9004",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.62.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.62.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 410808,
+    "sha256": "405824812afc082aa89f593561860719f384ddc2116cf4bded0c4f2fdcffd10b",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.62.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 409728,
+    "sha256": "a9411ee6679e80243e101c2d7a42c26bf3d2e00df640000b6249171daebb4a3d",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.62.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 411624,
+    "sha256": "f5563ce788d216001062c3e9184009d7fa4c2dfefba49820b11a542ae821d55b",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.62.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 408144,
+    "sha256": "e34295b305037dbf38a79228494b776395d83dbb83b9c0bec4b6fc4015a6cf53",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.62.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 407664,
+    "sha256": "584aa8acc1d1ff636d78d45892d223fbb3fda53ea6b99ba841673b9f9e5912a9",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.62.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 407672,
+    "sha256": "ed9f4366278e8b8b6fc1ae30c4af11a5a97a6cbc06f5ca3bd33d6f8b122a7672",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.63.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.63.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 461464,
+    "sha256": "c11d84045983f324d2411a60c8120daab2c7e2de312c98b326e5de8ee11656b5",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.63.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 449608,
+    "sha256": "8ad52cc87c4b21ada03fdb451c17d6f87818a2d5a85f4e6762f471ad4dc5466a",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.63.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 453824,
+    "sha256": "baf59ffec0761e32984bce3884fb03683128bc2b9bd47361cc93942a98438a80",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.63.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 433904,
+    "sha256": "5acf451174ea454c0271ec72e2202ea5cd89a605d78c7f104ddd2fec3f1ae4c5",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.63.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 435296,
+    "sha256": "27a3b04a74487c7acbf567e04bd1b3a6cd070a23c9390ed7cfc04170896e9a3c",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.63.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 434520,
+    "sha256": "8ec51cde54c10e1df2eb5a7564b324cca702573d62a6c44bbd4db28e1fb4d1cd",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.64.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.64.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 390112,
+    "sha256": "3ebc3978c6404a1861b1e27377995bbaf0ad1d5dd021a11ede96bf898cb4bddb",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.64.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 390736,
+    "sha256": "592733b05d8f781fe5da28fae44f3abfbd9856586d94d8e4d96979883a25f73c",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.64.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 390704,
+    "sha256": "550a58820d2a7de6039700b887372536ace673050ee64a2e177b109f49bcb65c",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.64.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 390960,
+    "sha256": "41eab86b20a56203a35444ec2ffaea0e5c8e146407767c8b2f9b3f845d559b76",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.64.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 390632,
+    "sha256": "ec5bc8452a0b41bf837e3085eeb9cd641634c742e38e4f49ada4a96198373d0d",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.64.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 390608,
+    "sha256": "110a7fe80afadcd232365fed8103d2b83688a564912ca0342236967ad11ab13a",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.65.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.65.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 477128,
+    "sha256": "81fe44e278af7aa6498f483122afb637c08b4f7021f99ee71334bfea8e331c95",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.65.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 478312,
+    "sha256": "86b65ac6fcb00f18d08567ec7dd35caba06857b7c5845b754d1a0038e2cb714c",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.65.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 478952,
+    "sha256": "717794b78babf97394b8c48707b39b99387669cd0396e31e2df03491271dc0aa",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.65.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 480264,
+    "sha256": "fc1337a9bf51a24463c78ec2f99d611b1b8a34724bfd4f2313ca92e76c9c97f5",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.65.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 480376,
+    "sha256": "8d25d623e7351fcf8d6831f531007004714579e67deec94c230e6aa968641f95",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.65.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 480664,
+    "sha256": "055bf3267b25df3b9405407a535c316f74fd17d51c755d3b3f3344cd43fb6166",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.66.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.66.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1879352,
+    "sha256": "a5f424f1b8a288cfb5c1ebb54dd25668185091ab92b425586d5c554d2190a55b",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.66.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 1919576,
+    "sha256": "10bfb1cad28efd1d7d0a5185b9fdcba424ae43f66f009c7ce4b46428c1270281",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.66.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 1957304,
+    "sha256": "c699ad562d7d19c62025ecdbf84978ed6fe4391cc4fab2450ebd1815babb5f99",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.66.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 1928544,
+    "sha256": "85bb12bf14291c69e5b36d0345a6c24d5dde58a05c7de3d8ccd851079373baad",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.66.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 1911192,
+    "sha256": "621c2f4c4d0bff2773c1bafdc9fd1f026c81cb8fd7e0650f27c72d86fda8dff2",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.66.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 1889048,
+    "sha256": "b4a14b6dff4cd667fa0860f853b478448a4d07b0d297d7f0eedfb4c1aacce966",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.67.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.67.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 444976,
+    "sha256": "7ab53cef6f938dfb19b07430eb730735758a5b6edfdce56b40d1d106390c4d77",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.67.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 450472,
+    "sha256": "a692b3d01a19327dce771f15a39dbd927dc21500630f6d25526d207ffeea7031",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.67.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 454360,
+    "sha256": "05fd0a9c8f4f15c0cba1a0ecf8838ecd3148c8f6d5a7eaa54f16e520c14061de",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.67.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 443784,
+    "sha256": "9f5f8e78a943932235e88baaf4be24f39c77bf9f01fddb1e88dcbe8ebd7f0608",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.67.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 441304,
+    "sha256": "478f6415277293f9c891fa5ff84441b15dcdccbaead4941abe628ce0086e0417",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.67.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 441336,
+    "sha256": "4733e7ff8660313cd9b19d02a6b0c2216e5645feff8c154da035d08b9e5094a8",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.68.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.68.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 422832,
+    "sha256": "bc21630495f101fb65ae4570401da44df03571eebb48e4e83797574afc295cf1",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.68.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 424408,
+    "sha256": "20de5174a4237822946238471cd12ddec6dc5aba8638ecdeec76c3f55741a80b",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.68.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 425080,
+    "sha256": "b8847ad587a9641130ed8d525ba87a0d51817c0346e2f925ba512d74b9de922e",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.68.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 423560,
+    "sha256": "6ca485bc35d510dcc4ce06cbf5138ef013cbd6d7cc105a138d677c63f4f33ff8",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.68.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 423800,
+    "sha256": "77d11e9546b1fee33c443dbcb06642eab05d2f0e756e0dcb560a6dac18907406",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.68.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 423840,
+    "sha256": "c85b029b6d96167c976006b032587c97f138c5a3b36c628869cb520c46f66ffb",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.69.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.69.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 406544,
+    "sha256": "964699ede8c48c51e08ea6a031e94fe68a2568b22c5067ae24bf953e6333986a",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.69.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 407136,
+    "sha256": "fe6586d49fa591e18332013033faea745262dc0fd208059efbe1f9b4614dec12",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.69.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 406480,
+    "sha256": "b7b02703d10c01d7242741b04a5e235d8c2b3c9326430dc6f75ddb99e0f31ece",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.69.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 407416,
+    "sha256": "478252b828c9b94ebf1a6320b334f802be9785a6f5189ba9c27223a01fb8c8bc",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.69.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 406912,
+    "sha256": "2af8cfb5ea9608dd09d7fe86f6ad02fda0bc41cdf19817a2ec3054033590241a",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.69.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 406936,
+    "sha256": "355e17e69f7756e7b95160cbadcfb450765822e1310572097a5842aafef36f6f",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.70.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.70.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 4641768,
+    "sha256": "31e6e07d9bde0857c6cfab0766ae4f661196baef1fd932edc565ae46ca1d9738",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.70.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 4441160,
+    "sha256": "baef0b7849554a128353e319230847192c84fc9576e0fa2d9e50449419a378c4",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.70.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 4479112,
+    "sha256": "c49f9bd31ff87d68148fc2ec6cf2c25db1feb1f8d21d380a90953e3f52a216c6",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.70.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 4817048,
+    "sha256": "2e4fb3d6b9d1a3cc3ed335325672cc5574cdd39dcf4d1ed03bb7600d7528e8a6",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.70.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 4684512,
+    "sha256": "9ce45db3273cba3d9b0afa930efddf1c440c8966ba5706b70fe42020ace8efcb",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.70.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 4685256,
+    "sha256": "68ee1c0642877678109743e7cd00030c6ee49b427ec6bd0d79a2e0c617ab3992",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.71.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.71.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 586952,
+    "sha256": "83fea3eaaf165029ecc02b800556dc60dc12003738084112b498c35516ebb9b3",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.71.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 596120,
+    "sha256": "9b77059cad40265f9c57c08d6187434d61faeacc90f4242e77d58e4c79b9e278",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.71.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 600680,
+    "sha256": "85b5709a6a64a1a981386f307e69c51d34f2ac48aabf963a9821475eeb046c5f",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.71.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 582120,
+    "sha256": "369bfde0c4cff5eaadb12e9cb12d139e6bedd212ca64da72e038002aba45dab4",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.71.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 584272,
+    "sha256": "bd0cbfd0089de79c701079a962fbee40ebb9b9b552f009fbb06139cdb1739fea",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.71.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 584112,
+    "sha256": "d30c3d77db0fcaeec8616e0c56929a664d3d01b0dab0be2559803111dfe8e4e2",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.72.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.72.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 418880,
+    "sha256": "ce0db5547eb040ea1eb9e22a1294c18bba16485eac7b7aa81891c86510acfe5b",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.72.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 422120,
+    "sha256": "9a5b659a3e42c44dc8487ab2b55c70bc524c54850f46dbd46a03ebea381b04e4",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.72.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 423024,
+    "sha256": "8dc29a5d17c3b8dd8865dc5f6c4fed42f18c1d1bec3008a7337996b62ae9b2b9",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.72.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 417536,
+    "sha256": "ebb8fe3aefd247e58c924fb7a8853211d8c0e5a7a2b5a0a3578bc451db3534a3",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.72.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 416600,
+    "sha256": "95a34b4e6f678b81ebc3301ff7695cd8ec5ea5b3b065ab6fce07901d21c90b1b",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.72.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 416600,
+    "sha256": "752a0c0ef0f7d55ee60e80f4a7b261d5dfc31537d27221adb339040e2e0450ea",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.73.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.73.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 932008,
+    "sha256": "9c8ec8a67915e94a677735ce06e477c441cdcd3cc61064d7f767e9532a52e2c9",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.73.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 932264,
+    "sha256": "f4f4038dc63df1cec5a829f19005b24cdb191183d1511c355cc05080fd2a1def",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.73.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 936120,
+    "sha256": "c7f99498bb72c2a6585661cc87ffa45385cb2a1211034f27ba0739cb707253a4",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.73.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 955608,
+    "sha256": "3dc49abcfbfb4727c45f305807307a4e46d83726c0c2355e6ccbbcc55c24c682",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.73.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 939376,
+    "sha256": "26a5894a61028859e439ab2c4a1ce519ad2fb3a8a0363a2c6f3bdc7f442c7c2e",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.73.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 941384,
+    "sha256": "4191fc160941382bbceff6ab513bb32f28332afbc2c859a5f2898027537eea23",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.74.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.74.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 550512,
+    "sha256": "2485ddecc45ffdad494f999f00d3ca82d8490589be1cfc3b3cd33c0118ce0bf1",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.74.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 555728,
+    "sha256": "56232a9ad01c72e5114abe362ca46efdead433c6ecafd77de4bdb52f7f168d17",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.74.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 559256,
+    "sha256": "2aeb8fa97b1b34fa6a0ae0c3664288f6488ce81b156db41ef64d6a56f8db93ba",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.74.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 547360,
+    "sha256": "901b1c340f0d99d2c059d77f3fc28a6ee393563ea1ca6993b8ec0b3182a03f10",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.74.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 549232,
+    "sha256": "1fde6bb6293ea6d0eb6eb992854e37dc6addaae8c55c3af91113b67936e60678",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.74.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 548720,
+    "sha256": "e82b3bc76ccf7615c42706134d78b14ef4c89f62173bb9bf0a808e27fa9ced9a",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.75.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.75.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 403656,
+    "sha256": "9976ba6630e5b46f4ecd428b5ee916cf3d2f4221b01b1dbe7ef03aa3f3c4dc2d",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.75.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 404992,
+    "sha256": "94ef92cdd20f6431570170ae41c80b24ecb87221cca1e77b524fe025b5366e38",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.75.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 405408,
+    "sha256": "f5aa8f8c15cc481b0c4f9dd768e36beeff4d05de7767f3c933595b93678ae7f5",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.75.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 402784,
+    "sha256": "d739f0f1edc51250db435cc7357b7def6c330fd5dc965d8991694477c80262d9",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.75.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 402392,
+    "sha256": "54e7ee0a754d29370e5c4dffe2244ed53f58eab34469d5f55d99fb22488494aa",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.75.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 402680,
+    "sha256": "6e9059bf2ddce6e0a34877e927d00b62af1592f51867673d28098edc1893d38d",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.76.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.76.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 472512,
+    "sha256": "c117173df658e9aa77260e9f23ad8b2de2932b6e687d9655b4eff71c32496831",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.76.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 473704,
+    "sha256": "6666ffd61af7f9ccdcfd197ee919b82a869d926f4ad1bcdade16c8c94336cdfa",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.76.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 475664,
+    "sha256": "e5e7c3e93573f08393400e1a93fb96482f91d3d0c530d493abe2b0bcf3872a38",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.76.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 466256,
+    "sha256": "cd79ad258d38578a724d5f8d1e902f0b3df0a678f05470fa4c5fa3f581152c1d",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.76.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 468992,
+    "sha256": "d677b64d646c4bb5fa19843652a85a460577f7d8b8f7ddf848d8c7c6616b8cb3",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.76.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 464000,
+    "sha256": "24005bee26a82d9138b451331c94690bea1737dd47e5c4013eff5ddb9f444b51",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.77.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.77.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 417920,
+    "sha256": "941b7c95bccd914c8d2469212ace6b859b8927c7e3e56aab4e5ef4fb57afe7b7",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.77.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 421576,
+    "sha256": "a29d664706c6d3007aa6493386c58878a0e9024a920b36a9d159618363cef569",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.77.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 426224,
+    "sha256": "d773b425a427ac2a9528bb2fa1dd76e83533506df8ab7ed12e4d58cbcc441bf6",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.77.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 407248,
+    "sha256": "8bca2334b7a080eb64309c4fe4da24d778cf8c7bc44fa8fb795f0d991fd3a820",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.77.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 406400,
+    "sha256": "740c1cf2cfd45fb9160c60639e6c5f5bd37cd4b7d20f6d91e338ecbe80e210ff",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.77.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 407080,
+    "sha256": "ca9b16c2b95ea789443e21114a6c4ffbda46632c86637895fa3e00631a932d65",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.78.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.78.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 504136,
+    "sha256": "e77f58190b8189acb9eeaee6e37f2adde789c49ffec7d7f4d06facf49dba8538",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.78.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 505464,
+    "sha256": "b90dcbc4434de5f409be1e461c071d00e86238c43172a27491898f5efb820f18",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.78.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 509256,
+    "sha256": "8c203f81c706c024f810f97c249d7ff806239d9d3c14d60fcef9bc758a32c8ac",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.78.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 500344,
+    "sha256": "7a1784755a18fc741ed1ab15f1f1cb30b1a5a5b962e92ec748051c81f44837d0",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.78.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 499952,
+    "sha256": "6743bd178dcdbb5967b346234ee84281f1dba85c790112948f4af4049d55abf5",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.78.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 496640,
+    "sha256": "858f1cfce593bb45bb5d93409c063d38001b1de41af49e775d2246509b172325",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.79.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.79.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 432576,
+    "sha256": "f7a95c1260e551a641d501b9dc08b55b459c3d772d7ad607f5e038016ed8ca12",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.79.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 435000,
+    "sha256": "7bc7b67914f9a72451551490a094544bbe2eba348301676cdfe106bddd9cb28b",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.79.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 435592,
+    "sha256": "8446022682dadf8d7a33b6a46bb3de952a0ad1030f1e5796d64468c2c7531197",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.79.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 437184,
+    "sha256": "08aaffa5f526faae7e745ef0356e440e1758b8a41b77d42aeb375ed476b4b12e",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.79.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 436640,
+    "sha256": "d8f206f13550a80afe4135e823a1987ca1593e8acd3b17e7604185f23f8d43e8",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.79.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 436616,
+    "sha256": "faa3fd4d9112b1681a59f682820ccef7ee8acfc1d8adcd19158a5298f429cce9",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.80.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.80.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 1036576,
+    "sha256": "a9fceff22c349be35ef904e3b784a1c3a58051321510fc41d4176b952e31d5df",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.80.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 872504,
+    "sha256": "1ff3a9799dcfbc592bb1e4c7146c336295a8f600ff09542a34f007f9d23517c0",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.80.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 888952,
+    "sha256": "72813b325e540dbd9d9c911c41b6d50344b178a25cc636e51bfc921fb7db765b",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.80.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 616944,
+    "sha256": "6906851c0030de80f8cf10799dc3d5f602048637aaf66c804c41401f357cee6d",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.80.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 618064,
+    "sha256": "9e9704c938530187b5caeaadabc32c8e4abddab3ab5743fbb5b26571a5394f4e",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.80.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 610056,
+    "sha256": "e538a8160ee6546efa4606ff0ff638de99d400ed2e8776865147242f0afbe1d5",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.81.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.81.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 402248,
+    "sha256": "be10afd58a5af88b5d3a267d22194117687398a9ddbcab7c3925212bf928b8b9",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.81.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 652184,
+    "sha256": "11b8c2afc106f85aaaa98a66be773562767ae6d7ad2216c957c7f2afa59e3edc",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.81.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 402632,
+    "sha256": "d367d92563549ad18fcf80d07e3838374258afa1f178c16b4b389fc85f6515e1",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.81.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 401976,
+    "sha256": "7b53d622cad626b27e4518a0417c4b3c2dde3b6c47ec65fffcd238110ee1c75e",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.81.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 402048,
+    "sha256": "c19cf90915ae4bbbe6c6baefd378faab5de206f1f4ab16aa2c9027f339e60225",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.81.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 402016,
+    "sha256": "b904f7ee492c4c35eb0505a5d3389c3df7a9b9d873408c6c02f7c132b7b0dda7",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.82.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.82.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 423152,
+    "sha256": "8d539306a618b333588448a666ee8d0eb66d31a08a020ba0320114b4cdc1774f",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.82.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 941488,
+    "sha256": "93a4fc5d3ba7647da222bc2615a2a4a07f0252fe4f6460b3cb021d88f4b23d32",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.82.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 423944,
+    "sha256": "3a224284a364ba27f681d699b781b661accbeed0da2444cc2b891516e6f7921d",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.82.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 422424,
+    "sha256": "4e1c01c82a7f7f2e592844bc3d3c26a93331b55aa6a0bed614d9511e380ca308",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.82.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 422968,
+    "sha256": "377c1f55d85d3d2ef875caa6cacf04f79f0093a2637229185c7bf7101103899a",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.82.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 422984,
+    "sha256": "a6a70e5631841fece93907d15047d9e4d985d566706b068911787712507192da",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.83.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.83.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 400312,
+    "sha256": "07bd6093683d6a841aaeef06e69d922b762ee880ce441991a21d0a1cdac7c150",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.83.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 662112,
+    "sha256": "45eeae07a7dc6b59b5f0636bd4b41ff923e8f83d3385d62c7a1556dfe43d630b",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.83.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 400312,
+    "sha256": "0802909884964aa50b604bd61f7740f82fbe4a5ba686ab737097192e15a281f2",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.83.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 400056,
+    "sha256": "a9cbbe0dd30f480fd50da29297048c611bdf634beb47b9d9d9eb120945c36951",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.83.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 400056,
+    "sha256": "74bb9d9442aeaaa7c2b6757bccdab8e92d2d2897758cb4f63b508ef82a84033d",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.83.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 400056,
+    "sha256": "9daf6501cc57a47d2069596860c78fc463217ab933b8753551b83d19f34aae5a",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.84.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.84.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 413296,
+    "sha256": "9cdece766ffe18bdb456131f098401a411bad6906313da789f6bf362b38d1080",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.84.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 571976,
+    "sha256": "1d337f06b6877da79fdac4759a6e4b4c20e78ff258b5c8db47c154181cf9dc7d",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.84.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 413296,
+    "sha256": "65817511d9c200661756519cbfb68d07069969b5885d958c8445156e61fa9943",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.84.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 413040,
+    "sha256": "9ac1461ae8731dd0bd4dabbff483f9025ad453fe1c26113bb8bc112bb04296e6",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.84.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 413040,
+    "sha256": "6dc479cf9c12ff36bf2f13eacbc7e21de4bebe42547d0c64b54b7bd5dca9c4db",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.84.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 413040,
+    "sha256": "08702e77f37b60157642a7da456d6bbe26689d246f0d2187aec758a13587145c",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.85.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.85.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 5170824,
+    "sha256": "75a80a3120003d7c41114f99c96a2aa1847451bbcacaaf10f36cb6b42f5722e7",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.85.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 6606808,
+    "sha256": "356adf01a83f639caee692b742d16e96281e3713e007baf1aab663046389b1a4",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.85.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 6760704,
+    "sha256": "5b69bc2da781027d3f2b58cc9b714c9f40379c68d756b9613794c6566b92b8ca",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.85.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 612568,
+    "sha256": "e76bfbe30f88b97c564101a3af3bbc4467db5df412d3171ee199aaacdf65d8a7",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.85.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 612568,
+    "sha256": "a00b0094ae97c7818193ae13b8de3cbeea4d96a54001e2a4229c57dad2d0e07a",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.85.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 612568,
+    "sha256": "736c9fd3efcb27182b5a960b79ad5e3fa1f85d5b2e2eee0a591cdee99138eb05",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.86.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.86.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 38440896,
+    "sha256": "6b2aaedf99ca60531318d91c65ca4528868cc7b541d5a015f1f29e65617fb511",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.86.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 33536632,
+    "sha256": "53f795f7e5f7d9e436a2e3007a783a6a37117d8000132081f12bf8bc9c9819c3",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.86.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 39185640,
+    "sha256": "aedd415edefd923c7e515d0a9d550f7d312f54c6b1e73282dba4591ebd2383ce",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.86.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 682368,
+    "sha256": "0e5cfb77dc3153d75c535bac08c29945ed962c67a24f8125bacd5e55e3f60361",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.86.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 682368,
+    "sha256": "e00e2c6ace4442db965cb5acd70daf7625cb841b252c4cfab4051710a1a9c988",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.86.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 682368,
+    "sha256": "55fe0b9239836042151944c4ee7e6675c13f77dde6eb1346c9a69869efddfe6d",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.87.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.87.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 383104,
+    "sha256": "3c72a96e5ec29faf8a6cd37ab5c78248153f87c92cd3ef226928905e028c16bc",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.87.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 383536,
+    "sha256": "4b1765e2772b67dd12af87bcdcf568316b2b8b1b8e2cc3ff8c617c0d5ae43172",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.87.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 383648,
+    "sha256": "22e798601e5b781d182db385a03290822058a2e292b2c07fe26327b6b02b3f75",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.87.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 379808,
+    "sha256": "9c4a8afe0886bc9c4817e8c7371ecf3e7faaa14a832ef80e17c6411820e4b491",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.87.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 379808,
+    "sha256": "34f17553f9da15d3fe87a7a538de8098989cece2870e43562ccfe3b1e2c6e866",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.87.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 379808,
+    "sha256": "05c3f75eb534cf7354594077f90d8105e40f74f02640c15f41c4d2b625687d25",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.88.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.88.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 443976,
+    "sha256": "7851c2edbcb134aa34254110f920bdf57c552c34ba4ae5ced534af2ca01624bd",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.88.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 434720,
+    "sha256": "79c6720c65ef06aefbc80c1781bd1b14459edeb3b72bd487baaf6f012d6ddb71",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.88.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 434592,
+    "sha256": "f5ac7a1691b57b842f5e53ef0e115a32701678ad5398fed371e457038ae63a63",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.88.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 423784,
+    "sha256": "ce52b0117cb7351f709d5dc809f14d75dbbf3097625230fcbdf175398d87ef3b",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.88.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 423656,
+    "sha256": "cf856b90b54e778d12e1e46f8be6fa3e21844e7b75066ebb6330af70a5d2773f",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.88.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 423352,
+    "sha256": "cf447a2400b9b02e757f030dc956df97630939f1471066edabb5efebc267d3d4",
+    "arch": "gfx950"
+  },
+  {
+    "file": "_rocm_C.abi3.so.89.host-x86_64-unknown-linux-gnu-",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch": "host"
+  },
+  {
+    "file": "_rocm_C.abi3.so.89.hipv4-amdgcn-amd-amdhsa--gfx1030",
+    "bytes": 489400,
+    "sha256": "5cb1d48c58056b05a15f12a7c2285cdb6abbec7d03bd21e3cd16ce1e4e68fb7c",
+    "arch": "gfx1030"
+  },
+  {
+    "file": "_rocm_C.abi3.so.89.hipv4-amdgcn-amd-amdhsa--gfx1100",
+    "bytes": 493888,
+    "sha256": "2c131d32562e6b5b8e58a09ef027d0d06c1ba827ef74300ac30f5e1e0ac25f82",
+    "arch": "gfx1100"
+  },
+  {
+    "file": "_rocm_C.abi3.so.89.hipv4-amdgcn-amd-amdhsa--gfx1200",
+    "bytes": 493960,
+    "sha256": "db72881ac94ffcb26b3fe2ffe613db50f26451f35404afd1309ba678cc3565e5",
+    "arch": "gfx1200"
+  },
+  {
+    "file": "_rocm_C.abi3.so.89.hipv4-amdgcn-amd-amdhsa--gfx90a",
+    "bytes": 497104,
+    "sha256": "ea69b0fa217a5da3878a9141ee7f2426f891914eb678ee80bcbb6a7ccd6d7b55",
+    "arch": "gfx90a"
+  },
+  {
+    "file": "_rocm_C.abi3.so.89.hipv4-amdgcn-amd-amdhsa--gfx942",
+    "bytes": 495240,
+    "sha256": "257baddd5af3199e46649bd9cb184fe4fb220805bd9bebf662cb9a720a0a47b5",
+    "arch": "gfx942"
+  },
+  {
+    "file": "_rocm_C.abi3.so.89.hipv4-amdgcn-amd-amdhsa--gfx950",
+    "bytes": 495264,
+    "sha256": "85da967f717addc6a4118d1fecff468653db8df8ecd3c15eb9782b0f206e8366",
+    "arch": "gfx950"
+  }
+]

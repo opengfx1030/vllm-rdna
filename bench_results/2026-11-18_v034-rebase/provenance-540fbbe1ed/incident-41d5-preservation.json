@@ -1,0 +1,69 @@
+{
+ "schema": "v034-incident/1",
+ "incident": "attested_41d5_full_binary_lost_after_copy",
+ "expected_artifact": {
+  "sha256": "41d5030b7791caf573d45df538ab3a9772bae533d572dc82416455dd2c977f6c",
+  "bytes": 201771832,
+  "source_commit": "93d737878644180147f44d001fa00ceb2bde8f2e",
+  "kind": "r3 GPU-tested patched-working-tree binary"
+ },
+ "cause": "An in-place objcopy --dump-section (no output file) rewrote the preserved copy while extracting section dumps. The original full 41d5 bytes were no longer available after the subsequent committed-source build overwrote tree.",
+ "current_copy": {
+  "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/_rocm_C.abi3.so",
+  "sha256": "519138997d2096983de91a0245819a6a55b22a6790d3344a421eb036402a51b7",
+  "bytes": 201752568
+ },
+ "current_copy_note": "Full-file hash is 51913899..., not 41d5. Code-section dumps (text/rodata/hip_fatbin) retained; do not claim full-file equivalence.",
+ "recovery_attempt": {
+  "build_log": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/recover-41d5.log",
+   "sha256": "06b4d5d3425f75ff9dcf05666106716ceebdd93bbef5107418b7e38f9d901705",
+   "bytes": 68274
+  },
+  "artifact": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/recovered-41d5/_rocm_C.abi3.so",
+   "sha256": "635b52f57a878fbbffa0b7cb1d61f46dfdbc1e089e6a69763591c10b22376409",
+   "bytes": 201772096
+  },
+  "result": "635b52f57a878fbbffa0b7cb1d61f46dfdbc1e089e6a69763591c10b22376409; not 41d5"
+ },
+ "search": "No exact-size 201771832-byte copy found under /home/chenco_adm; parent has no known extra copy.",
+ "historical_r3": {
+  "operator_receipt": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/operator-r3-receipt.json",
+   "sha256": "2d532f0a8e32e0a6764d8ad81a02a2b508d12965b09ec9d2eb4f648fe5d9714e",
+   "bytes": 2831
+  },
+  "runtime_receipt": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/runtime-r3/receipt.json",
+   "sha256": "f44760fd6bef1f4e6e5f2e118da49466c108fe245df1fd4220d1e87c4d047e46",
+   "bytes": 5490
+  },
+  "operator_r3_junit": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/operator-r3-junit.xml",
+   "sha256": "28eadf7de725dcdd7565dd86de20731aa5d5be94d0b92f59d11797648f82036b",
+   "bytes": 68222
+  },
+  "note": "Receipts remain unchanged and still reference 41d5; the binary they qualify is no longer available in full."
+ },
+ "static_reference": {
+  "text_dump": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/text.bin",
+   "sha256": "788c86c07a69d1323eef6b5967f3ada5d44d81f75a51a611a41af8275b84b516",
+   "bytes": 7282644
+  },
+  "rodata_dump": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/rodata.bin",
+   "sha256": "2a47c0bde7bff4d7675fa69f4b07f07a91dce97c4e5c596a7eca998681eadb70",
+   "bytes": 1219808
+  },
+  "hip_fatbin_dump": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/hip_fatbin.bin",
+   "sha256": "cee45cd824b2a7e83e07d2a435a970b4fef671a435f30d3e10811cee4fc09d34",
+   "bytes": 123211446
+  },
+  "read_only_extraction": "roc-obj-ls/llvm-objdump/clang-offload-bundler could not enumerate the CCOB fatbin read-only; no gfx1030 normalized instruction comparison claimed."
+ },
+ "documented_at": "2026-11-19",
+ "do_not": "Do not spend hours blind-rebuilding; do not claim the full preserved artifact is 41d5; do not claim new binary GPU equivalence."
+}

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
@@ -198,6 +199,41 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+@functools.cache
+def _rdna_gemv_available() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx10x
+
+    return on_gfx10x() and hasattr(torch.ops._rocm_C, "gemv_f16_rdna2")
+
+
+def compressor_score_mm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """fp32 compressor scores ``x @ weight.T``.
+
+    On gfx1030 decode batches use the RDNA2 fp16 GEMV and upcast: rocBLAS'
+    fp16 -> fp32-out path costs ~0.2 ms per call there regardless of size
+    (0.035 ms with the GEMV), and DeepSeek-V4 makes ~60 such calls per step.
+    """
+    if (
+        x.dtype == torch.float16
+        and weight.dtype == torch.float16
+        and 0 < x.shape[0] <= 8
+        and weight.is_contiguous()
+        and _rdna_gemv_available()
+    ):
+        return torch.ops._rocm_C.gemv_f16_rdna2(x.contiguous(), weight, None).float()
+    return torch.mm(x, weight.T, out_dtype=torch.float32)
+
+
+class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
+    """Fused ``wkv``/``wgate`` projection with the FP32 output the compressor
+    state accumulates in."""
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        return compressor_score_mm(input_, self.weight)
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4 KV/score compressor.
 
@@ -277,7 +313,14 @@ class DeepseekCompressor(nn.Module):
             requires_grad=False,
         )
 
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        # CPU packs the weight for its GEMM and frees the raw copy, so it keeps
+        # the quant-method forward and upcasts the BF16 output itself.
+        kv_score_linear = (
+            MergedColumnParallelLinear
+            if current_platform.is_cpu()
+            else DeepseekV4CompressorKVScoreLinear
+        )
+        self.fused_wkv_wgate = kv_score_linear(
             self.hidden_size,
             [self.coff * self.head_dim, self.coff * self.head_dim],
             bias=False,

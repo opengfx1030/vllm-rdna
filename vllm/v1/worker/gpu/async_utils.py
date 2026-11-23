@@ -10,6 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.platforms import current_platform
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     KVConnectorOutput,
@@ -32,6 +33,31 @@ class StepTimingSample:
     num_target_tokens: int
     num_reqs: int
     full_cudagraph: bool
+
+
+def sum_nans_per_request(
+    num_nans: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    num_reqs: int,
+) -> torch.Tensor:
+    """Reduce per-logit-row NaN counts to per-request totals.
+
+    Speculative decoding emits one logit row per verification token plus one
+    bonus row per request, while ``num_nans_in_logits`` is reported per
+    request. Every row, including the late verification and bonus rows, must
+    be attributed to its request; a row-layout mismatch fails closed instead
+    of producing an empty, successful diagnostics dict.
+    """
+    if num_nans.shape[0] != expanded_idx_mapping.shape[0]:
+        raise ValueError(
+            f"Expected {expanded_idx_mapping.shape[0]} NaN logit rows, "
+            f"got {num_nans.shape[0]}"
+        )
+    num_nans_per_req = torch.zeros(
+        num_reqs, dtype=num_nans.dtype, device=num_nans.device
+    )
+    num_nans_per_req.index_add_(0, expanded_idx_mapping, num_nans)
+    return num_nans_per_req
 
 
 def _timing_event() -> torch.cuda.Event:
@@ -137,6 +163,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self._mtp_fault_cpu: torch.Tensor | None = None
         self._mtp_fault_gpu: torch.Tensor | None = None
         self._mtp_fault_event: torch.cuda.Event | None = None
+        self._has_fault_gpu: torch.Tensor | None = None
+        if check_ep_fault:
+            # Computed on the main stream: the copy stream only carries copies.
+            self._has_fault_gpu = get_ep_all2all_manager().query_fault()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -169,9 +199,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
                     num_sampled=self.num_sampled_tokens_np,
                     num_rejected=async_copy_to_np(sampler_output.num_rejected),
                 )
-            if check_ep_fault:
-                has_fault = get_ep_all2all_manager().query_fault()
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
+            if self._has_fault_gpu is not None:
+                self._has_fault = self._has_fault_gpu.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
     def enqueue_mtp_fault(
@@ -298,6 +327,19 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True, copy=True).numpy()
+
+
+def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Stream:
+    """Create a stream for non_blocking D2H copies.
+
+    It must only carry copies: compute anything it copies on the producer stream
+    first (see `conf_compute_utils.new_external_d2h_stream()`).
+    """
+    if not current_platform.is_confidential_compute():
+        return torch.cuda.Stream(device)
+    from vllm.v1.conf_compute_utils import new_external_d2h_stream
+
+    return new_external_d2h_stream(device)
 
 
 @contextlib.contextmanager

@@ -35,7 +35,6 @@ def _config(knobs=None, tp=None):
         kernel_config=SimpleNamespace(monokernel=True),
         model_config=SimpleNamespace(architectures=[arch]),
         parallel_config=SimpleNamespace(pipeline_parallel_size=1),
-        use_v2_model_runner=True,
         additional_config=extra,
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
@@ -116,7 +115,9 @@ def test_expert_cache_refuses_w4a8_per_layer(deployment, monkeypatch):
     cfg = _config(knobs={"expert_cache_slots": 32})
     OPTS.assign(md.options(cfg))
     layer = _Layer(CompressedTensorsWNA16RDNA2MoEMethod(w4a8=True))
-    assert "VLLM_RDNA2_W4A8_SDOT4" in md.moe_refusal(layer)
+    reason = md.moe_refusal(layer)
+    assert reason is not None
+    assert "VLLM_RDNA2_W4A8_SDOT4" in reason
     with pytest.raises(ValueError, match=CACHE_REFUSAL):
         md.layer_hook(layer, cfg, "model.layers.3", True)
     assert not cfg.compilation_config.static_forward_context
@@ -150,6 +151,7 @@ def test_no_row_cap_reaches_the_w4a8_gate():
             }
         )
     )
+    assert o is not None
     caps = (o.k1_max_rows, o.k2_max_rows, o.mtp_k1_max_rows, o.mtp_k2_max_rows)
     assert max(*caps, o.gdn_max_rows) < gate
 

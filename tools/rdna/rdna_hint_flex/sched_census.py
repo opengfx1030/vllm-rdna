@@ -56,7 +56,6 @@ import collections
 import importlib.util
 import json
 import math
-import os
 import sys
 import time
 from dataclasses import dataclass
@@ -585,9 +584,12 @@ def fmt_hist(hist: dict, top: int = 0) -> str:
 def fmt_result(name: str, variant: str, res: dict, detail: bool) -> list[str]:
     agg = res["agg"]
     lines = [
-        f"== {name} [{variant}] steps={agg['steps']} "
-        f"prefill_steps={agg['prefill_steps']} "
-        f"tokens={agg['tokens']} max_M={agg['max_m']} preemptions={agg['preemptions']}"
+        (
+            f"== {name} [{variant}] steps={agg['steps']} "
+            f"prefill_steps={agg['prefill_steps']} "
+            f"tokens={agg['tokens']} max_M={agg['max_m']} "
+            f"preemptions={agg['preemptions']}"
+        )
     ]
     for seg in res["segments"]:
         ms = [s[0] for s in seg["steps"]]
@@ -673,8 +675,6 @@ def main() -> int:
     variants = [("mtp0", 0, 0)] + [
         (f"mtp{args.mtp}_acc{a}", args.mtp, int(a)) for a in args.accepted.split(",")
     ]
-    # The recipe serves with the V2 model runner; the scheduler reads this.
-    os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "1")
     init_none_hash(sha256)
     tokenizer = get_tokenizer(str(args.model), tokenizer_mode="auto")
     census: dict = {
@@ -727,10 +727,12 @@ def main() -> int:
     (args.out_dir / "census.json").write_text(json.dumps(census))
     lines = [
         f"config: {json.dumps(census['config'])}",
-        "checks asserted on every request of every run: prefix hit + sum(prefill "
-        "chunks) == prompt length; every prefill chunk ends on a 1024-token state "
-        "block boundary "
-        "or at prompt-1 (identical-resend replay stop) / the prompt end",
+        (
+            "checks asserted on every request of every run: prefix hit + sum(prefill "
+            "chunks) == prompt length; every prefill chunk ends on a 1024-token state "
+            "block boundary "
+            "or at prompt-1 (identical-resend replay stop) / the prompt end"
+        ),
         "",
     ]
     for name, per_cell in census["cells_prompts"].items():

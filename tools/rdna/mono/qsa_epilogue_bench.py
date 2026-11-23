@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """QSA indexer epilogue after the qk projection, timed in a CUDA graph:
 
   A  norm_rope(q) + qsa_compress_groups + norm_rope_store3   (--monokernel now)
@@ -41,14 +44,14 @@ def graph_us(fn, calls=100, reps=20):
         for _ in range(calls):
             fn()
     g.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     best = float("inf")
     for _ in range(reps):
         e0, e1 = torch.cuda.Event(True), torch.cuda.Event(True)
         e0.record()
         g.replay()
         e1.record()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         best = min(best, e0.elapsed_time(e1) * 1e3 / calls)
     return best
 
@@ -62,7 +65,7 @@ def main():
     from vllm.model_executor.layers.rotary_embedding import get_rope
     from vllm.models.qwen4_exp.amd.mono.rdna2 import qsa as MQ
     from vllm.models.qwen4_exp.amd.ops import qsa as Q
-    from vllm.models.qwen4_exp.common.qsa_cache import canonical_qsa_rope_positions
+    from vllm.models.qwen4_exp.common.qsa_indexer import canonical_qsa_rope_positions
 
     dev = torch.device("cuda")
     with set_current_vllm_config(VllmConfig()):

@@ -1,0 +1,47 @@
+/home/chenco_adm/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/lib64/python3.12/site-packages/pytest_asyncio/plugin.py:306: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session". Set it to "fixture-scope" to keep the current behavior.
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[False-0]
+tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[False-1000003]
+tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[True-0]
+tests/v1/worker/test_sample_ops_rdna2.py::test_gumbel_sample_logits_cache[True-1000003]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-0-2-dtype2]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-1-2-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-1-2-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-1-2-dtype2]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-3-4-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-3-4-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[4096-3-4-dtype2]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-0-2-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-0-2-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-0-2-dtype2]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-1-2-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-1-2-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-1-2-dtype2]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-3-4-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-3-4-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[2624-3-4-dtype2]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-0-2-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-0-2-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-0-2-dtype2]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-1-2-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-1-2-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-1-2-dtype2]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-3-4-dtype0]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-3-4-dtype1]
+tests/v1/worker/test_spec_decode_ops_rdna2.py::test_update_draft_inputs_parity[255-3-4-dtype2]
+
+=============================== warnings summary ===============================
+../../../Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/lib64/python3.12/site-packages/torch/jit/_script.py:365: 14 warnings
+  /home/chenco_adm/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/lib64/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+../../../../../usr/lib64/python3.12/multiprocessing/popen_fork.py:66
+  /usr/lib64/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=1808952) is multi-threaded, use of fork() may lead to deadlocks in the child.
+    self.pid = os.fork()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+31 tests collected in 1.43s

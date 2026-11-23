@@ -720,6 +720,32 @@ def _run_quiet(tmp_path: Path, body: str, **env: str) -> list[str]:
     return res.stdout.splitlines()
 
 
+def test_quiet_lock_timeout_does_not_start_measurement(tmp_path: Path):
+    lines = _run_quiet(
+        tmp_path,
+        """
+flock() { return 1; }
+date() {
+    if [[ -e "$QUIET_DIR/clock-advanced" ]]; then
+        echo 2
+    else
+        touch "$QUIET_DIR/clock-advanced"
+        echo 0
+    fi
+}
+BOOT_LOCK=held QUIET_LOCK_WAIT=1
+(
+    quiet_lock_wait
+    echo MEASUREMENT_STARTED
+)
+echo "lock_wait_exit=$?"
+""",
+    )
+    exit_line = next(line for line in lines if line.startswith("lock_wait_exit="))
+    assert int(exit_line.split("=", 1)[1]) != 0
+    assert "MEASUREMENT_STARTED" not in lines
+
+
 @pytest.mark.skipif(not LINUX, reason="flock and GNU stat")
 def test_quiet_begin_waits_for_a_boot_keeps_the_file_fresh_and_end_removes_it(
     tmp_path: Path,

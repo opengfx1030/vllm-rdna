@@ -1,0 +1,40 @@
+{
+  "recipe": "flashnext-mtp2",
+  "out": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/canary-540fbbe1ed/runtime-r1/flashnext-mtp2",
+  "passed": true,
+  "ppl": 4.83,
+  "ppl_bound": 5.0,
+  "prefix": {
+    "speedup": 1.86,
+    "hits": 1024,
+    "hit_rate_pct": 53.1
+  },
+  "cells": {
+    "bench-1024x512-c1": {
+      "in": 1024,
+      "out": 512,
+      "concurrency": 1,
+      "requests": 2,
+      "output_tps": 78.04650821607021,
+      "ttft_ms": 392.48218848661054,
+      "tpot_ms": 12.068382439346175
+    },
+    "bench-1024x512-c8": {
+      "in": 1024,
+      "out": 512,
+      "concurrency": 8,
+      "requests": 8,
+      "output_tps": 262.7201044988564,
+      "ttft_ms": 2011.3091966195498,
+      "tpot_ms": 24.159325898239715
+    }
+  },
+  "failures": [],
+  "measurement_claim": "bounded smoke/timing receipt only: PPL bounds are corruption gates, one boot per recipe, no baseline parity or performance-improvement claim",
+  "driver_exit": 0,
+  "new_dmesg_lines": 13,
+  "new_kernel_faults": [],
+  "aer_jumps": {},
+  "aer_unverified": [],
+  "all_run_new_faults": []
+}

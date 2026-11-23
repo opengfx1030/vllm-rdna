@@ -1,0 +1,370 @@
+{
+ "schema": "v034-r3-attestation/1",
+ "source_commit": "93d737878644180147f44d001fa00ceb2bde8f2e",
+ "base_native_source_commit": "6333bc722e7ecb29bc0bd72bda9fccfbcdc80bf5",
+ "source_patch_sha256": "79583684dd9a0519a393d00d529f370cc0d9e849d2021f63828b9d14c4733449",
+ "actual_artifact": {
+  "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_rocm_C.abi3.so",
+  "sha256": "41d5030b7791caf573d45df538ab3a9772bae533d572dc82416455dd2c977f6c",
+  "bytes": 201771832
+ },
+ "native_receipt": {
+  "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/native-receipt-93d737878644.json",
+  "sha256": "42e94b2499d4dcfa6e48e90572a8640fb5266446e40f883e36adc06ee8b0fbeb"
+ },
+ "gates": {
+  "operator": {
+   "current": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034_operator_gate.py",
+   "current_sha256": "3384d048f592e13e7f3e7c7536e5f87cad9e2f1933ff1969fa630b741af86fb5",
+   "previous_sha256": "5ad0893c40a07889839d5eaa83891a2e548d488b3cb0cebd3ac93424a731b335"
+  },
+  "runtime": {
+   "current": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/v034_runtime_gate.py",
+   "current_sha256": "4e86aab49edbd610fc35bc02d0557a72c848d6148b580ba26a36d41c0f866e26",
+   "previous_sha256": "51e30e02495bb41f23a9bda3b4dfe9732f7ae29dceefc5fa04d7a2efc93a8e84"
+  }
+ },
+ "native_guard_selftest": {
+  "operator_log": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/native-guard-selftest-operator-93d737-final.log",
+   "sha256": "d40d433a36ead7151bdfde917d9ef38dc98f6cfbd599effbffb03df0c4a05f68",
+   "bytes": 1019
+  },
+  "runtime_log": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/native-guard-selftest-runtime-93d737-final.log",
+   "sha256": "48e5331a24283c079be626c4616c1f553946ddbe2de56695256b9c6849b3c159",
+   "bytes": 1019
+  },
+  "negative_cases": 5,
+  "positive_actual_artifact": true
+ },
+ "gate_selftest": {
+  "operator_log": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/gate-selftest-operator-20261119-final.log",
+   "sha256": "95ded017d969a0b4bf495c2e6102235768f820972f802dc872b4beebb939ac4a",
+   "bytes": 741
+  },
+  "runtime_log": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/gate-selftest-runtime-20261119-final.log",
+   "sha256": "2a6c75417308bdb208d96125f0bf94b34fb605f89c2220b0976cf22b49e65cc7",
+   "bytes": 2764
+  }
+ },
+ "r3": {
+  "operator": {
+   "receipt": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/operator-r3-receipt.json",
+   "receipt_sha256": "2d532f0a8e32e0a6764d8ad81a02a2b508d12965b09ec9d2eb4f648fe5d9714e",
+   "junit": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/operator-r3-junit.xml",
+   "junit_sha256": "28eadf7de725dcdd7565dd86de20731aa5d5be94d0b92f59d11797648f82036b",
+   "raw_counts": {
+    "total": 504,
+    "passed": 504,
+    "failed": 0,
+    "skipped": 0
+   },
+   "passed": true,
+   "pytest_exit": 0,
+   "max_junction_c": {
+    "d9": 35.0,
+    "dc": 32.0,
+    "df": 33.0,
+    "e2": 32.0
+   },
+   "new_fault_lines": []
+  },
+  "runtime": {
+   "receipt": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/runtime-r3/receipt.json",
+   "receipt_sha256": "f44760fd6bef1f4e6e5f2e118da49466c108fe245df1fd4220d1e87c4d047e46",
+   "passed": true,
+   "recipes": {
+    "flashnext-mtp2": {
+     "passed": true,
+     "driver_exit": 0
+    },
+    "27b-hi2-tp2-mtp2": {
+     "passed": true,
+     "driver_exit": 0
+    }
+   }
+  }
+ },
+ "note": "Historical r3 receipts are preserved unchanged and were NOT re-run under the repaired wrappers. Operator r3 raw JUnit is 504/504 passed (receipt passed=true, pytest_exit=0, no new fault lines); runtime r3 passed both recipes. This sidecar links the historical receipts to the current patched source and actual binary. Current wrappers hash the actual tree artifact; CPU positive/negative and pause/missing-native fail-closed proofs pass. A committed-SHA native receipt is still required after parent integration.",
+ "failclosed": {
+  "pause_marker": {
+   "operator_log": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/guard-failclosed-20261119/operator-pause-blocked.log",
+    "sha256": "fb35ab1291f3a32ff58b1968b8e2677d0cd3067313abf392569f79300f6c7b41",
+    "bytes": 53
+   },
+   "runtime_log": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/guard-failclosed-20261119/runtime-pause-blocked.log",
+    "sha256": "fb35ab1291f3a32ff58b1968b8e2677d0cd3067313abf392569f79300f6c7b41",
+    "bytes": 53
+   },
+   "operator_exit": 1,
+   "runtime_exit": 1,
+   "note": "Temporary root with GPU_PAUSED; actual root marker absent; both wrappers refused before lease/GPU."
+  },
+  "missing_native": {
+   "operator_log": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/guard-failclosed-20261119/v034_operator_gate-missing-native.log",
+    "sha256": "4d5d056e521cad57013f5ea4914e72ebbab0dde25bbea666bca542c2eac3c2e3",
+    "bytes": 126
+   },
+   "runtime_log": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/guard-failclosed-20261119/v034_runtime_gate-missing-native.log",
+    "sha256": "4d5d056e521cad57013f5ea4914e72ebbab0dde25bbea666bca542c2eac3c2e3",
+    "bytes": 126
+   },
+   "operator_exit": 1,
+   "runtime_exit": 1,
+   "note": "Valid CPU prerequisite but nonexistent native receipt; both wrappers refused before lease/GPU."
+  }
+ },
+ "pause_supersession": {
+  "active_marker": false,
+  "old_proof": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/gpu-pause-proof.json",
+   "sha256": "178f306b5b853e1f55e6c8bc821f34adee6b9b2cbc0337598c44ef4f58dd4a9a",
+   "bytes": 495
+  },
+  "backup_dir": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/pause-supersession-20261119T011532",
+  "backup_receipt": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/pause-supersession-20261119T011532/receipt.json",
+   "sha256": "b3d056fd36f16f7655d360c106f31e431df3b51cc2916995cd8b40b90c15956b",
+   "bytes": 436
+  },
+  "backup_sha256": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/pause-supersession-20261119T011532/backup.sha256",
+   "sha256": "3ac5e038932b9f5dd42b0d1984606321f52abb41183d2da8383923a0e477a4be",
+   "bytes": 264
+  },
+  "note": "User resumed work; old GPU_PAUSED marker/proof preserved with dated backup. Fail-closed behavior re-proved on a temporary root without altering the real marker."
+ },
+ "attested_binary": {
+  "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/_rocm_C.abi3.so",
+  "sha256": "519138997d2096983de91a0245819a6a55b22a6790d3344a421eb036402a51b7",
+  "bytes": 201752568,
+  "attestation": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/attestation.json",
+  "attestation_sha256": "7e3ae5931f57f5110921ec306ab59d5d42325c09d7d74f0f533ebfcb1b68e715",
+  "note": "Preserved r3 GPU-tested patched-working-tree binary; immutable reference for comparison with the committed-source build.",
+  "native_receipt_copy": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/native-receipt-93d737878644.json",
+  "native_receipt_copy_sha256": "42e94b2499d4dcfa6e48e90572a8640fb5266446e40f883e36adc06ee8b0fbeb",
+  "sections": {
+   "text": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/text.bin",
+    "sha256": "788c86c07a69d1323eef6b5967f3ada5d44d81f75a51a611a41af8275b84b516",
+    "bytes": 7282644
+   },
+   "rodata": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/rodata.bin",
+    "sha256": "2a47c0bde7bff4d7675fa69f4b07f07a91dce97c4e5c596a7eca998681eadb70",
+    "bytes": 1219808
+   },
+   "hip_fatbin": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/attested-41d5/sections/hip_fatbin.bin",
+    "sha256": "cee45cd824b2a7e83e07d2a435a970b4fef671a435f30d3e10811cee4fc09d34",
+    "bytes": 123211446
+   }
+  },
+  "expected_sha256": "41d5030b7791caf573d45df538ab3a9772bae533d572dc82416455dd2c977f6c",
+  "expected_bytes": 201771832,
+  "integrity_mismatch": true,
+  "integrity_note": "An in-place objcopy --dump-section rewrote the preserved full file after its initial 41d5 copy. Current full hash is 51913899..., not 41d5; original full 41d5 is not available. Section dumps were retained; a recovery rebuild from pre-format sources gave 635b52f5..., not 41d5. Historical r3 receipts still reference 41d5.",
+  "recovery_attempt": {
+   "build_log": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/recover-41d5.log",
+    "sha256": "06b4d5d3425f75ff9dcf05666106716ceebdd93bbef5107418b7e38f9d901705",
+    "bytes": 68274
+   },
+   "binary": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/recovered-41d5/_rocm_C.abi3.so",
+    "sha256": "635b52f57a878fbbffa0b7cb1d61f46dfdbc1e089e6a69763591c10b22376409",
+    "bytes": 201772096
+   },
+   "result": "not 41d5"
+  }
+ },
+ "committed_build": {
+  "status": "cpu_built_not_gpu_qualified",
+  "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+  "artifact": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/vllm/_rocm_C.abi3.so",
+   "sha256": "579d8ca2db1539e9ffea69409d9454731057675e9e7947ff02c1bd63823e3042",
+   "bytes": 201767808
+  },
+  "native_receipt": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/native-receipt-540fbbe1ed.json",
+   "sha256": "476d7c12300a0e35eb0889545aa9a96c2183f13b33bb901bcfc24eb5499d00c5",
+   "bytes": 6687
+  },
+  "imports_receipt": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/native-imports-540fbbe.json",
+   "sha256": "0ace849eb35d9edf99396d531066b190981bc1241a41455695cb2c15397527b7",
+   "bytes": 2229
+  },
+  "modules": 7,
+  "rocm_schema_count": 186,
+  "architectures": [
+   "gfx90a",
+   "gfx942",
+   "gfx950",
+   "gfx1030",
+   "gfx1100",
+   "gfx1200"
+  ],
+  "architectures_evidence": "six --offload-arch flags in build.ninja; CCOB fatbin target IDs not independently enumerated",
+  "build_rc": 0,
+  "build_kind": "committed-source-incremental-sixarch-rocm_C",
+  "build_log": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/cmake-build-rocm_C-540fbbe1ed.log",
+   "sha256": "f302cac860ad602d8b73877a3e0b93ed961cf8f158e49baea56fa042e270e85b",
+   "bytes": 68478
+  },
+  "native_guard_operator": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/native-guard-selftest-operator-540fbbe-final.log",
+   "sha256": "0acb5f649a2696b6b14e2de688c315b597a92b1cf34ea678aad25982ea47f101",
+   "bytes": 1019
+  },
+  "native_guard_runtime": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/native-guard-selftest-runtime-540fbbe-final.log",
+   "sha256": "3e5b799447358f1cd9c112a18e1f58ca856dfc1767ebae4bbaa2bc2834dd1237",
+   "bytes": 1019
+  },
+  "sections": {
+   "text": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/committed-540fbbe1ed/sections/text.bin",
+    "sha256": "699aece42ac83ea7df7dd7f7d34eea6689e80602463a97f13c4464665a2c646d",
+    "bytes": 7282644
+   },
+   "rodata": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/committed-540fbbe1ed/sections/rodata.bin",
+    "sha256": "2d9a7b843d34a25b5d17be3aecce7869d6b25c1891da4495fc3afc81f411d943",
+    "bytes": 1219808
+   },
+   "hip_fatbin": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/committed-540fbbe1ed/sections/hip_fatbin.bin",
+    "sha256": "fc2a22a2aa944817dd05c0bc2d8641c07539602eb2b70e4991de4b4a58ad9d56",
+    "bytes": 123207350
+   }
+  },
+  "sections_identical_to_preserved_reference": {
+   "text": false,
+   "rodata": false,
+   "hip_fatbin": false
+  },
+  "gpu_evidence": null,
+  "gpu_qualified": false,
+  "qualification": "CPU-only committed-source rebuild: actual hash/size, six configured arches, seven independently loaded extension modules, 186 ROCm schemas, strict actual-artifact negative guard. No b4 GPU run; no runtime or performance claim. .text/.rodata/.hip_fatbin are not section-identical to the preserved reference, so a narrow GPU proof is required before any runtime claim."
+ },
+ "pre_format_verified_sources": {
+  "csrc/rocm/ops.h": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/ops.h",
+   "sha256": "b82322d7e9559f10154f6e71dfeb7398b40b860640b9b2980e4ace1bac9002fb",
+   "bytes": 84297
+  },
+  "csrc/rocm/torch_bindings.cpp": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/torch_bindings.cpp",
+   "sha256": "c5e3dae617c3808344af59938836945533e3f150fe736037fef0dea66d51d1d5",
+   "bytes": 73395
+  },
+  "csrc/rocm/v1_sample_rdna2.cu": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/v1_sample_rdna2.cu",
+   "sha256": "d0daeba73553f69faef31998d23ad295b5f83a219420adf697a7f7a7b8e7941c",
+   "bytes": 58328
+  },
+  "csrc/rocm/v1_spec_decode_rdna2.cu": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/v1_spec_decode_rdna2.cu",
+   "sha256": "21920349b625244f91f4e3731697e98d4a35e974f888d03e9bd9494182764256",
+   "bytes": 89538
+  },
+  "tests/v1/worker/test_sample_ops_rdna2.py": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_sample_ops_rdna2.py",
+   "sha256": "04270ae40166c5b26efe6cade9579872072fe41957af66b8086881d396ed8f1b",
+   "bytes": 49964
+  },
+  "tests/v1/worker/test_spec_decode_ops_rdna2.py": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_spec_decode_ops_rdna2.py",
+   "sha256": "9a5245500066463b0297c7dd7c7ffdf83daf2b420a8900ed58fc89d1a4a03f04",
+   "bytes": 52547
+  },
+  "tests/v1/worker/test_worker_ops_rdna2.py": {
+   "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_worker_ops_rdna2.py",
+   "sha256": "91fa064925b99988467ff647b936426be5f8f28a101fc0f31af997d82b92a02e",
+   "bytes": 19144
+  }
+ },
+ "committed_source": {
+  "source_commit": "540fbbe1ed84968b2f54a126bbacafa164f9c52d",
+  "short_sha": "540fbbe1ed",
+  "tree": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree",
+  "files": {
+   "csrc/rocm/ops.h": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/ops.h",
+    "sha256": "b82322d7e9559f10154f6e71dfeb7398b40b860640b9b2980e4ace1bac9002fb",
+    "bytes": 84297
+   },
+   "csrc/rocm/torch_bindings.cpp": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/torch_bindings.cpp",
+    "sha256": "c5e3dae617c3808344af59938836945533e3f150fe736037fef0dea66d51d1d5",
+    "bytes": 73395
+   },
+   "csrc/rocm/v1_sample_rdna2.cu": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/v1_sample_rdna2.cu",
+    "sha256": "d0daeba73553f69faef31998d23ad295b5f83a219420adf697a7f7a7b8e7941c",
+    "bytes": 58328
+   },
+   "csrc/rocm/v1_spec_decode_rdna2.cu": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/v1_spec_decode_rdna2.cu",
+    "sha256": "12685505175d39167348bf2db5d3c692abc126991585385ccd26d7479c8ab7b6",
+    "bytes": 89827
+   },
+   "tests/v1/worker/test_sample_ops_rdna2.py": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_sample_ops_rdna2.py",
+    "sha256": "be884bbf791b5192afdf081b56c1dba653085c7f4f7ea144a03557c98af81e1b",
+    "bytes": 49940
+   },
+   "tests/v1/worker/test_spec_decode_ops_rdna2.py": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_spec_decode_ops_rdna2.py",
+    "sha256": "9759f6c434b1c2ae45423b576f9f07ec3d2246cb4f8e5677569b28a5d34abae7",
+    "bytes": 52533
+   },
+   "tests/v1/worker/test_worker_ops_rdna2.py": {
+    "path": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_worker_ops_rdna2.py",
+    "sha256": "91fa064925b99988467ff647b936426be5f8f28a101fc0f31af997d82b92a02e",
+    "bytes": 19144
+   }
+  },
+  "source_before_commit": {
+   "csrc/rocm/ops.h": {
+    "backup": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/source-before-540fbbe1ed/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/ops.h",
+    "sha256": "b82322d7e9559f10154f6e71dfeb7398b40b860640b9b2980e4ace1bac9002fb"
+   },
+   "csrc/rocm/torch_bindings.cpp": {
+    "backup": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/source-before-540fbbe1ed/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/torch_bindings.cpp",
+    "sha256": "c5e3dae617c3808344af59938836945533e3f150fe736037fef0dea66d51d1d5"
+   },
+   "csrc/rocm/v1_sample_rdna2.cu": {
+    "backup": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/source-before-540fbbe1ed/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/v1_sample_rdna2.cu",
+    "sha256": "d0daeba73553f69faef31998d23ad295b5f83a219420adf697a7f7a7b8e7941c"
+   },
+   "csrc/rocm/v1_spec_decode_rdna2.cu": {
+    "backup": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/source-before-540fbbe1ed/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/csrc/rocm/v1_spec_decode_rdna2.cu",
+    "sha256": "21920349b625244f91f4e3731697e98d4a35e974f888d03e9bd9494182764256"
+   },
+   "tests/v1/worker/test_sample_ops_rdna2.py": {
+    "backup": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/source-before-540fbbe1ed/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_sample_ops_rdna2.py",
+    "sha256": "04270ae40166c5b26efe6cade9579872072fe41957af66b8086881d396ed8f1b"
+   },
+   "tests/v1/worker/test_spec_decode_ops_rdna2.py": {
+    "backup": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/source-before-540fbbe1ed/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_spec_decode_ops_rdna2.py",
+    "sha256": "9a5245500066463b0297c7dd7c7ffdf83daf2b420a8900ed58fc89d1a4a03f04"
+   },
+   "tests/v1/worker/test_worker_ops_rdna2.py": {
+    "backup": "/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/source-patch-93d737/source-before-540fbbe1ed/home/chenco_adm/w4a8_runs/v034-rebase-1e1cac5340/tree/tests/v1/worker/test_worker_ops_rdna2.py",
+    "sha256": "91fa064925b99988467ff647b936426be5f8f28a101fc0f31af997d82b92a02e"
+   }
+  },
+  "note": "Exactly seven committed files synced to the tree; old pre-commit sources preserved under source-before-540fbbe1ed. Format-only reflow confirmed for the spec-decode translation unit and tests by AST/visual diff; hook checks passed by parent."
+ }
+}

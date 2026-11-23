@@ -1,0 +1,13 @@
+{
+  "recipe": "flashnext-mtp2",
+  "driver_exit": 0,
+  "monitor_failure": null,
+  "server_cleanup": "server cmdline does not match this tree; left alone",
+  "max_junction_c": {
+    "d9": 66.0,
+    "dc": 64.0,
+    "df": 66.0,
+    "e2": 66.0
+  },
+  "samples": 421
+}
