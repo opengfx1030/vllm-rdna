@@ -78,7 +78,12 @@ fail on `f34d6cf6bc`):
    made it resolve the *physical* six cards while the server saw two); it runs with
    `HIP_VISIBLE_DEVICES` as the only filter and refuses an environment that still
    carries `ROCR_VISIBLE_DEVICES`/`CUDA_VISIBLE_DEVICES` or a process that sees
-   more/fewer devices than the slot.  The recipe now defaults to the a2 pair
+   more/fewer devices than the slot.  On the box's torch 2.12+rocm7.14,
+   `torch.accelerator.device_count()` returns 0 (even with the accelerator
+   available) until the accelerator is initialized, so the enumeration calls
+   `torch.cuda.init()` first — with `HIP_VISIBLE_DEVICES` as the only filter this
+   initializes exactly the slot's cards (observed: `0xd1`/`0xd4` for a2).  The recipe
+   now defaults to the a2 pair
    (`HIP_VISIBLE_DEVICES=0,1`; the stock recipe's example was the retired b4 pair).
 3. **P3 boot lock and window validity.** `serve.sh` holds `flock boot.lock` until
    the server answers `/health` (the old `flock -w 900 true` released it before the

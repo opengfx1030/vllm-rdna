@@ -196,6 +196,10 @@ def visible_table() -> dict[int, tuple[str, str]]:
         import torch
         import torch.accelerator
 
+        # torch 2.12+rocm7.14 reports 0 devices from accelerator.device_count()
+        # until the cuda accelerator is initialized (even with is_available()
+        # True).  init() only sees the devices HIP_VISIBLE_DEVICES allows.
+        torch.cuda.init()
         return {
             index: (
                 normalise_bus(torch.cuda.get_device_properties(index).pci_bus_id),

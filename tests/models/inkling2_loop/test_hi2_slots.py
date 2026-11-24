@@ -100,7 +100,9 @@ def test_the_live_check_uses_only_the_server_environment(monkeypatch):
     with pytest.raises(slot.SlotError, match="unset CUDA_VISIBLE_DEVICES"):
         slot.visible_table()
     assert "os.environ.pop" not in _read("slot.py")
-    assert "torch.cuda.init" not in _read("slot.py")
+    slot_source = _read("slot.py")
+    assert "torch.cuda.init()" in slot_source  # count is 0 until init on 2.12+rocm
+    assert "accelerator.device_count()" in slot_source
 
 
 def test_the_launchers_unset_the_other_visibility_vars():
