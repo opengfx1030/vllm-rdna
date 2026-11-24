@@ -152,15 +152,46 @@ __device__ __forceinline__ void load8(const float* p, float* f) {
   f[7] = b.w;
 }
 
+  #if defined(__HIP__RDNA2__)
+template <int O>
+__device__ __forceinline__ float dspark_xor_lane(float v) {
+  const int x = __float_as_int(v);
+  int r;
+  if constexpr (O == 16)
+    r = __builtin_amdgcn_permlanex16(x, x, 0x76543210u, 0xfedcba98u, false,
+                                     false);
+  else if constexpr (O == 8)
+    r = __builtin_amdgcn_update_dpp(x, x, 0x168, 0xF, 0xF, false);
+  else if constexpr (O == 4)
+    r = __builtin_amdgcn_update_dpp(x, x, 0x164, 0xF, 0xF, false);
+  else if constexpr (O == 2)
+    r = __builtin_amdgcn_update_dpp(x, x, 0x4E, 0xF, 0xF, false);
+  else
+    r = __builtin_amdgcn_update_dpp(x, x, 0xB1, 0xF, 0xF, false);
+  return __int_as_float(r);
+}
+  #else
+template <int O>
+__device__ __forceinline__ float dspark_xor_lane(float v) {
+  return __shfl_xor(v, O);
+}
+  #endif
+
 __device__ __forceinline__ float warp_sum(float v) {
-  #pragma unroll
-  for (int m = 16; m >= 1; m >>= 1) v += __shfl_xor(v, m);
+  v += dspark_xor_lane<16>(v);
+  v += dspark_xor_lane<8>(v);
+  v += dspark_xor_lane<4>(v);
+  v += dspark_xor_lane<2>(v);
+  v += dspark_xor_lane<1>(v);
   return v;
 }
 
 __device__ __forceinline__ float warp_max(float v) {
-  #pragma unroll
-  for (int m = 16; m >= 1; m >>= 1) v = fmaxf(v, __shfl_xor(v, m));
+  v = fmaxf(v, dspark_xor_lane<16>(v));
+  v = fmaxf(v, dspark_xor_lane<8>(v));
+  v = fmaxf(v, dspark_xor_lane<4>(v));
+  v = fmaxf(v, dspark_xor_lane<2>(v));
+  v = fmaxf(v, dspark_xor_lane<1>(v));
   return v;
 }
 
@@ -651,13 +682,19 @@ __global__ __launch_bounds__(256) void attn_split_kernel(
     long long bt_stride, const int* __restrict__ seq_lens,
     float* __restrict__ part, int kv_heads, int window, int splits,
     float scale_log2) {
-  __shared__ __align__(16) __half qs[kNumQ][kHead];
+  // Pad row stride by 8 halfs (16B) to avoid LDS bank conflicts while keeping
+  // 16B alignment. Total LDS: qs 6.5 KB + kv_s 17.4 KB + ss 6.1 KB + meta 0.8
+  // KB = ~30.8 KB (< 32 KB -> 4 CTAs/WGP).
+  constexpr int kHeadPad = kHead + 8;
+  __shared__ __align__(16) __half qs[kNumQ][kHeadPad];
+  __shared__ __align__(16) __half kv_s[kTile][kHeadPad];
   __shared__ float ss[kNumQ][kTile];
   __shared__ long long koff[kTile];
   __shared__ float m_run[kNumQ], l_run[kNumQ], alpha_s[kNumQ];
 
   const int sp = blockIdx.x, kvh = blockIdx.y, req = blockIdx.z;
   const int tid = threadIdx.x;
+  const int lane = tid & 31, wave = tid >> 5;
   const int seq_len = seq_lens[req];
   int start, n_keys, tiles_per_split;
   tile_geometry(seq_len, window, splits, &start, &n_keys, &tiles_per_split);
@@ -678,13 +715,19 @@ __global__ __launch_bounds__(256) void attn_split_kernel(
     l_run[tid] = 0.f;
   }
 
-  const int kk = tid >> 2;  // key of the tile this thread scores
-  const int g4 = tid & 3;   // its 6 queries: g4 * 6 .. g4 * 6 + 5
-  const int dp = tid & 63;  // PV: output dims 2 * dp, 2 * dp + 1
-  const int gq = tid >> 6;  // PV: queries gq * 6 .. gq * 6 + 5
-  float o[6][2];
+  // Coalesced K/V staging geometry: 16 threads per key (8 halfs = 16B each),
+  // 16 keys per pass x 4 passes = 64 keys loaded once from DRAM.
+  const int ld_k_base = tid >> 4;  // 0..15
+  const int ld_c8 = tid & 15;      // 0..15 (16B vector along kHead)
+  // QK scoring geometry: 64 keys x 4 thread groups (6 queries each).
+  const int kk = tid >> 2;
+  const int g4 = tid & 3;
+  // PV geometry: 8 waves x 3 queries/wave, 32 lanes x 4 dims/lane (8B loads).
+  float o[3][4];
   #pragma unroll
-  for (int j = 0; j < 6; ++j) o[j][0] = o[j][1] = 0.f;
+  for (int j = 0; j < 3; ++j)
+  #pragma unroll
+    for (int u = 0; u < 4; ++u) o[j][u] = 0.f;
 
   for (int k0 = k_lo; k0 < k_hi; k0 += kTile) {
     const int nt = min(kTile, k_hi - k0);
@@ -702,13 +745,24 @@ __global__ __launch_bounds__(256) void attn_split_kernel(
       koff[tid] = offs;
     }
     __syncthreads();
-    // scores
+    // Stage K tile once from DRAM with coalesced 16-byte loads.
+  #pragma unroll
+    for (int pass = 0; pass < 4; ++pass) {
+      const int k_idx = pass * 16 + ld_k_base;
+      uint4 kv = make_uint4(0u, 0u, 0u, 0u);
+      if (k_idx < nt) {
+        kv = *reinterpret_cast<const uint4*>(cache + koff[k_idx] + ld_c8 * 8);
+      }
+      *reinterpret_cast<uint4*>(&kv_s[k_idx][ld_c8 * 8]) = kv;
+    }
+    __syncthreads();
+    // scores (reading K and Q from LDS)
     {
       float sc[6];
   #pragma unroll
       for (int j = 0; j < 6; ++j) sc[j] = 0.f;
       if (kk < nt) {
-        const uint4* kp = reinterpret_cast<const uint4*>(cache + koff[kk]);
+        const uint4* kp = reinterpret_cast<const uint4*>(&kv_s[kk][0]);
   #pragma unroll
         for (int c = 0; c < kHead / 8; ++c) {
           const uint4 kv = kp[c];
@@ -725,9 +779,18 @@ __global__ __launch_bounds__(256) void attn_split_kernel(
         ss[g4 * 6 + j][kk] = kk < nt ? sc[j] * scale_log2 : -INFINITY;
     }
     __syncthreads();
+    // Stage V tile once from DRAM into the reused kv_s buffer while computing
+    // online softmax (independent of kv_s).
+    uint4 v_reg[4];
+  #pragma unroll
+    for (int pass = 0; pass < 4; ++pass) {
+      const int k_idx = pass * 16 + ld_k_base;
+      v_reg[pass] = k_idx < nt ? *reinterpret_cast<const uint4*>(
+                                     cache + koff[k_idx] + kHead + ld_c8 * 8)
+                               : make_uint4(0u, 0u, 0u, 0u);
+    }
     // online softmax: wave w owns queries w, w + 8, w + 16
     {
-      const int lane = tid & 31, wave = tid >> 5;
       for (int qi = wave; qi < kNumQ; qi += 8) {
         const float s0 = ss[qi][lane], s1 = ss[qi][lane + 32];
         const float tm = warp_max(fmaxf(s0, s1));
@@ -749,23 +812,30 @@ __global__ __launch_bounds__(256) void attn_split_kernel(
         }
       }
     }
-    __syncthreads();
-    // P . V
   #pragma unroll
-    for (int j = 0; j < 6; ++j) {
-      const float al = alpha_s[gq * 6 + j];
-      o[j][0] *= al;
-      o[j][1] *= al;
+    for (int pass = 0; pass < 4; ++pass) {
+      const int k_idx = pass * 16 + ld_k_base;
+      *reinterpret_cast<uint4*>(&kv_s[k_idx][ld_c8 * 8]) = v_reg[pass];
+    }
+    __syncthreads();
+    // P . V: wave w owns queries 3*w .. 3*w + 2, lane l owns dims 4*l .. 4*l+3.
+  #pragma unroll
+    for (int j = 0; j < 3; ++j) {
+      const float al = alpha_s[wave * 3 + j];
+  #pragma unroll
+      for (int u = 0; u < 4; ++u) o[j][u] *= al;
     }
     for (int k = 0; k < nt; ++k) {
-      const __half2 vv =
-          *reinterpret_cast<const __half2*>(cache + koff[k] + kHead + 2 * dp);
-      const float2 vf = __half22float2(vv);
+      const uint2 vv = *reinterpret_cast<const uint2*>(&kv_s[k][lane * 4]);
+      const float2 vf0 = __half22float2(as_half2(vv.x));
+      const float2 vf1 = __half22float2(as_half2(vv.y));
   #pragma unroll
-      for (int j = 0; j < 6; ++j) {
-        const float p = ss[gq * 6 + j][k];
-        o[j][0] += p * vf.x;
-        o[j][1] += p * vf.y;
+      for (int j = 0; j < 3; ++j) {
+        const float p = ss[wave * 3 + j][k];
+        o[j][0] = fmaf(p, vf0.x, o[j][0]);
+        o[j][1] = fmaf(p, vf0.y, o[j][1]);
+        o[j][2] = fmaf(p, vf1.x, o[j][2]);
+        o[j][3] = fmaf(p, vf1.y, o[j][3]);
       }
     }
   }
@@ -773,10 +843,12 @@ __global__ __launch_bounds__(256) void attn_split_kernel(
   float* pbase =
       part + ((static_cast<long long>(req) * kv_heads + kvh) * splits + sp) *
                  kNumQ * kPartStride;
+  // kPartStride = 130 floats (8-byte aligned for every qi; odd qi is not 16B).
   #pragma unroll
-  for (int j = 0; j < 6; ++j) {
-    float* p = pbase + (gq * 6 + j) * kPartStride;
-    *reinterpret_cast<float2*>(p + 2 * dp) = make_float2(o[j][0], o[j][1]);
+  for (int j = 0; j < 3; ++j) {
+    float* p = pbase + (wave * 3 + j) * kPartStride + lane * 4;
+    *reinterpret_cast<float2*>(p) = make_float2(o[j][0], o[j][1]);
+    *reinterpret_cast<float2*>(p + 2) = make_float2(o[j][2], o[j][3]);
   }
   if (tid < kNumQ) {
     float* p = pbase + tid * kPartStride;
@@ -785,12 +857,15 @@ __global__ __launch_bounds__(256) void attn_split_kernel(
   }
 }
 
-// out[(req * 8 + r), (kvh * 3 + g) * 128 + d]: merge the splits of each query.
+// out[(req * 8 + r), (kvh * 3 + g) * 128 + d]: merge the splits of one query.
+// One CTA per (req, kvh, qi) -> 192 CTAs at b=1 instead of 8.
 __global__ __launch_bounds__(128) void attn_combine_kernel(
     const float* __restrict__ part, const int* __restrict__ seq_lens,
     __half* __restrict__ out, long long ld_out, int kv_heads, int window,
     int splits) {
-  const int kvh = blockIdx.x % kv_heads, req = blockIdx.x / kv_heads;
+  const int qi = blockIdx.x % kNumQ;
+  const int rk = blockIdx.x / kNumQ;
+  const int kvh = rk % kv_heads, req = rk / kv_heads;
   const int d = threadIdx.x;
   int start, n_keys, tiles_per_split;
   tile_geometry(seq_lens[req], window, splits, &start, &n_keys,
@@ -800,25 +875,23 @@ __global__ __launch_bounds__(128) void attn_combine_kernel(
       tiles_per_split > 0 ? (tiles + tiles_per_split - 1) / tiles_per_split : 0;
   const float* pbase = part + (static_cast<long long>(req) * kv_heads + kvh) *
                                   splits * kNumQ * kPartStride;
-  for (int qi = 0; qi < kNumQ; ++qi) {
-    float mx = -INFINITY;
-    for (int s = 0; s < active; ++s)
-      mx = fmaxf(mx,
-                 pbase[(static_cast<long long>(s) * kNumQ + qi) * kPartStride +
-                       kHead]);
-    float acc = 0.f, l = 0.f;
-    for (int s = 0; s < active; ++s) {
-      const float* p =
-          pbase + (static_cast<long long>(s) * kNumQ + qi) * kPartStride;
-      const float wgt = exp2f(p[kHead] - mx);
-      l += p[kHead + 1] * wgt;
-      acc += p[d] * wgt;
-    }
-    const int g = qi / kBlockRows, r = qi % kBlockRows;
-    out[(static_cast<long long>(req) * kBlockRows + r) * ld_out +
-        (kvh * kQPerKv + g) * kHead + d] =
-        to_half_sat(active > 0 && l > 0.f ? acc / l : 0.f);
+  float mx = -INFINITY;
+  for (int s = 0; s < active; ++s)
+    mx = fmaxf(
+        mx,
+        pbase[(static_cast<long long>(s) * kNumQ + qi) * kPartStride + kHead]);
+  float acc = 0.f, l = 0.f;
+  for (int s = 0; s < active; ++s) {
+    const float* p =
+        pbase + (static_cast<long long>(s) * kNumQ + qi) * kPartStride;
+    const float wgt = exp2f(p[kHead] - mx);
+    l += p[kHead + 1] * wgt;
+    acc += p[d] * wgt;
   }
+  const int g = qi / kBlockRows, r = qi % kBlockRows;
+  out[(static_cast<long long>(req) * kBlockRows + r) * ld_out +
+      (kvh * kQPerKv + g) * kHead + d] =
+      to_half_sat(active > 0 && l > 0.f ? acc / l : 0.f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1723,8 +1796,8 @@ void inkling2_dspark_attention(torch::Tensor q, torch::Tensor kv_cache,
       seq_lens.data_ptr<int>(), part.data_ptr<float>(), (int)kv_heads,
       (int)window, (int)splits, scale_log2);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  attn_combine_kernel<<<dim3((unsigned)(num_reqs * kv_heads)), dim3(kHead), 0,
-                        stream>>>(
+  attn_combine_kernel<<<dim3((unsigned)(num_reqs * kv_heads * kNumQ)),
+                        dim3(kHead), 0, stream>>>(
       part.data_ptr<float>(), seq_lens.data_ptr<int>(),
       reinterpret_cast<__half*>(out.data_ptr()), out.stride(0), (int)kv_heads,
       (int)window, (int)splits);

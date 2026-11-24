@@ -308,12 +308,13 @@ class Inkling2DSparkDecoder(nn.Module):
 
 @dataclass
 class _DraftVocab:
-    """The token ids the greedy draft ranks (an explicit opt-in, see
+    """The token ids the greedy draft ranks on this rank (an explicit opt-in, see
     ``speculator_options["draft_vocab"]``) with their rows of the target's LM head
     and of the folded head.  A token outside it is never drafted, which can only
     cost acceptance: the target verifies every draft."""
 
-    ids: torch.Tensor  # int64 [N], strictly ascending
+    ids: torch.Tensor  # int64 [N], strictly ascending global token ids on this rank
+    ids_i32: torch.Tensor  # int32 [N], same ids for TP argmax partial remap
     weight: torch.Tensor  # fp16 [N, hidden]
     fold_w: torch.Tensor  # fp16 [N, rank]
     fold_b: torch.Tensor  # fp32 [N]
@@ -372,9 +373,21 @@ class _Scratch:
         # and the gathered argmax; the anchor embedding rows of a chunk (looked up in
         # the sharded table, then all-reduced) and the row -> anchor index the block
         # embed kernel reads them with
-        self.part = new(2 * _HEAD_REQS, dtype=f32)
+        self.part = new(2 * _HEAD_REQS, dtype=torch.float32)
+        self.part_ids = new(_HEAD_REQS, dtype=torch.int32)
         self.tok = new(_HEAD_REQS, dtype=torch.int64)
         self.tok2 = new(_HEAD_REQS, dtype=torch.int64)
+        # Compact sample_indices buffer when markov_steps < steps so the base
+        # LM-head GEMM and rnn_wh GEMV only compute rows that the Markov loop reads.
+        self.active_idx = new(head_rows, dtype=torch.int64)
+        self.step_pick: dict[int, torch.Tensor] = {
+            m: (
+                torch.arange(_HEAD_REQS, dtype=torch.int64, device=device)[:, None]
+                * steps
+                + torch.arange(m, dtype=torch.int64, device=device)[None, :]
+            ).reshape(-1)
+            for m in range(1, steps)
+        }
         self.anchor_ids = new(chunk, dtype=torch.int32)
         self.anchor_rows = new(chunk, hidden)
         self.row_anchor = torch.div(
@@ -476,10 +489,6 @@ class Inkling2DSparkModel(nn.Module):
         self.model = Inkling2DSparkDecoder(config, f"{prefix}model")
         self.lm_head: nn.Module | None = None
         self._draft_vocab_path = (spec.speculator_options or {}).get("draft_vocab")
-        if self._draft_vocab_path is not None and tp.enabled:
-            raise NotImplementedError(
-                "the draft_vocab option is not supported under tensor parallelism"
-            )
         self._draft_vocab: _DraftVocab | None = None
         # this rank's share of the vocabulary: the first id, the rows of its LM head
         # and the rows holding real ids (the rest is the zero padding of the last
@@ -630,32 +639,53 @@ class Inkling2DSparkModel(nn.Module):
     def _derive_draft_vocab(self, path: str) -> _DraftVocab:
         """The LM-head and folded-head rows of the ids listed in ``path`` (an
         ``.npy`` of strictly ascending token ids, made offline by
-        ``tools/rdna/inkling2/draft_vocab.py``)."""
+        ``tools/rdna/inkling2/draft_vocab.py``), filtered to this TP rank's shard."""
         assert self.lm_head is not None
         head, lm = self.model.markov_head, self.lm_head.weight
         ids = torch.from_numpy(np.load(path).astype(np.int64)).to(lm.device)
+        vocab_limit = self.config.vocab_size
         if (
             ids.dim() != 1
             or ids.numel() == 0
             or int(ids[0]) < 0
-            or int(ids[-1]) >= self._head_take
+            or int(ids[-1]) >= vocab_limit
             or not bool((ids[1:] > ids[:-1]).all())
         ):
             raise ValueError(
                 f"{path}: the draft vocabulary must be a vector of strictly "
-                f"ascending token ids below {self._head_take}"
+                f"ascending token ids below {vocab_limit}"
             )
-        logger.info(
-            "Inkling-2 DSpark draft vocabulary: %d of %d token ids (%s)",
-            ids.numel(),
-            self._head_take,
-            path,
-        )
+        lo = self._head_first
+        hi = lo + self._head_take
+        if self._tp.enabled:
+            rank_ids = ids[(ids >= lo) & (ids < hi)]
+            local_idx = rank_ids - lo
+            logger.info(
+                "Inkling-2 DSpark draft vocabulary (TP rank %d/%d): %d local of %d "
+                "listed ids (shard [%d, %d), %s)",
+                self._tp.rank,
+                self._tp.size,
+                rank_ids.numel(),
+                ids.numel(),
+                lo,
+                hi,
+                path,
+            )
+        else:
+            rank_ids = ids
+            local_idx = ids
+            logger.info(
+                "Inkling-2 DSpark draft vocabulary: %d of %d token ids (%s)",
+                ids.numel(),
+                vocab_limit,
+                path,
+            )
         return _DraftVocab(
-            ids,
-            lm.index_select(0, ids),
-            head.fold_w.index_select(0, ids),
-            head.fold_b.index_select(0, ids),
+            rank_ids,
+            rank_ids.to(torch.int32),
+            lm.index_select(0, local_idx),
+            head.fold_w.index_select(0, local_idx),
+            head.fold_b.index_select(0, local_idx),
         )
 
     # -- speculator interface ------------------------------------------------
@@ -925,10 +955,20 @@ class Inkling2DSparkModel(nn.Module):
         sample_pos = spec.sample_pos[:sample_rows].view(num_reqs, steps)
         for c0 in range(0, num_reqs, _HEAD_REQS):
             rc = min(_HEAD_REQS, num_reqs - c0)
-            rows = rc * steps
-            idx = spec.sample_indices[c0 * steps : c0 * steps + rows]
+            rows = rc * markov_steps
+            if markov_steps == steps:
+                idx = spec.sample_indices[c0 * steps : c0 * steps + rows]
+            elif rc == 1:
+                idx = spec.sample_indices[c0 * steps : c0 * steps + markov_steps]
+            else:
+                idx_full = spec.sample_indices[c0 * steps : (c0 + rc) * steps]
+                idx = s.active_idx[:rows]
+                torch.index_select(
+                    idx_full, 0, s.step_pick[markov_steps][:rows], out=idx
+                )
             ops.inkling2_dspark_gather_rows(head_hidden, idx, s.head_rows, rows)
-            _linear(s.head_rows, weight, s.base[:rows, :vocab], rows)
+            if vocab > 0:
+                _linear(s.head_rows, weight, s.base[:rows, :vocab], rows)
             for r0 in range(0, rows, _GEMV_MAX_ROWS):
                 m = min(_GEMV_MAX_ROWS, rows - r0)
                 ops.inkling2_dspark_gemv(
@@ -964,20 +1004,21 @@ class Inkling2DSparkModel(nn.Module):
                     s.latent,
                     rc,
                     i,
-                    steps,
+                    markov_steps,
                     i == 0,
                 )
-                ops.inkling2_dspark_head_logits(
-                    s.base,
-                    s.latent,
-                    fold_w,
-                    fold_b,
-                    s.logits,
-                    rc,
-                    i,
-                    steps,
-                    cfg.final_logit_softcapping,
-                )
+                if vocab > 0:
+                    ops.inkling2_dspark_head_logits(
+                        s.base,
+                        s.latent,
+                        fold_w,
+                        fold_b,
+                        s.logits,
+                        rc,
+                        i,
+                        markov_steps,
+                        cfg.final_logit_softcapping,
+                    )
                 out = spec.draft_tokens[c0 : c0 + rc, i]
                 if not greedy:
                     out.copy_(
@@ -989,7 +1030,7 @@ class Inkling2DSparkModel(nn.Module):
                         )
                     )
                 elif self._tp.enabled:
-                    out.copy_(self._argmax_across_ranks(rc))
+                    out.copy_(self._argmax_across_ranks(rc, ranked))
                 elif ranked is not None:
                     ops.inkling2_dspark_argmax(s.logits, s.tok[:rc], rc, vocab)
                     torch.index_select(ranked.ids, 0, s.tok[:rc], out=s.tok2[:rc])
@@ -998,19 +1039,33 @@ class Inkling2DSparkModel(nn.Module):
                     ops.inkling2_dspark_argmax(s.logits, out, rc, vocab)
         return True
 
-    def _argmax_across_ranks(self, rows: int) -> torch.Tensor:
+    def _argmax_across_ranks(
+        self, rows: int, ranked: _DraftVocab | None = None
+    ) -> torch.Tensor:
         """Global argmax of the first ``rows`` rows of the logits (int64 ``[rows]``).
 
-        This rank's logits cover its vocabulary shard: its ``(value, global id)``
-        partial over the real rows is all-gathered with the other ranks' and reduced
-        by the kernel ``greedy_token_ids`` uses, so the tie rule (lowest id) is the
+        This rank's logits cover its vocabulary shard (or its shard of
+        ``draft_vocab`` when ``ranked`` is set): its ``(value, global id)`` partial
+        over the real rows is all-gathered with the other ranks' and reduced by the
+        kernel ``greedy_token_ids`` uses, so the tie rule (lowest id) is the
         single-rank one and every rank ends with the same token.
         """
         s = self._scratch
         part = s.part[: 2 * rows]
-        ops.inkling2_dspark_argmax_partial(
-            s.logits, part, rows, self._head_take, self._head_first
-        )
+        if ranked is None:
+            ops.inkling2_dspark_argmax_partial(
+                s.logits, part, rows, self._head_take, self._head_first
+            )
+        elif ranked.ids.numel() == 0:
+            part[:rows].fill_(float("-inf"))
+            part[rows : 2 * rows].view(torch.int32).fill_(0x7FFFFFFF)
+        else:
+            ops.inkling2_dspark_argmax_partial(
+                s.logits, part, rows, ranked.ids.numel(), 0
+            )
+            local_idx = part[rows : 2 * rows].view(torch.int32)
+            torch.index_select(ranked.ids_i32, 0, local_idx, out=s.part_ids[:rows])
+            local_idx.copy_(s.part_ids[:rows])
         gathered = self._tp.all_gather(part.view(2 * rows, 1))  # [2 * rows, tp]
         out = s.tok[:rows]
         ops.inkling2_linear_argmax_reduce(

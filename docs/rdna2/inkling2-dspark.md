@@ -25,9 +25,10 @@ after `RECIPE=`. Smoke test of the running server (text, image, prefix cache, st
 
 | recipe | cards | what it is | one request decodes (mean of six kinds of text) |
 | --- | --- | --- | --- |
-| `inkling2-mini-tp1-dspark` | 1 | `inkling2-mini-tp1` with the draft, K = 2, `SEQS=2`, `MAXLEN=125000` | 1.31x (1.09x - 1.59x by kind) |
-| `inkling2-mini-tp1-dspark-adaptive` | 1 | that with adaptive K and a 32,768-id draft vocabulary, `MAXLEN=105000` | 1.51x (1.16x - 2.43x) |
-| `inkling2-mini-tp2-dspark` | 2 | `inkling2-mini-tp2` with the draft, K = 2, `SEQS=2`, `MAXLEN=780000` (`HIP_VISIBLE_DEVICES=4,5`) | 1.35x (1.15x - 1.62x) |
+| `inkling2-mini-tp1-dspark` | 1 | `inkling2-mini-tp1` with the draft, K = 2 (`[[1,2,2],[3,16,0]]`), `SEQS=16`, `MAXLEN=115000` | 1.31x (1.09x - 1.59x by kind) |
+| `inkling2-mini-tp1-dspark-adaptive` | 1 | that with adaptive K (`[[1,2,7],[3,16,0]]`) and a 32,768-id draft vocabulary, `SEQS=16`, `MAXLEN=95000` | 1.51x (1.16x - 2.43x) |
+| `inkling2-mini-tp2-dspark` | 2 | `inkling2-mini-tp2` with the draft, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXBAT=1024`, `MAXLEN=720000` (`HIP_VISIBLE_DEVICES=4,5`) | 1.35x (1.15x - 1.62x) |
+| `inkling2-mini-tp4-dspark` | 4 | `inkling2-mini-tp4` with the draft, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXLEN=1048576` (`HIP_VISIBLE_DEVICES=2,3,4,5`) | full 1M context fits |
 
 The adaptive recipe takes a draft vocabulary: an ids file made once, on the CPU (27 s on the box, no GPU). Any code and
 prose that is not what you will serve will do, here the venv's python packages and this repository's docs:
@@ -802,3 +803,56 @@ deselected.  All six mutants are **killed**: `partial_drops_first_id` (first run
 `test_argmax_partial_is_the_value_and_the_global_id[7-4099-4112-0]`);
 `partial_ties_to_higher_index` (4 sites, 1 failed, 109 passed,
 `test_argmax_matches_reference[1-200058-200064]`).
+
+## 2026-11-24 optimization pass: draft attention, concurrency, and TP=1/2/4 recipes
+
+Four changes remove the long-context attention bottleneck and concurrency collapse when serving
+DSpark at `SEQS > 2`:
+
+1. **Vectorized split-KV draft attention (`csrc/rocm/inkling2_dspark_rdna2.cu`)**:
+   * Adaptive `num_splits` targeting high CU occupancy at long context (64k) with two-stage online
+     softmax reduction and coalesced `V_DOT2` K/V loads.
+   * Microbench on V620 (`par1-cs25` HIP 2, `base -> cand`):
+     * `b=1 ctx=1024 win=1024`: `139.5 -> 36.4 us` (**3.83x**)
+     * `b=1 ctx=1024 win=0`: `139.0 -> 31.2 us` (**4.46x**)
+     * `b=1 ctx=16384 win=0`: `1,063 -> 218.2 us` (**4.87x**, 307.7 GB/s)
+     * `b=1 ctx=65536 win=0`: `2,961 -> 932.6 us` (**3.18x**, **-2.03 ms/draft step**)
+     * `b=2 ctx=65536 win=0`: `3,973 -> 1,951 us` (**2.04x**)
+   * Gates: 29/29 attention oracle tests pass; 5/5 hand mutants killed (`survived=0`); 6-arch
+     `archdiff` clean (0 diffs on `gfx90a/942/950/1100/1200`); built-op `test_inkling2_dspark_rdna2.py`,
+     `test_dspark_verifier.py` and `test_dspark_target_taps.py` 148 passed, `test_dspark_tp.py`
+     5 passed, `test_dspark_model.py` 37 passed.
+2. **Schedule-aware graph capture (`vllm/v1/worker/gpu/spec_decode/dflash/speculator.py` and
+   `vllm/config/vllm.py`)**:
+   * `DFlashCudaGraphManager` caps draft FULL graph capture to the largest batch size where the
+     dynamic schedule drafts (`k > 0`, i.e., `1..2` for `[[1,2,2],[3,N,0]]`), so raising `SEQS`
+     adds zero dead draft graphs.
+   * `VllmConfig._set_cudagraph_sizes` computes the default `max_cudagraph_capture_size` from
+     `max(q * tier_max_reqs)` across `target_query_lens` instead of `max_num_seqs * uniform_decode_query_len`.
+     On TP=1 DSpark (`SEQS=16`, `[[1,2,2],[3,16,0]]`), this cuts target PIECEWISE capture from
+     37 graphs (up to 256 tokens, `3.60 GiB`) to 9 graphs (up to 32 tokens, `0.90 GiB`),
+     reclaiming **2.70 GiB** and lifting the KV pool from 45,824 to **122,992 tokens**.
+3. **TP `draft_vocab` support (`vllm/models/inkling2_loop/amd/dspark.py`)**:
+   * Each TP rank filters the requested draft vocabulary ids to its local vocabulary shard,
+     gathers local head weights, runs `argmax_partial` with global token ids, and all-gathers
+     across ranks (handles empty local shards via `-inf` sentinel).
+4. **Updated TP=1/2/4 DSpark recipes**:
+   * `inkling2-mini-tp1-dspark`: `SEQS=16`, `MAXLEN=115000`, `[[1,2,2],[3,16,0]]` (122,992 KV tokens, 0.90 GiB graphs).
+   * `inkling2-mini-tp1-dspark-adaptive`: `SEQS=16`, `MAXLEN=95000`, `[[1,2,7],[3,16,0]]` (103,659 KV tokens, 1.40 GiB graphs).
+   * `inkling2-mini-tp2-dspark`: `SEQS=8`, `MAXBAT=1024`, `MAXLEN=720000`, `[[1,2,2],[3,8,0]]` (734,936 KV tokens).
+   * `inkling2-mini-tp4-dspark` (new): `SEQS=8`, `MAXLEN=1048576`, `[[1,2,2],[3,8,0]]` (1,083,012 KV tokens, full 1M context fits).
+
+### Measured E2E (`par1-cs25` b4, 2026-11-24, `serve_validate.sh`, `--temperature 0`)
+
+| Recipe | KV tokens | 1k/512 c=1 prefill | 1k/512 c=1 decode | 1k/512 c=8 agg out | 1k/512 c=8 TTFT | 64k/256 c=1 prefill | 64k/256 c=1 ITL | Faults |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `inkling2-mini-tp1-dspark` | 122,992 | 2,084.7 tok/s | 93.76 tok/s/req | 184.66 tok/s | 1.86 s | 1,519.9 tok/s | 40.3 ms | 0 |
+| `inkling2-mini-tp2-dspark` | 734,936 | 3,043.9 tok/s | 135.67 tok/s/req | 283.81 tok/s | 1.21 s | 2,403.9 tok/s | 27.7 ms | 0 |
+| `inkling2-mini-tp4-dspark` | 1,083,012 | 3,866.7 tok/s | 163.76 tok/s/req | 386.18 tok/s | 1.29 s | 3,475.7 tok/s | 22.6 ms | 0 |
+
+Real-text TP=1 `dspark_bench.py` (`SEQS=16`, `[[1,2,2],[3,16,0]]`, 24 chat prompts, greedy):
+
+* `b=1`: `14.36 ms/tok/req` (**69.6 tok/s**, 1.014 accepted/step)
+* `b=2`: `19.03 ms/tok/req` (**105.1 tok/s**, 1.016 accepted/step)
+* `b=4`: `28.41 ms/tok/req` (**140.8 tok/s**, draft automatically dropped)
+* `b=8`: `38.68 ms/tok/req` (**206.8 tok/s**, draft automatically dropped)

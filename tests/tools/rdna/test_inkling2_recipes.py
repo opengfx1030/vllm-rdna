@@ -32,7 +32,7 @@ DROPPED = (
 # recipe -> (tp, port, max_model_len, max_num_seqs, max_num_batched_tokens)
 RECIPES = {
     "inkling2-mini-tp1": (1, 18221, 180000, 16, 1024),
-    "inkling2-mini-tp2": (2, 18222, 1048576, 8, 184),
+    "inkling2-mini-tp2": (2, 18222, 1048576, 8, 320),
     "inkling2-mini-tp4": (4, 18223, 1048576, 8, 4096),
 }
 
@@ -141,49 +141,77 @@ def test_ports_are_distinct():
     assert len({port for _, port, *_ in RECIPES.values()}) == len(RECIPES)
 
 
-# DSpark recipe -> (the recipe it builds on, max_model_len, max_num_seqs)
+# DSpark recipe -> (base, max_len, seqs, max_batched_override, spec)
 DSPARK = {
-    "inkling2-mini-tp1-dspark": ("inkling2-mini-tp1", 125000, 2),
-    "inkling2-mini-tp2-dspark": ("inkling2-mini-tp2", 780000, 2),
+    "inkling2-mini-tp1-dspark": (
+        "inkling2-mini-tp1",
+        115000,
+        16,
+        None,
+        (
+            '{"method":"dspark","num_speculative_tokens":7,'
+            '"num_speculative_tokens_per_batch_size":[[1,2,2],[3,16,0]]}'
+        ),
+    ),
+    "inkling2-mini-tp2-dspark": (
+        "inkling2-mini-tp2",
+        720000,
+        8,
+        1024,
+        (
+            '{"method":"dspark","num_speculative_tokens":7,'
+            '"num_speculative_tokens_per_batch_size":[[1,2,2],[3,8,0]]}'
+        ),
+    ),
+    "inkling2-mini-tp4-dspark": (
+        "inkling2-mini-tp4",
+        1048576,
+        8,
+        None,
+        (
+            '{"method":"dspark","num_speculative_tokens":7,'
+            '"num_speculative_tokens_per_batch_size":[[1,2,2],[3,8,0]]}'
+        ),
+    ),
 }
-SPEC = (
-    '{"method":"dspark","num_speculative_tokens":7,'
-    '"num_speculative_tokens_per_batch_size":[[1,2,2]]}'
-)
 
 
 @pytest.mark.parametrize("recipe", DSPARK)
 def test_dspark_recipe_is_its_base_recipe_plus_the_draft(venv, recipe):
-    base, max_len, seqs = DSPARK[recipe]
+    base, max_len, seqs, max_bat, spec = DSPARK[recipe]
     result = plan(venv, f"RECIPE={recipe}")
     assert result.returncode == 0, result.stderr
     out = result.stdout
-    assert flag(out, "--speculative-config", SPEC)
+    assert flag(out, "--speculative-config", spec)
     assert flag(out, "--max-model-len", str(max_len))
     assert flag(out, "--max-num-seqs", str(seqs))
+    if max_bat is not None:
+        assert flag(out, "--max-num-batched-tokens", str(max_bat))
     # Everything else is the base recipe's plan, flag for flag and variable for
     # variable: the launcher's own keys on the command line give the same plan.
-    ref = plan(
-        venv,
+    overrides = [
         f"RECIPE={base}",
         f"SEQS={seqs}",
         f"MAXLEN={max_len}",
-        f"SPEC_CONFIG={SPEC}",
-    )
+        f"SPEC_CONFIG={spec}",
+    ]
+    if max_bat is not None:
+        overrides.append(f"MAXBAT={max_bat}")
+    ref = plan(venv, *overrides)
     assert ref.returncode == 0, ref.stderr
     assert out.replace(recipe, base) == ref.stdout
 
 
 @pytest.mark.parametrize("recipe", DSPARK)
 def test_dspark_recipe_keys_follow_the_caller(venv, recipe):
-    max_len = DSPARK[recipe][1]
+    _, max_len, _, _, spec = DSPARK[recipe]
     # The caller's environment wins over the recipe and over the recipe it builds on
     # (PORT is set only by the latter).
     out = plan(venv, f"RECIPE={recipe}", PORT="19999", SEQS="4").stdout
     assert flag(out, "--port", "19999")
     assert flag(out, "--max-num-seqs", "4")
     assert flag(out, "--max-model-len", str(max_len))
-    assert flag(out, "--speculative-config", SPEC)
+    assert flag(out, "--speculative-config", spec)
     # KEY=value after RECIPE= wins over both; an empty SPEC_CONFIG drops the draft.
     out = plan(venv, f"RECIPE={recipe}", "MAXLEN=90000", "SPEC_CONFIG=").stdout
     assert flag(out, "--max-model-len", "90000")
@@ -196,7 +224,7 @@ ADAPTIVE = "inkling2-mini-tp1-dspark-adaptive"
 def adaptive_spec(ids) -> str:
     return (
         '{"method":"dspark","num_speculative_tokens":7,'
-        '"num_speculative_tokens_per_batch_size":[[1,2,7]],'
+        '"num_speculative_tokens_per_batch_size":[[1,2,7],[3,16,0]],'
         f'"speculator_options":{{"adaptive_k":{{}},"draft_vocab":"{ids}"}}}}'
     )
 
@@ -209,8 +237,8 @@ def test_adaptive_recipe_names_the_ids_file(venv, tmp_path):
         plan(venv, f"RECIPE={ADAPTIVE}", DRAFT_VOCAB=str(ids)).stdout,
     ):
         assert flag(out, "--speculative-config", adaptive_spec(ids))
-        assert flag(out, "--max-num-seqs", "2")
-        assert flag(out, "--max-model-len", "105000")
+        assert flag(out, "--max-num-seqs", "16")
+        assert flag(out, "--max-model-len", "95000")
         assert flag(out, "--tensor-parallel-size", "1")
     default = plan(venv, f"RECIPE={ADAPTIVE}").stdout
     assert "/.cache/rdna/inkling2-mini-draft-vocab-32768.npy" in default

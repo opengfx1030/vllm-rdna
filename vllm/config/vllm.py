@@ -2486,8 +2486,15 @@ class VllmConfig:
                 )
                 decode_query_len = self.uniform_decode_query_len
                 max_num_seqs = self.scheduler_config.max_num_seqs
+                max_decode_tokens = max(
+                    (
+                        query_len * tier_max_reqs
+                        for query_len, tier_max_reqs in target_query_lens.items()
+                    ),
+                    default=max_num_seqs * decode_query_len,
+                )
                 max_cudagraph_capture_size = min(
-                    max_num_seqs * decode_query_len * 2, default_max_graph_size
+                    max_decode_tokens * 2, default_max_graph_size
                 )
                 if decode_query_len > 1:
                     # A uniform decode batch is decode_query_len tokens per
