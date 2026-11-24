@@ -59,7 +59,7 @@ def _conv_fixture(stream: int, conv_bs: int, drafts: int, seed: int):
         owner = state_mod.Inkling2ConvOwner(
             num_kv_heads=nkv, stream_channels=channels, kernel_size=k, prefix="t.conv"
         )
-    assert owner.ring_rows == k - 1 + drafts
+    assert owner.ring_rows == k + drafts
     world = PagedWorld(
         [(owner, "conv")], {"conv": (conv_bs, k)}, torch.float32, seed=seed
     )
@@ -184,11 +184,11 @@ def test_conv_taps_after_rejected_draft_tokens(stream, conv_bs, seed):
     assert worst < UNIT_TOL
 
 
-@pytest.mark.parametrize("conv_bs", [4, 16])
+@pytest.mark.parametrize("conv_bs", [8, 16])
 def test_a_ring_without_rows_for_the_drafts_loses_the_history(conv_bs):
-    """Negative control: rows ``p % 3`` of a ring sized for no drafts are overwritten
-    by the rejected tokens, so the same scenario must break (``S = k - 1 + drafts``
-    is what keeps the accepted prefix intact)."""
+    """Negative control: rows ``p % 4`` of a no-draft ring (``S = k < conv_bs``)
+    are overwritten by the rejected tokens, so the same scenario must break
+    (``S = k + drafts`` is what keeps the accepted prefix intact)."""
     worst = _verify_steps(state_mod.STREAM_K, conv_bs, drafts=4, ring_drafts=0, seed=0)
     assert worst > 1e-2, worst
 
