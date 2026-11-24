@@ -132,7 +132,7 @@ def _call_attn_res_sconv(
     from vllm import _custom_ops as ops
 
     conv_x, conv_w, owner, md, offset = pending
-    write_state = conv_writes_in_op(md)
+    write_state = conv_writes_in_op(md, owner.ring_rows, owner.kernel_size)
     ops.inkling2_glue_attn_res_sconv(
         blk,
         n_blocks,
