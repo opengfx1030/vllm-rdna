@@ -2430,23 +2430,39 @@ def inkling2_dspark_gemv(
     num_rows: int,
     splits: int = 0,
     variant: int = 0,
+    w_row_ids: torch.Tensor | None = None,
 ) -> None:
     """Skinny fp16 GEMM out = x @ w.T for num_rows <= 32 (fp32 accumulation).
 
     splits == 0 writes fp16 out [rows, N]; splits > 0 writes the fp32 partial
     sums over K / splits into out [splits, rows, N] (the consumer adds them).
-    x_index (int64) gathers the activation rows; variant forces rows per wave.
+    x_index (int64) gathers the activation rows; w_row_ids (int32/int64) gathers
+    the weight rows directly from w; variant forces rows per wave.
     """
-    torch.ops._rocm_C.inkling2_dspark_gemv(
-        x, w, out, x_index, num_rows, splits, variant
-    )
+    if w_row_ids is None:
+        torch.ops._rocm_C.inkling2_dspark_gemv(
+            x, w, out, x_index, num_rows, splits, variant
+        )
+    else:
+        torch.ops._rocm_C.inkling2_dspark_gemv(
+            x, w, out, x_index, num_rows, splits, variant, w_row_ids
+        )
 
 
 def inkling2_dspark_gemm(
-    x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, num_rows: int, design: int
+    x: torch.Tensor,
+    w: torch.Tensor,
+    out: torch.Tensor,
+    num_rows: int,
+    design: int,
+    w_row_ids: torch.Tensor | None = None,
 ) -> None:
-    """Dense fp16 GEMM out = x @ w.T on rdna_hint_flex design 0..5 (no rocBLAS)."""
-    torch.ops._rocm_C.inkling2_dspark_gemm(x, w, out, num_rows, design)
+    """Dense fp16 GEMM out = x @ w.T on rdna_hint_flex design 0..5 (no rocBLAS),
+    with optional zero-copy weight row gather ``w_row_ids``."""
+    if w_row_ids is None:
+        torch.ops._rocm_C.inkling2_dspark_gemm(x, w, out, num_rows, design)
+    else:
+        torch.ops._rocm_C.inkling2_dspark_gemm(x, w, out, num_rows, design, w_row_ids)
 
 
 def inkling2_dspark_qkv_prep(
@@ -2562,22 +2578,42 @@ def inkling2_dspark_fold_bias(
 
 
 def inkling2_dspark_argmax(
-    logits: torch.Tensor, out: torch.Tensor, num_rows: int, vocab: int
+    logits: torch.Tensor,
+    out: torch.Tensor,
+    num_rows: int,
+    vocab: int,
+    token_map: torch.Tensor | None = None,
 ) -> None:
     """out[r] = argmax(logits[r, :vocab]) for fp16 rows (NaN as -inf, lowest index
-    on ties); out is an int64 vector, possibly a strided column of a token table."""
-    torch.ops._rocm_C.inkling2_dspark_argmax(logits, out, num_rows, vocab)
+    on ties), optionally remapped through ``token_map``; out is an int64 vector,
+    possibly a strided column of a token table."""
+    if token_map is None:
+        torch.ops._rocm_C.inkling2_dspark_argmax(logits, out, num_rows, vocab)
+    else:
+        torch.ops._rocm_C.inkling2_dspark_argmax(
+            logits, out, num_rows, vocab, token_map
+        )
 
 
 def inkling2_dspark_argmax_partial(
-    logits: torch.Tensor, part: torch.Tensor, num_rows: int, vocab: int, first_id: int
+    logits: torch.Tensor,
+    part: torch.Tensor,
+    num_rows: int,
+    vocab: int,
+    first_id: int,
+    token_map: torch.Tensor | None = None,
 ) -> None:
     """The (value, id) partial of one vocabulary shard: ``part[r]`` is the fp32 maximum
-    of ``logits[r, :vocab]`` and ``part[num_rows + r]`` the int32 bits of ``first_id``
-    plus the lowest index of that maximum (NaN as -inf)."""
-    torch.ops._rocm_C.inkling2_dspark_argmax_partial(
-        logits, part, num_rows, vocab, first_id
-    )
+    of ``logits[r, :vocab]`` and ``part[num_rows + r]`` the int32 bits of ``token_map``
+    (or ``first_id`` plus the lowest index) of that maximum (NaN as -inf)."""
+    if token_map is None:
+        torch.ops._rocm_C.inkling2_dspark_argmax_partial(
+            logits, part, num_rows, vocab, first_id
+        )
+    else:
+        torch.ops._rocm_C.inkling2_dspark_argmax_partial(
+            logits, part, num_rows, vocab, first_id, token_map
+        )
 
 
 def inkling2_dspark_prepare_inputs(
@@ -6850,8 +6886,9 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         out: torch.Tensor,
         x_index: torch.Tensor | None,
         num_rows: int,
-        splits: int,
-        variant: int,
+        splits: int = 0,
+        variant: int = 0,
+        w_row_ids: torch.Tensor | None = None,
     ) -> None:
         return
 
@@ -6862,6 +6899,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         out: torch.Tensor,
         num_rows: int,
         design: int,
+        w_row_ids: torch.Tensor | None = None,
     ) -> None:
         return
 
@@ -6936,7 +6974,11 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
 
     @register_fake("_rocm_C::inkling2_dspark_argmax")
     def _inkling2_dspark_argmax_fake(
-        logits: torch.Tensor, out: torch.Tensor, num_rows: int, vocab: int
+        logits: torch.Tensor,
+        out: torch.Tensor,
+        num_rows: int,
+        vocab: int,
+        token_map: torch.Tensor | None = None,
     ) -> None:
         return
 
@@ -6949,6 +6991,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
             num_rows: int,
             vocab: int,
             first_id: int,
+            token_map: torch.Tensor | None = None,
         ) -> None:
             return
 

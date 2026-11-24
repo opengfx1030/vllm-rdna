@@ -90,34 +90,68 @@ def _gemm_design(rows: int) -> int:
     return 5 if rows <= 64 else 0
 
 
-def _linear(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, rows: int) -> None:
-    """``out[:rows] = x[:rows] @ w.T`` with fp16 operands and fp32 accumulation."""
+def _linear(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    out: torch.Tensor,
+    rows: int,
+    w_row_ids: torch.Tensor | None = None,
+) -> None:
+    """``out[:rows] = x[:rows] @ w[w_row_ids].T`` (or ``w.T``) with fp16 operands
+    and fp32 accumulation."""
     if rows <= _GEMV_MAX_ROWS:
-        ops.inkling2_dspark_gemv(x, w, out, None, rows, 0, 0)
+        ops.inkling2_dspark_gemv(x, w, out, None, rows, 0, 0, w_row_ids)
     else:
-        ops.inkling2_dspark_gemm(x, w, out, rows, _gemm_design(rows))
+        ops.inkling2_dspark_gemm(x, w, out, rows, _gemm_design(rows), w_row_ids)
 
 
-def scheduled_draft_tokens(vllm_config: VllmConfig, drafted: int) -> int:
-    """Most of the ``drafted`` tokens of a block that any batch size verifies.
+def scheduled_draft_tokens_by_reqs(
+    vllm_config: VllmConfig, drafted: int
+) -> tuple[int, tuple[int, ...] | None]:
+    """(Global max Markov steps, optional per-``num_reqs`` Markov step lookup).
 
     ``num_speculative_tokens_per_batch_size`` makes the scheduler verify the first
     ``k(batch size)`` of the block's tokens.  The chain is sequential (token ``i``
-    never depends on a later one), so the Markov steps beyond the schedule's
-    largest ``k`` produce tokens nothing consumes.  Without a schedule every drafted
-    token can be verified.
+    never depends on a later one), so at batch size ``b`` any Markov steps past
+    ``k(b)`` (or past the largest ``k`` among batch sizes padding into the same
+    captured draft graph) produce tokens nothing consumes.
     """
     schedule = getattr(
         vllm_config.speculative_config, "num_speculative_tokens_per_batch_size", None
     )
     if not schedule:
-        return drafted
+        return drafted, None
+    max_seqs = vllm_config.scheduler_config.max_num_seqs
     lookup = build_dynamic_sd_schedule_lookup(
         schedule,
-        vllm_max_batch_size=vllm_config.scheduler_config.max_num_seqs,
+        vllm_max_batch_size=max_seqs,
         vllm_num_speculative_tokens=drafted,
     )
-    return max(1, max(lookup[1:]))
+    raw = [max(1, int(k)) for k in lookup]
+    cc = getattr(vllm_config, "compilation_config", None)
+    req_sizes = getattr(cc, "decode_cudagraph_capture_request_sizes", None)
+    if not req_sizes:
+        from vllm.config.compilation import decode_cudagraph_capture_grid
+
+        req_sizes = sorted(
+            {*range(1, min(max_seqs, 8) + 1), *decode_cudagraph_capture_grid(max_seqs)}
+        )
+    else:
+        req_sizes = sorted({*req_sizes, *range(1, min(max_seqs, 8) + 1)})
+    prev_g = 0
+    for g in req_sizes:
+        if g <= 0 or g > max_seqs:
+            continue
+        active_in_bucket = [raw[b] for b in range(prev_g + 1, g + 1) if lookup[b] > 0]
+        if active_in_bucket:
+            raw[g] = max(raw[g], max(active_in_bucket))
+        prev_g = g
+    return max(1, max(lookup[1:])), tuple(raw)
+
+
+def scheduled_draft_tokens(vllm_config: VllmConfig, drafted: int) -> int:
+    """Most of the ``drafted`` tokens of a block that any batch size verifies."""
+    return scheduled_draft_tokens_by_reqs(vllm_config, drafted)[0]
 
 
 def attention_splits(num_reqs: int) -> int:
@@ -268,14 +302,43 @@ class Inkling2MarkovHead(nn.Module):
         self.register_buffer("fold_w", torch.empty(0, dtype=torch.float16), False)
         self.register_buffer("fold_b", torch.empty(0, dtype=torch.float32), False)
 
+    def ensure_checkpoint_storage(
+        self, config: Inkling2DSparkConfig, device: torch.device
+    ) -> None:
+        hidden, rank = config.hidden_size, config.markov_rank
+        if self.rnn_proj_w.numel() == 0:
+            self.rnn_proj_w.data = torch.empty(
+                3 * rank, 2 * rank + 2 * hidden, dtype=torch.float16, device=device
+            )
+        if self.hidden_out_w.numel() == 0:
+            self.hidden_out_w.data = torch.empty(
+                hidden, rank, dtype=torch.float16, device=device
+            )
+        if self.hidden_out_b.numel() == 0:
+            self.hidden_out_b.data = torch.empty(
+                hidden, dtype=torch.float16, device=device
+            )
+
     @torch.no_grad()
     def derive(self, config: Inkling2DSparkConfig) -> None:
         rank, hidden = config.markov_rank, config.hidden_size
         w = self.rnn_proj_w
+        dev = w.device
         self.rnn_wt = w[:, : 2 * rank].t().contiguous()
         self.rnn_wh = w[:, 2 * rank : 2 * rank + hidden].contiguous()
         self.rnn_wf = w[:, 2 * rank + hidden :].contiguous()
         self.hidden_out_t = self.hidden_out_w.t().contiguous()
+        # Free repacked checkpoint originals (~8.63 MiB on Inkling-2-Mini).
+        self.rnn_proj_w.data = torch.empty(0, dtype=torch.float16, device=dev)
+        self.hidden_out_w.data = torch.empty(0, dtype=torch.float16, device=dev)
+
+    @torch.no_grad()
+    def free_unfolded_head(self) -> None:
+        """Free ``hidden_out_t`` and ``hidden_out_b`` after ``attach_target`` folds
+        them into ``fold_w`` / ``fold_b`` (~1.13 MiB on Inkling-2-Mini)."""
+        dev = self.hidden_out_t.device
+        self.hidden_out_t = torch.empty(0, dtype=torch.float16, device=dev)
+        self.hidden_out_b.data = torch.empty(0, dtype=torch.float16, device=dev)
 
 
 class Inkling2DSparkDecoder(nn.Module):
@@ -309,13 +372,12 @@ class Inkling2DSparkDecoder(nn.Module):
 @dataclass
 class _DraftVocab:
     """The token ids the greedy draft ranks on this rank (an explicit opt-in, see
-    ``speculator_options["draft_vocab"]``) with their rows of the target's LM head
-    and of the folded head.  A token outside it is never drafted, which can only
-    cost acceptance: the target verifies every draft."""
+    ``speculator_options["draft_vocab"]``) with their local LM-head row indices and
+    folded-head rows (zero fp16 LM-head weight copy).  A token outside it is never
+    drafted, which can only cost acceptance: the target verifies every draft."""
 
     ids: torch.Tensor  # int64 [N], strictly ascending global token ids on this rank
-    ids_i32: torch.Tensor  # int32 [N], same ids for TP argmax partial remap
-    weight: torch.Tensor  # fp16 [N, hidden]
+    local_idx: torch.Tensor  # int32 [N], row indices into this rank's lm_head.weight
     fold_w: torch.Tensor  # fp16 [N, rank]
     fold_b: torch.Tensor  # fp32 [N]
 
@@ -358,31 +420,31 @@ class _Scratch:
         # context K/V precompute
         self.ctx_mix = new(config.num_hidden_layers * _CTX_CHUNK, hidden)
         self.ctx_kv = new(_CTX_CHUNK, 2 * kv_heads * dim)
-        # Markov head: a chunk of requests at a time
+        # Markov head: a chunk of requests at a time, sized to active head_vocab
         steps = config.draft_block_size - 1
-        head_rows = _HEAD_REQS * steps
+        head_reqs = min(max(max_reqs, 1), _HEAD_REQS)
+        head_rows = head_reqs * steps
         vocab_pad = -(-vocab // 8) * 8
+        self.head_reqs = head_reqs
         self.head_rows = new(head_rows, hidden)
         self.base = new(head_rows, vocab_pad)
-        self.logits = new(_HEAD_REQS, vocab_pad)
+        self.logits = new(head_reqs, vocab_pad)
         self.ctx_h = new(1, head_rows, 3 * config.markov_rank, dtype=f32)
-        self.ctx_f = new(1, _HEAD_REQS, 3 * config.markov_rank, dtype=f32)
-        self.state = new(_HEAD_REQS, config.markov_rank, dtype=f32)
-        self.latent = new(_HEAD_REQS, config.markov_rank)
+        self.ctx_f = new(1, head_reqs, 3 * config.markov_rank, dtype=f32)
+        self.state = new(head_reqs, config.markov_rank, dtype=f32)
+        self.latent = new(head_reqs, config.markov_rank)
         # tensor parallelism: this rank's (value, id) partial of the vocabulary shard
         # and the gathered argmax; the anchor embedding rows of a chunk (looked up in
         # the sharded table, then all-reduced) and the row -> anchor index the block
         # embed kernel reads them with
-        self.part = new(2 * _HEAD_REQS, dtype=torch.float32)
-        self.part_ids = new(_HEAD_REQS, dtype=torch.int32)
-        self.tok = new(_HEAD_REQS, dtype=torch.int64)
-        self.tok2 = new(_HEAD_REQS, dtype=torch.int64)
+        self.part = new(2 * head_reqs, dtype=torch.float32)
+        self.tok = new(head_reqs, dtype=torch.int64)
         # Compact sample_indices buffer when markov_steps < steps so the base
         # LM-head GEMM and rnn_wh GEMV only compute rows that the Markov loop reads.
         self.active_idx = new(head_rows, dtype=torch.int64)
         self.step_pick: dict[int, torch.Tensor] = {
             m: (
-                torch.arange(_HEAD_REQS, dtype=torch.int64, device=device)[:, None]
+                torch.arange(head_reqs, dtype=torch.int64, device=device)[:, None]
                 * steps
                 + torch.arange(m, dtype=torch.int64, device=device)[None, :]
             ).reshape(-1)
@@ -395,6 +457,17 @@ class _Scratch:
             BLOCK,
             rounding_mode="floor",
         )
+
+    def ensure_vocab(self, vocab: int) -> None:
+        vocab_pad = -(-vocab // 8) * 8
+        if self.base.shape[1] < vocab_pad:
+            dev = self.base.device
+            self.base = torch.empty(
+                self.base.shape[0], vocab_pad, dtype=torch.float16, device=dev
+            )
+            self.logits = torch.empty(
+                self.logits.shape[0], vocab_pad, dtype=torch.float16, device=dev
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +561,7 @@ class Inkling2DSparkModel(nn.Module):
         self._tp = tp
         self.model = Inkling2DSparkDecoder(config, f"{prefix}model")
         self.lm_head: nn.Module | None = None
+        self._greedy_only = getattr(spec, "draft_sample_method", "greedy") == "greedy"
         self._draft_vocab_path = (spec.speculator_options or {}).get("draft_vocab")
         self._draft_vocab: _DraftVocab | None = None
         # this rank's share of the vocabulary: the first id, the rows of its LM head
@@ -498,17 +572,32 @@ class Inkling2DSparkModel(nn.Module):
         )
         # first id of this rank's rows of the (padded) embedding table
         self._embed_first = lm_head_shard(config.padded_vocab_size, tp.size, tp.rank)[0]
+        device = torch.get_default_device()
+        if self._draft_vocab_path is not None and self._greedy_only:
+            rank_ids, _ = self._load_draft_vocab_ids(
+                self._draft_vocab_path, device, log=False
+            )
+            scratch_vocab = rank_ids.numel()
+        else:
+            scratch_vocab = self._head_rows
         self._scratch = _Scratch(
             config,
             vllm_config.scheduler_config.max_num_seqs,
-            self._head_rows,
-            torch.get_default_device(),
+            scratch_vocab,
+            device,
         )
         self._eps = config.rms_norm_eps
-        # Markov steps per draft pass (the rest of the block's tokens are never used)
-        self._markov_steps = scheduled_draft_tokens(
+        # Markov steps per draft pass and per-batch-size schedule lookup
+        self._markov_steps, self._markov_steps_by_reqs = scheduled_draft_tokens_by_reqs(
             vllm_config, spec.num_speculative_tokens
         )
+
+    def steps_for_reqs(self, num_reqs: int) -> int:
+        """Markov steps needed for a batch of ``num_reqs`` requests."""
+        table = self._markov_steps_by_reqs
+        if table is None or num_reqs <= 0:
+            return self._markov_steps
+        return min(self._markov_steps, table[min(num_reqs, len(table) - 1)])
 
     # -- weights -----------------------------------------------------------
     def _route(self, name: str) -> tuple[str, slice | None]:
@@ -561,6 +650,9 @@ class Inkling2DSparkModel(nn.Module):
 
     @torch.no_grad()
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        self.model.markov_head.ensure_checkpoint_storage(
+            self.config, self.model.norm_w.device
+        )
         params = dict(self.named_parameters())
         report = _Fp16Report()
         received: dict[str, int] = {}
@@ -612,37 +704,50 @@ class Inkling2DSparkModel(nn.Module):
             )
         self.model.embed_norm = target_model.model.embed_norm
         self.refresh_derived_weights()
+        self.model.markov_head.free_unfolded_head()
 
     @torch.no_grad()
     def refresh_derived_weights(self) -> None:
         """Re-derive the weights computed from the target's LM head (also after the
         target's weights are replaced): ``fold_w = lm_head @ hidden_out.W`` and
-        ``fold_b = lm_head @ hidden_out.b``, fp32 accumulation."""
+        ``fold_b = lm_head @ hidden_out.b``, fp32 accumulation.  Under greedy
+        sampling with ``draft_vocab``, only the subset rows of ``fold_w`` / ``fold_b``
+        are materialized (~16.1 MiB instead of ~114.6 MiB on Inkling-2-Mini TP=1)."""
         assert self.lm_head is not None
         head = self.model.markov_head
         lm = self.lm_head.weight
         vocab = lm.shape[0]
+        if self._draft_vocab_path is not None and self._greedy_only:
+            if head.fold_w.numel() != 0:
+                head.fold_w = torch.empty(0, dtype=torch.float16, device=lm.device)
+                head.fold_b = torch.empty(0, dtype=torch.float32, device=lm.device)
+            self._draft_vocab = self._derive_draft_vocab(self._draft_vocab_path)
+            self._scratch.ensure_vocab(self._draft_vocab.ids.numel())
+            return
+
+        self._draft_vocab = None
+        self._scratch.ensure_vocab(vocab)
         if head.fold_w.shape[0] != vocab:
             head.fold_w = torch.empty(
                 vocab, self.config.markov_rank, dtype=torch.float16, device=lm.device
             )
             head.fold_b = torch.empty(vocab, dtype=torch.float32, device=lm.device)
-        ops.inkling2_dspark_gemm(lm, head.hidden_out_t, head.fold_w, vocab, 0)
-        ops.inkling2_dspark_fold_bias(lm, head.hidden_out_b, head.fold_b)
-        self._draft_vocab = (
-            None
-            if self._draft_vocab_path is None
-            else self._derive_draft_vocab(self._draft_vocab_path)
-        )
+        if lm.is_cuda:
+            ops.inkling2_dspark_gemm(lm, head.hidden_out_t, head.fold_w, vocab, 0)
+            ops.inkling2_dspark_fold_bias(lm, head.hidden_out_b, head.fold_b)
+        else:
+            head.fold_w.copy_(
+                (lm.float() @ head.hidden_out_t.float().t()).to(torch.float16)
+            )
+            head.fold_b.copy_(lm.float() @ head.hidden_out_b.float())
+        if self._draft_vocab_path is not None:
+            self._draft_vocab = self._derive_draft_vocab(self._draft_vocab_path)
 
-    @torch.no_grad()
-    def _derive_draft_vocab(self, path: str) -> _DraftVocab:
-        """The LM-head and folded-head rows of the ids listed in ``path`` (an
-        ``.npy`` of strictly ascending token ids, made offline by
-        ``tools/rdna/inkling2/draft_vocab.py``), filtered to this TP rank's shard."""
-        assert self.lm_head is not None
-        head, lm = self.model.markov_head, self.lm_head.weight
-        ids = torch.from_numpy(np.load(path).astype(np.int64)).to(lm.device)
+    def _load_draft_vocab_ids(
+        self, path: str, device: torch.device, *, log: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Validate ``path`` and return ``(rank_ids [int64], local_idx [int32])``."""
+        ids = torch.from_numpy(np.load(path).astype(np.int64)).to(device)
         vocab_limit = self.config.vocab_size
         if (
             ids.dim() != 1
@@ -659,34 +764,72 @@ class Inkling2DSparkModel(nn.Module):
         hi = lo + self._head_take
         if self._tp.enabled:
             rank_ids = ids[(ids >= lo) & (ids < hi)]
-            local_idx = rank_ids - lo
-            logger.info(
-                "Inkling-2 DSpark draft vocabulary (TP rank %d/%d): %d local of %d "
-                "listed ids (shard [%d, %d), %s)",
-                self._tp.rank,
-                self._tp.size,
-                rank_ids.numel(),
-                ids.numel(),
-                lo,
-                hi,
-                path,
-            )
+            local_idx = (rank_ids - lo).to(torch.int32)
+            if log:
+                logger.info(
+                    "Inkling-2 DSpark draft vocabulary (TP rank %d/%d): %d local of %d "
+                    "listed ids (shard [%d, %d), %s)",
+                    self._tp.rank,
+                    self._tp.size,
+                    rank_ids.numel(),
+                    ids.numel(),
+                    lo,
+                    hi,
+                    path,
+                )
         else:
             rank_ids = ids
-            local_idx = ids
-            logger.info(
-                "Inkling-2 DSpark draft vocabulary: %d of %d token ids (%s)",
-                ids.numel(),
-                vocab_limit,
-                path,
-            )
-        return _DraftVocab(
-            rank_ids,
-            rank_ids.to(torch.int32),
-            lm.index_select(0, local_idx),
-            head.fold_w.index_select(0, local_idx),
-            head.fold_b.index_select(0, local_idx),
-        )
+            local_idx = ids.to(torch.int32)
+            if log:
+                logger.info(
+                    "Inkling-2 DSpark draft vocabulary: %d of %d token ids (%s)",
+                    ids.numel(),
+                    vocab_limit,
+                    path,
+                )
+        return rank_ids, local_idx
+
+    @torch.no_grad()
+    def _derive_draft_vocab(self, path: str) -> _DraftVocab:
+        """The local LM-head row indices and folded-head rows of the ids listed in
+        ``path`` (an ``.npy`` of strictly ascending token ids, made offline by
+        ``tools/rdna/inkling2/draft_vocab.py``), filtered to this TP rank's shard."""
+        assert self.lm_head is not None
+        head, lm = self.model.markov_head, self.lm_head.weight
+        rank_ids, local_idx = self._load_draft_vocab_ids(path, lm.device, log=True)
+        n_sub = rank_ids.numel()
+        rank = self.config.markov_rank
+        if n_sub == 0:
+            fold_w = torch.empty((0, rank), dtype=torch.float16, device=lm.device)
+            fold_b = torch.empty((0,), dtype=torch.float32, device=lm.device)
+        elif head.fold_w.shape[0] == lm.shape[0]:
+            local_i64 = local_idx.to(torch.int64)
+            fold_w = head.fold_w.index_select(0, local_i64)
+            fold_b = head.fold_b.index_select(0, local_i64)
+        else:
+            fold_w = torch.empty((n_sub, rank), dtype=torch.float16, device=lm.device)
+            fold_b = torch.empty((n_sub,), dtype=torch.float32, device=lm.device)
+            chunk = 4096
+            for i0 in range(0, n_sub, chunk):
+                n = min(chunk, n_sub - i0)
+                lm_sub = lm.index_select(0, local_idx[i0 : i0 + n].to(torch.int64))
+                if lm.is_cuda:
+                    ops.inkling2_dspark_gemm(
+                        lm_sub, head.hidden_out_t, fold_w[i0 : i0 + n], n, 0
+                    )
+                    ops.inkling2_dspark_fold_bias(
+                        lm_sub, head.hidden_out_b, fold_b[i0 : i0 + n]
+                    )
+                else:
+                    fold_w[i0 : i0 + n].copy_(
+                        (lm_sub.float() @ head.hidden_out_t.float().t()).to(
+                            torch.float16
+                        )
+                    )
+                    fold_b[i0 : i0 + n].copy_(
+                        lm_sub.float() @ head.hidden_out_b.float()
+                    )
+        return _DraftVocab(rank_ids, local_idx, fold_w, fold_b)
 
     # -- speculator interface ------------------------------------------------
     def get_draft_kv_cache_layer_names(self) -> list[str]:
@@ -938,23 +1081,26 @@ class Inkling2DSparkModel(nn.Module):
         cfg, s = self.config, self._scratch
         head = self.model.markov_head
         steps = spec.num_speculative_steps
-        markov_steps = min(steps, self._markov_steps)  # ``steps`` stays the layout
+        markov_steps = min(steps, self.steps_for_reqs(num_reqs))
         stride = spec.num_query_per_req
         weight = self.lm_head.weight
         vocab, take = weight.shape[0], self._head_take
-        # the folded head of the rows holding real ids (all of them at TP=1)
-        fold_w, fold_b = head.fold_w[:take], head.fold_b[:take]
+        w_row_ids: torch.Tensor | None = None
         greedy = spec.draft_logits is None
-        # with the draft vocabulary the greedy chain sweeps only its rows
+        # with the draft vocabulary the greedy chain sweeps only its rows in place
         ranked = self._draft_vocab if greedy else None
         if ranked is not None:
-            weight, vocab = ranked.weight, ranked.ids.numel()
+            vocab = ranked.ids.numel()
+            w_row_ids = ranked.local_idx
             fold_w, fold_b = ranked.fold_w, ranked.fold_b
+        else:
+            fold_w, fold_b = head.fold_w[:take], head.fold_b[:take]
         sample_rows = num_reqs * steps
         idx_map = spec.sample_idx_mapping[:sample_rows].view(num_reqs, steps)
         sample_pos = spec.sample_pos[:sample_rows].view(num_reqs, steps)
-        for c0 in range(0, num_reqs, _HEAD_REQS):
-            rc = min(_HEAD_REQS, num_reqs - c0)
+        head_chunk = s.head_reqs
+        for c0 in range(0, num_reqs, head_chunk):
+            rc = min(head_chunk, num_reqs - c0)
             rows = rc * markov_steps
             if markov_steps == steps:
                 idx = spec.sample_indices[c0 * steps : c0 * steps + rows]
@@ -968,7 +1114,7 @@ class Inkling2DSparkModel(nn.Module):
                 )
             ops.inkling2_dspark_gather_rows(head_hidden, idx, s.head_rows, rows)
             if vocab > 0:
-                _linear(s.head_rows, weight, s.base[:rows, :vocab], rows)
+                _linear(s.head_rows, weight, s.base[:rows, :vocab], rows, w_row_ids)
             for r0 in range(0, rows, _GEMV_MAX_ROWS):
                 m = min(_GEMV_MAX_ROWS, rows - r0)
                 ops.inkling2_dspark_gemv(
@@ -1032,9 +1178,7 @@ class Inkling2DSparkModel(nn.Module):
                 elif self._tp.enabled:
                     out.copy_(self._argmax_across_ranks(rc, ranked))
                 elif ranked is not None:
-                    ops.inkling2_dspark_argmax(s.logits, s.tok[:rc], rc, vocab)
-                    torch.index_select(ranked.ids, 0, s.tok[:rc], out=s.tok2[:rc])
-                    out.copy_(s.tok2[:rc])
+                    ops.inkling2_dspark_argmax(s.logits, out, rc, vocab, ranked.ids)
                 else:
                     ops.inkling2_dspark_argmax(s.logits, out, rc, vocab)
         return True
@@ -1061,11 +1205,8 @@ class Inkling2DSparkModel(nn.Module):
             part[rows : 2 * rows].view(torch.int32).fill_(0x7FFFFFFF)
         else:
             ops.inkling2_dspark_argmax_partial(
-                s.logits, part, rows, ranked.ids.numel(), 0
+                s.logits, part, rows, ranked.ids.numel(), 0, ranked.ids
             )
-            local_idx = part[rows : 2 * rows].view(torch.int32)
-            torch.index_select(ranked.ids_i32, 0, local_idx, out=s.part_ids[:rows])
-            local_idx.copy_(s.part_ids[:rows])
         gathered = self._tp.all_gather(part.view(2 * rows, 1))  # [2 * rows, tp]
         out = s.tok[:rows]
         ops.inkling2_linear_argmax_reduce(
