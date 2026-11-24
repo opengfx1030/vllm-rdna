@@ -81,11 +81,12 @@ port on purpose: only one runs on a given set of cards at a time.
 | `flashnext-tp4pp2-mtp2` | Flash-Next AWQ-W4A16 | 4 x 2 (EP4) | 8 | 18099 | 262144 | 8 | MTP=2 | `PCI_BUSES` of the eight-card reference box |
 | `flashnext-tp8-mtp2` | Flash-Next AWQ-W4A16 | 8 x 1 (EP8) | 8 | 18098 | 262144 | 8 | MTP=2 | `PCI_BUSES` of the eight-card reference box |
 | `inkling2-mini-tp1` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 180000 | 16 | none | `ATTN=none`, one image per prompt, no TunableOp |
-| `inkling2-mini-tp1-dspark` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 125000 | 2 | DSpark, 7 drafted, 2 verified | sources `inkling2-mini-tp1`; draft is `mtp.safetensors` in the checkpoint |
-| `inkling2-mini-tp1-dspark-adaptive` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 105000 | 2 | DSpark, adaptive K | sources `inkling2-mini-tp1-dspark`; 32,768-id draft vocabulary file (`DRAFT_VOCAB`) |
-| `inkling2-mini-tp2` | Inkling-2-Mini | 2 x 1 | 2 | 18222 | 1048576 | 8 | none | one-shot HIP all-reduce, 184 tokens per prefill step |
-| `inkling2-mini-tp2-dspark` | Inkling-2-Mini | 2 x 1 | 2 | 18222 | 780000 | 2 | DSpark, 7 drafted, 2 verified | sources `inkling2-mini-tp2` |
+| `inkling2-mini-tp1-dspark` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 115000 | 16 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | sources `inkling2-mini-tp1`; draft is `mtp.safetensors` in the checkpoint |
+| `inkling2-mini-tp1-dspark-adaptive` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 95000 | 16 | DSpark, adaptive K (`b<=2`), off at `b>=3` | sources `inkling2-mini-tp1-dspark`; 32,768-id draft vocabulary file (`DRAFT_VOCAB`) |
+| `inkling2-mini-tp2` | Inkling-2-Mini | 2 x 1 | 2 | 18222 | 1048576 | 8 | none | one-shot HIP all-reduce, 320 tokens per prefill step |
+| `inkling2-mini-tp2-dspark` | Inkling-2-Mini | 2 x 1 | 2 | 18222 | 720000 | 8 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | sources `inkling2-mini-tp2`, `MAXBAT=1024` |
 | `inkling2-mini-tp4` | Inkling-2-Mini | 4 x 1 | 4 | 18223 | 1048576 | 8 | none | one-shot HIP all-reduce, 4096 tokens per prefill step |
+| `inkling2-mini-tp4-dspark` | Inkling-2-Mini | 4 x 1 | 4 | 18223 | 1048576 | 8 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | sources `inkling2-mini-tp4`; full 1M context fits |
 
 The three `flashnext-pp3*`, `flashnext-tp4pp2-mtp2` and `flashnext-tp8-mtp2`
 recipes assume cards of 29.98 GiB (V620). The two recipes with `PCI_BUSES` carry

@@ -1365,6 +1365,32 @@ def test_dynamic_decode_capture_covers_schedule_gap_and_tail():
 
 
 @pytest.mark.usefixtures("off_sm100")
+def test_dynamic_decode_capture_size_uses_schedule_max_tokens():
+    """Dynamic spec schedules that drop drafting at higher concurrency must not
+    inflate the default prefill/mixed CUDA graph ceiling by the widest static
+    query length across all `max_num_seqs`."""
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=16,
+        num_speculative_tokens=7,
+        max_num_batched_tokens=1024,
+        compilation_config=compilation_config,
+        num_speculative_tokens_per_batch_size=[(1, 2, 2), (3, 16, 0)],
+        method="dspark",
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    # Max scheduled decode tokens is max(2 * 3, 16 * 1) = 16, so default ceiling
+    # is 16 * 2 = 32 (not 16 * 8 * 2 = 256).
+    assert compilation_config.max_prefill_cudagraph_capture_tokens == 32
+    assert compilation_config.max_cudagraph_capture_size == 32
+    assert {3, 6, 16}.issubset(compilation_config.cudagraph_capture_sizes)
+
+
+@pytest.mark.usefixtures("off_sm100")
 def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
     """Decode coverage does not override the `max_num_batched_tokens` clamp.
 
