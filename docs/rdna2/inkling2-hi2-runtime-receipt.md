@@ -22,8 +22,11 @@ tools below.
 
 | Step | Command (abbreviated) | Exit | Result |
 | --- | --- | --- | --- |
-| CPU gate | `pytest test_hi2_loader.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 27 passed, 5 skipped (the 5 GPU tests) |
-| Mutants | `python tools/inkling_hi2/mutants.py --tree <scratch copy>` | 0 | baseline 21 passed; 16/16 mutants killed |
+| CPU gate | `pytest test_hi2_loader.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 33 passed, 5 skipped (the 5 GPU tests) |
+| Pre-fix check | the same gate on the 5 new regression tests, old product files | 1 | 5 failed, 16 deselected (the tests can fail) |
+| Mutants | `python tools/inkling_hi2/mutants.py --tree <scratch copy>` | 0 | baseline 27 passed; 21/21 killed (20-battery on the pre-B4 tree + the changed/new 2 targeted on the final tree) |
+| Real-dir load | `python tools/inkling_hi2/check_real_dir.py --model <bpw3.5> --stock <stock>` | 0 | 1125 text tensors loaded, 0 missing parameters, lm_head == stock |
+| TP suite | `pytest tests/models/inkling2_loop/test_tensor_parallel.py -q` with the workaround below | 0 | 156 passed |
 | Serve dir | `bash tools/inkling_hi2/prep_serve_dir.sh <quantizer out> <serve dir>` | 0 | 15 symlinks + MTP; source untouched |
 | Validate dir | `python tools/inkling_hi2/validate_dir.py --model <serve dir>` | 0 | VALID (see census below) |
 | archdiff | `archdiff_report.py plan --base-tree base-rdna_extras --head-tree tree` | 0 | `units: []`, `csrc.diff` 0 bytes |
@@ -32,13 +35,63 @@ tools below.
 | Recipe assembly | `PRINT=1 serve_rdna.sh RECIPE=inkling2-hi2-tp2 MODEL=...` | 0 | command below |
 
 The CPU gate is the six-layer HI2 test set: format declaration/name map/TP slice
-(`test_hi2_loader.py`, 17), the legacy loader (`test_loader.py`, 6), the kernel tests
+(`test_hi2_loader.py`, 23), the legacy loader (`test_loader.py`, 6), the kernel tests
 collected and skipped off a GPU (5), and the reference against the quantizer's own
 `hi2.format.dequantize` on a tiny HI2 export of the quantizer's fixture (4, fp16
 exact).  `test_hi2_reference.py` needs the quantizer on `PYTHONPATH`
 (`HI2_SRC=$HOME/w4a8_runs/inkling-hi2/tree`) and reuses its fixture with
 `INKLING2_TINY_OUT`; without the quantizer the 4 tests skip (do not read a skip as a
 pass).
+
+### Verifier round (fix-first -> fixed)
+
+`InklingRuntimeVerify` loaded the real directory on CPU and found four start-up
+blockers; each is fixed on the branch and covered by a CPU regression test (the
+B1-B3 tests fail on the pre-fix overlay, the "Pre-fix check" row; the B4 test
+exercises the exact call shape that crashed):
+
+1. **TP=2 workspace (`B1`).** The w2 output reused the gate/up scratch and the
+   workspace required `2 * intermediate == hidden`; the real TP=2 rank has hidden
+   2304 and intermediate 576. The w2 GEMM now writes `moe_hidden_view()` (its own
+   `[T*K, H]` fp16 buffer) and the requirement is gone; tested at TP=1 and TP=2.
+2. **Block-64 routing (`B2`).** `sorted_ids64` was `numel + E*(64-1)` long, not a
+   multiple of 64, but the HIP GEMM checks `numel % 64 == 0`. The buffer and the
+   view are rounded up (the extra rows are pad ids the GEMM never reads); tested for
+   every chunk size 1..1024 at TP=1 and TP=2.
+3. **`lm_head.weight` (`B3`).** The exporter keeps the stock top-level name; the
+   text model calls it `model.llm.unembed.weight`. `serving_checkpoint_name()`
+   aliases it in `load_weights`; `check_real_dir.py` loads the real directory and
+   compares the head with the stock unembed.
+4. **w2 top-k reduction (`B4`, introduced by the B1 fix).** The serving path kept
+   the old 3-D broadcast on the now 2-D `[T*K, H]` buffer and raised for every
+   chunk size at both TP sizes. `_sum_topk_rows()` takes the 2-D workspace view and
+   the workspace's fp32 `[T, K]` `topk_w`, does the `[T, K, H]` multiply and sums
+   over K into `[T, H]`; the CPU test runs it on the exact workspace buffer and
+   `topk_w` view, and a mutant (view as `T*K` rows) is killed.
+
+Smaller items: a runtime `on_gfx10x()` guard on both HI2 kernel paths (wider than
+the gfx1030-only kernels: documented residual); `validate_stack` refuses uneven
+expert rows for every part of every expert, so the gate/up stack at TP=1 is covered
+too; the serving path rounds the per-expert products to fp16 before the top-k sum
+(fp32 accumulator, fp16 output), while the eager and reference paths multiply fp32
+products (the plan's risk 4 says so); the alignment op's
+zero-element `expert_map` placeholder is the only per-call allocation (as in the
+generic MoE path).
+
+### `test_tensor_parallel.py` and the venv's LLVM fault
+
+The 18 errors are an environment fault, not this branch: the engine's model-registry
+subprocess loads two LLVMs and aborts with `spirv-expand-step registered more than
+once`.  With an empty `VLLM_CACHE_ROOT` the base commit fails the same way; it
+passes only because a cached modelinfo entry exists for its `model.py` hash.  Run
+the suite with the venv's ROCm libraries on `LD_LIBRARY_PATH` and an empty cache:
+
+```bash
+site=$($VENV/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+LD_LIBRARY_PATH=$site/_rocm_sdk_libraries/lib:$site/_rocm_sdk_core/lib/host-math/lib:\
+$site/_rocm_sdk_core/lib/rocm_sysdeps/lib:$site/_rocm_sdk_core/lib:$site/torch/lib \
+VLLM_CACHE_ROOT=<empty dir> python -m pytest tests/models/inkling2_loop/test_tensor_parallel.py -q
+```
 
 ### Real 3.5 bpw directory (header-only census)
 

@@ -44,7 +44,7 @@ V=$HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python
 cd $TREE && env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
     PYTHONPATH=$TREE $V -c "import vllm._custom_ops, vllm.models.inkling2_loop.amd.moe"
 
-# CPU gates: loader (18), quantizer reference on the tiny HI2 directory (4; the
+# CPU gates: loader (23), quantizer reference on the tiny HI2 directory (4; the
 # fixture is built by the quantizer's own pipeline, ~3.7 min), legacy loader (6),
 # plus the GPU kernel tests collected-and-skipped on CPU (5). H is the quantizer
 # tree; it provides the `hi2` package the reference test imports.
@@ -55,8 +55,22 @@ PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
   tests/models/inkling2_loop/test_loader.py \
   tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
   tests/models/inkling2_loop/test_hi2_reference.py -q
-# 27 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
+# 33 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
 # reuses the <dir>/stock + <dir>/hi2 pair built below instead of rebuilding it.
+
+# mutant battery: the loader / name map / TP slice / reference tests must kill
+# every mutant (21; exit 0). Use a scratch copy of the tree, not the checkout.
+env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+PYTHONPATH=$H:$HOME/w4a8_runs/pydeps/tfm-main INKLING2_TINY_OUT=$HOME/w4a8_runs/inkling-hi2-runtime/tiny \
+$V $TREE/tools/inkling_hi2/mutants.py --tree <scratch copy>
+
+# the real quantizer output, loaded on CPU (the first-boot proxy): no GPU
+env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+PYTHONPATH=$TREE $V $TREE/tools/inkling_hi2/check_real_dir.py \
+  --model $HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5 \
+  --stock $HOME/hfcache/inkling2-mini
+# expected: 1125 text tensors, 0 missing parameters, 480 expert buffers,
+# lm_head equals the stock unembed's first 200058 rows, 643 dense tensors bit-equal
 ```
 
 Build the tiny HI2 fixture once for the GPU kernel test (it is the same fixture the

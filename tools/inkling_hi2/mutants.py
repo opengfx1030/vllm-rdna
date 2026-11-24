@@ -171,8 +171,8 @@ MUTANTS = [
     (
         "hi2_uneven_rows_check_off",
         "vllm/models/inkling2_loop/amd/hi2.py",
-        "        if counts.numel() > 1 and bool((counts != counts[0, 0]).any()):",
-        "        if False:",
+        "    if counts.numel() > 1 and bool((counts != counts[0, 0]).any()):",
+        "    if False:",
         [
             _L + "test_a_stack_with_uneven_expert_rows_is_refused",
             _L + "test_a_multipart_stack_with_uneven_rows_is_refused",

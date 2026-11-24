@@ -200,20 +200,41 @@ TP=1 (`docs/rdna2/inkling2-port-spec.md:240`); HI2 at TP=2 is smaller per rank.
 
 * Steps 1-3 are committed and pushed: the plan, the loader (format declaration,
   name map, TP slices) and the float64/fp32 reference, proven against the
-  quantizer's own tiny output: `test_hi2_loader.py` 18 passed,
+  quantizer's own tiny output: `test_hi2_loader.py` 23 passed,
   `test_hi2_reference.py` 4 passed (bit-identical decode, exact TP columns, routed
   MoE == transformers reference; 3m41s fixture).
 * Step 4 is committed: `_forward_chunk_hi2` drives the generic
   `rdna_hint_flex_moe_transform_rdna2` + `..._gemm_rdna2` at block 64 with the
   Inkling soft-capped SwiGLU (`inkling2_glue_swiglu`) and a fp32 weighted sum;
-  `_forward_hip_hi2` runs the same kernels from the workspace (`moe_x`, block-64
-  routing buffers), so the serving path allocates nothing on the device. The CPU
-  side is covered by the loader tests (unsmoothed stacks, the workspace views);
-  the kernel test is `tests/models/inkling2_loop/test_hi2_kernel_gpu.py` and has
-  **not run**: every GPU is leased.
+  `_forward_hip_hi2` runs the same kernels from workspace views (`moe_x`, the w2
+  output buffer, block-64 routing buffers). The CPU side is covered by the loader
+  tests; the kernel test is `tests/models/inkling2_loop/test_hi2_kernel_gpu.py` and
+  has **not run**: every GPU is leased.
 * Step 5 is committed: `tools/inkling_hi2/{serve.sh,smoke.sh,kl_probe.py,bench.py}`
   and the ordered checklist in `tools/inkling_hi2/README.md`. Nothing in the kit
   has been executed on a GPU.
+* Verifier round (`InklingRuntimeVerify`) fixed four start-up blockers on the real
+  directory, each with a CPU regression test:
+    * **TP=2 workspace**: the w2 output has its own `[T*K, H]` buffer
+    (`moe_hidden_view`); the `hidden == 2 * intermediate` requirement is gone
+    (real TP=2: hidden 2304, intermediate 576 per rank).
+    * **block-64 routing**: `sorted_ids64` is rounded up to 64 (the HIP GEMM checks
+    `numel % 64 == 0`); tested for every chunk size 1..1024 at TP=1 and TP=2.
+    * **`lm_head.weight`**: the HI2 output keeps the stock top-level name; it is
+    aliased to `model.llm.unembed.weight` in `load_weights`
+    (`serving_checkpoint_name`).
+    * **w2 top-k reduction** (introduced by the w2-buffer fix): `_sum_topk_rows`
+    views the 2-D `[T*K, H]` w2 output as `[T, K, H]`, multiplies by the
+    workspace's fp32 `[T, K]` `topk_w` and sums over K into `[T, H]`; a CPU test
+    uses that exact view and a mutant is killed.
+  Also: a runtime `on_gfx10x()` guard on both HI2 kernel paths (wider than the
+  gfx1030-only kernels; documented residual); `validate_stack` refuses uneven
+  expert rows for every part of every expert (gate/up at TP=1 included).
+* Serving numerics: the w2 GEMM writes fp16, and the top-k reduction multiplies
+  those fp16 products by the fp32 router weights in a `[tokens, top_k, hidden]`
+  fp16 tensor before `torch.sum` (fp32 accumulator, fp16 output). The eager
+  path/sum and the reference use fp32 products; the GPU kernel test and the KL probe
+  compare them.
 
 ## 4. Risks / unknowns
 
@@ -221,18 +242,23 @@ TP=1 (`docs/rdna2/inkling2-port-spec.md:240`); HI2 at TP=2 is smaller per rank.
    ~8-pair decode does 8 × 64 rows of work. Expect a slow first decode
    (**[inference]** several × to ~10× the stock kernel at c=1). Correctness first;
    the per-pair GEMV variant and a fused softcap kernel are follow-ups.
-2. **CUDA-graph capture.** `forward_hip` writes only preallocated workspace buffers
-   (the block-64 routing layout included); capture is still unproven on the device,
-   so the kit boots with `FULL_AND_PIECEWISE` and falls back to `EAGER=1` only to
-   report the difference. The `torch.mul_`/`torch.sum` epilogue is two captured torch
-   kernels; if the graph rejects them the fallback is a small HIP epilogue.
+2. **CUDA-graph capture.** `forward_hip` writes preallocated workspace views (the
+   block-64 routing layout and the w2 output included). `ops.moe_align_block_size`
+   itself allocates one zero-element `expert_map` placeholder per call (as the
+   generic MoE path does); the routing buffers it fills are preallocated. Capture is
+   unproven on the device, so the kit boots with `FULL_AND_PIECEWISE` and falls back
+   to `EAGER=1` only to report the difference. The `torch.mul_`/`torch.sum` epilogue
+   is two captured torch kernels; if the graph rejects them the fallback is a small
+   HIP epilogue.
 3. **Load-time memory.** The loader reads the whole 13.7 GiB shard per rank (mmap);
    page cache is shared on the box. Host RSS peak is one stack group (~0.5 GiB) plus
    the dense tensors. Not measured on the real directory yet.
-4. **Numerics.** The grouped kernel accumulates w13/w2 in fp16; the reference and the
-   stock kernels do the same, but the softcap pass is fp32 in torch. Tolerance and KL
-   are proven only by the GPU probes; CPU tests compare the reference to the
-   quantizer's decode to fp32 tolerance.
+4. **Numerics.** The grouped kernel accumulates w13 in fp16 and writes the w2 output
+   in fp16; the serving top-k reduction multiplies those fp16 products by the fp32
+   router weights and sums with an fp32 accumulator, while the reference and the
+   eager path multiply fp32 products. The kernel path's per-expert product is thus
+   the fp16 GEMM output (inherent to the op). Tolerance and KL are proven only by
+   the GPU probes; CPU tests compare the reference to the quantizer's decode.
 5. **MTP.** The stock `mtp.safetensors` is bf16/stock-format; the HI2 text model keeps
    bf16 everything else, so the draft should load unchanged, but it has never run
    against HI2 experts. Language-model-only is the first GPU step.
