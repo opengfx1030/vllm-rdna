@@ -415,8 +415,9 @@ def decode_part(
     """float64 ``[R, K]`` of one expert's part in the original basis."""
     r0, r1 = part_rows(t, expert * parts + part)
     w = _fwht_groups(dequantize_stored_rows(t, r0, r1), t["had"][expert])
-    if t.get("col_scale") is not None:
-        w = w / t["col_scale"][expert].double()
+    scale = t.get("col_scale")
+    if scale is not None and scale.numel():  # empty = the checkpoint has none
+        w = w / scale[expert].double()
     return w
 
 

@@ -857,8 +857,10 @@ class Inkling2LoopMoE(_ExpertsKernel):
         out = {f: getattr(self, f"{stage}_{f}") for f in hi2.FIELDS}
         out["part_off"] = getattr(self, f"{stage}_part_off")
         scale = getattr(self, f"{stage}_col_scale", None)
-        if scale is not None:
-            out["col_scale"] = scale
+        if scale is None:
+            # the HI2 ops take col_scale unconditionally (empty = no smoothing)
+            scale = torch.empty(0, dtype=torch.float16, device=out["had"].device)
+        out["col_scale"] = scale
         return out
 
     @torch.no_grad()
@@ -866,6 +868,13 @@ class Inkling2LoopMoE(_ExpertsKernel):
         if self._processed:
             return
         if self.quant_format == "hi2":
+            # an unsmoothed checkpoint has no ``hi2_col_scale``: its group only
+            # completes here (the rows are mmap views until then, so this is cheap)
+            for stage in ("w13", "w2"):
+                pending = self._hi2_pending[stage]
+                required = set(hi2.FIELDS) | {"part_off"}
+                if not self._hi2_seen[stage] and required.issubset(pending):
+                    self._finalize_hi2(stage)
             missing = [s for s in ("w13", "w2") if not self._hi2_seen[s]]
             if missing:
                 raise ValueError(
@@ -1096,6 +1105,83 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 self.up_softcap,
             )
 
+    # -- HI2 grouped-GEMM path (gfx1030) ----------------------------------
+
+    def _hi2_kernel_forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Eager kernel path: chunks of ``max_tokens_per_call`` routed tokens."""
+        out = torch.empty_like(hidden_states)
+        step = self.max_tokens_per_call
+        for start in range(0, hidden_states.shape[0], step):
+            end = min(start + step, hidden_states.shape[0])
+            out[start:end] = self._forward_chunk_hi2(
+                hidden_states[start:end],
+                top_k_index[start:end],
+                top_k_weights[start:end],
+            )
+        return out
+
+    def _forward_chunk_hi2(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """One chunk: per-pair transform, w13 grouped GEMM, softcapped SwiGLU,
+        w2 grouped GEMM, fp32 weighted top-k sum.
+
+        The kernels are the generic HI2 ones (``rdna_hint_flex_moe_*``): block 64
+        per expert, gate rows first (the loader stores the de-interleaved stack),
+        one activation transform shared by gate and up.  The activation is the
+        Inkling soft-capped two-argument SwiGLU (the fused ``_moe_rdna2`` op only
+        implements SiLU, so the two GEMMs are driven directly).
+        """
+        from vllm import _custom_ops as ops
+        from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+            moe_align_block_size,
+        )
+
+        tokens, top_k = top_k_index.shape
+        inter, hidden = self.intermediate_dim, self.hidden_dim
+        device = hidden_states.device
+        pairs = tokens * top_k
+        x = hidden_states.to(torch.float16).contiguous()
+        flat = top_k_index.to(torch.int32).reshape(-1).contiguous()
+        sorted_ids, expert_ids, ntpp = moe_align_block_size(
+            flat.view(pairs, 1),
+            64,
+            self.num_experts,
+            pad_sorted_ids=True,
+            ignore_invalid_experts=True,
+        )
+        w13, w2 = self._hi2_weights("w13"), self._hi2_weights("w2")
+        xp = torch.empty(pairs, hidden, dtype=torch.float16, device=device)
+        ops.rdna_hint_flex_moe_transform_rdna2(
+            x, top_k, flat, w13, self._hi2_transform["w13"], xp
+        )
+        gate_up = torch.empty(pairs, 2 * inter, dtype=torch.float16, device=device)
+        ops.rdna_hint_flex_moe_gemm_rdna2(
+            xp, sorted_ids, expert_ids, ntpp, w13, 2 * inter, gate_up
+        )
+        act = softcapped_swiglu(
+            gate_up[:, :inter], gate_up[:, inter:], self.gate_softcap, self.up_softcap
+        ).contiguous()
+        hp = torch.empty(pairs, inter, dtype=torch.float16, device=device)
+        ops.rdna_hint_flex_moe_transform_rdna2(
+            act, 1, flat, w2, self._hi2_transform["w2"], hp
+        )
+        y = torch.empty(pairs, hidden, dtype=torch.float16, device=device)
+        ops.rdna_hint_flex_moe_gemm_rdna2(
+            hp, sorted_ids, expert_ids, ntpp, w2, hidden, y
+        )
+        weights = top_k_weights.to(torch.float32).reshape(tokens, top_k)
+        final = (y.view(tokens, top_k, hidden).float() * weights.unsqueeze(-1)).sum(1)
+        return final.to(hidden_states.dtype)
+
     def forward(  # type: ignore[override]
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
@@ -1106,19 +1192,27 @@ class Inkling2LoopMoE(_ExpertsKernel):
             )
         _, weights, ids = self.gate(hidden_states)
         if self.quant_format == "hi2":
-            # eager reference: dequantize the stored ladders and run fp32 matmuls
-            # (the oracle of the grouped kernels; not used in serving)
-            return hi2.reference_moe(
-                hidden_states,
-                ids,
-                weights,
-                self._hi2_weights("w13"),
-                self._hi2_weights("w2"),
-                self.gate_softcap,
-                self.up_softcap,
-                experts=self.num_experts,
-            )
+            return self._hi2_kernel_forward(hidden_states, ids, weights)
         return super().forward(hidden_states, ids, weights)
+
+    @torch.no_grad()
+    def forward_reference(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """The oracle of the HI2 kernels: float64 decode, fp32 matmuls (CPU ok)."""
+        if not self._processed:
+            raise RuntimeError(
+                f"{self.prefix}: call process_weights_after_loading() before forward"
+            )
+        _, weights, ids = self.gate(hidden_states)
+        return hi2.reference_moe(
+            hidden_states,
+            ids,
+            weights,
+            self._hi2_weights("w13"),
+            self._hi2_weights("w2"),
+            self.gate_softcap,
+            self.up_softcap,
+            experts=self.num_experts,
+        )
 
     # -- HIP serving path -------------------------------------------------
 
@@ -1141,6 +1235,75 @@ class Inkling2LoopMoE(_ExpertsKernel):
         self.router_w = (w16 if self.router_fp16 else weight).contiguous()
         del self.gate.weight
 
+    def _forward_hip_hi2(
+        self, x16: torch.Tensor, ws: Any, out_all: torch.Tensor
+    ) -> torch.Tensor:
+        """HI2 experts on the generic grouped kernels, from the workspace buffers.
+
+        The glue router launch computes the fp32 routing (its 8-row block layout is
+        unused); ``moe_align_block_size`` writes the block-64 layout the HI2 GEMM
+        consumes into preallocated buffers, so nothing here allocates on the device.
+        ``hidden == 2 * intermediate`` lets the w2 output reuse the gate/up scratch
+        (Inkling-2-Mini: 2304 = 2 * 1152; the workspace enforces it).
+        """
+        from vllm import _custom_ops as ops
+
+        T, K = x16.shape[0], self.top_k
+        inter, hidden = self.intermediate_dim, self.hidden_dim
+        step = min(self.max_tokens_per_call, ws.moe_chunk)
+        w13, w2 = self._hi2_weights("w13"), self._hi2_weights("w2")
+        tr13, tr2 = self._hi2_transform["w13"], self._hi2_transform["w2"]
+        scale = self.gate.routed_scaling_factor
+        bias = self.gate.e_score_correction_bias
+        for s in range(0, T, step):
+            e = min(s + step, T)
+            tc = e - s
+            m = ws.moe_views(tc, 8)
+            x = x16 if tc == T else x16[s:e]
+            out = out_all if tc == T else out_all[s:e]
+            ops.inkling2_glue_moe_route(
+                x,
+                self.router_w,
+                bias,
+                m.logits,
+                m.topk_w,
+                m.topk_ids,
+                m.sorted_ids,
+                m.expert_ids,
+                ws.post_pad,
+                ws.route_counters,
+                8,
+                scale,
+            )
+            flat = m.topk_ids.reshape(-1)
+            sorted_ids, expert_ids, ntpp = ws.moe64_views(tc)
+            ops.moe_align_block_size(
+                m.topk_ids,
+                self.num_experts,
+                64,
+                sorted_ids,
+                expert_ids,
+                ntpp,
+                None,
+                None,
+            )
+            xp = ws.moe_x_view(tc, hidden)
+            ops.rdna_hint_flex_moe_transform_rdna2(x, K, flat, w13, tr13, xp)
+            ops.rdna_hint_flex_moe_gemm_rdna2(
+                xp, sorted_ids, expert_ids, ntpp, w13, 2 * inter, m.gu
+            )
+            ops.inkling2_glue_swiglu(m.gu, m.act, self.gate_softcap, self.up_softcap)
+            hp = ws.moe_x_view(tc, inter)
+            ops.rdna_hint_flex_moe_transform_rdna2(m.act, 1, flat, w2, tr2, hp)
+            # rows of m.gu are [gate | up] = ``hidden`` wide after the w2 GEMM
+            y = m.gu[: tc * K * hidden].view(tc, K, hidden)
+            ops.rdna_hint_flex_moe_gemm_rdna2(
+                hp, sorted_ids, expert_ids, ntpp, w2, hidden, m.gu
+            )
+            y.mul_(m.topk_w.unsqueeze(-1))
+            torch.sum(y, dim=1, out=out)
+        return out_all
+
     def forward_hip(
         self, x16: torch.Tensor, ws: Any, out_all: torch.Tensor
     ) -> torch.Tensor:
@@ -1155,10 +1318,7 @@ class Inkling2LoopMoE(_ExpertsKernel):
         from vllm import _custom_ops as ops
 
         if self.quant_format == "hi2":
-            raise NotImplementedError(
-                f"{self.prefix}: the HI2 grouped-GEMM serving path is not wired yet; "
-                "the eager reference (VLLM_INKLING2_PATH=reference) is the oracle"
-            )
+            return self._forward_hip_hi2(x16, ws, out_all)
         T, K = x16.shape[0], self.top_k
         step = min(self.max_tokens_per_call, ws.moe_chunk)
         scale = self.gate.routed_scaling_factor

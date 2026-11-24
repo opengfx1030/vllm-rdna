@@ -330,11 +330,11 @@ def test_the_moe_collects_both_groups_and_runs_the_reference():
 
     torch.manual_seed(0)
     x = torch.randn(3, hidden, dtype=torch.float16)
-    out = layer(x)
+    out = layer.forward_reference(x)
     assert out.shape == x.shape and out.dtype == x.dtype
     assert torch.isfinite(out.float()).all()
-    # the eager forward is deterministic
-    assert torch.equal(out, layer(x))
+    # the eager reference is deterministic
+    assert torch.equal(out, layer.forward_reference(x))
 
 
 def test_an_incomplete_group_is_refused():
@@ -348,3 +348,42 @@ def test_an_incomplete_group_is_refused():
         layer.process_weights_after_loading()
     with pytest.raises(ValueError, match="duplicate"):
         layer.load_hi2_field("gate_up", "codes", stack["codes"])
+
+
+def test_an_unsmoothed_group_finalizes_at_the_end_of_loading():
+    """No ``hi2_col_scale`` in the checkpoint: the group completes in
+    ``process_weights_after_loading`` and the kernels see an empty smoothing vector."""
+    from vllm.models.inkling2_loop.amd.moe import Inkling2LoopMoE
+
+    experts, hidden, inter = 4, 128, 64
+    cfg = _config(hidden, inter, experts, 2)
+    layer = Inkling2LoopMoE(cfg, "hi2", prefix="test.mlp").eval()
+    for group, stack in (
+        ("gate_up", make_stack(experts, inter, hidden, 2, seed=41)),
+        ("down", make_stack(experts, hidden, inter, 1, seed=42)),
+    ):
+        stack.pop("col_scale")
+        for field in (*hi2.FIELDS, "part_off"):
+            layer.load_hi2_field(group, field, stack[field])
+    layer.process_weights_after_loading()
+    for stage in ("w13", "w2"):
+        weights = layer._hi2_weights(stage)
+        assert weights["col_scale"].numel() == 0
+        assert layer._hi2_transform[stage] is True
+    x = torch.randn(2, hidden, dtype=torch.float16)
+    assert torch.isfinite(layer.forward_reference(x).float()).all()
+
+
+def test_the_hi2_serving_workspace_reuses_the_gate_up_scratch():
+    pytest.importorskip("vllm.models.inkling2_loop.amd.glue")
+    from vllm.models.inkling2_loop.amd import glue
+
+    cfg = _config(128, 64, 4, 2)
+    ws = glue.Inkling2GlueWorkspace(cfg, 8, "cpu", hi2=True)
+    assert ws.moe_x_view(8, cfg.hidden_size).shape == (16, cfg.hidden_size)
+    assert ws.moe_x_view(8, cfg.intermediate_size).shape == (16, 64)
+    sorted_ids, expert_ids, ntpp = ws.moe64_views(8)
+    assert sorted_ids.numel() == 16 + 4 * 63 and expert_ids.numel() == 5
+    assert ntpp.numel() == 1
+    with pytest.raises(ValueError, match="2 \\* intermediate"):
+        glue.Inkling2GlueWorkspace(_config(192, 64, 4, 2), 8, "cpu", hi2=True)

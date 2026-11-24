@@ -116,6 +116,7 @@ class Inkling2GlueWorkspace:
         max_tokens: int,
         device: torch.device | str,
         tp_size: int = 1,
+        hi2: bool = False,
     ) -> None:
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be positive, got {max_tokens}")
@@ -183,6 +184,25 @@ class Inkling2GlueWorkspace:
         self.route_counters = torch.zeros(chunk + 1, **i32)  # zero ONCE
         self.no_weights = torch.empty(0, **f32)
 
+        # HI2 experts (``rdna_hint_flex_moe_*``): a block-64 routing layout and the
+        # per-pair transformed activations.  The w2 output reuses ``gu`` and the
+        # activation transform reuses ``moe_x``, so hidden must be 2 * intermediate.
+        self.hi2 = hi2
+        self.sorted_ids64: torch.Tensor | None = None
+        self.expert_ids64: torch.Tensor | None = None
+        self.post_pad64: torch.Tensor | None = None
+        if hi2:
+            if 2 * inter != H:
+                raise ValueError(
+                    "the HI2 serving path reuses the gate/up scratch for the down "
+                    f"output: hidden {H} must be 2 * intermediate {inter}"
+                )
+            self.f16["moe_x"] = torch.empty(chunk * K * H, **f16)
+            n_pad64, n_blk64, _ = ops.inkling2_glue_moe_route_sizes(chunk, E, K, 64)
+            self.sorted_ids64 = torch.empty(n_pad64, **i32)
+            self.expert_ids64 = torch.empty(n_blk64, **i32)
+            self.post_pad64 = torch.empty(1, **i32)
+
         # attention: the fused input projections write into per-segment buffers shared
         # by every layer; the output / o_proj buffers and the split-K workspace too
         self._segments: dict[tuple[str, int], torch.Tensor] = {}
@@ -214,6 +234,9 @@ class Inkling2GlueWorkspace:
             self.topk_ids,
             self.post_pad,
             self.route_counters,
+            self.sorted_ids64,
+            self.expert_ids64,
+            self.post_pad64,
             self.attn_ws,
             self.o_out,
             self.final32,
@@ -295,6 +318,26 @@ class Inkling2GlueWorkspace:
             )
             self._moe_views[key] = views
         return views
+
+    def moe64_views(
+        self, tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``(sorted_ids, expert_ids, ntpp)`` of the block-64 HI2 GEMM layout."""
+        if not self.hi2:
+            raise RuntimeError("moe64_views needs a workspace built with hi2=True")
+        assert self.sorted_ids64 is not None
+        assert self.expert_ids64 is not None
+        assert self.post_pad64 is not None
+        n_pad, n_blk, _ = ops.inkling2_glue_moe_route_sizes(tokens, self.E, self.K, 64)
+        return (
+            self.sorted_ids64[:n_pad],
+            self.expert_ids64[:n_blk],
+            self.post_pad64,
+        )
+
+    def moe_x_view(self, tokens: int, width: int) -> torch.Tensor:
+        """``[tokens * top_k, width]`` row-major view of the per-pair scratch."""
+        return self.f16["moe_x"][: tokens * self.K * width].view(tokens * self.K, width)
 
     # -- per-step views ---------------------------------------------------------------
     def bind(self, T: int) -> SimpleNamespace:

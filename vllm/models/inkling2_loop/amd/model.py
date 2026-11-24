@@ -971,7 +971,11 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         device = self.lm_head.weight.device
         before = torch.accelerator.memory_allocated(device)
         ws = glue.Inkling2GlueWorkspace(
-            self.config, self._max_tokens, device, tp_size=self.tp.size
+            self.config,
+            self._max_tokens,
+            device,
+            tp_size=self.tp.size,
+            hi2=any(m.quant_format == "hi2" for m in self._moe_modules),
         )
         workspace = torch.accelerator.memory_allocated(device) - before
         for layer in self.model.layers:
