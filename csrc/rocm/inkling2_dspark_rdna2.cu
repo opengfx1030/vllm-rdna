@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -35,10 +36,13 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+#include "rdna_hint_flex_dense_gemm_kernel.cuh"
 #include "rdna_hint_flex_dense_gemm_rdna2.cuh"
 
 #if defined(__HIPCC__) && defined(__gfx1030__)
-  #define __HIP__RDNA2__
+  #ifndef __HIP__RDNA2__
+    #define __HIP__RDNA2__
+  #endif
 #endif
 
 namespace inkling2_dspark {
@@ -218,8 +222,31 @@ __device__ __forceinline__ void block_sum(float* v, float* red) {
 }
 
 // ---------------------------------------------------------------------------
-// bf16 tap capture
+// bf16 tap capture & integer index helpers
 // ---------------------------------------------------------------------------
+// An int32 / int64 device vector read through one type.
+struct IntVec {
+  const void* p;
+  int wide;
+  __device__ __forceinline__ long long operator[](long long i) const {
+    return wide ? static_cast<const long long*>(p)[i]
+                : static_cast<const int*>(p)[i];
+  }
+};
+
+// An int32 / int64 device vector written through one type.
+struct IntOut {
+  void* p;
+  int wide;
+  __device__ __forceinline__ void set(long long i, long long v) const {
+    if (wide) {
+      static_cast<long long*>(p)[i] = v;
+    } else {
+      static_cast<int*>(p)[i] = static_cast<int>(v);
+    }
+  }
+};
+
 struct TapSources {
   const void* p[4];
   long long ld[4];
@@ -484,7 +511,7 @@ template <int MT, int NR, bool kF32>
 __global__ __launch_bounds__(256) void gemv_kernel(
     const __half* __restrict__ x, long long ldx,
     const int64_t* __restrict__ x_index, const __half* __restrict__ w,
-    long long ldw, void* __restrict__ out, long long ldo,
+    long long ldw, IntVec w_row_ids, void* __restrict__ out, long long ldo,
     long long split_stride, int M, int N, int K, int k_per_split) {
   constexpr int NV = MT * NR;
   static_assert(NV == 4 || NV == 8 || NV == 16 || NV == 32, "NV must be 4..32");
@@ -493,6 +520,14 @@ __global__ __launch_bounds__(256) void gemv_kernel(
   const int row0 = (blockIdx.x * kGemvWaves + wave) * NR;
   const int k_begin = blockIdx.y * k_per_split;
   const int k_end = min(K, k_begin + k_per_split);
+  long long wr[NR];
+  #pragma unroll
+  for (int i = 0; i < NR; ++i) {
+    const int r = row0 + i;
+    wr[i] = r < N ? (w_row_ids.p != nullptr ? w_row_ids[r]
+                                            : static_cast<long long>(r))
+                  : -1;
+  }
   float acc[NR][MT];
   #pragma unroll
   for (int i = 0; i < NR; ++i)
@@ -517,10 +552,10 @@ __global__ __launch_bounds__(256) void gemv_kernel(
         uint4 wv[NR];
   #pragma unroll
         for (int i = 0; i < NR; ++i) {
-          const int r = row0 + i;
-          wv[i] = r < N ? *reinterpret_cast<const uint4*>(
-                              w + static_cast<long long>(r) * ldw + k0 + c)
-                        : make_uint4(0, 0, 0, 0);
+          wv[i] =
+              wr[i] >= 0
+                  ? *reinterpret_cast<const uint4*>(w + wr[i] * ldw + k0 + c)
+                  : make_uint4(0, 0, 0, 0);
         }
   #pragma unroll
         for (int m = 0; m < MT; ++m) {
@@ -568,6 +603,280 @@ __global__ __launch_bounds__(256) void gemv_kernel(
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Indexed dense GEMM: C[M, N] = A[M, K] . W[w_row_ids[0..N), K]^T on the
+// rdna_hint_flex tile designs (D1..D6, DMA == 0), preserving exact fp32
+// accumulation order and single fp16 store rounding of the materialized path.
+// ---------------------------------------------------------------------------
+template <class P>
+__global__ __launch_bounds__(P::T) void indexed_gemm_kernel(
+    const char* __restrict__ A, const char* __restrict__ W, IntVec w_row_ids,
+    _Float16* __restrict__ Cout, int M, int N, int W_rows, int K, int lda,
+    int ldw, int ldc) {
+  #if defined(__HIP__RDNA2__)
+  using Chunk = vllm::rdna_hint_flex::gemm::u32x4;
+  using Frag = typename vllm::rdna_hint_flex::gemm::FragT<P::LW>::type;
+  constexpr int BM = P::BM, BN = P::BN, BK = P::BK, TM = P::TM, TN = P::TN;
+  constexpr int TX = P::TX, TY = P::TY, T = P::T, LD = P::LD, CH = P::CH;
+  constexpr int CPR = P::CPR, NBUF = P::NBUF;
+  constexpr int A_PER_T = P::A_PER_T, B_PER_T = P::B_PER_T;
+
+  __shared__ __attribute__((aligned(16))) char lds[P::LDS_BYTES];
+
+  const int tid = threadIdx.x;
+  const int tx = tid % TX, ty = tid / TX;
+  const int swa = P::SWZ ? (ty / P::SRP) & (CPR - 1) : 0;
+  const int swb = P::SWZ ? (tx / P::SRP) & (CPR - 1) : 0;
+  auto store_off = [](int r, int kcc) {
+    if constexpr (P::SWZ)
+      return r * LD * 2 + ((kcc ^ ((r / P::SRP) & (CPR - 1))) << 4);
+    else
+      return (r * LD + kcc * CH) * 2;
+  };
+  auto frag_off = [](int kk, int sw) {
+    if constexpr (P::SWZ)
+      return (((kk >> 3) ^ sw) << 4) + ((kk & 7) << 1);
+    else
+      return kk * 2;
+  };
+
+  const int ntm = (M + BM - 1) / BM, ntn = (N + BN - 1) / BN;
+  int tm, tn;
+  const int bid = blockIdx.x;
+  if constexpr (P::RAST == 0) {
+    tn = bid % ntn;
+    tm = bid / ntn;
+  } else {
+    constexpr int GM = P::RAST;
+    const int per_group = GM * ntn;
+    const int group = bid / per_group;
+    const int first_m = group * GM;
+    const int gsz = min(ntm - first_m, GM);
+    tm = first_m + (bid % per_group) % gsz;
+    tn = (bid % per_group) / gsz;
+  }
+  const int m0 = tm * BM, n0 = tn * BN;
+  const int nk = K / BK;
+
+  bool wave_live = true;
+  if constexpr (P::SKIP) {
+    const int w0 = __builtin_amdgcn_readfirstlane(tid) & ~31;
+    wave_live = (m0 + w0 / TX < M) && (n0 + (TX >= 32 ? w0 % TX : 0) < N);
+  }
+
+  uint32_t aoff[A_PER_T], boff[B_PER_T];
+    #pragma unroll
+  for (int v = 0; v < A_PER_T; ++v) {
+    const int c = tid + v * T;
+    const int row = min(c / CPR, BM - 1);
+    const int kc = (c % CPR) * CH;
+    const int grow = min(m0 + row, M - 1);
+    aoff[v] = static_cast<uint32_t>((grow * lda + kc) * 2);
+  }
+    #pragma unroll
+  for (int v = 0; v < B_PER_T; ++v) {
+    const int c = tid + v * T;
+    const int row = min(c / CPR, BN - 1);
+    const int kc = (c % CPR) * CH;
+    const int grow = min(n0 + row, N - 1);
+    const long long wrow = w_row_ids[grow];
+    boff[v] = static_cast<uint32_t>((wrow * ldw + kc) * 2);
+  }
+
+  Chunk ra[A_PER_T], rb[B_PER_T];
+  const __amdgpu_buffer_rsrc_t rsa = __builtin_amdgcn_make_buffer_rsrc(
+      const_cast<char*>(A), static_cast<short>(0),
+      static_cast<int>(static_cast<uint32_t>(M) * static_cast<uint32_t>(lda) *
+                       2u),
+      0x31014000);
+  const __amdgpu_buffer_rsrc_t rsw = __builtin_amdgcn_make_buffer_rsrc(
+      const_cast<char*>(W), static_cast<short>(0),
+      static_cast<int>(static_cast<uint32_t>(W_rows) *
+                       static_cast<uint32_t>(ldw) * 2u),
+      0x31014000);
+  auto gload = [&](int kt) {
+    const uint32_t kb = static_cast<uint32_t>(kt * BK * 2);
+    #pragma unroll
+    for (int v = 0; v < A_PER_T; ++v)
+      if (A_PER_T * T == P::A_CHUNKS || tid + v * T < P::A_CHUNKS) {
+        if constexpr (P::BUF)
+          ra[v] = __builtin_amdgcn_raw_buffer_load_b128(rsa, aoff[v], kb, 0);
+        else
+          ra[v] = *reinterpret_cast<const Chunk*>(A + aoff[v] + kb);
+      }
+    #pragma unroll
+    for (int v = 0; v < B_PER_T; ++v)
+      if (B_PER_T * T == P::B_CHUNKS || tid + v * T < P::B_CHUNKS) {
+        if constexpr (P::BUF)
+          rb[v] = __builtin_amdgcn_raw_buffer_load_b128(rsw, boff[v], kb, 0);
+        else
+          rb[v] = *reinterpret_cast<const Chunk*>(W + boff[v] + kb);
+      }
+  };
+  auto lstore = [&](int buf) {
+    char* as = lds + buf * P::STAGE * 2;
+    char* bs = as + P::A_LDS * 2;
+    #pragma unroll
+    for (int v = 0; v < A_PER_T; ++v) {
+      const int c = tid + v * T;
+      if (A_PER_T * T == P::A_CHUNKS || c < P::A_CHUNKS)
+        *reinterpret_cast<Chunk*>(as + store_off(c / CPR, c % CPR)) = ra[v];
+    }
+    #pragma unroll
+    for (int v = 0; v < B_PER_T; ++v) {
+      const int c = tid + v * T;
+      if (B_PER_T * T == P::B_CHUNKS || c < P::B_CHUNKS) {
+        char* dst = bs + store_off(c / CPR, c % CPR);
+        if constexpr (P::BROT == 0) {
+          *reinterpret_cast<Chunk*>(dst) = rb[v];
+        } else {
+          const Chunk q = rb[v];
+          if constexpr (P::BROT == 1) {
+            if constexpr (P::LW == 8)
+              *reinterpret_cast<Chunk*>(dst) = Chunk{q.y, q.x, q.w, q.z};
+            else
+              *reinterpret_cast<Chunk*>(dst) = Chunk{q.w, q.x, q.y, q.z};
+          } else {
+            volatile uint32_t* d32 = reinterpret_cast<volatile uint32_t*>(dst);
+            if constexpr (P::LW == 8) {
+              d32[0] = q.y;
+              d32[1] = q.x;
+              d32[2] = q.w;
+              d32[3] = q.z;
+            } else {
+              d32[0] = q.w;
+              d32[1] = q.x;
+              d32[2] = q.y;
+              d32[3] = q.z;
+            }
+          }
+        }
+      }
+    }
+  };
+
+  float acc[TM][TN];
+    #pragma unroll
+  for (int i = 0; i < TM; ++i)
+    #pragma unroll
+    for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
+
+  auto compute = [&](int buf) {
+    const char* as = lds + buf * P::STAGE * 2;
+    const char* bs = as + P::A_LDS * 2;
+    auto kstep = [&](int kk) {
+      Frag af[TM], bf[TN];
+    #pragma unroll
+      for (int i = 0; i < TM; ++i)
+        af[i] = *reinterpret_cast<const Frag*>(as + (ty + TY * i) * LD * 2 +
+                                               frag_off(kk, swa));
+    #pragma unroll
+      for (int j = 0; j < TN; ++j)
+        bf[j] = *reinterpret_cast<const Frag*>(bs + (tx + TX * j) * LD * 2 +
+                                               frag_off(kk, swb));
+    #pragma unroll
+      for (int i = 0; i < TM; ++i)
+    #pragma unroll
+        for (int j = 0; j < TN; ++j)
+    #pragma unroll
+          for (int t = 0; t < P::ND; ++t)
+            acc[i][j] = dot2u(af[i][t], bf[j][P::BROT ? (t + 1) % P::ND : t],
+                              acc[i][j]);
+    };
+    if constexpr (P::KU == 0) {
+    #pragma unroll
+      for (int kk = 0; kk < BK; kk += P::KS) kstep(kk);
+    } else {
+    #pragma unroll P::KU
+      for (int kk = 0; kk < BK; kk += P::KS) kstep(kk);
+    }
+  };
+  auto run = [&](int buf) {
+    if constexpr (P::SKIP) {
+      if (!wave_live) return;
+    }
+    if constexpr (P::PRIO == 1) __builtin_amdgcn_s_setprio(1);
+    compute(buf);
+    if constexpr (P::PRIO == 1) __builtin_amdgcn_s_setprio(0);
+  };
+  auto mem_begin = [&]() {
+    if constexpr (P::PRIO == 2) __builtin_amdgcn_s_setprio(1);
+  };
+  auto mem_end = [&]() {
+    if constexpr (P::PRIO == 2) __builtin_amdgcn_s_setprio(0);
+  };
+
+  if constexpr (NBUF == 2) {
+    mem_begin();
+    gload(0);
+    lstore(0);
+    mem_end();
+    __syncthreads();
+    int kt = 0;
+    for (; kt + 1 < nk; kt += 2) {
+      mem_begin();
+      gload(kt + 1);
+      mem_end();
+      run(0);
+      mem_begin();
+      lstore(1);
+      mem_end();
+      __syncthreads();
+      mem_begin();
+      if (kt + 2 < nk) gload(kt + 2);
+      mem_end();
+      run(1);
+      mem_begin();
+      if (kt + 2 < nk) lstore(0);
+      mem_end();
+      __syncthreads();
+    }
+    if (kt < nk) run(0);
+  } else {
+    mem_begin();
+    gload(0);
+    mem_end();
+    for (int kt = 0; kt < nk; ++kt) {
+      __syncthreads();
+      mem_begin();
+      lstore(0);
+      mem_end();
+      __syncthreads();
+      mem_begin();
+      if (kt + 1 < nk) gload(kt + 1);
+      mem_end();
+      run(0);
+    }
+  }
+
+    #pragma unroll
+  for (int i = 0; i < TM; ++i) {
+    const int row = m0 + ty + TY * i;
+    if (row < M) {
+    #pragma unroll
+      for (int j = 0; j < TN; ++j) {
+        const int col = n0 + tx + TX * j;
+        if (col < N)
+          Cout[static_cast<size_t>(row) * ldc + col] =
+              static_cast<_Float16>(acc[i][j]);
+      }
+    }
+  }
+  #else
+  (void)A;
+  (void)W;
+  (void)w_row_ids;
+  (void)Cout;
+  (void)M;
+  (void)N;
+  (void)W_rows;
+  (void)K;
+  (void)lda;
+  (void)ldw;
+  (void)ldc;
+  #endif
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,8 +1349,8 @@ __global__ __launch_bounds__(256) void fold_bias_kernel(
 // ``first_id`` + its index, the (value, id) pair a cross-rank reduction takes.
 __global__ __launch_bounds__(512) void argmax_rows_kernel(
     const __half* __restrict__ logits, long long ld, int V, bool vec,
-    long long* __restrict__ out, long long out_stride, float* __restrict__ part,
-    int part_rows, int first_id) {
+    long long* __restrict__ out, long long out_stride, IntVec token_map,
+    float* __restrict__ part, int part_rows, int first_id) {
   __shared__ float sv[16];
   __shared__ int si[16];
   const __half* row = logits + static_cast<long long>(blockIdx.x) * ld;
@@ -1094,11 +1403,14 @@ __global__ __launch_bounds__(512) void argmax_rows_kernel(
       }
     }
     if (tid == 0) {
+      const long long mapped = token_map.p != nullptr
+                                   ? token_map[bi]
+                                   : static_cast<long long>(first_id + bi);
       if (part == nullptr) {
-        out[static_cast<long long>(blockIdx.x) * out_stride] = bi;
+        out[static_cast<long long>(blockIdx.x) * out_stride] = mapped;
       } else {
         part[blockIdx.x] = bv;
-        part[part_rows + blockIdx.x] = __int_as_float(first_id + bi);
+        part[part_rows + blockIdx.x] = __int_as_float(static_cast<int>(mapped));
       }
     }
   }
@@ -1118,29 +1430,6 @@ __global__ __launch_bounds__(512) void argmax_rows_kernel(
 constexpr int kPrepBlock = 128;
 constexpr int kPadPrograms = 32;
 constexpr long long kPadSlot = -1;
-
-// An int32 / int64 device vector read through one type.
-struct IntVec {
-  const void* p;
-  int wide;
-  __device__ __forceinline__ long long operator[](long long i) const {
-    return wide ? static_cast<const long long*>(p)[i]
-                : static_cast<const int*>(p)[i];
-  }
-};
-
-// An int32 / int64 device vector written through one type.
-struct IntOut {
-  void* p;
-  int wide;
-  __device__ __forceinline__ void set(long long i, long long v) const {
-    if (wide) {
-      static_cast<long long*>(p)[i] = v;
-    } else {
-      static_cast<int*>(p)[i] = static_cast<int>(v);
-    }
-  }
-};
 
 struct PrepareArgs {
   // outputs
@@ -1576,11 +1865,19 @@ void inkling2_dspark_gather_rows(torch::Tensor src, torch::Tensor idx,
 
 namespace {
 
+inline IntVec int_vec_1d(const torch::Tensor& t, const char* name) {
+  TORCH_CHECK(t.is_cuda() && t.dim() == 1 && t.is_contiguous(), name,
+              " must be a contiguous 1D GPU tensor");
+  TORCH_CHECK(t.scalar_type() == torch::kInt || t.scalar_type() == torch::kLong,
+              name, " must be int32 or int64");
+  return IntVec{t.data_ptr(), t.scalar_type() == torch::kLong ? 1 : 0};
+}
+
 template <int MT, int NR, bool F32>
 void launch_gemv(const torch::Tensor& x,
                  const std::optional<torch::Tensor>& x_index,
-                 const torch::Tensor& w, const torch::Tensor& out, int64_t M,
-                 int64_t N, int64_t K, int64_t splits, int64_t ldo,
+                 const torch::Tensor& w, IntVec w_ids, const torch::Tensor& out,
+                 int64_t M, int64_t N, int64_t K, int64_t splits, int64_t ldo,
                  int64_t split_stride, hipStream_t stream) {
   const int64_t rows_per_block = kGemvWaves * NR;
   const dim3 grid(static_cast<unsigned>(cdiv(N, rows_per_block)),
@@ -1589,9 +1886,80 @@ void launch_gemv(const torch::Tensor& x,
   gemv_kernel<MT, NR, F32><<<grid, dim3(256), 0, stream>>>(
       reinterpret_cast<const __half*>(x.data_ptr()), x.stride(0),
       x_index.has_value() ? x_index->data_ptr<int64_t>() : nullptr,
-      reinterpret_cast<const __half*>(w.data_ptr()), w.stride(0),
+      reinterpret_cast<const __half*>(w.data_ptr()), w.stride(0), w_ids,
       out.data_ptr(), ldo, split_stride, (int)M, (int)N, (int)K, (int)kps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+using IdxD1 =
+    hg::Design<128, 128, 32, 8, 16, 2, 0, 8, 8, true, 1, 1, 1, 0, 0, 1>;
+using IdxD2 =
+    hg::Design<128, 128, 32, 8, 16, 2, 0, 4, 8, true, 1, 1, 1, 0, 0, 1>;
+using IdxD3 =
+    hg::Design<128, 64, 64, 8, 8, 1, 8, 4, 8, false, 1, 0, 1, 0, 0, 1>;
+using IdxD4 =
+    hg::Design<256, 128, 32, 8, 16, 2, 0, 4, 8, true, 1, 1, 1, 0, 0, 1>;
+using IdxD5 = hg::Design<32, 128, 64, 4, 8, 2, 0, 0, 8, true, 1, 0, 1, 0, 0, 1>;
+using IdxD6 = hg::Design<64, 128, 64, 8, 8, 2, 0, 0, 8, true, 1, 0, 1, 0, 0, 1>;
+
+template <class P>
+void launch_indexed_gemm_design(const void* A, const void* W, IntVec w_ids,
+                                void* C, int64_t M, int64_t N, int64_t W_rows,
+                                int64_t K, int64_t lda, int64_t ldw,
+                                int64_t ldc, hipStream_t stream) {
+  const int64_t ntm = (M + P::BM - 1) / P::BM, ntn = (N + P::BN - 1) / P::BN;
+  indexed_gemm_kernel<P>
+      <<<dim3(static_cast<unsigned>(ntm * ntn)), dim3(P::T), 0, stream>>>(
+          static_cast<const char*>(A), static_cast<const char*>(W), w_ids,
+          static_cast<_Float16*>(C), static_cast<int>(M), static_cast<int>(N),
+          static_cast<int>(W_rows), static_cast<int>(K), static_cast<int>(lda),
+          static_cast<int>(ldw), static_cast<int>(ldc));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+bool launch_indexed_gemm(int design, const void* A, const void* W, IntVec w_ids,
+                         void* C, int64_t M, int64_t N, int64_t W_rows,
+                         int64_t K, int64_t lda, int64_t ldw, int64_t ldc,
+                         hipStream_t stream) {
+  constexpr int kBks[6] = {32, 32, 64, 32, 64, 64};
+  if (design < 0 || design >= 6) return false;
+  if (M == 0 || N == 0) return true;
+  constexpr int64_t kMaxElems = int64_t{1} << 30;
+  const hipDeviceProp_t* prop = at::cuda::getCurrentDeviceProperties();
+  if (M < 0 || N < 0 || W_rows <= 0 || K <= 0 || K % kBks[design] != 0 ||
+      lda % 8 != 0 || ldw % 8 != 0 || lda < K || ldw < K || ldc < N ||
+      M * lda >= kMaxElems || W_rows * ldw >= kMaxElems ||
+      ldc >= (int64_t{1} << 31) || (reinterpret_cast<uintptr_t>(A) & 15) != 0 ||
+      (reinterpret_cast<uintptr_t>(W) & 15) != 0 ||
+      std::strncmp(prop->gcnArchName, "gfx1030", 7) != 0)
+    return false;
+  switch (design) {
+    case 0:
+      launch_indexed_gemm_design<IdxD1>(A, W, w_ids, C, M, N, W_rows, K, lda,
+                                        ldw, ldc, stream);
+      break;
+    case 1:
+      launch_indexed_gemm_design<IdxD2>(A, W, w_ids, C, M, N, W_rows, K, lda,
+                                        ldw, ldc, stream);
+      break;
+    case 2:
+      launch_indexed_gemm_design<IdxD3>(A, W, w_ids, C, M, N, W_rows, K, lda,
+                                        ldw, ldc, stream);
+      break;
+    case 3:
+      launch_indexed_gemm_design<IdxD4>(A, W, w_ids, C, M, N, W_rows, K, lda,
+                                        ldw, ldc, stream);
+      break;
+    case 4:
+      launch_indexed_gemm_design<IdxD5>(A, W, w_ids, C, M, N, W_rows, K, lda,
+                                        ldw, ldc, stream);
+      break;
+    default:
+      launch_indexed_gemm_design<IdxD6>(A, W, w_ids, C, M, N, W_rows, K, lda,
+                                        ldw, ldc, stream);
+      break;
+  }
+  return true;
 }
 
 }  // namespace
@@ -1600,16 +1968,28 @@ void launch_gemv(const torch::Tensor& x,
 //   splits == 0: out is fp16 [>= M, N] (K is not split).
 //   splits  > 0: out is fp32 [>= splits, >= M, N] partial sums over K / splits
 //                (K / splits a multiple of 256), summed by the consumer.
-// x_index (int64 [M]) gathers the activation rows.  `variant` forces the rows
-// per wave (0: automatic); tests and benchmarks use it.
-void inkling2_dspark_gemv(torch::Tensor x, torch::Tensor w, torch::Tensor out,
-                          std::optional<torch::Tensor> x_index,
-                          int64_t num_rows, int64_t splits, int64_t variant) {
+// x_index (int64 [M]) gathers the activation rows; w_row_ids (int32/int64 [N])
+// gathers the weight rows directly from w without copying a subset table.
+// `variant` forces the rows per wave (0: automatic); tests and benchmarks use
+// it.
+void inkling2_dspark_gemv_v2(torch::Tensor x, torch::Tensor w,
+                             torch::Tensor out,
+                             std::optional<torch::Tensor> x_index,
+                             int64_t num_rows, int64_t splits, int64_t variant,
+                             std::optional<torch::Tensor> w_row_ids) {
   check_gpu(x, "x", torch::kHalf);
   check_gpu(w, "w", torch::kHalf);
-  const int64_t M = num_rows, N = w.size(0), K = w.size(1);
+  const int64_t M = num_rows, K = w.size(1);
+  IntVec w_ids{nullptr, 0};
+  int64_t N = w.size(0);
+  if (w_row_ids.has_value()) {
+    w_ids = int_vec_1d(*w_row_ids, "w_row_ids");
+    N = w_row_ids->size(0);
+    TORCH_CHECK(N == 0 || w.size(0) > 0,
+                "w has 0 rows for non-empty w_row_ids");
+  }
   TORCH_CHECK(x.dim() == 2 && w.dim() == 2 && x.size(1) == K,
-              "x [M, K], w [N, K]");
+              "x [M, K], w [W_rows, K]");
   TORCH_CHECK(M >= 0 && M <= 32,
               "the skinny kernel takes at most 32 rows, got ", M);
   TORCH_CHECK(K % 256 == 0, "K must be a multiple of 256");
@@ -1647,8 +2027,8 @@ void inkling2_dspark_gemv(torch::Tensor x, torch::Tensor w, torch::Tensor out,
   const int64_t mt = M <= 8 ? 8 : (M <= 16 ? 16 : 32);
   int64_t nr = variant;
   if (nr == 0) nr = mt == 8 ? (N >= 4096 ? 4 : 2) : (mt == 16 ? 2 : 1);
-  #define I2D_GEMV(MT, NR, F32)                                        \
-    launch_gemv<MT, NR, F32>(x, x_index, w, out, M, N, K, nsplit, ldo, \
+  #define I2D_GEMV(MT, NR, F32)                                               \
+    launch_gemv<MT, NR, F32>(x, x_index, w, w_ids, out, M, N, K, nsplit, ldo, \
                              split_stride, stream)
   if (mt == 8 && nr == 2) {
     f32 ? I2D_GEMV(8, 2, true) : I2D_GEMV(8, 2, false);
@@ -1666,32 +2046,61 @@ void inkling2_dspark_gemv(torch::Tensor x, torch::Tensor w, torch::Tensor out,
   #undef I2D_GEMV
 }
 
+void inkling2_dspark_gemv(torch::Tensor x, torch::Tensor w, torch::Tensor out,
+                          std::optional<torch::Tensor> x_index,
+                          int64_t num_rows, int64_t splits, int64_t variant) {
+  inkling2_dspark_gemv_v2(std::move(x), std::move(w), std::move(out),
+                          std::move(x_index), num_rows, splits, variant,
+                          std::nullopt);
+}
+
 // y = x . w^T on the dense RDNA2 GEMM `design` (rdna_hint_flex designs 0..5),
-// fp16 in / out, fp32 accumulation.  The launch fails loudly (no rocBLAS
-// fallback).
-void inkling2_dspark_gemm(torch::Tensor x, torch::Tensor w, torch::Tensor out,
-                          int64_t num_rows, int64_t design) {
+// fp16 in / out, fp32 accumulation, with optional zero-copy `w_row_ids` [N].
+// The launch fails loudly (no rocBLAS fallback).
+void inkling2_dspark_gemm_v2(torch::Tensor x, torch::Tensor w,
+                             torch::Tensor out, int64_t num_rows,
+                             int64_t design,
+                             std::optional<torch::Tensor> w_row_ids) {
   check_gpu(x, "x", torch::kHalf);
   check_gpu(w, "w", torch::kHalf);
   check_gpu(out, "out", torch::kHalf);
-  const int64_t M = num_rows, N = w.size(0), K = w.size(1);
+  const int64_t M = num_rows, W_rows = w.size(0), K = w.size(1);
+  IntVec w_ids{nullptr, 0};
+  int64_t N = W_rows;
+  if (w_row_ids.has_value()) {
+    w_ids = int_vec_1d(*w_row_ids, "w_row_ids");
+    N = w_row_ids->size(0);
+    TORCH_CHECK(N == 0 || W_rows > 0, "w has 0 rows for non-empty w_row_ids");
+  }
   TORCH_CHECK(x.dim() == 2 && w.dim() == 2 && out.dim() == 2 &&
                   x.size(1) == K && x.size(0) >= M && out.size(0) >= M &&
                   out.size(1) == N,
-              "x [>= M, K], w [N, K], out [>= M, N]");
+              "x [>= M, K], w [W_rows, K], out [>= M, N]");
   check_rows(x, "x", 8);
   check_rows(w, "w", 8);
   check_rows(out, "out", 1);
-  if (M == 0) return;
+  if (M == 0 || N == 0) return;
   const at::cuda::OptionalCUDAGuard guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream();
-  TORCH_CHECK(hg::launch(static_cast<int>(design), x.data_ptr(), w.data_ptr(),
-                         out.data_ptr(), M, N, K, x.stride(0), w.stride(0),
-                         out.stride(0), stream),
-              "inkling2_dspark_gemm: design ", design, " cannot run M=", M,
+  const bool ok =
+      w_row_ids.has_value()
+          ? launch_indexed_gemm(static_cast<int>(design), x.data_ptr(),
+                                w.data_ptr(), w_ids, out.data_ptr(), M, N,
+                                W_rows, K, x.stride(0), w.stride(0),
+                                out.stride(0), stream)
+          : hg::launch(static_cast<int>(design), x.data_ptr(), w.data_ptr(),
+                       out.data_ptr(), M, N, K, x.stride(0), w.stride(0),
+                       out.stride(0), stream);
+  TORCH_CHECK(ok, "inkling2_dspark_gemm: design ", design, " cannot run M=", M,
               " N=", N, " K=", K,
               " (needs gfx1030, K a multiple of the design's K step, "
               "16-byte aligned operands)");
+}
+
+void inkling2_dspark_gemm(torch::Tensor x, torch::Tensor w, torch::Tensor out,
+                          int64_t num_rows, int64_t design) {
+  inkling2_dspark_gemm_v2(std::move(x), std::move(w), std::move(out), num_rows,
+                          design, std::nullopt);
 }
 
 // Per-head Q/K RMSNorm + RoPE + paged KV write (see qkv_prep_kernel).
@@ -1929,17 +2338,27 @@ void inkling2_dspark_fold_bias(torch::Tensor head, torch::Tensor b,
 }
 
 // out[r] = argmax of logits[r, :vocab] (fp16 rows, NaN as -inf, lowest index on
-// ties). `out` is an int64 vector (a strided column of a token table is fine).
-void inkling2_dspark_argmax(torch::Tensor logits, torch::Tensor out,
-                            int64_t num_rows, int64_t vocab) {
+// ties), optionally remapped through `token_map` (int32/int64 [>= vocab]).
+// `out` is an int64 vector or [rows, 1] strided column of a token table.
+void inkling2_dspark_argmax_v2(torch::Tensor logits, torch::Tensor out,
+                               int64_t num_rows, int64_t vocab,
+                               std::optional<torch::Tensor> token_map) {
   check_gpu(logits, "logits", torch::kHalf);
   check_gpu(out, "out", torch::kLong);
   TORCH_CHECK(logits.dim() == 2 && logits.size(0) >= num_rows &&
                   logits.size(1) >= vocab && logits.stride(1) == 1 &&
                   vocab > 0 && vocab < (int64_t{1} << 31),
               "logits must be [>= rows, >= vocab] with a unit column stride");
-  TORCH_CHECK(out.dim() == 1 && out.size(0) >= num_rows,
-              "out must be an int64 vector of at least num_rows entries");
+  TORCH_CHECK((out.dim() == 1 || (out.dim() == 2 && out.size(1) == 1)) &&
+                  out.size(0) >= num_rows,
+              "out must be an int64 vector (or [rows, 1] column) of at least "
+              "num_rows entries");
+  IntVec tmap{nullptr, 0};
+  if (token_map.has_value()) {
+    tmap = int_vec_1d(*token_map, "token_map");
+    TORCH_CHECK(token_map->size(0) >= vocab,
+                "token_map has fewer than vocab entries");
+  }
   if (num_rows == 0) return;
   const at::cuda::OptionalCUDAGuard guard(device_of(logits));
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -1949,28 +2368,38 @@ void inkling2_dspark_argmax(torch::Tensor logits, torch::Tensor out,
                        stream>>>(
       reinterpret_cast<const __half*>(logits.data_ptr()), logits.stride(0),
       (int)vocab, vec, static_cast<long long*>(out.data_ptr()), out.stride(0),
-      nullptr, 0, 0);
+      tmap, nullptr, 0, 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+void inkling2_dspark_argmax(torch::Tensor logits, torch::Tensor out,
+                            int64_t num_rows, int64_t vocab) {
+  inkling2_dspark_argmax_v2(std::move(logits), std::move(out), num_rows, vocab,
+                            std::nullopt);
+}
+
 // The (value, id) partial of one vocabulary shard: part[r] = max logits[r,
-// :vocab] (fp32), part[num_rows + r] = the int32 bits of first_id + the lowest
-// index of that maximum (NaN as -inf).  `part` is fp32 with at least 2 *
-// num_rows entries; `part[:2 * num_rows]` viewed [2 * num_rows, 1] is what a
-// tensor-parallel all-gather concatenates along the last dimension, and
-// inkling2_linear_argmax_reduce(part[:R], part[R:].view(int32), out) turns the
-// gathered [2R, tp] into the global argmax (ties to the lowest id).
-void inkling2_dspark_argmax_partial(torch::Tensor logits, torch::Tensor part,
-                                    int64_t num_rows, int64_t vocab,
-                                    int64_t first_id) {
+// :vocab] (fp32), part[num_rows + r] = the int32 bits of (token_map ?
+// token_map[bi] : first_id + bi) for the lowest index `bi` of that maximum.
+void inkling2_dspark_argmax_partial_v2(torch::Tensor logits, torch::Tensor part,
+                                       int64_t num_rows, int64_t vocab,
+                                       int64_t first_id,
+                                       std::optional<torch::Tensor> token_map) {
   check_gpu(logits, "logits", torch::kHalf);
   check_gpu(part, "part", torch::kFloat);
   TORCH_CHECK(logits.dim() == 2 && logits.size(0) >= num_rows &&
                   logits.size(1) >= vocab && logits.stride(1) == 1 &&
                   vocab > 0 && vocab < (int64_t{1} << 31),
               "logits must be [>= rows, >= vocab] with a unit column stride");
-  TORCH_CHECK(first_id >= 0 && first_id + vocab < (int64_t{1} << 31),
-              "first_id + vocab must fit an int32");
+  IntVec tmap{nullptr, 0};
+  if (token_map.has_value()) {
+    tmap = int_vec_1d(*token_map, "token_map");
+    TORCH_CHECK(token_map->size(0) >= vocab,
+                "token_map has fewer than vocab entries");
+  } else {
+    TORCH_CHECK(first_id >= 0 && first_id + vocab < (int64_t{1} << 31),
+                "first_id + vocab must fit an int32");
+  }
   TORCH_CHECK(
       part.is_contiguous() && part.numel() >= 2 * num_rows,
       "part must be a contiguous fp32 tensor of >= 2 * num_rows entries");
@@ -1982,9 +2411,16 @@ void inkling2_dspark_argmax_partial(torch::Tensor logits, torch::Tensor part,
   argmax_rows_kernel<<<dim3(static_cast<unsigned>(num_rows)), dim3(512), 0,
                        stream>>>(
       reinterpret_cast<const __half*>(logits.data_ptr()), logits.stride(0),
-      (int)vocab, vec, nullptr, 0, part.data_ptr<float>(), (int)num_rows,
+      (int)vocab, vec, nullptr, 0, tmap, part.data_ptr<float>(), (int)num_rows,
       (int)first_id);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void inkling2_dspark_argmax_partial(torch::Tensor logits, torch::Tensor part,
+                                    int64_t num_rows, int64_t vocab,
+                                    int64_t first_id) {
+  inkling2_dspark_argmax_partial_v2(std::move(logits), std::move(part),
+                                    num_rows, vocab, first_id, std::nullopt);
 }
 
 namespace {

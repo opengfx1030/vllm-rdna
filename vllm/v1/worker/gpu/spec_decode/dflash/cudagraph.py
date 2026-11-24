@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Mapping
+import copy
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import torch
 
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode, decode_cudagraph_capture_grid
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -75,6 +77,75 @@ def _prepare_dflash_inputs_to_capture(
 class DFlashCudaGraphManager(CudaGraphManager):
     """DFlash CudaGraphManager for the parallel-drafting query forward,
     building its own attention metadata from scratch."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_lens: Mapping[int, int],
+        lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
+        ubatch_runner: Any = None,
+        decode_request_sizes: Sequence[int] | None = None,
+    ) -> None:
+        # Target compilation_config sizes max_cudagraph_capture_size by target
+        # decode shapes (e.g. 8 tokens at SEQS=4 without speculative verify, or
+        # 6 at SEQS=2, K=2), whereas each DFlash/DSpark request emits a full
+        # block of q = 1 + num_speculative_steps tokens (e.g. 2 * 8 = 16 at b=2).
+        # Widen a local copy of compilation_config (within max_num_batched_tokens)
+        # and ensure every small active request count 1..min(max_reqs, 8) plus
+        # the decode request grid is captured regardless of target capture caps.
+        max_seqs = vllm_config.scheduler_config.max_num_seqs
+        max_batched = vllm_config.scheduler_config.max_num_batched_tokens
+        max_reqs_needed = max(
+            (min(r, max_seqs) for r in decode_query_lens.values()), default=0
+        )
+        max_tokens_needed = min(
+            max(
+                (q * min(r, max_seqs) for q, r in decode_query_lens.items()),
+                default=0,
+            ),
+            max_batched,
+        )
+        cc = vllm_config.compilation_config
+        if max_tokens_needed > 0 and cc is not None:
+            cur_max = cc.max_cudagraph_capture_size or 0
+            cur_dec = cc.max_decode_cudagraph_capture_tokens
+            if cur_max < max_tokens_needed or (
+                cur_dec is not None and cur_dec < max_tokens_needed
+            ):
+                vllm_config = copy.copy(vllm_config)
+                cc = copy.copy(cc)
+                cc.max_cudagraph_capture_size = max(cur_max, max_tokens_needed)
+                if cur_dec is not None:
+                    cc.max_decode_cudagraph_capture_tokens = max(
+                        cur_dec, max_tokens_needed
+                    )
+                vllm_config.compilation_config = cc
+        if decode_request_sizes is None and max_reqs_needed > 0:
+            existing = (
+                cc.decode_cudagraph_capture_request_sizes if cc is not None else None
+            ) or ()
+            decode_request_sizes = sorted(
+                s
+                for s in {
+                    *existing,
+                    *range(1, min(max_reqs_needed, 8) + 1),
+                    *decode_cudagraph_capture_grid(max_reqs_needed),
+                }
+                if 1 <= s <= max_reqs_needed
+            )
+        super().__init__(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_lens=decode_query_lens,
+            lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
+            ubatch_runner=ubatch_runner,
+            decode_request_sizes=decode_request_sizes,
+        )
 
     def capture(
         self,

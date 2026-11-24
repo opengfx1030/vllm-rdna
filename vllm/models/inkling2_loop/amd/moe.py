@@ -619,8 +619,14 @@ _BLOCK_M_WIDE = 8
 #: one-row blocks.
 _BLOCK_M_BY_TOKENS_SPEC = {
     "nvfp4": ((1, 1), (12, 2), (64, 4)),
-    "mxfp8": ((4, 1), (48, 2)),
+    "mxfp8": ((1, 1), (12, 2), (48, 4)),
 }
+
+#: Optional knob ``VLLM_INKLING2_SPEC_BM4_MIN`` (default ``0`` = off): when ``> 0``
+#: (e.g. ``8``), raises ``block_size_m`` to at least ``4`` from that token count up
+#: under ``FUSE_GLUE``, allowing A/B sweeps of correlated verify routing without
+#: rebuilding.
+_SPEC_BM4_MIN = int(os.environ.get("VLLM_INKLING2_SPEC_BM4_MIN", "0"))
 
 #: ``VLLM_INKLING2_FUSE_GLUE``: chunks of at most this many tokens run the SwiGLU
 #: inside the w2 GEMM (``moe_*_gemm_swiglu_rdna2``).  The fused load recomputes the
@@ -817,12 +823,24 @@ class Inkling2LoopMoE(_ExpertsKernel):
 
     # -- compute ----------------------------------------------------------
 
-    def _default_block_size_m(self, num_tokens: int, top_k: int) -> int:
+    def _default_block_size_m(
+        self, num_tokens: int, top_k: int, max_query_len: int = 0
+    ) -> int:
         table = _BLOCK_M_BY_TOKENS_SPEC if FUSE_GLUE else _BLOCK_M_BY_TOKENS
-        for limit, rows in table[self.quant_format]:
+        rows = _BLOCK_M_WIDE
+        for limit, r in table[self.quant_format]:
             if num_tokens <= limit:
-                return rows
-        return _BLOCK_M_WIDE
+                rows = r
+                break
+        if FUSE_GLUE:
+            if _SPEC_BM4_MIN > 0 and num_tokens >= _SPEC_BM4_MIN:
+                return max(rows, 4)
+            # Correlated multi-token spec verify (q_len >= 6, e.g. K=7 -> T>=8):
+            # on NVFP4, bm=4 cuts expert blocks from ~45 to ~31 (344 -> 250 us/visit
+            # on V620), while MXFP8 stays optimal at bm=2 (698 vs 722 us).
+            if self.quant_format == "nvfp4" and max_query_len >= 6 and num_tokens >= 8:
+                return max(rows, 4)
+        return rows
 
     def _prefill_supported(self) -> bool:
         """Eligibility of the prefill kernels: K of both stages (hidden, this rank's
@@ -1015,7 +1033,11 @@ class Inkling2LoopMoE(_ExpertsKernel):
         del self.gate.weight
 
     def forward_hip(
-        self, x16: torch.Tensor, ws: Any, out_all: torch.Tensor
+        self,
+        x16: torch.Tensor,
+        ws: Any,
+        out_all: torch.Tensor,
+        max_query_len: int = 0,
     ) -> torch.Tensor:
         """Router, expert GEMMs and swiglu on the HIP kernels (no allocation).
 
@@ -1040,7 +1062,11 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 and self._prefill_supported()
             )
             # the prefill kernels group the router's 8-row blocks
-            bm = _BLOCK_M_WIDE if prefill else self._default_block_size_m(tc, K)
+            bm = (
+                _BLOCK_M_WIDE
+                if prefill
+                else self._default_block_size_m(tc, K, max_query_len=max_query_len)
+            )
             m = ws.moe_views(tc, bm)
             x = x16 if tc == T else x16[s:e]
             out = out_all if tc == T else out_all[s:e]

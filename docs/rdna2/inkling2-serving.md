@@ -32,8 +32,8 @@ bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1 MODEL=/path/to/inkling2-m
 
 | Recipe | Cards | Port | `MAXLEN` | `SEQS` | `MAXBAT` | Use it for |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | 1 | 18221 | 180,000 | 16 | 1,024 | plain TP=1: max single-card context (180k), up to 16 concurrent requests |
-| [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | 1 | 18221 | 115,000 | 16 | 1,024 | TP=1 with DSpark (`[[1,2,2],[3,16,0]]`): +38% decode, zero c=8 collapse; supports `ADAPTIVE=1` (`MAXLEN=95000`) and `DRAFT_VOCAB=...` |
+| [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | 1 | 18221 | 194,000 | 16 | 1,024 | plain TP=1: max single-card context (194k), up to 16 concurrent requests |
+| [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | 1 | 18221 | 135,000 | 16 | 1,024 | TP=1 with DSpark (`[[1,2,2],[3,16,0]]`): +38% decode, zero c=8 collapse; supports `ADAPTIVE=1` (`MAXLEN=125000`) and `DRAFT_VOCAB=...` |
 | [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | 2 | 18222 | 720,000 | 8 | 1,024 | best TP=2: DSpark ON by default (`[[1,2,2],[3,8,0]]`, +39% decode, +64–73% prefill); `ADAPTIVE=1` (`MAXLEN=660000`) / `DRAFT_VOCAB=...`; `DSPARK=0` for full 1M context (`MAXBAT=320`) |
 | [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | 4 | 18223 | 1,048,576 | 8 | 4,096 | best TP=4: full 1M context with DSpark ON by default (`[[1,2,2],[3,8,0]]`); `ADAPTIVE=1` (1M ctx still fits) / `DRAFT_VOCAB=...`; `DSPARK=0` for plain decoding (2.25M KV) |
 
@@ -82,7 +82,7 @@ capture included): TP=1 44 s, TP=2 64 s, TP=4 59 s [measured, `serve_one.sh`].
 | `EAGER` | 0 | 1 | `1` runs without HIP graphs (`--enforce-eager`) | decode +2 to +13% per token (table below), KV pool +10% at TP=1, SEQS 16 |
 | `SEQS` | 16 (TP=1), 8 | 1 - 16 | `--max-num-seqs`; decode graphs for 1 .. min(16, `SEQS`) requests | each size is a graph; at TP=1 the 16 + 7 graphs take 0.70 GiB of the KV budget |
 | `MAXBAT` | 1,024 / 184 / 4,096 | any | `--max-num-batched-tokens`: the prefill chunk; steps above 32 tokens run eager | at TP=2 every token of it takes 1.92 MiB of the KV budget [derived from the boots below]; larger chunks prefill faster |
-| `MAXLEN` | 180,000 / 1,048,576 | lower | `--max-model-len`; the engine refuses a length the KV pool cannot hold once | see "Long context" |
+| `MAXLEN` | 194,000 / 1,048,576 | lower | `--max-model-len`; the engine refuses a length the KV pool cannot hold once | see "Long context" |
 | `VLLM_KV_CACHE_MARGIN_FLOOR_MIB` | 2048 (TP=2 only) | empty | the memory the KV sizing keeps free beyond its measured transient peak (engine default 3 GiB on ROCm) | the full context at TP=2 needs it (see "Long context") |
 | `RDNA_AR`, `VLLM_RDNA_AR_MAX_KB`, `VLLM_RDNA_AR_ONESHOT_KB` | 1, 256, 256 (TP > 1) | `RDNA_AR=0` | the one-shot HIP all-reduce up to 256 KiB (28 decode tokens in fp32), RCCL above; captured inside the graphs | the cost of RCCL for every reduction was not measured: no decode step needed the fallback |
 | `COMPILATION_CONFIG` | unset | JSON | an explicit capture grid, e.g. `{"cudagraph_mode":"FULL_AND_PIECEWISE","decode_cudagraph_capture_request_sizes":[1,2,4,8]}` | fewer graphs, less KV budget spent; a request count without its own graph replays in the next larger one (3 rows in the 4-row graph cost 35.4 ms against 30.8 ms in an exact one, port spec part B) |
@@ -112,11 +112,11 @@ Per rank, from the engine's boot log of the recipes [measured]:
 | KV per token (the 8 full-attention layer visits of the loop; the sliding-window layers add a bounded amount per request) | 32 KiB | 16 KiB | 8 KiB |
 | one 1,048,576-token request | 32 GiB | 16.1 GiB | 8.2 GiB |
 | HIP graphs (engine log "took") | 0.70 GiB (SEQS 16) | 0.19 GiB (SEQS 8) | between -0.50 and 0.30 GiB (below the counter's resolution) |
-| KV pool of the recipe | 180,986 tokens | 1,062,736 tokens | 2,250,192 tokens |
+| KV pool of the recipe | 196,065 tokens | 1,062,736 tokens | 2,250,192 tokens |
 
 The pool is what is left: free memory after warmup and graph capture, less the margin (engine
 default 3 GiB on ROCm, 2 GiB at TP=2 in the recipe) and the transient activation peak the warmup measured
-(0.77 GiB at TP=1, 0.3 GiB at TP=2 with chunks of 184 tokens). Capture comes out of the same budget: at
+(0.19 GiB at TP=1 after `prompt_logprob` chunk cap, 0.3 GiB at TP=2 with chunks of 184 tokens). Capture comes out of the same budget: at
 TP=1 SEQS 16 costs 9.5% of the KV tokens of a 4,096-token engine (45,175 eager, 40,876 with graphs).
 Prefix caching keeps conv state per 64-token block, so a hit covers whole blocks (128 of 134 tokens in
 the image test below).
@@ -262,9 +262,9 @@ full context back at TP=2; it is not built (`docs/rdna2/inkling2-dspark.md`).
   (349 tok/s) and 25.3 minutes at TP=4 (690 tok/s), against 811 and 1,589 tok/s for a 261k prompt (the rate
   falls with depth). Each was run once, one needle at depth 0.5; several long prompts at once and a long prompt
   with an image were not run.
-- **TP=1 holds about 181k tokens, not the model's million**: the KV cache is 32 KiB per token (eight
-  full-attention layer visits, counting the three passes of the loop) and 18.68 GiB of the 29.98 GiB are
-  weights. The recipe is 180,000.
+- **TP=1 holds about 196k tokens, not the model's million**: the KV cache is 32 KiB per token (eight
+  full-attention layer visits, counting the two passes of the loop) and 18.68 GiB of the 29.98 GiB are
+  weights. The recipe is 194,000.
 - **The TP=2 recipe lowers the engine's KV margin floor to 2 GiB.** With the default 3 GiB the full context
   does not fit once graphs are captured (see "Long context").
 - **Greedy output is not bit-stable**: two runs of the same eager engine produce different continuations

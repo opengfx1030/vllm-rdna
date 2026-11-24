@@ -23,6 +23,7 @@ pytest.importorskip("vllm.models.inkling2_loop.amd.conv_state")
 from vllm.models.inkling2_loop.amd.conv_state import (  # noqa: E402
     Inkling2ConvSpec,
     Inkling2ConvStateManager,
+    conv_ring_rows,
 )
 from vllm.sampling_params import SamplingParams  # noqa: E402
 from vllm.utils.hashing import sha256  # noqa: E402
@@ -207,3 +208,41 @@ def test_the_page_of_the_real_model_and_its_grouping():
     # a conv layer does not join sliding-window layers (the real model's windows are
     # 1024 tokens, so the other order cannot happen)
     assert UniformTypeKVCacheSpecs.from_specs({"c": spec, "s": sliding}) is None
+
+
+def test_conv_ring_rows_tracks_scheduled_draft_tokens():
+    from types import SimpleNamespace
+
+    # No speculative config -> k = 4 ring rows (concurrent in-op single-token safety)
+    cfg_none = SimpleNamespace(speculative_config=None, scheduler_config=None)
+    assert conv_ring_rows(cfg_none, 4) == 4
+
+    # Static K = 7 drafts (no dynamic batch schedule) -> 4 + 7 = 11 rows
+    cfg_k7 = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=7,
+            num_speculative_tokens_per_batch_size=None,
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=16),
+    )
+    assert conv_ring_rows(cfg_k7, 4) == 11
+
+    # Dynamic schedule [[1, 2, 2], [3, 16, 0]] with mtp block 7 -> 6 rows (-40% vs 10)
+    cfg_k2 = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=7,
+            num_speculative_tokens_per_batch_size=[[1, 2, 2], [3, 16, 0]],
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=16),
+    )
+    assert conv_ring_rows(cfg_k2, 4) == 6
+
+    # All-zero schedule -> 4 + 0 = 4 rows
+    cfg_k0 = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=7,
+            num_speculative_tokens_per_batch_size=[[1, 8, 0]],
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+    )
+    assert conv_ring_rows(cfg_k0, 4) == 4

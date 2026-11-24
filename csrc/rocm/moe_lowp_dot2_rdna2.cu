@@ -24,6 +24,7 @@
 // The checkpoint stores N-first tensors ([E, N, K/2] / [E, N, K]); the Python
 // wrapper repacks them into the K-first word layout indexed here.
 
+#include <cstdlib>
 #include <cstdint>
 
 #include <torch/all.h>
@@ -155,29 +156,33 @@ __device__ __forceinline__ float swiglu_act(float g, float u, float gate_cap,
 // (``2 * size_k`` columns) and the tile is the fp16-rounded softcapped SwiGLU
 // of them, i.e. the activations the unfused inkling2_glue_swiglu would have
 // stored.
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, int BLOCK_SIZE_M, int TX = THREADS_X,
+          int BK = BLOCK_KN_SIZE>
 __device__ __forceinline__ void load_activations(
-    const T* __restrict__ a, T (&block_a)[BLOCK_SIZE_M][BLOCK_KN_SIZE + 8],
+    const T* __restrict__ a, T (&block_a)[BLOCK_SIZE_M][BK + 8],
     const int32_t* __restrict__ sorted_token_ids, int offset_m_base,
     int offset_k, int end_k, int t, int size_m, int size_k, int top_k,
     float gate_cap, float up_cap) {
-  if (offset_k + t < end_k) {
   #pragma unroll
-    for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-      const int32_t token_id = sorted_token_ids[offset_m_base + m];
-      const int token_row = token_id / top_k;
-      T v = tzero<T>();
-      if (token_row < size_m) {
-        if (gate_cap > 0.0f) {
-          const T* row = a + (int64_t)token_row * 2 * size_k + offset_k + t;
-          v = __float2half_rn(swiglu_act(__half2float(row[0]),
-                                         __half2float(row[size_k]), gate_cap,
-                                         up_cap));
-        } else {
-          v = a[(int64_t)token_row * size_k + offset_k + t];
+  for (int tk = t; tk < BK; tk += TX) {
+    if (offset_k + tk < end_k) {
+  #pragma unroll
+      for (int m = 0; m < BLOCK_SIZE_M; ++m) {
+        const int32_t token_id = sorted_token_ids[offset_m_base + m];
+        const int token_row = token_id / top_k;
+        T v = tzero<T>();
+        if (token_row < size_m) {
+          if (gate_cap > 0.0f) {
+            const T* row = a + (int64_t)token_row * 2 * size_k + offset_k + tk;
+            v = __float2half_rn(swiglu_act(__half2float(row[0]),
+                                           __half2float(row[size_k]), gate_cap,
+                                           up_cap));
+          } else {
+            v = a[(int64_t)token_row * size_k + offset_k + tk];
+          }
         }
+        block_a[m][tk] = v;
       }
-      block_a[m][t] = v;
     }
   }
 }
@@ -185,7 +190,8 @@ __device__ __forceinline__ void load_activations(
 // ---------------------------------------------------------------------------
 // NVFP4
 // ---------------------------------------------------------------------------
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, int BLOCK_SIZE_M, int TX = THREADS_X,
+          int BK = BLOCK_KN_SIZE>
 __global__ void moe_gemm_nvfp4_kernel_rdna2(
     const T* __restrict__ a, T* __restrict__ c,
     const uint32_t* __restrict__ b_q_weight,  // [E, K/8, N]
@@ -199,11 +205,12 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
     const int expert_weight_stride, const int expert_scales_stride,
     const bool mul_topk_weight, const int output_topk, const float gate_cap,
     const float up_cap) {
+  static_assert(BK % 32 == 0, "BK must be a multiple of 32");
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
-  const int offset_n = blockIdx.y * BLOCK_KN_SIZE * 4;
-  const int offset_k = blockIdx.z * BLOCK_KN_SIZE;
-  const int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
+  const int offset_n = blockIdx.y * TX * 4;
+  const int offset_k = blockIdx.z * BK;
+  const int end_k = min(offset_k + BK, size_k);
   const int n = offset_n + t * 4;
 
   if (token_block * BLOCK_SIZE_M >= num_tokens_post_padded[0]) return;
@@ -216,11 +223,11 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
       b_scales + (int64_t)expert_id * expert_scales_stride;
   const float global = b_globals[expert_id];
 
-  __shared__ T block_a[BLOCK_SIZE_M][BLOCK_KN_SIZE + 8];
+  __shared__ T block_a[BLOCK_SIZE_M][BK + 8];
   const int offset_m_base = token_block * BLOCK_SIZE_M;
-  load_activations<T, BLOCK_SIZE_M>(a, block_a, sorted_token_ids, offset_m_base,
-                                    offset_k, end_k, t, size_m, size_k, top_k,
-                                    gate_cap, up_cap);
+  load_activations<T, BLOCK_SIZE_M, TX, BK>(
+      a, block_a, sorted_token_ids, offset_m_base, offset_k, end_k, t, size_m,
+      size_k, top_k, gate_cap, up_cap);
   __syncthreads();
   if (n >= size_n) return;
 
@@ -305,7 +312,8 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
 
 namespace lowp_dot2 {
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, int BLOCK_SIZE_M, int TX = THREADS_X,
+          int BK = BLOCK_KN_SIZE>
 __global__ void moe_gemm_nvfp4_kernel_rdna2(
     const T*, T*, const uint32_t*, const uint8_t*, const float*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
@@ -320,6 +328,42 @@ __global__ void moe_gemm_nvfp4_kernel_rdna2(
 // Launchers
 // ---------------------------------------------------------------------------
 
+static int g_nvfp4_variant_override = -1;
+
+void moe_nvfp4_set_variant_rdna2(int64_t variant) {
+  g_nvfp4_variant_override = (int)variant;
+}
+
+static int nvfp4_tile_variant() {
+  if (g_nvfp4_variant_override >= 0) return g_nvfp4_variant_override;
+  static const int v = [] {
+    const char* e = std::getenv("VLLM_INKLING2_NVFP4_VARIANT");
+    return (e == nullptr || e[0] == '\0') ? 0 : std::atoi(e);
+  }();
+  return v;
+}
+
+template <typename T, int BLOCK_SIZE_M, int TX = THREADS_X,
+          int BK = BLOCK_KN_SIZE>
+void launch_moe_nvfp4_cfg(
+    const T* a, T* c, const uint32_t* b_q_weight, const uint8_t* b_scales,
+    const float* b_globals, const float* topk_weights,
+    const int32_t* sorted_token_ids, const int32_t* expert_ids,
+    const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
+    int size_n, int size_k, int top_k, int expert_weight_stride,
+    int expert_scales_stride, bool mul_topk_weight, int output_topk,
+    float gate_cap, float up_cap, hipStream_t stream) {
+  dim3 block(TX);
+  dim3 grid(num_token_blocks, (size_n + TX * 4 - 1) / (TX * 4),
+            (size_k + BK - 1) / BK);
+  lowp_dot2::moe_gemm_nvfp4_kernel_rdna2<T, BLOCK_SIZE_M, TX, BK>
+      <<<grid, block, 0, stream>>>(
+          a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, size_m, size_n, size_k, top_k,
+          expert_weight_stride, expert_scales_stride, mul_topk_weight,
+          output_topk, gate_cap, up_cap);
+}
+
 template <typename T, int BLOCK_SIZE_M>
 void launch_moe_nvfp4(
     const T* a, T* c, const uint32_t* b_q_weight, const uint8_t* b_scales,
@@ -328,34 +372,43 @@ void launch_moe_nvfp4(
     const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
     int size_n, int size_k, int top_k, int expert_weight_stride,
     int expert_scales_stride, bool mul_topk_weight, int output_topk,
-    float gate_cap, float up_cap, hipStream_t stream) {
-  dim3 block(THREADS_X);
-  dim3 grid(num_token_blocks,
-            (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
-            (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
-  lowp_dot2::moe_gemm_nvfp4_kernel_rdna2<T, BLOCK_SIZE_M>
-      <<<grid, block, 0, stream>>>(
+    float gate_cap, float up_cap, hipStream_t stream, int variant = 0) {
+  if constexpr (BLOCK_SIZE_M <= 4) {
+    if (variant == 1) {
+      launch_moe_nvfp4_cfg<T, BLOCK_SIZE_M, 128, 256>(
           a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids,
-          expert_ids, num_tokens_post_padded, size_m, size_n, size_k, top_k,
-          expert_weight_stride, expert_scales_stride, mul_topk_weight,
-          output_topk, gate_cap, up_cap);
+          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+          size_k, top_k, expert_weight_stride, expert_scales_stride,
+          mul_topk_weight, output_topk, gate_cap, up_cap, stream);
+      return;
+    }
+  }
+  launch_moe_nvfp4_cfg<T, BLOCK_SIZE_M, THREADS_X, BLOCK_KN_SIZE>(
+      a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids,
+      expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+      size_k, top_k, expert_weight_stride, expert_scales_stride,
+      mul_topk_weight, output_topk, gate_cap, up_cap, stream);
 }
 
 template <typename T>
-void dispatch_moe_nvfp4(
-    const T* a, T* c, const uint32_t* b_q_weight, const uint8_t* b_scales,
-    const float* b_globals, const float* topk_weights,
-    const int32_t* sorted_token_ids, const int32_t* expert_ids,
-    const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
-    int size_n, int size_k, int top_k, int block_size_m,
-    int expert_weight_stride, int expert_scales_stride, bool mul_topk_weight,
-    int output_topk, float gate_cap, float up_cap, hipStream_t stream) {
+void dispatch_moe_nvfp4(const T* a, T* c, const uint32_t* b_q_weight,
+                        const uint8_t* b_scales, const float* b_globals,
+                        const float* topk_weights,
+                        const int32_t* sorted_token_ids,
+                        const int32_t* expert_ids,
+                        const int32_t* num_tokens_post_padded,
+                        int num_token_blocks, int size_m, int size_n,
+                        int size_k, int top_k, int block_size_m,
+                        int expert_weight_stride, int expert_scales_stride,
+                        bool mul_topk_weight, int output_topk, float gate_cap,
+                        float up_cap, hipStream_t stream, int variant = -1) {
+  if (variant < 0) variant = nvfp4_tile_variant();
 #define LAUNCH(BM)                                                           \
   launch_moe_nvfp4<T, BM>(                                                   \
       a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids, \
       expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,  \
       size_k, top_k, expert_weight_stride, expert_scales_stride,             \
-      mul_topk_weight, output_topk, gate_cap, up_cap, stream)
+      mul_topk_weight, output_topk, gate_cap, up_cap, stream, variant)
   switch (block_size_m) {
     case 1:
       LAUNCH(1);

@@ -2430,23 +2430,39 @@ def inkling2_dspark_gemv(
     num_rows: int,
     splits: int = 0,
     variant: int = 0,
+    w_row_ids: torch.Tensor | None = None,
 ) -> None:
     """Skinny fp16 GEMM out = x @ w.T for num_rows <= 32 (fp32 accumulation).
 
     splits == 0 writes fp16 out [rows, N]; splits > 0 writes the fp32 partial
     sums over K / splits into out [splits, rows, N] (the consumer adds them).
-    x_index (int64) gathers the activation rows; variant forces rows per wave.
+    x_index (int64) gathers the activation rows; w_row_ids (int32/int64) gathers
+    the weight rows directly from w; variant forces rows per wave.
     """
-    torch.ops._rocm_C.inkling2_dspark_gemv(
-        x, w, out, x_index, num_rows, splits, variant
-    )
+    if w_row_ids is None:
+        torch.ops._rocm_C.inkling2_dspark_gemv(
+            x, w, out, x_index, num_rows, splits, variant
+        )
+    else:
+        torch.ops._rocm_C.inkling2_dspark_gemv(
+            x, w, out, x_index, num_rows, splits, variant, w_row_ids
+        )
 
 
 def inkling2_dspark_gemm(
-    x: torch.Tensor, w: torch.Tensor, out: torch.Tensor, num_rows: int, design: int
+    x: torch.Tensor,
+    w: torch.Tensor,
+    out: torch.Tensor,
+    num_rows: int,
+    design: int,
+    w_row_ids: torch.Tensor | None = None,
 ) -> None:
-    """Dense fp16 GEMM out = x @ w.T on rdna_hint_flex design 0..5 (no rocBLAS)."""
-    torch.ops._rocm_C.inkling2_dspark_gemm(x, w, out, num_rows, design)
+    """Dense fp16 GEMM out = x @ w.T on rdna_hint_flex design 0..5 (no rocBLAS),
+    with optional zero-copy weight row gather ``w_row_ids``."""
+    if w_row_ids is None:
+        torch.ops._rocm_C.inkling2_dspark_gemm(x, w, out, num_rows, design)
+    else:
+        torch.ops._rocm_C.inkling2_dspark_gemm(x, w, out, num_rows, design, w_row_ids)
 
 
 def inkling2_dspark_qkv_prep(
@@ -2562,22 +2578,42 @@ def inkling2_dspark_fold_bias(
 
 
 def inkling2_dspark_argmax(
-    logits: torch.Tensor, out: torch.Tensor, num_rows: int, vocab: int
+    logits: torch.Tensor,
+    out: torch.Tensor,
+    num_rows: int,
+    vocab: int,
+    token_map: torch.Tensor | None = None,
 ) -> None:
     """out[r] = argmax(logits[r, :vocab]) for fp16 rows (NaN as -inf, lowest index
-    on ties); out is an int64 vector, possibly a strided column of a token table."""
-    torch.ops._rocm_C.inkling2_dspark_argmax(logits, out, num_rows, vocab)
+    on ties), optionally remapped through ``token_map``; out is an int64 vector,
+    possibly a strided column of a token table."""
+    if token_map is None:
+        torch.ops._rocm_C.inkling2_dspark_argmax(logits, out, num_rows, vocab)
+    else:
+        torch.ops._rocm_C.inkling2_dspark_argmax(
+            logits, out, num_rows, vocab, token_map
+        )
 
 
 def inkling2_dspark_argmax_partial(
-    logits: torch.Tensor, part: torch.Tensor, num_rows: int, vocab: int, first_id: int
+    logits: torch.Tensor,
+    part: torch.Tensor,
+    num_rows: int,
+    vocab: int,
+    first_id: int,
+    token_map: torch.Tensor | None = None,
 ) -> None:
     """The (value, id) partial of one vocabulary shard: ``part[r]`` is the fp32 maximum
-    of ``logits[r, :vocab]`` and ``part[num_rows + r]`` the int32 bits of ``first_id``
-    plus the lowest index of that maximum (NaN as -inf)."""
-    torch.ops._rocm_C.inkling2_dspark_argmax_partial(
-        logits, part, num_rows, vocab, first_id
-    )
+    of ``logits[r, :vocab]`` and ``part[num_rows + r]`` the int32 bits of ``token_map``
+    (or ``first_id`` plus the lowest index) of that maximum (NaN as -inf)."""
+    if token_map is None:
+        torch.ops._rocm_C.inkling2_dspark_argmax_partial(
+            logits, part, num_rows, vocab, first_id
+        )
+    else:
+        torch.ops._rocm_C.inkling2_dspark_argmax_partial(
+            logits, part, num_rows, vocab, first_id, token_map
+        )
 
 
 def inkling2_dspark_prepare_inputs(
@@ -2838,6 +2874,7 @@ def inkling2_glue_attn_res(
     partial_out: torch.Tensor | None = None,
     append: torch.Tensor | None = None,
     norm_w: torch.Tensor | None = None,
+    norm_out2: torch.Tensor | None = None,
     eps: float = 1e-6,
     norm_eps: float = 1e-6,
 ) -> None:
@@ -2861,10 +2898,28 @@ def inkling2_glue_attn_res(
         append: optional ``[T, H]`` fp32 state inserted before the partial.
         norm_w: optional ``[1 or Q, H]`` fp16 / fp32 RMSNorm weight; the
             result is then normalised per query and written as fp16.
+        norm_out2: optional ``[T, H]`` fp32 or bf16 secondary norm output
+            (``Q == 1`` with ``norm_w``), written in the same launch.
         eps: epsilon of the unweighted state norm.
         norm_eps: epsilon of the weighted output norm.
 
     """
+    if norm_out2 is not None:
+        torch.ops._rocm_C.inkling2_glue_attn_res_dual(
+            blocks,
+            n_blocks,
+            x0,
+            x1,
+            partial_out,
+            append,
+            query,
+            norm_w,
+            out,
+            norm_out2,
+            eps,
+            norm_eps,
+        )
+        return
     torch.ops._rocm_C.inkling2_glue_attn_res(
         blocks,
         n_blocks,
@@ -2875,6 +2930,67 @@ def inkling2_glue_attn_res(
         query,
         norm_w,
         out,
+        eps,
+        norm_eps,
+    )
+
+
+def inkling2_glue_attn_res_sconv(
+    blocks: torch.Tensor,
+    n_blocks: int,
+    x0: torch.Tensor | None,
+    conv_x: torch.Tensor,
+    conv_w: torch.Tensor,
+    conv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_idx: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    stream_offset: int,
+    num_kv_heads: int,
+    block_size: int,
+    write_state: bool,
+    query: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    sconv_out: torch.Tensor | None = None,
+    partial_out: torch.Tensor | None = None,
+    append: torch.Tensor | None = None,
+    norm_w: torch.Tensor | None = None,
+    norm_out2: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+) -> None:
+    """Static depthwise short-conv fused into the ``inkling2_glue_attn_res`` prologue.
+
+    Computes the 4-tap depthwise conv of ``conv_x [T, H]`` fp16 in an isolated
+    register prologue (optionally writing ``conv_cache`` when ``write_state`` is
+    True, and optionally storing ``sconv_out [T, H]`` fp32), forms the partial
+    state ``x0 + conv`` (or ``conv`` alone when ``x0`` is None), and executes
+    ``attn_res`` (+ optional ``norm_out2`` fp32/bf16) in one launch.
+    """
+    torch.ops._rocm_C.inkling2_glue_attn_res_sconv(
+        blocks,
+        n_blocks,
+        x0,
+        conv_x,
+        conv_w,
+        conv_cache,
+        block_table,
+        seq_idx,
+        query_start_loc,
+        seq_lens,
+        stream_offset,
+        num_kv_heads,
+        block_size,
+        write_state,
+        sconv_out,
+        partial_out,
+        append,
+        query,
+        norm_w,
+        out,
+        norm_out2,
         eps,
         norm_eps,
     )
@@ -6850,8 +6966,9 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         out: torch.Tensor,
         x_index: torch.Tensor | None,
         num_rows: int,
-        splits: int,
-        variant: int,
+        splits: int = 0,
+        variant: int = 0,
+        w_row_ids: torch.Tensor | None = None,
     ) -> None:
         return
 
@@ -6862,6 +6979,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         out: torch.Tensor,
         num_rows: int,
         design: int,
+        w_row_ids: torch.Tensor | None = None,
     ) -> None:
         return
 
@@ -6936,7 +7054,11 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
 
     @register_fake("_rocm_C::inkling2_dspark_argmax")
     def _inkling2_dspark_argmax_fake(
-        logits: torch.Tensor, out: torch.Tensor, num_rows: int, vocab: int
+        logits: torch.Tensor,
+        out: torch.Tensor,
+        num_rows: int,
+        vocab: int,
+        token_map: torch.Tensor | None = None,
     ) -> None:
         return
 
@@ -6949,6 +7071,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
             num_rows: int,
             vocab: int,
             first_id: int,
+            token_map: torch.Tensor | None = None,
         ) -> None:
             return
 
@@ -7112,6 +7235,55 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_glue_s
         norm_eps: float,
     ) -> None:
         return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_glue_attn_res_dual"):
+
+        @register_fake("_rocm_C::inkling2_glue_attn_res_dual")
+        def _inkling2_glue_attn_res_dual_fake(
+            blocks: torch.Tensor,
+            n_blocks: int,
+            x0: torch.Tensor,
+            x1: torch.Tensor | None,
+            partial_out: torch.Tensor | None,
+            append: torch.Tensor | None,
+            query: torch.Tensor,
+            norm_w: torch.Tensor | None,
+            out: torch.Tensor,
+            norm_out2: torch.Tensor | None,
+            eps: float,
+            norm_eps: float,
+        ) -> None:
+            return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_glue_attn_res_sconv"):
+
+        @register_fake("_rocm_C::inkling2_glue_attn_res_sconv")
+        def _inkling2_glue_attn_res_sconv_fake(
+            blocks: torch.Tensor,
+            n_blocks: int,
+            x0: torch.Tensor | None,
+            conv_x: torch.Tensor,
+            conv_w: torch.Tensor,
+            conv_cache: torch.Tensor,
+            block_table: torch.Tensor,
+            seq_idx: torch.Tensor,
+            query_start_loc: torch.Tensor,
+            seq_lens: torch.Tensor,
+            stream_offset: int,
+            num_kv_heads: int,
+            block_size: int,
+            write_state: bool,
+            sconv_out: torch.Tensor | None,
+            partial_out: torch.Tensor | None,
+            append: torch.Tensor | None,
+            query: torch.Tensor,
+            norm_w: torch.Tensor | None,
+            out: torch.Tensor,
+            norm_out2: torch.Tensor | None,
+            eps: float,
+            norm_eps: float,
+        ) -> None:
+            return
 
     @register_fake("_rocm_C::inkling2_glue_msg_gate_down")
     def _inkling2_glue_msg_gate_down_fake(

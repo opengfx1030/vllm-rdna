@@ -33,9 +33,11 @@ from . import blocks, fuse_chain, loader
 from .attention import (
     Inkling2Attention,
     StaticSconv,
+    conv_writes_in_op,
     get_metadata,
     static_conv_hip,
 )
+from .glue import FUSE_SCONV_ATTN_RES
 from .moe import Inkling2LoopMoE
 from .multimodal import Inkling2MultiModalMixin, register_inkling2_processor
 from .parallel import (
@@ -98,6 +100,76 @@ def _stack_gates(
     for g in gates:
         del g.down_proj.weight, g.forget_gate_proj.weight, g.message_gate_proj.weight
     return down, _gate_weights(forget, exact), _gate_weights(gain, exact)
+
+
+#: Maximum token count per step at which post-attention / post-MLP static short
+#: convolutions fuse into ``inkling2_glue_attn_res_sconv`` (covers decode and
+#: DSpark verify batches while leaving large prefill chunks on the standalone
+#: high-occupancy conv kernel).
+_SCONV_FUSE_MAX_TOKENS = 64
+
+_PendingSconv = tuple[
+    torch.Tensor, torch.Tensor, Inkling2ConvOwner, Inkling2Metadata, int
+]
+
+
+def _call_attn_res_sconv(
+    blk: torch.Tensor,
+    n_blocks: int,
+    x0: torch.Tensor | None,
+    pending: _PendingSconv,
+    query: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    sconv_out: torch.Tensor | None = None,
+    partial_out: torch.Tensor | None = None,
+    append: torch.Tensor | None = None,
+    norm_w: torch.Tensor | None = None,
+    norm_out2: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+) -> None:
+    from vllm import _custom_ops as ops
+
+    conv_x, conv_w, owner, md, offset = pending
+    write_state = conv_writes_in_op(md, owner.ring_rows, owner.kernel_size)
+    ops.inkling2_glue_attn_res_sconv(
+        blk,
+        n_blocks,
+        x0,
+        conv_x,
+        conv_w,
+        owner.state,
+        md.block_table,
+        md.seq_idx,
+        md.query_start_loc,
+        md.seq_lens,
+        offset,
+        owner.num_kv_heads,
+        owner.block_size,
+        write_state,
+        query,
+        out,
+        sconv_out=sconv_out,
+        partial_out=partial_out,
+        append=append,
+        norm_w=norm_w,
+        norm_out2=norm_out2,
+        eps=eps,
+        norm_eps=norm_eps,
+    )
+    if not write_state:
+        ops.inkling2_conv_state_write(
+            conv_x,
+            owner.state,
+            md.block_table,
+            md.seq_idx,
+            md.query_start_loc,
+            md.seq_lens,
+            offset,
+            owner.num_kv_heads,
+            owner.block_size,
+        )
 
 
 class Inkling2DecoderLayer(nn.Module):
@@ -318,6 +390,29 @@ class Inkling2DecoderLayer(nn.Module):
         ``v.msgs`` the messages of this visit when ``has_msgs``.  Returns the lazy sum
         of the output as ``(x0, x1)`` and the new number of block states.
         """
+        new_x0, out_x1, next_n, _ = self._forward_hip_visit(
+            ws, v, x0, x1, n_blocks, has_msgs, positions, visit, tap
+        )
+        assert out_x1 is not None
+        return new_x0, out_x1, next_n
+
+    def _forward_hip_visit(
+        self,
+        ws: Inkling2GlueWorkspace,
+        v: Any,
+        x0: torch.Tensor,
+        x1: torch.Tensor | None,
+        n_blocks: int,
+        has_msgs: bool,
+        positions: torch.Tensor,
+        visit: int,
+        tap: torch.Tensor | None,
+        *,
+        pending_sconv: _PendingSconv | None = None,
+        sconv_out: torch.Tensor | None = None,
+        defer_mlp_sconv: bool = False,
+        mlp_c_out: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, int, _PendingSconv | None]:
         from vllm import _custom_ops as ops
 
         eps = self.config.rms_norm_eps
@@ -325,14 +420,58 @@ class Inkling2DecoderLayer(nn.Module):
         blk = v.blk
         kv_owner, conv_owner = self.kv_owners[visit], self.conv_owners[visit]
         kv_md, conv_md = get_metadata(kv_owner.prefix), get_metadata(conv_owner.prefix)
+        sconv_fuse = (
+            FUSE_SCONV_ATTN_RES
+            and self.tp.size == 1
+            and kv_md is not None
+            and conv_md is not None
+            and v.T <= _SCONV_FUSE_MAX_TOKENS
+        )
 
         # ---- attention input: block residual (+ message gates) + layernorm -> fp16
         if self.attention_input is None:  # layer 0: the embedding is the partial block
+            assert pending_sconv is None
             hid = x0
             ops.inkling2_glue_rms_norm(hid, v.hq, weight=self._input_norm, eps=eps)
         else:
             hid = v.hid
-            if not has_msgs:
+            if pending_sconv is not None:
+                if not has_msgs:
+                    _call_attn_res_sconv(
+                        blk,
+                        n_blocks,
+                        x0,
+                        pending_sconv,
+                        self._attn_query,
+                        v.norm3 if G == 3 else v.norm1,
+                        sconv_out=sconv_out,
+                        partial_out=hid,
+                        norm_w=self.attn_norm_w,
+                        eps=eps,
+                        norm_eps=eps,
+                    )
+                else:
+                    raw = v.raw3 if G == 3 else v.raw1
+                    _call_attn_res_sconv(
+                        blk,
+                        n_blocks,
+                        x0,
+                        pending_sconv,
+                        self._attn_query,
+                        raw,
+                        sconv_out=sconv_out,
+                        partial_out=hid,
+                        eps=eps,
+                    )
+                    ops.inkling2_glue_msg_gate_down(
+                        raw, v.msgs_qkv, self.qkv_wd, v.d, eps
+                    )
+                    ops.inkling2_glue_msg_gate_mix(
+                        raw, v.msgs_qkv, v.d, self.qkv_wf, self.qkv_wg, v.x16,
+                        norm_w=self.attn_norm_w, scratch=v.g_scratch, partials=v.g_part,
+                        counters=ws.gate_counters, norm_eps=eps,
+                    )  # fmt: skip
+            elif not has_msgs:
                 ops.inkling2_glue_attn_res(
                     blk, n_blocks, x0, self._attn_query,
                     v.norm3 if G == 3 else v.norm1, x1=x1, partial_out=hid,
@@ -360,6 +499,7 @@ class Inkling2DecoderLayer(nn.Module):
 
         # ---- attention + post-attention short convolution -> attn_c (fp32 [T, H])
         # profiling / dummy run: no cache, no history
+        attn_pending: _PendingSconv | None = None
         if kv_md is None or conv_md is None:
             ops.inkling2_glue_rms_norm(hq, v.hk, sum_out=v.attn_c, eps=eps)
         else:
@@ -369,50 +509,119 @@ class Inkling2DecoderLayer(nn.Module):
             # TP > 1: ``attn`` is the fp32 o_proj partial of this rank's heads; the
             # sum (fp32, rank order) feeds the short conv, which reads fp32 or fp16
             attn = self.tp.all_reduce(attn)
-            static_conv_hip(
-                self.post_attention_convolution,
-                attn,
-                v.attn_c,
-                conv_owner,
-                conv_md,
-                STREAM_ATTN,
-            )
+            if sconv_fuse:
+                attn_pending = (
+                    attn,
+                    self.post_attention_convolution.conv1d.weight,
+                    conv_owner,
+                    conv_md,
+                    conv_owner.stream_ranges[STREAM_ATTN][0],
+                )
+            else:
+                static_conv_hip(
+                    self.post_attention_convolution,
+                    attn,
+                    v.attn_c,
+                    conv_owner,
+                    conv_md,
+                    STREAM_ATTN,
+                )
 
         # ---- mlp input: boundary layers append their input, the others add attn_c
-        if self.is_block_boundary:  # stack = states + hid + attn_c; residual = attn_c
-            a0, a1, extra, new_x0 = v.attn_c, None, {"append": hid}, v.attn_c
-        else:  # stack = states + (hid + attn_c); residual = hid + attn_c
-            a0, a1, extra, new_x0 = hid, v.attn_c, {"partial_out": v.res}, v.res
-        if not has_msgs:
-            ops.inkling2_glue_attn_res(
-                blk, n_blocks, a0, self._mlp_query, v.norm1, x1=a1,
-                norm_w=self.post_attn_norm_w, eps=eps, norm_eps=eps, **extra,
-            )  # fmt: skip
+        if attn_pending is not None:
+            if self.is_block_boundary:
+                a0_s, extra_s, new_x0 = (
+                    None,
+                    {"append": hid, "sconv_out": v.attn_c},
+                    v.attn_c,
+                )
+            else:
+                a0_s, extra_s, new_x0 = hid, {"partial_out": v.res}, v.res
+            if not has_msgs:
+                _call_attn_res_sconv(
+                    blk,
+                    n_blocks,
+                    a0_s,
+                    attn_pending,
+                    self._mlp_query,
+                    v.norm1,
+                    norm_w=self.post_attn_norm_w,
+                    eps=eps,
+                    norm_eps=eps,
+                    **extra_s,
+                )
+            else:
+                _call_attn_res_sconv(
+                    blk,
+                    n_blocks,
+                    a0_s,
+                    attn_pending,
+                    self._mlp_query,
+                    v.raw1,
+                    eps=eps,
+                    **extra_s,
+                )
+                ops.inkling2_glue_msg_gate_down(
+                    v.raw1, v.msgs_mlp, self.mlp_wd, v.d1, eps
+                )
+                ops.inkling2_glue_msg_gate_mix(
+                    v.raw1, v.msgs_mlp, v.d1, self.mlp_wf, self.mlp_wg, v.x16_g1,
+                    norm_w=self.post_attn_norm_w, scratch=v.g_scratch,
+                    partials=v.g_part, counters=ws.gate_counters, norm_eps=eps,
+                )  # fmt: skip
         else:
-            ops.inkling2_glue_attn_res(
-                blk, n_blocks, a0, self._mlp_query, v.raw1, x1=a1, eps=eps, **extra
-            )
-            ops.inkling2_glue_msg_gate_down(v.raw1, v.msgs_mlp, self.mlp_wd, v.d1, eps)
-            ops.inkling2_glue_msg_gate_mix(
-                v.raw1, v.msgs_mlp, v.d1, self.mlp_wf, self.mlp_wg, v.x16_g1,
-                norm_w=self.post_attn_norm_w, scratch=v.g_scratch, partials=v.g_part,
-                counters=ws.gate_counters, norm_eps=eps,
-            )  # fmt: skip
+            if (
+                self.is_block_boundary
+            ):  # stack = states + hid + attn_c; residual = attn_c
+                a0, a1, extra, new_x0 = v.attn_c, None, {"append": hid}, v.attn_c
+            else:  # stack = states + (hid + attn_c); residual = hid + attn_c
+                a0, a1, extra, new_x0 = hid, v.attn_c, {"partial_out": v.res}, v.res
+            if not has_msgs:
+                ops.inkling2_glue_attn_res(
+                    blk, n_blocks, a0, self._mlp_query, v.norm1, x1=a1,
+                    norm_w=self.post_attn_norm_w, eps=eps, norm_eps=eps, **extra,
+                )  # fmt: skip
+            else:
+                ops.inkling2_glue_attn_res(
+                    blk, n_blocks, a0, self._mlp_query, v.raw1, x1=a1, eps=eps, **extra
+                )
+                ops.inkling2_glue_msg_gate_down(
+                    v.raw1, v.msgs_mlp, self.mlp_wd, v.d1, eps
+                )
+                ops.inkling2_glue_msg_gate_mix(
+                    v.raw1, v.msgs_mlp, v.d1, self.mlp_wf, self.mlp_wg, v.x16_g1,
+                    norm_w=self.post_attn_norm_w, scratch=v.g_scratch,
+                    partials=v.g_part, counters=ws.gate_counters, norm_eps=eps,
+                )  # fmt: skip
 
         # ---- MoE (route, gemm1, swiglu, gemm2) + post-mlp short convolution
-        moe = self.tp.all_reduce(self.mlp.forward_hip(hq, ws, v.moe_out))
+        max_q = 0 if conv_md is None else conv_md.max_query_len
+        moe = self.tp.all_reduce(
+            self.mlp.forward_hip(hq, ws, v.moe_out, max_query_len=max_q)
+        )
+        next_n = n_blocks + int(self.is_block_boundary)
+        out_c = v.mlp_c if mlp_c_out is None else mlp_c_out
         if conv_md is None:
-            ops.inkling2_glue_rms_norm(moe, v.hk, sum_out=v.mlp_c, eps=eps)
-        else:
-            static_conv_hip(
-                self.post_mlp_convolution,
+            ops.inkling2_glue_rms_norm(moe, v.hk, sum_out=out_c, eps=eps)
+            return new_x0, out_c, next_n, None
+        if defer_mlp_sconv and sconv_fuse:
+            mlp_pending: _PendingSconv = (
                 moe,
-                v.mlp_c,
+                self.post_mlp_convolution.conv1d.weight,
                 conv_owner,
                 conv_md,
-                STREAM_MLP,
+                conv_owner.stream_ranges[STREAM_MLP][0],
             )
-        return new_x0, v.mlp_c, n_blocks + int(self.is_block_boundary)
+            return new_x0, None, next_n, mlp_pending
+        static_conv_hip(
+            self.post_mlp_convolution,
+            moe,
+            out_c,
+            conv_owner,
+            conv_md,
+            STREAM_MLP,
+        )
+        return new_x0, out_c, next_n, None
 
 
 class Inkling2Model(nn.Module):
@@ -639,27 +848,73 @@ class Inkling2Model(nn.Module):
             # the vision mixin merged the image rows): widen them into the fp32 stream
             ops.inkling2_glue_rms_norm(inputs_embeds, v.hk, sum_out=v.hid, eps=eps)
 
-        def run(layers, x0, x1, n, visit, fill=None):
+        def run(
+            layers,
+            x0,
+            x1,
+            n,
+            visit,
+            fill=None,
+            pending: _PendingSconv | None = None,
+            first_sconv_out: torch.Tensor | None = None,
+            defer_last: bool = True,
+            last_mlp_out: torch.Tensor | None = None,
+        ):
             nonlocal seen
+            last_j = len(layers) - 1
             for j, layer in enumerate(layers):
                 slot = slots.get(seen)
                 seen += 1
                 if fill is not None:
                     fill(j)
                 tap = None if slot is None else ws.taps[slot][:T]
-                x0, x1, n = layer.forward_hip(
-                    ws, v, x0, x1, n, fill is not None, positions, visit, tap
+                is_last = j == last_j
+                x0, x1, n, pending = layer._forward_hip_visit(
+                    ws,
+                    v,
+                    x0,
+                    x1,
+                    n,
+                    fill is not None,
+                    positions,
+                    visit,
+                    tap,
+                    pending_sconv=pending,
+                    sconv_out=(
+                        first_sconv_out if (j == 0 and pending is not None) else None
+                    ),
+                    defer_mlp_sconv=defer_last if is_last else True,
+                    mlp_c_out=last_mlp_out if is_last else None,
                 )
-            return x0, x1, n
+            return x0, x1, n, pending
 
-        x0, x1, n = run(self.layers[:ls], v.hid, None, 0, 0)
-        num_pre = n
         loop_layers = self.layers[ls:le]
+        coda_layers = self.layers[le:]
         passes = cfg.loop_num_passes
+        x0, x1, n, pending = run(
+            self.layers[:ls],
+            v.hid,
+            None,
+            0,
+            0,
+            defer_last=bool(loop_layers) or passes <= 1,
+        )
+        num_pre = n
         if passes > 1:  # the state every later pass restarts from
             copy(x0, v.pre_x0)
-            copy(x1, v.pre_x1)
-        x0, x1, n = run(loop_layers, x0, x1, n, 0)
+            if pending is None and x1 is not None:
+                copy(x1, v.pre_x1)
+        x0, x1, n, pending = run(
+            loop_layers,
+            x0,
+            x1,
+            n,
+            0,
+            pending=pending,
+            first_sconv_out=v.pre_x1 if passes > 1 else None,
+            defer_last=passes <= 1,
+            last_mlp_out=v.prev_x1 if passes > 1 else None,
+        )
         for visit in range(1, passes):
             # the previous pass's block states and output feed this pass's messages;
             # this pass rewrites those buffers while it still reads them
@@ -667,7 +922,9 @@ class Inkling2Model(nn.Module):
             if n_prev > 0:
                 copy(v.blk[:, num_pre + 1 : n], v.prev_blk[:, :n_prev])
             copy(x0, v.prev_x0)
-            copy(x1, v.prev_x1)
+            if x1 is not v.prev_x1:
+                assert x1 is not None
+                copy(x1, v.prev_x1)
 
             batch = self._msg_batch
             if batch is not None and not batch.usable(T):
@@ -684,24 +941,53 @@ class Inkling2Model(nn.Module):
                         x1=v.prev_x1, eps=eps,
                     )  # fmt: skip
 
-            x0, x1, n = run(loop_layers, v.pre_x0, v.pre_x1, num_pre, visit, fill)
-        x0, x1, n = run(self.layers[le:], x0, x1, n, 0)
+            more_passes = visit + 1 < passes
+            x0, x1, n, pending = run(
+                loop_layers,
+                v.pre_x0,
+                v.pre_x1,
+                num_pre,
+                visit,
+                fill,
+                defer_last=not more_passes,
+                last_mlp_out=v.prev_x1 if more_passes else None,
+            )
+        x0, x1, n, pending = run(
+            coda_layers, x0, x1, n, 0, pending=pending, defer_last=True
+        )
 
         final16 = v.hq  # fp16 [T, H]: the input of the lm_head
-        if not slots:
+        final_tap = ws.final_tap(T) if slots else None
+        if pending is not None:
+            _call_attn_res_sconv(
+                v.blk,
+                n,
+                x0,
+                pending,
+                self._final_query,
+                final16.unsqueeze(1),
+                norm_w=self._final_norm_w,
+                norm_out2=final_tap,
+                eps=eps,
+                norm_eps=eps,
+            )
+        else:
             ops.inkling2_glue_attn_res(
-                v.blk, n, x0, self._final_query, final16.unsqueeze(1), x1=x1,
-                norm_w=self._final_norm_w, eps=eps, norm_eps=eps,
-            )  # fmt: skip
+                v.blk,
+                n,
+                x0,
+                self._final_query,
+                final16.unsqueeze(1),
+                x1=x1,
+                norm_w=self._final_norm_w,
+                norm_out2=final_tap,
+                eps=eps,
+                norm_eps=eps,
+            )
+        if not slots:
             return final16
-        # DSpark: the fp32 normalised output is the last tap
-        ops.inkling2_glue_attn_res(
-            v.blk, n, x0, self._final_query, v.hid.unsqueeze(1), x1=x1, eps=eps
-        )
-        final32 = ws.final_tap(T)
-        ops.inkling2_glue_rms_norm(v.hid, final32, weight=self.norm.weight, eps=eps)
-        ops.inkling2_glue_rms_norm(v.hid, final16, weight=self.norm.weight, eps=eps)
-        return final16, [*(ws.taps[i][:T] for i in range(len(slots))), final32]
+        assert final_tap is not None
+        return final16, [*(ws.taps[i][:T] for i in range(len(slots))), final_tap]
 
 
 # checkpoint key (after the ``model.llm.`` prefix) -> parameter name in this model
@@ -840,6 +1126,9 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         self._max_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens if self.serving else 0
         )
+        self._has_spec_config = (
+            getattr(vllm_config, "speculative_config", None) is not None
+        )
         self._head: LMHeadPack | None = None
         self._argmax_parts = 0
 
@@ -967,7 +1256,11 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         device = self.lm_head.weight.device
         before = torch.accelerator.memory_allocated(device)
         ws = glue.Inkling2GlueWorkspace(
-            self.config, self._max_tokens, device, tp_size=self.tp.size
+            self.config,
+            self._max_tokens,
+            device,
+            tp_size=self.tp.size,
+            tap_dtype=torch.bfloat16 if self._has_spec_config else torch.float32,
         )
         workspace = torch.accelerator.memory_allocated(device) - before
         for layer in self.model.layers:

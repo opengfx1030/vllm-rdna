@@ -93,10 +93,60 @@ def test_path_selection(monkeypatch):
         state_mod.use_hip_ops("cuda")
 
 
-def test_conv_ops_write_the_state_themselves_only_for_one_token_per_request():
+def test_conv_ops_write_the_state_themselves_for_disjoint_ring_chunks(monkeypatch):
+    # default ring_rows = 4 (no speculative drafts): only q_len == 1 writes in-op
     assert attention_mod.conv_writes_in_op(SimpleNamespace(max_query_len=1))
-    for max_q in (2, 3, 16, 4096):  # a chunk: ``inkling2_conv_state_write`` after
+    for max_q in (2, 3, 16, 4096):
         assert not attention_mod.conv_writes_in_op(SimpleNamespace(max_query_len=max_q))
+    # K = 2 scheduled drafts -> ring_rows = 4 + 2 = 6: q_len <= 3 writes in-op
+    for max_q in (1, 2, 3):
+        assert attention_mod.conv_writes_in_op(
+            SimpleNamespace(max_query_len=max_q), ring_rows=6, kernel_size=4
+        )
+    for max_q in (4, 8, 16, 4096):
+        assert not attention_mod.conv_writes_in_op(
+            SimpleNamespace(max_query_len=max_q), ring_rows=6, kernel_size=4
+        )
+    # K = 7 scheduled drafts -> ring_rows = 4 + 7 = 11: q_len <= 8 writes in-op
+    assert attention_mod.conv_writes_in_op(
+        SimpleNamespace(max_query_len=8), ring_rows=11, kernel_size=4
+    )
+    assert not attention_mod.conv_writes_in_op(
+        SimpleNamespace(max_query_len=9), ring_rows=11, kernel_size=4
+    )
+    # piecewise graphs never bake in-op writes (they replay arbitrary chunk lengths)
+    monkeypatch.setattr(attention_mod, "_tracing_piecewise_graph", lambda: True)
+    assert not attention_mod.conv_writes_in_op(
+        SimpleNamespace(max_query_len=1), ring_rows=11, kernel_size=4
+    )
+
+
+def test_serving_attention_split_policy_fuses_short_verify_and_skips_dead_decode(
+    monkeypatch,
+):
+    monkeypatch.setattr(ops, "_INKLING2_DECODE_FUSED", "1")
+    # SWA decode and verify (q <= 8, window = 512 / 1024) at any context -> (0, 0)
+    for window in (512, 1024):
+        for max_q in (1, 2, 3, 8):
+            for ctx in (64, 16384, 131072):
+                assert attention_mod.attention_splits_hip(
+                    4, 8, window, ctx, max_q, uniform_multi_q=(max_q > 1)
+                ) == (0, 0, None)
+    # Full attention at short context (max_seq_len <= 1024, q <= 8) -> (0, 0)
+    assert attention_mod.attention_splits_hip(
+        2, 4, 0, 1024, 3, uniform_multi_q=True
+    ) == (0, 0, None)
+    # Full attention verify at long context (uniform q = 3) -> skips dead decode launch
+    sd, st, tile_impl = attention_splits_hip_res = attention_mod.attention_splits_hip(
+        2, 4, 0, 32768, 3, uniform_multi_q=True
+    )
+    del attention_splits_hip_res
+    assert sd == 1 and st >= 1 and tile_impl is not None and (tile_impl & 2) != 0
+    # Mixed batch (q = 1 + q > 1, uniform_multi_q = False) keeps decode splits
+    sd_m, st_m, tile_m = attention_mod.attention_splits_hip(
+        4, 4, 0, 32768, 64, uniform_multi_q=False
+    )
+    assert sd_m >= 1 and st_m >= 1 and tile_m is None
 
 
 # -- the split-K workspace bound ----------------------------------------------------
@@ -229,14 +279,22 @@ def test_moe_block_rows_policy(fmt):
     assert set(rows) <= {1, 2, 4, 8}  # the widths the router and the kernels have
     assert rows == sorted(rows)  # more tokens never narrow the blocks
     assert rows[0] == 1 and rows[-1] == 8
-    # a verify step of up to 4 rows: one-row blocks, except that NVFP4 with
-    # VLLM_INKLING2_FUSE_GLUE (the default) uses two-row blocks from 2 rows on
-    two_row_from_2 = fmt == "nvfp4" and moe_mod.FUSE_GLUE
+    # a verify step of up to 4 rows: one-row blocks, except that with
+    # VLLM_INKLING2_FUSE_GLUE (the default) both NVFP4 and MXFP8 use two-row
+    # blocks from 2 rows on
+    two_row_from_2 = moe_mod.FUSE_GLUE
     assert {policy(t) for t in range(2, 5)} == ({2} if two_row_from_2 else {1})
     assert policy(1) == 1
     # 5..8 rows (a 4-way draft step, five or more requests) were 8-row blocks: the
     # 5 -> 8 cliff
     assert {policy(t) for t in range(5, 9)} == {2}
+    if moe_mod.FUSE_GLUE:
+        prev_bm4 = moe_mod._SPEC_BM4_MIN
+        try:
+            moe_mod._SPEC_BM4_MIN = 8
+            assert [policy(t) for t in (1, 7, 8, 12, 256)] == [1, 2, 4, 4, 8]
+        finally:
+            moe_mod._SPEC_BM4_MIN = prev_bm4
 
 
 def test_repack_mxfp8_refuses_scales_outside_the_exact_range():

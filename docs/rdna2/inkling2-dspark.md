@@ -25,7 +25,7 @@ after `RECIPE=`. Smoke test of the running server (text, image, prefix cache, st
 
 | recipe | cards | what it is | one request decodes (mean of six kinds of text) |
 | --- | --- | --- | --- |
-| `inkling2-mini-tp1-dspark` | 1 | `inkling2-mini-tp1` with DSpark, K = 2 (`[[1,2,2],[3,16,0]]`), `SEQS=16`, `MAXLEN=115000`; `ADAPTIVE=1` (`MAXLEN=95000`) + optional `DRAFT_VOCAB` | 1.31x K=2; 1.51x `ADAPTIVE=1` + 32k vocab |
+| `inkling2-mini-tp1-dspark` | 1 | `inkling2-mini-tp1` with DSpark, K = 2 (`[[1,2,2],[3,16,0]]`), `SEQS=16`, `MAXLEN=135000`; `ADAPTIVE=1` (`[[1,1,7],[2,2,2],[3,16,0]]`, `MAXLEN=125000`) + optional `DRAFT_VOCAB` | 1.36x–1.75x K=2; 1.57x–3.05x `ADAPTIVE=1` + 32k vocab |
 | `inkling2-mini-tp2` | 2 | DSpark ON by default, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXBAT=1024`, `MAXLEN=720000`; `ADAPTIVE=1` (`MAXLEN=660000`), `DSPARK=0` for 1M ctx | 1.39x K=2 (113 t/s); 1.65x `ADAPTIVE=1` + 32k vocab (135 t/s) |
 | `inkling2-mini-tp4` | 4 | DSpark ON by default, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXLEN=1048576`; `ADAPTIVE=1` (1M ctx still fits), `DSPARK=0` for plain | 1.36x K=2 (143 t/s); 1.50x+ `ADAPTIVE=1` + 32k vocab (158+ t/s) |
 
@@ -888,3 +888,15 @@ Recipes were consolidated from 7 to 4 (`inkling2-mini-tp1`, `inkling2-mini-tp1-d
 `inkling2-mini-tp2`, `inkling2-mini-tp4`), all with `prompt-tokens-details` enabled
 (verified `usage.prompt_tokens_details.cached_tokens` 0 cold / 64 warm on TP=1) and
 `ADAPTIVE=1`, `DRAFT_VOCAB=...` and `DSPARK=0` switches built in.
+
+### TP=1 Speed & Memory Round (`par1-cs25` b4, 2026-11-24)
+
+On one V620 (`SEQS=16`, `GMEM=0.92`, `FULL_AND_PIECEWISE`, `async_scheduling=True`, `image=1`):
+
+* **Memory & KV capacity reclaimed**:
+    * Warmup `transient_peak` cut **`0.77 GiB -> 0.19 GiB`** (`prompt_logprob` chunk cap `1024 -> 128` on RDNA2 + disjoint ViT scratch aliasing).
+    * Persistent DSpark head & scratch cut **`366.1 MiB -> 24.3 MiB`** (`-341.9 MiB`): zero-copy `w_row_ids` `lm_head` indexing (`-144 MiB`, `+86 µs` faster from V620 Infinity Cache reuse), greedy subset-only `fold_w`/`fold_b` (`-98.5 MiB`), active-vocab `_Scratch` (`-89.7 MiB`), freed redundant weights (`-9.8 MiB`), plus `bf16` target taps & `act`/`g_scratch` aliasing (`-36 MiB`), exact conv ring rows (`10 -> 6` at `K=2`, `5 -> 4` when off), and `[[1,1,7],[2,2,2],[3,16,0]]` schedule (`25` vs `30` FULL graphs).
+    * Resulting `SEQS=16` KV pools: plain TP=1 **`180,986 -> 197,479` tokens** (`MAXLEN=194000`), DSpark `K=2` **`143,635` tokens** (`MAXLEN=135000`), DSpark `ADAPTIVE=1` **`132,025–134,995` tokens** (`MAXLEN=125000`, `+30k` over `95000`).
+* **Kernel launches & decode speed**:
+    * Verify step launches cut **`1,053 -> 646–659` (`-392` to `-407` launches/step)**: 1-launch multi-query SWA GQA verify + `skip_decode` (`-88` launches), in-op `conv_state_write` (`192 -> 0` launches), fused `inkling2_glue_attn_res_sconv` (`-94` launches), strided `dspark_argmax` `token_map` (`-14` launches), per-batch `markov_steps` (`2` at `b=2`), `DFlashCudaGraphManager` `SEQS<=4` capture fix, GQA `nkv`-grid decode (`b>=3`), `gate_mix_split` `T<=16`, MXFP8 `bm=2` from `T>=2`, and NVFP4 `bm=4` on `K>=6` verify.
+    * Measured TP=1 speeds: `ADAPTIVE=1 + 32k vocab` reaches **`171.9 tok/s` (`5.82 ms/tok`, `3.10x`)** on 1k RAG, **`160.7 tok/s` (`6.22 ms/tok`, `3.05x`)** on 16k chat, **`95.0 tok/s`** on code, **`87.1 tok/s`** on 1k chat, and **`115.7 agg tok/s`** at `b=2`; plain TP=1 reaches **`170.6 / 255.9 / 248.6 agg tok/s`** at `b=4 (1k) / b=8 (1k) / b=8 (4k)`.

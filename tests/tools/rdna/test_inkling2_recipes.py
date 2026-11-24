@@ -29,15 +29,16 @@ DROPPED = (
     "ADAPTIVE",
     "DSPARK",
     "DRAFT_VOCAB",
+    "PYTORCH_TUNABLEOP_ENABLED",
 )
 
 # recipe -> (tp, port, max_model_len, max_num_seqs, max_num_batched_tokens, spec)
 RECIPES = {
-    "inkling2-mini-tp1": (1, 18221, 180000, 16, 1024, None),
+    "inkling2-mini-tp1": (1, 18221, 194000, 16, 1024, None),
     "inkling2-mini-tp1-dspark": (
         1,
         18221,
-        115000,
+        135000,
         16,
         1024,
         (
@@ -176,15 +177,15 @@ def test_ports_by_tp_are_distinct():
 
 
 @pytest.mark.parametrize(
-    ("recipe", "max_len", "seqs"),
+    ("recipe", "max_len", "schedule"),
     [
-        ("inkling2-mini-tp1-dspark", 95000, 16),
-        ("inkling2-mini-tp2", 660000, 8),
-        ("inkling2-mini-tp4", 1048576, 8),
+        ("inkling2-mini-tp1-dspark", 125000, "[[1,1,7],[2,2,2],[3,16,0]]"),
+        ("inkling2-mini-tp2", 660000, "[[1,2,7],[3,8,0]]"),
+        ("inkling2-mini-tp4", 1048576, "[[1,2,7],[3,8,0]]"),
     ],
 )
 def test_adaptive_switch_and_optional_draft_vocab(
-    venv, tmp_path, recipe, max_len, seqs
+    venv, tmp_path, recipe, max_len, schedule
 ):
     out = plan(venv, f"RECIPE={recipe}", "ADAPTIVE=1").stdout
     assert flag(out, "--max-model-len", str(max_len))
@@ -193,7 +194,7 @@ def test_adaptive_switch_and_optional_draft_vocab(
         "--speculative-config",
         (
             '{"method":"dspark","num_speculative_tokens":7,'
-            f'"num_speculative_tokens_per_batch_size":[[1,2,7],[3,{seqs},0]],'
+            f'"num_speculative_tokens_per_batch_size":{schedule},'
             '"speculator_options":{"adaptive_k":{}}}'
         ),
     )
@@ -209,7 +210,7 @@ def test_adaptive_switch_and_optional_draft_vocab(
             "--speculative-config",
             (
                 '{"method":"dspark","num_speculative_tokens":7,'
-                f'"num_speculative_tokens_per_batch_size":[[1,2,7],[3,{seqs},0]],'
+                f'"num_speculative_tokens_per_batch_size":{schedule},'
                 f'"speculator_options":{{"adaptive_k":{{}},"draft_vocab":"{ids}"}}}}'
             ),
         )
