@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,9 @@ def tiny(tmp_path_factory):
         "transformers.models.inkling2_loop.modeling_inkling2_loop",
         reason="transformers' inkling2_loop is not installed",
     )
+    cached = os.environ.get("INKLING2_TINY_OUT")
+    if cached and (Path(cached) / "hi2" / "model.safetensors.index.json").exists():
+        return Path(cached) / "stock", Path(cached) / "hi2"
     out = tmp_path_factory.mktemp("tiny_hi2")
     generator = _load_module("inkling2_make_tiny_hi2", GENERATOR)
     hi2_dir = generator.make(out, TINY_TOOLS)

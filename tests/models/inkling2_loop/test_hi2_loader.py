@@ -296,6 +296,16 @@ def test_a_column_slice_must_be_64_aligned():
 # ---------------------------------------------------------------------------
 
 
+def _init_gate(layer, seed: int = 0) -> None:
+    """The router weight is ``torch.empty`` until a checkpoint fills it; give the
+    two forward tests a small deterministic one so uninitialized memory cannot
+    turn the logits into NaN."""
+    g = torch.Generator().manual_seed(seed)
+    layer.gate.weight.data.copy_(
+        torch.randn(layer.gate.weight.shape, generator=g) * 0.02
+    )
+
+
 def _config(hidden: int, inter: int, experts: int, top_k: int):
     pytest.importorskip("vllm.models.inkling2_loop.amd.moe")
     from vllm.models.inkling2_loop.configs import Inkling2LoopTextConfig
@@ -317,6 +327,7 @@ def test_the_moe_collects_both_groups_and_runs_the_reference():
     experts, hidden, inter, top_k = 4, 128, 64, 2
     cfg = _config(hidden, inter, experts, top_k)
     layer = Inkling2LoopMoE(cfg, "hi2", prefix="test.mlp").eval()
+    _init_gate(layer)
 
     w13 = make_stack(experts, inter, hidden, 2, seed=21)
     w2 = make_stack(experts, hidden, inter, 1, seed=22)
@@ -358,6 +369,7 @@ def test_an_unsmoothed_group_finalizes_at_the_end_of_loading():
     experts, hidden, inter = 4, 128, 64
     cfg = _config(hidden, inter, experts, 2)
     layer = Inkling2LoopMoE(cfg, "hi2", prefix="test.mlp").eval()
+    _init_gate(layer, seed=1)
     for group, stack in (
         ("gate_up", make_stack(experts, inter, hidden, 2, seed=41)),
         ("down", make_stack(experts, hidden, inter, 1, seed=42)),
