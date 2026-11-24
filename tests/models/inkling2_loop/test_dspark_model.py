@@ -484,6 +484,48 @@ def test_adaptive_verification_is_refused_with_a_pointer_to_adaptive_k():
             Inkling2DSparkSpeculatorConfig.validate_options(spec)
 
 
+def test_adaptive_step_cost_selects_tp_table_and_scales_vocab(tmp_path):
+    """Adaptive K picks the measured TP=1/2/4 V620 step-cost model and scales
+    draft_vocab head savings inversely with TP."""
+    import numpy as np
+
+    from vllm.models.inkling2_loop.speculator_config import (
+        _V620_STEP_COST,
+        _V620_TP2_STEP_COST,
+        _V620_TP4_STEP_COST,
+        Inkling2DSparkSpeculatorConfig,
+    )
+
+    ids_path = tmp_path / "vocab.npy"
+    np.save(ids_path, np.arange(32768, dtype=np.int32))
+    spec = types.SimpleNamespace(
+        speculator_options={"adaptive_k": {}},
+        enable_adaptive_verification=False,
+        draft_model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(vocab_size=200058)
+        ),
+    )
+    cfg = Inkling2DSparkSpeculatorConfig(spec)
+    p1 = cfg.make_num_tokens_policy([0, 7], tensor_parallel_size=1)
+    p2 = cfg.make_num_tokens_policy([0, 7], tensor_parallel_size=2)
+    p4 = cfg.make_num_tokens_policy([0, 7], tensor_parallel_size=4)
+    assert p1 is not None and p1.cost == _V620_STEP_COST
+    assert p2 is not None and p2.cost == _V620_TP2_STEP_COST
+    assert p4 is not None and p4.cost == _V620_TP4_STEP_COST
+
+    # With draft_vocab, savings halve at TP=2 and quarter at TP=4.
+    spec.speculator_options = {"adaptive_k": {}, "draft_vocab": str(ids_path)}
+    v1 = cfg.make_num_tokens_policy([0, 7], tensor_parallel_size=1)
+    v2 = cfg.make_num_tokens_policy([0, 7], tensor_parallel_size=2)
+    v4 = cfg.make_num_tokens_policy([0, 7], tensor_parallel_size=4)
+    assert v1 is not None and v2 is not None and v4 is not None
+    drop1 = _V620_STEP_COST.draft_ms - v1.cost.draft_ms
+    drop2 = _V620_TP2_STEP_COST.draft_ms - v2.cost.draft_ms
+    drop4 = _V620_TP4_STEP_COST.draft_ms - v4.cost.draft_ms
+    assert pytest.approx(drop2, rel=1e-6) == drop1 / 2.0
+    assert pytest.approx(drop4, rel=1e-6) == drop1 / 4.0
+
+
 # ---------------------------------------------------------------------------
 # gfx1030
 # ---------------------------------------------------------------------------

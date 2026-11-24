@@ -25,10 +25,9 @@ after `RECIPE=`. Smoke test of the running server (text, image, prefix cache, st
 
 | recipe | cards | what it is | one request decodes (mean of six kinds of text) |
 | --- | --- | --- | --- |
-| `inkling2-mini-tp1-dspark` | 1 | `inkling2-mini-tp1` with the draft, K = 2 (`[[1,2,2],[3,16,0]]`), `SEQS=16`, `MAXLEN=115000` | 1.31x (1.09x - 1.59x by kind) |
-| `inkling2-mini-tp1-dspark-adaptive` | 1 | that with adaptive K (`[[1,2,7],[3,16,0]]`) and a 32,768-id draft vocabulary, `SEQS=16`, `MAXLEN=95000` | 1.51x (1.16x - 2.43x) |
-| `inkling2-mini-tp2-dspark` | 2 | `inkling2-mini-tp2` with the draft, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXBAT=1024`, `MAXLEN=720000` (`HIP_VISIBLE_DEVICES=4,5`) | 1.35x (1.15x - 1.62x) |
-| `inkling2-mini-tp4-dspark` | 4 | `inkling2-mini-tp4` with the draft, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXLEN=1048576` (`HIP_VISIBLE_DEVICES=2,3,4,5`) | full 1M context fits |
+| `inkling2-mini-tp1-dspark` | 1 | `inkling2-mini-tp1` with DSpark, K = 2 (`[[1,2,2],[3,16,0]]`), `SEQS=16`, `MAXLEN=115000`; `ADAPTIVE=1` (`MAXLEN=95000`) + optional `DRAFT_VOCAB` | 1.31x K=2; 1.51x `ADAPTIVE=1` + 32k vocab |
+| `inkling2-mini-tp2` | 2 | DSpark ON by default, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXBAT=1024`, `MAXLEN=720000`; `ADAPTIVE=1` (`MAXLEN=660000`), `DSPARK=0` for 1M ctx | 1.39x K=2 (113 t/s); 1.65x `ADAPTIVE=1` + 32k vocab (135 t/s) |
+| `inkling2-mini-tp4` | 4 | DSpark ON by default, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXLEN=1048576`; `ADAPTIVE=1` (1M ctx still fits), `DSPARK=0` for plain | 1.36x K=2 (143 t/s); 1.50x+ `ADAPTIVE=1` + 32k vocab (158+ t/s) |
 
 The adaptive recipe takes a draft vocabulary: an ids file made once, on the CPU (27 s on the box, no GPU). Any code and
 prose that is not what you will serve will do, here the venv's python packages and this repository's docs:
@@ -856,3 +855,36 @@ Real-text TP=1 `dspark_bench.py` (`SEQS=16`, `[[1,2,2],[3,16,0]]`, 24 chat promp
 * `b=2`: `19.03 ms/tok/req` (**105.1 tok/s**, 1.016 accepted/step)
 * `b=4`: `28.41 ms/tok/req` (**140.8 tok/s**, draft automatically dropped)
 * `b=8`: `38.68 ms/tok/req` (**206.8 tok/s**, draft automatically dropped)
+
+### TP-aware `StepCostModel`, `ADAPTIVE=1` + `draft_vocab` at TP=2/4, and 4-recipe consolidation
+
+`Inkling2DSparkSpeculatorConfig.make_num_tokens_policy` now accepts `tensor_parallel_size`
+(passed from `Scheduler`) and selects measured V620 step-cost models for TP=1, TP=2 and TP=4
+while scaling `draft_vocab` LM-head savings inversely with TP (`_FULL_VOCAB_DRAFT_MS / tp`,
+matching measured `-2.1 / -1.12 / -0.5 ms/step` at TP=1/2/4).
+
+Measured single-stream step times (`par1-cs25` b4, 160 tokens, greedy, `ba9b43bcd4`):
+
+| TP | K=0 | K=1 full | K=2 full | K=3 full | K=7 full | K=2 32k vocab | K=7 32k vocab |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| TP=2 | 12.22 ms | 18.47 ms | 20.14 ms | 21.47 ms | 25.78 ms | 19.02 ms | 25.05 ms |
+| TP=4 | 9.50 ms | 14.87 ms | 16.06 ms | 17.02 ms | 20.11 ms | 15.61 ms | 19.50 ms |
+
+Measured 6-category real-text decode (`chat`, `code_gen`, `code_edit`, `prose`, `structured`,
+`rag`; 3 prompts each, 160 tokens, greedy):
+
+| Config | KV pool | Mean (6 cats) | `chat` | `code_gen` | `code_edit` | `prose` | `structured` | `rag` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| TP=2 no draft (`K=0`) | 973,541 | 81.8 tok/s | 82.1 | 82.0 | 81.5 | 82.1 | 81.9 | 81.5 |
+| TP=2 `K=2` full | 723,444 | 113.3 tok/s | 95.4 | 118.6 | 119.9 | 92.6 | 140.1 | 128.3 |
+| TP=2 `K=2` + 32k vocab | 719,494 | 121.1 tok/s | 109.4 | 129.8 | 128.1 | 98.2 | 134.9 | 136.8 |
+| TP=2 `ADAPTIVE=1` + 32k vocab (TP=2 cost) | 693,467 | **139.0 tok/s** (1.70x) | 100.5 | 130.2 | 150.1 | 116.2 | 185.8 | **204.5** |
+| TP=4 no draft (`K=0`) | 2,247,076 | 105.3 tok/s | 105.3 | 105.6 | 104.5 | 105.8 | 105.4 | 105.0 |
+| TP=4 `K=2` full | 1,177,580 | 143.3 tok/s | 117.8 | 150.7 | 143.4 | 128.4 | 168.9 | 165.4 |
+| TP=4 `K=2` + 32k vocab | 1,173,297 | 145.9 tok/s | 119.9 | 140.7 | 154.3 | 138.2 | 164.4 | 170.0 |
+| TP=4 `ADAPTIVE=1` + 32k vocab (TP=4 cost, 1M ctx) | 1,125,661 | **154.4 tok/s** (1.47x) | 121.8 | 131.8 | **179.0** | 109.3 | **226.9** | **254.7** |
+
+Recipes were consolidated from 7 to 4 (`inkling2-mini-tp1`, `inkling2-mini-tp1-dspark`,
+`inkling2-mini-tp2`, `inkling2-mini-tp4`), all with `prompt-tokens-details` enabled
+(verified `usage.prompt_tokens_details.cached_tokens` 0 cold / 64 warm on TP=1) and
+`ADAPTIVE=1`, `DRAFT_VOCAB=...` and `DSPARK=0` switches built in.

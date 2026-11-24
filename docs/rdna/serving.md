@@ -42,12 +42,10 @@ ROCm variables, `VLLM_*`, `HSA_*`, `NCCL_*` / `RCCL_*`, and vLLM serve flags bel
 | Qwen3.8-27B HI2 3.0 bpw, two cards, MTP=2 (one to four concurrent requests) | [`27b-hi2-tp2-mtp2`](../../tools/rdna/recipes/27b-hi2-tp2-mtp2.env) | TP=2 | `127.0.0.1:18211`, name `q27hi2` |
 | DeepSeek-V4-Flash, K128 | [`dsv4-flash`](../../tools/rdna/recipes/dsv4-flash.env) | TP=4 | `127.0.0.1:18300`, name `dsv4-flash` |
 | HIP graphs, breakable capture, TP=2 | [`full`](../../tools/rdna/recipes/full.env) | TP=2 | launcher omits `--host`; port `18094`; no served name |
-| Inkling-2-Mini on one card, 180k context, images | [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | TP=1 | `127.0.0.1:18221`, name `inkling2-mini` |
-| Inkling-2-Mini on one card with the DSpark draft (one or two requests) | [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | TP=1 | `127.0.0.1:18221`, name `inkling2-mini` |
-| Same, plus adaptive K and a draft vocabulary file | [`inkling2-mini-tp1-dspark-adaptive`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark-adaptive.env) | TP=1 | `127.0.0.1:18221`, name `inkling2-mini` |
-| Inkling-2-Mini on two cards, the full 1,048,576-token context | [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | TP=2 | `127.0.0.1:18222`, name `inkling2-mini` |
-| Inkling-2-Mini on two cards with the DSpark draft | [`inkling2-mini-tp2-dspark`](../../tools/rdna/recipes/inkling2-mini-tp2-dspark.env) | TP=2 | `127.0.0.1:18222`, name `inkling2-mini` |
-| Inkling-2-Mini on four cards, the full context, 4,096-token prefill steps | [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | TP=4 | `127.0.0.1:18223`, name `inkling2-mini` |
+| Inkling-2-Mini on one card, 180k context, plain decoding, images | [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | TP=1 | `127.0.0.1:18221`, name `inkling2-mini` |
+| Inkling-2-Mini on one card with the DSpark draft (`ADAPTIVE=1` built in) | [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | TP=1 | `127.0.0.1:18221`, name `inkling2-mini` |
+| Inkling-2-Mini on two cards, DSpark ON (`ADAPTIVE=1` / `DSPARK=0` for 1M ctx) | [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | TP=2 | `127.0.0.1:18222`, name `inkling2-mini` |
+| Inkling-2-Mini on four cards, full 1M context, DSpark ON (`ADAPTIVE=1` / `DSPARK=0`) | [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | TP=4 | `127.0.0.1:18223`, name `inkling2-mini` |
 
 The older `tools/rdna/serve_gfx1030_*.sh` files are aliases. They exec `serve_rdna.sh` with a fixed recipe and forward every argument:
 
@@ -335,12 +333,10 @@ Inkling-2-Mini (`thinkingmachines/Inkling-2-Mini`) on native HIP kernels: no roc
 
 | Recipe | Cards | Port | `MAXLEN` | `SEQS` | `MAXBAT` | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| `inkling2-mini-tp1` | 1 | 18221 | 180000 | 16 | 1024 | `RDNA_AR=0`. |
-| `inkling2-mini-tp1-dspark` | 1 | 18221 | 125000 | 2 | 1024 | Sources `inkling2-mini-tp1`; adds the model's own draft (`mtp.safetensors` must sit in the checkpoint directory): 7 drafted tokens, 2 verified per step for one or two requests. |
-| `inkling2-mini-tp1-dspark-adaptive` | 1 | 18221 | 105000 | 2 | 1024 | Sources `inkling2-mini-tp1-dspark`; adaptive K and a draft vocabulary file (`DRAFT_VOCAB`, default `$HOME/.cache/rdna/inkling2-mini-draft-vocab-32768.npy`, made once with `tools/rdna/inkling2/draft_vocab.py`). TP=1 and greedy decoding only. |
-| `inkling2-mini-tp2` | 2 | 18222 | 1048576 | 8 | 184 | `RDNA_AR=1`, one-shot gate 256 KiB, `VLLM_KV_CACHE_MARGIN_FLOOR_MIB=2048` so the whole context fits. |
-| `inkling2-mini-tp2-dspark` | 2 | 18222 | 780000 | 2 | 184 | Sources `inkling2-mini-tp2`; the draft's per-rank KV takes context, so this is the longest that boots. |
-| `inkling2-mini-tp4` | 4 | 18223 | 1048576 | 8 | 4096 | `RDNA_AR=1`, one-shot gate 256 KiB; the default engine margin stays. DSpark was not run at TP=4. |
+| `inkling2-mini-tp1` | 1 | 18221 | 180000 | 16 | 1024 | Plain TP=1 (max single-card context), `RDNA_AR=0`, `prompt-tokens-details`. |
+| `inkling2-mini-tp1-dspark` | 1 | 18221 | 115000 | 16 | 1024 | Sources `inkling2-mini-tp1`; DSpark K=2 (`[[1,2,2],[3,16,0]]`); `ADAPTIVE=1` (`MAXLEN=95000`) and optional `DRAFT_VOCAB=...`. |
+| `inkling2-mini-tp2` | 2 | 18222 | 720000 | 8 | 1024 | `RDNA_AR=1`, `VLLM_KV_CACHE_MARGIN_FLOOR_MIB=2048`, DSpark K=2 (`[[1,2,2],[3,8,0]]`) by default; `ADAPTIVE=1` (`MAXLEN=660000`), `DRAFT_VOCAB=...`, or `DSPARK=0` (`MAXLEN=1048576`, `MAXBAT=320`). |
+| `inkling2-mini-tp4` | 4 | 18223 | 1048576 | 8 | 4096 | `RDNA_AR=1`, full 1M context with DSpark K=2 (`[[1,2,2],[3,8,0]]`) by default; `ADAPTIVE=1` (1M ctx still fits), `DRAFT_VOCAB=...`, or `DSPARK=0`. |
 
 The `-dspark*` files source their base recipe through `$RDSE_RECIPES`; override any key after `RECIPE=` or in the caller's environment as for every other recipe. Draft, kernels and tables: [`docs/rdna2/inkling2-dspark.md`](../rdna2/inkling2-dspark.md).
 

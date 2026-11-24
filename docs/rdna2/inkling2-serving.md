@@ -32,13 +32,10 @@ bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1 MODEL=/path/to/inkling2-m
 
 | Recipe | Cards | Port | `MAXLEN` | `SEQS` | `MAXBAT` | Use it for |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | 1 | 18221 | 180,000 | 16 | 1,024 | one card: short and medium contexts, up to 16 concurrent requests |
-| [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | 2 | 18222 | 1,048,576 | 8 | 320 | the full context on two cards; lower latency than TP=1 |
-| [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | 4 | 18223 | 1,048,576 | 8 | 4,096 | the full context with room for two such requests; fastest prefill |
-| [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | 1 | 18221 | 115,000 | 16 | 1,024 | `inkling2-mini-tp1` with the DSpark draft (`[[1,2,2],[3,16,0]]`): one request decodes 1.3x faster (1.1x - 1.6x by kind of text), two about 1.1x, drops draft cleanly at 3+ requests |
-| [`inkling2-mini-tp1-dspark-adaptive`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark-adaptive.env) | 1 | 18221 | 95,000 | 16 | 1,024 | that with adaptive K (`[[1,2,7],[3,16,0]]`) and a 32,768-id draft vocabulary (an ids file made once): one request decodes 1.5x faster, drops draft at 3+ requests |
-| [`inkling2-mini-tp2-dspark`](../../tools/rdna/recipes/inkling2-mini-tp2-dspark.env) | 2 | 18222 | 720,000 | 8 | 1,024 | `inkling2-mini-tp2` with the DSpark draft (`[[1,2,2],[3,8,0]]`, `MAXBAT=1024`): faster prefill and 1.35x decode on 1..2 requests, drops draft at 3+ requests |
-| [`inkling2-mini-tp4-dspark`](../../tools/rdna/recipes/inkling2-mini-tp4-dspark.env) | 4 | 18223 | 1,048,576 | 8 | 4,096 | `inkling2-mini-tp4` with the DSpark draft (`[[1,2,2],[3,8,0]]`): full 1M context fits with fastest prefill and decode, drops draft at 3+ requests |
+| [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | 1 | 18221 | 180,000 | 16 | 1,024 | plain TP=1: max single-card context (180k), up to 16 concurrent requests |
+| [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | 1 | 18221 | 115,000 | 16 | 1,024 | TP=1 with DSpark (`[[1,2,2],[3,16,0]]`): +38% decode, zero c=8 collapse; supports `ADAPTIVE=1` (`MAXLEN=95000`) and `DRAFT_VOCAB=...` |
+| [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | 2 | 18222 | 720,000 | 8 | 1,024 | best TP=2: DSpark ON by default (`[[1,2,2],[3,8,0]]`, +39% decode, +64–73% prefill); `ADAPTIVE=1` (`MAXLEN=660000`) / `DRAFT_VOCAB=...`; `DSPARK=0` for full 1M context (`MAXBAT=320`) |
+| [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | 4 | 18223 | 1,048,576 | 8 | 4,096 | best TP=4: full 1M context with DSpark ON by default (`[[1,2,2],[3,8,0]]`); `ADAPTIVE=1` (1M ctx still fits) / `DRAFT_VOCAB=...`; `DSPARK=0` for plain decoding (2.25M KV) |
 
 All three serve the model as `inkling2-mini` on `127.0.0.1`, capture HIP graphs
 (`FULL_AND_PIECEWISE`, the model's default capture grid), enable prefix caching and accept one

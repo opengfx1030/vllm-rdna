@@ -42,6 +42,37 @@ _V620_STEP_COST = StepCostModel(
     draft_request_ms=0.35,
     host_ms=0.4,
 )
+# Measured on 2x V620 (TP=2, FULL_AND_PIECEWISE, one-shot HIP all-reduce,
+# par1-cs25, 2026-11-24): step times for K = 0, 1, 2, 3, 7 are 12.22, 18.47,
+# 20.14, 21.47 and 25.78 ms; 32,768-id draft_vocab drops K=2 from 20.14 to
+# 19.02 ms (-1.12 ms, matching half the TP=1 LM-head sweep).
+_V620_TP2_STEP_COST = StepCostModel(
+    forward_ms=(11.07, 13.83, 15.41, 16.65, 17.64, 18.63, 19.61, 20.60),
+    forward_row_ms=0.99,
+    base_ms=1.15,
+    draft_ms=3.00,
+    draft_token_ms=0.09,
+    draft_request_ms=0.25,
+    host_ms=0.4,
+)
+# Measured on 4x V620 (TP=4, FULL_AND_PIECEWISE, one-shot HIP all-reduce,
+# par1-cs25, 2026-11-24): step times for K = 0, 1, 2, 3, 7 are 9.50, 14.87,
+# 16.06, 17.02 and 20.11 ms; 32,768-id draft_vocab drops K=2 to 15.61 ms and
+# K=7 to 19.50 ms (-0.45 / -0.61 ms, matching a quarter of the TP=1 sweep).
+_V620_TP4_STEP_COST = StepCostModel(
+    forward_ms=(8.85, 11.35, 12.47, 13.36, 14.06, 14.77, 15.47, 16.17),
+    forward_row_ms=0.70,
+    base_ms=0.65,
+    draft_ms=2.40,
+    draft_token_ms=0.07,
+    draft_request_ms=0.20,
+    host_ms=0.4,
+)
+_V620_STEP_COSTS = {
+    1: _V620_STEP_COST,
+    2: _V620_TP2_STEP_COST,
+    4: _V620_TP4_STEP_COST,
+}
 # What the draft vocabulary shrinks (draft_micro.py, graph replay of the whole draft at
 # K = 2 / 7: 4.47 / 5.08 ms over the full vocabulary, 2.37 / 2.65 ms over 32768 of its
 # 200058 ids, 2.15 ms over 16384): the head sweeps of the vocabulary are 2.35 ms of the
@@ -121,7 +152,7 @@ class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
         ]
 
     def make_num_tokens_policy(
-        self, max_tokens: Sequence[int]
+        self, max_tokens: Sequence[int], tensor_parallel_size: int = 1
     ) -> AdaptiveSpecTokens | None:
         options = self._adaptive_options()
         if options is None:
@@ -131,21 +162,29 @@ class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
             cost["forward_ms"] = tuple(cost["forward_ms"])
         estimator = {k: options[k] for k in _ESTIMATOR_OPTIONS if k in options}
         return AdaptiveSpecTokens(
-            cost=replace(self._step_cost(), **cost),
+            cost=replace(self._step_cost(tensor_parallel_size), **cost),
             max_tokens=max_tokens,
             **estimator,
         )
 
-    def _step_cost(self) -> StepCostModel:
-        """The step cost model, with the draft's share of the vocabulary it ranks."""
+    def _step_cost(self, tensor_parallel_size: int = 1) -> StepCostModel:
+        """The step cost model for the active TP size, scaled for draft_vocab."""
+        tp = max(int(tensor_parallel_size), 1)
+        if tp >= 4:
+            base = _V620_STEP_COSTS[4]
+        elif tp >= 2:
+            base = _V620_STEP_COSTS[2]
+        else:
+            base = _V620_STEP_COSTS[1]
         path = (self.spec_config.speculator_options or {}).get("draft_vocab")
         if path is None:
-            return _V620_STEP_COST
+            return base
         hf_config = self.spec_config.draft_model_config.hf_config
         dropped = 1.0 - np.load(path, mmap_mode="r").shape[0] / hf_config.vocab_size
+        # The draft LM head is sharded across TP ranks, so vocab-pruning savings
+        # scale inversely with TP (measured: -2.1 ms TP1, -1.12 ms TP2, -0.5 ms TP4).
         return replace(
-            _V620_STEP_COST,
-            draft_ms=_V620_STEP_COST.draft_ms - _FULL_VOCAB_DRAFT_MS * dropped,
-            draft_token_ms=_V620_STEP_COST.draft_token_ms
-            - _FULL_VOCAB_TOKEN_MS * dropped,
+            base,
+            draft_ms=base.draft_ms - (_FULL_VOCAB_DRAFT_MS / tp) * dropped,
+            draft_token_ms=base.draft_token_ms - (_FULL_VOCAB_TOKEN_MS / tp) * dropped,
         )

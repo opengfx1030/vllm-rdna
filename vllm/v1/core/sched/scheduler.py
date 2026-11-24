@@ -342,7 +342,10 @@ class Scheduler(SchedulerInterface):
                     speculative_config.speculator_config.make_num_tokens_policy(
                         self.dynamic_sd_lookup
                         or [0]
-                        + [self.num_spec_tokens] * self.scheduler_config.max_num_seqs
+                        + [self.num_spec_tokens] * self.scheduler_config.max_num_seqs,
+                        tensor_parallel_size=(
+                            self.vllm_config.parallel_config.tensor_parallel_size
+                        ),
                     )
                 )
             self.use_eagle = speculative_config.uses_target_hidden_states
