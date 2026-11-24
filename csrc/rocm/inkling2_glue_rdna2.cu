@@ -205,6 +205,22 @@ __device__ __forceinline__ void store4(__half* p, const float4 v) {
   *reinterpret_cast<uint2*>(p) = u;
 }
 
+__device__ __forceinline__ uint16_t f32_to_bf16_rne(float f) {
+  uint32_t u = static_cast<uint32_t>(__float_as_int(f));
+  if ((u & 0x7fffffffu) > 0x7f800000u) return 0x7fc0u;  // NaN
+  u += 0x7fffu + ((u >> 16) & 1u);                      // round to nearest even
+  return static_cast<uint16_t>(u >> 16);
+}
+__device__ __forceinline__ uint32_t pack_bf2(float lo, float hi) {
+  return (uint32_t)f32_to_bf16_rne(lo) | ((uint32_t)f32_to_bf16_rne(hi) << 16);
+}
+__device__ __forceinline__ void store4_bf16(uint16_t* p, const float4 v) {
+  uint2 u;
+  u.x = pack_bf2(v.x, v.y);
+  u.y = pack_bf2(v.z, v.w);
+  *reinterpret_cast<uint2*>(p) = u;
+}
+
 // Element type tag selected by a uniform runtime flag.
 __device__ __forceinline__ float4 load4_dyn(const void* base, int64_t idx,
                                             int is_half) {
@@ -238,8 +254,35 @@ struct AttnResArgs {
   int nw_rows;
   void* out;  // [T, Q, H] fp32 (or fp16 with norm_w)
   int64_t o_t, o_q;
+  void* norm_out2;  // optional [T, H] fp32 or bf16 secondary norm output (Q=1)
+  int64_t no2_t;
+  int no2_bf16;
   int H, n_blocks;
   float eps, norm_eps, inv_h, scale;
+};
+
+struct GlueConvMeta {
+  const int32_t* block_table;  // [R, bt_stride]
+  const int32_t* seq_idx;      // [T_md]
+  const int32_t* qsl;          // [R + 1]
+  const int32_t* seq_lens;     // [R]
+  __half* cache;               // [blocks, nkv, ring, W] fp16
+  int64_t cs0, cs1, cs2;       // strides in halfs
+  int bt_stride, blk_shift, ring, T_md;
+};
+
+struct AttnResSconvArgs {
+  AttnResArgs base;
+  GlueConvMeta cm;
+  const __half* cx;  // [T, H] fp16 conv input
+  int64_t cx_t;
+  const float* cw;   // [H, 1, 4] fp32 conv weight
+  float* sconv_out;  // optional [T, H] fp32 conv output
+  int64_t sco_t;
+  int conv_width;  // H / num_kv_heads
+  int conv_o0;     // stream_offset
+  int conv_wr;     // 1 if write_state else 0
+  float conv_inv;  // 1 / sqrt(5)
 };
 
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -259,7 +302,8 @@ __device__ __forceinline__ void state_partials(const float4 (&s)[ITER],
 }
 
 template <int Q, int ITER, bool NORM>
-__device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
+__device__ __forceinline__ void attn_res_core(const AttnResArgs& a,
+                                              const float4 (&P)[ITER]) {
   constexpr int kNReg = 6;  // states kept in registers between the two passes
   constexpr int kQ1 = Q + 1;
   const int tid = threadIdx.x;
@@ -272,35 +316,19 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
 
   __shared__ float s_red[8][kMaxStates * kQ1];
 
-  const bool has_x1 = a.x1 != nullptr;
   const bool has_app = a.append != nullptr;
   const int NS = a.n_blocks + (has_app ? 1 : 0) + 1;
   float* brow = a.blocks != nullptr ? a.blocks + t * a.bs_t : nullptr;
 
-  // partial state (last of the stack) and appended block state
-  float4 P[ITER], A[ITER], Qv[Q][ITER];
+  float4 A[ITER], Qv[Q][ITER];
   #pragma unroll
   for (int k = 0; k < ITER; ++k) {
     const int v = tid + k * nth;
-    float4 p = make_float4(0.f, 0.f, 0.f, 0.f);
-    float4 ap = p;
-    if (v < V) {
-      p = load4(a.x0 + t * a.x0_t + 4 * v);
-      if (has_x1) {
-        const float4 q1 = load4(a.x1 + t * a.x1_t + 4 * v);
-        p.x += q1.x;
-        p.y += q1.y;
-        p.z += q1.z;
-        p.w += q1.w;
-      }
-      if (a.partial_out != nullptr)
-        store4(a.partial_out + t * a.po_t + 4 * v, p);
-      if (has_app) {
-        ap = load4(a.append + t * a.ap_t + 4 * v);
-        store4(brow + (int64_t)a.n_blocks * a.bs_s + 4 * v, ap);
-      }
+    float4 ap = make_float4(0.f, 0.f, 0.f, 0.f);
+    if (v < V && has_app) {
+      ap = load4(a.append + t * a.ap_t + 4 * v);
+      store4(brow + (int64_t)a.n_blocks * a.bs_s + 4 * v, ap);
     }
-    P[k] = p;
     A[k] = ap;
   #pragma unroll
     for (int q = 0; q < Q; ++q)
@@ -484,10 +512,203 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
               w.x * (acc[q][k].x * rs[q]), w.y * (acc[q][k].y * rs[q]),
               w.z * (acc[q][k].z * rs[q]), w.w * (acc[q][k].w * rs[q]));
           store4(out + (int64_t)q * a.o_q + 4 * v, y);
+          if constexpr (Q == 1) {
+            if (a.norm_out2 != nullptr) {
+              if (a.no2_bf16) {
+                store4_bf16(reinterpret_cast<uint16_t*>(a.norm_out2) +
+                                t * a.no2_t + 4 * v,
+                            y);
+              } else {
+                store4(
+                    reinterpret_cast<float*>(a.norm_out2) + t * a.no2_t + 4 * v,
+                    y);
+              }
+            }
+          }
         }
       }
     }
   }
+}
+
+template <int Q, int ITER, bool NORM>
+__device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
+  const int tid = threadIdx.x;
+  const int nth = blockDim.x;
+  const int64_t t = blockIdx.x;
+  const int V = a.H >> 2;
+  const bool has_x1 = a.x1 != nullptr;
+  float4 P[ITER];
+  #pragma unroll
+  for (int k = 0; k < ITER; ++k) {
+    const int v = tid + k * nth;
+    float4 p = make_float4(0.f, 0.f, 0.f, 0.f);
+    if (v < V) {
+      p = load4(a.x0 + t * a.x0_t + 4 * v);
+      if (has_x1) {
+        const float4 q1 = load4(a.x1 + t * a.x1_t + 4 * v);
+        p.x += q1.x;
+        p.y += q1.y;
+        p.z += q1.z;
+        p.w += q1.w;
+      }
+      if (a.partial_out != nullptr)
+        store4(a.partial_out + t * a.po_t + 4 * v, p);
+    }
+    P[k] = p;
+  }
+  attn_res_core<Q, ITER, NORM>(a, P);
+}
+
+// SCONV_MODE 1: partial = x0 + sconv(cx)
+// SCONV_MODE 2: partial = sconv(cx) (boundary layer mlp_input, x0 == nullptr)
+// Computing P[ITER] in an isolated prologue scope before loading Qv / S keeps
+// conv weights + history taps dead during the state reduction (~104 VGPRs vs
+// 164 VGPRs when all loads overlap).
+template <int Q, int ITER, bool NORM, int SCONV_MODE>
+__device__ __forceinline__ void attn_res_sconv_body(
+    const AttnResSconvArgs& sa) {
+  const AttnResArgs& a = sa.base;
+  const int tid = threadIdx.x;
+  const int nth = blockDim.x;
+  const int64_t t = blockIdx.x;
+  const int V = a.H >> 2;
+  float4 P[ITER];
+  {
+    int cr = -1;
+    int qs = 0, tp_p = 0, tp_p1 = 0;
+    bool keep = false;
+    int blk_cur = 0;
+    bool h_use_x[3] = {false, false, false};
+    bool h_valid[3] = {false, false, false};
+    int64_t h_base[3] = {0, 0, 0};
+    if (t < sa.cm.T_md) {
+      cr = sa.cm.seq_idx[t];
+      if (cr >= 0) {
+        qs = sa.cm.qsl[cr];
+        tp_p1 = sa.cm.seq_lens[cr];
+        tp_p = tp_p1 - (sa.cm.qsl[cr + 1] - qs) + ((int)t - qs);
+        if (sa.conv_wr && tp_p >= 0 && tp_p < tp_p1) {
+          const int blk_end = ((tp_p >> sa.cm.blk_shift) + 1)
+                              << sa.cm.blk_shift;
+          keep = (tp_p + sa.cm.ring >= min(tp_p1, blk_end));
+        }
+        const int bt_row = cr * sa.cm.bt_stride;
+        if (keep) {
+          blk_cur =
+              sa.cm.block_table[bt_row + (max(tp_p, 0) >> sa.cm.blk_shift)];
+        }
+  #pragma unroll
+        for (int lag = 1; lag < 4; ++lag) {
+          const int sr = (int)t - lag;
+          const int sp = tp_p - lag;
+          const bool ux = sr >= qs;
+          h_use_x[lag - 1] = ux;
+          h_valid[lag - 1] = ux || sp >= 0;
+          if (ux) {
+            h_base[lag - 1] = (int64_t)sr * sa.cx_t;
+          } else if (sp >= 0) {
+            const int b = sa.cm.block_table[bt_row + (sp >> sa.cm.blk_shift)];
+            h_base[lag - 1] = (int64_t)b * sa.cm.cs0 +
+                              (int64_t)(sp % sa.cm.ring) * sa.cm.cs2 +
+                              sa.conv_o0;
+          }
+        }
+      }
+    }
+
+    uint2 xh[ITER];
+    uint2 hh[ITER][3];
+    float4 wc[ITER][4];
+    float4 x0v[ITER];
+  #pragma unroll
+    for (int k = 0; k < ITER; ++k) {
+      const int v = tid + k * nth;
+      xh[k] = make_uint2(0u, 0u);
+      hh[k][0] = hh[k][1] = hh[k][2] = make_uint2(0u, 0u);
+      x0v[k] = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (v < V) {
+        const int c = 4 * v;
+        if constexpr (SCONV_MODE == 1) {
+          x0v[k] = load4(a.x0 + t * a.x0_t + c);
+        }
+        if (cr >= 0) {
+          xh[k] = *reinterpret_cast<const uint2*>(sa.cx + t * sa.cx_t + c);
+          const int h = c / sa.conv_width;
+          const int jch = c - h * sa.conv_width;
+  #pragma unroll
+          for (int i = 0; i < 3; ++i) {
+            if (h_valid[i]) {
+              const __half* src = h_use_x[i] ? (sa.cx + h_base[i] + c)
+                                             : (sa.cm.cache + h_base[i] +
+                                                (int64_t)h * sa.cm.cs1 + jch);
+              hh[k][i] = *reinterpret_cast<const uint2*>(src);
+            }
+          }
+          const float* wp = sa.cw + (int64_t)c * 4;
+          wc[k][0] = load4(wp);
+          wc[k][1] = load4(wp + 4);
+          wc[k][2] = load4(wp + 8);
+          wc[k][3] = load4(wp + 12);
+        }
+      }
+    }
+
+  #pragma unroll
+    for (int k = 0; k < ITER; ++k) {
+      const int v = tid + k * nth;
+      float4 p = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (v < V) {
+        const int c = 4 * v;
+        float4 cv = make_float4(0.f, 0.f, 0.f, 0.f);
+        if (cr >= 0) {
+          const float4 t0 = make_float4(h2f_lo(xh[k].x), h2f_hi(xh[k].x),
+                                        h2f_lo(xh[k].y), h2f_hi(xh[k].y));
+          const float4 t1 = make_float4(h2f_lo(hh[k][0].x), h2f_hi(hh[k][0].x),
+                                        h2f_lo(hh[k][0].y), h2f_hi(hh[k][0].y));
+          const float4 t2 = make_float4(h2f_lo(hh[k][1].x), h2f_hi(hh[k][1].x),
+                                        h2f_lo(hh[k][1].y), h2f_hi(hh[k][1].y));
+          const float4 t3 = make_float4(h2f_lo(hh[k][2].x), h2f_hi(hh[k][2].x),
+                                        h2f_lo(hh[k][2].y), h2f_hi(hh[k][2].y));
+          cv.x = t0.x * wc[k][0].w + t1.x * wc[k][0].z + t2.x * wc[k][0].y +
+                 t3.x * wc[k][0].x;
+          cv.y = t0.y * wc[k][1].w + t1.y * wc[k][1].z + t2.y * wc[k][1].y +
+                 t3.y * wc[k][1].x;
+          cv.z = t0.z * wc[k][2].w + t1.z * wc[k][2].z + t2.z * wc[k][2].y +
+                 t3.z * wc[k][2].x;
+          cv.w = t0.w * wc[k][3].w + t1.w * wc[k][3].z + t2.w * wc[k][3].y +
+                 t3.w * wc[k][3].x;
+          cv.x = (cv.x + t0.x) * sa.conv_inv;
+          cv.y = (cv.y + t0.y) * sa.conv_inv;
+          cv.z = (cv.z + t0.z) * sa.conv_inv;
+          cv.w = (cv.w + t0.w) * sa.conv_inv;
+          if (keep && blk_cur > 0) {
+            const int h = c / sa.conv_width;
+            const int jch = c - h * sa.conv_width;
+            __half* dst = sa.cm.cache + (int64_t)blk_cur * sa.cm.cs0 +
+                          (int64_t)h * sa.cm.cs1 +
+                          (int64_t)(tp_p % sa.cm.ring) * sa.cm.cs2 +
+                          sa.conv_o0 + jch;
+            store4(dst, t0);
+          }
+        }
+        if (sa.sconv_out != nullptr) {
+          store4(sa.sconv_out + t * sa.sco_t + c, cv);
+        }
+        if constexpr (SCONV_MODE == 1) {
+          p = make_float4(x0v[k].x + cv.x, x0v[k].y + cv.y, x0v[k].z + cv.z,
+                          x0v[k].w + cv.w);
+        } else {
+          p = cv;
+        }
+        if (a.partial_out != nullptr) {
+          store4(a.partial_out + t * a.po_t + c, p);
+        }
+      }
+      P[k] = p;
+    }
+  }
+  attn_res_core<Q, ITER, NORM>(a, P);
 }
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
@@ -496,6 +717,14 @@ template <int Q, int ITER, bool NORM>
 __global__ void __launch_bounds__(256) attn_res_kernel(const AttnResArgs a) {
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
   attn_res_body<Q, ITER, NORM>(a);
+#endif
+}
+
+template <int Q, int ITER, bool NORM, int SCONV_MODE>
+__global__ void __launch_bounds__(256)
+    attn_res_sconv_kernel(const AttnResSconvArgs sa) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  attn_res_sconv_body<Q, ITER, NORM, SCONV_MODE>(sa);
 #endif
 }
 
@@ -1121,24 +1350,33 @@ __global__ void __launch_bounds__(256) swiglu_kernel(const SwigluArgs a) {
 }
 
 // ---------------------------------------------------------------------------
-// copy_states: [T, P, H] fp32 -> [T, P, H] fp32 (snapshots of persistent
-// states)
+// copy_states: [T, P, H] fp32 -> [T, P, H] fp32 or bf16 (snapshots of
+// persistent states and DSpark partial-block taps)
 // ---------------------------------------------------------------------------
 struct CopyArgs {
   const float* src;
-  float* dst;
+  void* dst;
   int64_t s_t, s_p, d_t, d_p;  // row strides in elements
   int P, H;
 };
 
-template <int DUMMY = 0>
+template <bool DST_BF16 = false>
 __global__ void __launch_bounds__(256) copy_states_kernel(const CopyArgs a) {
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
   const int t = blockIdx.x / a.P, p = blockIdx.x - t * a.P;
   const float4* s =
       reinterpret_cast<const float4*>(a.src + t * a.s_t + p * a.s_p);
-  float4* d = reinterpret_cast<float4*>(a.dst + t * a.d_t + p * a.d_p);
-  for (int i = threadIdx.x; i < (a.H >> 2); i += 256) d[i] = s[i];
+  if constexpr (DST_BF16) {
+    uint16_t* d = reinterpret_cast<uint16_t*>(a.dst) + (int64_t)t * a.d_t +
+                  (int64_t)p * a.d_p;
+    for (int i = threadIdx.x; i < (a.H >> 2); i += 256)
+      store4_bf16(d + 4 * i, s[i]);
+  } else {
+    float4* d =
+        reinterpret_cast<float4*>(reinterpret_cast<float*>(a.dst) +
+                                  (int64_t)t * a.d_t + (int64_t)p * a.d_p);
+    for (int i = threadIdx.x; i < (a.H >> 2); i += 256) d[i] = s[i];
+  }
 #endif
 }
 
@@ -1724,8 +1962,16 @@ bool fuse_glue() {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// inkling2_glue_attn_res
+// inkling2_glue_attn_res / _dual / _sconv
 // ---------------------------------------------------------------------------
+static int glue_log2_exact(int64_t v, const char* who) {
+  TORCH_CHECK(v >= 1 && (v & (v - 1)) == 0, who,
+              ": the cache block size must be a power of two, got ", v);
+  int s = 0;
+  while ((int64_t(1) << s) < v) ++s;
+  return s;
+}
+
 template <int Q, bool NORM>
 static void launch_attn_res(int iter, int block, int64_t T,
                             const AttnResArgs& a, hipStream_t stream) {
@@ -1746,41 +1992,51 @@ static void launch_attn_res(int iter, int block, int64_t T,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void inkling2_glue_attn_res(const at::Tensor& blocks, int64_t n_blocks,
-                            const at::Tensor& x0,
-                            const std::optional<at::Tensor>& x1,
-                            const std::optional<at::Tensor>& partial_out,
-                            const std::optional<at::Tensor>& append,
-                            const at::Tensor& query,
-                            const std::optional<at::Tensor>& norm_w,
-                            const at::Tensor& out, double eps,
-                            double norm_eps) {
-  const char* who = "inkling2_glue_attn_res";
-  check_gpu(x0, who, "x0");
+template <int Q, bool NORM, int SCONV_MODE>
+static void launch_attn_res_sconv(int iter, int block, int64_t T,
+                                  const AttnResSconvArgs& sa,
+                                  hipStream_t stream) {
+#define I2G_ARS(IT)                                               \
+  case IT:                                                        \
+    inkling2_glue::attn_res_sconv_kernel<Q, IT, NORM, SCONV_MODE> \
+        <<<dim3((unsigned)T), dim3(block), 0, stream>>>(sa);      \
+    break
+  switch (iter) {
+    I2G_ARS(1);
+    I2G_ARS(2);
+    I2G_ARS(3);
+    I2G_ARS(4);
+    default:
+      TORCH_CHECK(false, "inkling2_glue_attn_res_sconv: bad iter ", iter);
+  }
+#undef I2G_ARS
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+static void fill_attn_res_common(AttnResArgs& a, const char* who,
+                                 const at::Tensor& blocks, int64_t n_blocks,
+                                 int64_t T, int64_t H, int64_t Q,
+                                 const std::optional<at::Tensor>& partial_out,
+                                 const std::optional<at::Tensor>& append,
+                                 const at::Tensor& query,
+                                 const std::optional<at::Tensor>& norm_w,
+                                 const at::Tensor& out,
+                                 const std::optional<at::Tensor>& norm_out2,
+                                 double eps, double norm_eps, bool& norm) {
   check_gpu(query, who, "query");
   check_gpu(out, who, "out");
-  TORCH_CHECK(x0.dim() == 2, who, ": x0 must be [T, H]");
-  const int64_t T = x0.size(0), H = x0.size(1);
-  check_dtype(x0, who, "x0", at::kFloat);
-  check_vec_rows(x0, who, "x0", 4);
   check_dtype(query, who, "query", at::kFloat);
   TORCH_CHECK(query.dim() == 2 && query.size(1) == H, who,
               ": query must be [Q, H]");
   check_vec_rows(query, who, "query", 4);
-  const int64_t Q = query.size(0);
-  TORCH_CHECK(Q == 1 || Q == 3 || Q == 4, who, ": Q must be 1, 3 or 4, got ",
-              Q);
   TORCH_CHECK(out.dim() == 3 && out.size(0) == T && out.size(1) == Q &&
                   out.size(2) == H,
               who, ": out must be [T, Q, H]");
-  const bool norm = norm_w.has_value() && norm_w->defined();
+  norm = norm_w.has_value() && norm_w->defined();
   check_dtype(out, who, "out", norm ? at::kHalf : at::kFloat);
   check_vec_rows(out, who, "out", 4);
   TORCH_CHECK(n_blocks >= 0, who, ": n_blocks must be >= 0");
 
-  AttnResArgs a{};
-  a.x0 = x0.data_ptr<float>();
-  a.x0_t = x0.stride(0);
   a.query = query.data_ptr<float>();
   a.q_s = query.stride(0);
   a.out = out.data_ptr();
@@ -1793,15 +2049,6 @@ void inkling2_glue_attn_res(const at::Tensor& blocks, int64_t n_blocks,
   a.inv_h = 1.0f / (float)H;
   a.scale = (float)std::pow((double)H, -0.5);
 
-  if (x1.has_value() && x1->defined()) {
-    check_gpu(*x1, who, "x1");
-    check_dtype(*x1, who, "x1", at::kFloat);
-    TORCH_CHECK(x1->dim() == 2 && x1->size(0) == T && x1->size(1) == H, who,
-                ": x1 must be [T, H]");
-    check_vec_rows(*x1, who, "x1", 4);
-    a.x1 = x1->data_ptr<float>();
-    a.x1_t = x1->stride(0);
-  }
   if (partial_out.has_value() && partial_out->defined()) {
     check_gpu(*partial_out, who, "partial_out");
     check_dtype(*partial_out, who, "partial_out", at::kFloat);
@@ -1849,6 +2096,54 @@ void inkling2_glue_attn_res(const at::Tensor& blocks, int64_t n_blocks,
     a.nw_s = norm_w->stride(0);
     a.nw_rows = (int)norm_w->size(0);
   }
+  if (norm_out2.has_value() && norm_out2->defined()) {
+    TORCH_CHECK(norm && Q == 1, who, ": norm_out2 requires norm_w and Q == 1");
+    check_gpu(*norm_out2, who, "norm_out2");
+    TORCH_CHECK(norm_out2->scalar_type() == at::kFloat ||
+                    norm_out2->scalar_type() == at::kBFloat16,
+                who, ": norm_out2 must be Float or BFloat16");
+    TORCH_CHECK(norm_out2->dim() == 2 && norm_out2->size(0) == T &&
+                    norm_out2->size(1) == H,
+                who, ": norm_out2 must be [T, H]");
+    check_vec_rows(*norm_out2, who, "norm_out2", 4);
+    a.norm_out2 = norm_out2->data_ptr();
+    a.no2_t = norm_out2->stride(0);
+    a.no2_bf16 = norm_out2->scalar_type() == at::kBFloat16 ? 1 : 0;
+  }
+}
+
+void inkling2_glue_attn_res_dual(
+    const at::Tensor& blocks, int64_t n_blocks, const at::Tensor& x0,
+    const std::optional<at::Tensor>& x1,
+    const std::optional<at::Tensor>& partial_out,
+    const std::optional<at::Tensor>& append, const at::Tensor& query,
+    const std::optional<at::Tensor>& norm_w, const at::Tensor& out,
+    const std::optional<at::Tensor>& norm_out2, double eps, double norm_eps) {
+  const char* who = "inkling2_glue_attn_res";
+  check_gpu(x0, who, "x0");
+  TORCH_CHECK(x0.dim() == 2, who, ": x0 must be [T, H]");
+  const int64_t T = x0.size(0), H = x0.size(1);
+  check_dtype(x0, who, "x0", at::kFloat);
+  check_vec_rows(x0, who, "x0", 4);
+  const int64_t Q = query.dim() == 2 ? query.size(0) : -1;
+  TORCH_CHECK(Q == 1 || Q == 3 || Q == 4, who, ": Q must be 1, 3 or 4, got ",
+              Q);
+
+  AttnResArgs a{};
+  bool norm = false;
+  fill_attn_res_common(a, who, blocks, n_blocks, T, H, Q, partial_out, append,
+                       query, norm_w, out, norm_out2, eps, norm_eps, norm);
+  a.x0 = x0.data_ptr<float>();
+  a.x0_t = x0.stride(0);
+  if (x1.has_value() && x1->defined()) {
+    check_gpu(*x1, who, "x1");
+    check_dtype(*x1, who, "x1", at::kFloat);
+    TORCH_CHECK(x1->dim() == 2 && x1->size(0) == T && x1->size(1) == H, who,
+                ": x1 must be [T, H]");
+    check_vec_rows(*x1, who, "x1", 4);
+    a.x1 = x1->data_ptr<float>();
+    a.x1_t = x1->stride(0);
+  }
 
   const at::cuda::OptionalCUDAGuard guard(device_of(x0));
   const hipStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -1870,6 +2165,151 @@ void inkling2_glue_attn_res(const at::Tensor& blocks, int64_t n_blocks,
       break;
   }
 #undef I2G_ARQ
+}
+
+void inkling2_glue_attn_res(const at::Tensor& blocks, int64_t n_blocks,
+                            const at::Tensor& x0,
+                            const std::optional<at::Tensor>& x1,
+                            const std::optional<at::Tensor>& partial_out,
+                            const std::optional<at::Tensor>& append,
+                            const at::Tensor& query,
+                            const std::optional<at::Tensor>& norm_w,
+                            const at::Tensor& out, double eps,
+                            double norm_eps) {
+  inkling2_glue_attn_res_dual(blocks, n_blocks, x0, x1, partial_out, append,
+                              query, norm_w, out, std::nullopt, eps, norm_eps);
+}
+
+void inkling2_glue_attn_res_sconv(
+    const at::Tensor& blocks, int64_t n_blocks,
+    const std::optional<at::Tensor>& x0, const at::Tensor& conv_x,
+    const at::Tensor& conv_w, const at::Tensor& conv_cache,
+    const at::Tensor& block_table, const at::Tensor& seq_idx,
+    const at::Tensor& query_start_loc, const at::Tensor& seq_lens,
+    int64_t stream_offset, int64_t num_kv_heads, int64_t block_size,
+    bool write_state, const std::optional<at::Tensor>& sconv_out,
+    const std::optional<at::Tensor>& partial_out,
+    const std::optional<at::Tensor>& append, const at::Tensor& query,
+    const std::optional<at::Tensor>& norm_w, const at::Tensor& out,
+    const std::optional<at::Tensor>& norm_out2, double eps, double norm_eps) {
+  const char* who = "inkling2_glue_attn_res_sconv";
+  check_gpu(conv_x, who, "conv_x");
+  check_dtype(conv_x, who, "conv_x", at::kHalf);
+  TORCH_CHECK(conv_x.dim() == 2, who, ": conv_x must be [T, H]");
+  const int64_t T = conv_x.size(0), H = conv_x.size(1);
+  check_vec_rows(conv_x, who, "conv_x", 4);
+  const bool has_x0 = x0.has_value() && x0->defined();
+  const int64_t Q = query.dim() == 2 ? query.size(0) : -1;
+  TORCH_CHECK(Q == 1 || (Q == 3 && has_x0), who,
+              ": Q must be 1 (or 3 with x0), got ", Q);
+
+  AttnResSconvArgs sa{};
+  bool norm = false;
+  fill_attn_res_common(sa.base, who, blocks, n_blocks, T, H, Q, partial_out,
+                       append, query, norm_w, out, norm_out2, eps, norm_eps,
+                       norm);
+  if (has_x0) {
+    check_gpu(*x0, who, "x0");
+    check_dtype(*x0, who, "x0", at::kFloat);
+    TORCH_CHECK(x0->dim() == 2 && x0->size(0) == T && x0->size(1) == H, who,
+                ": x0 must be [T, H]");
+    check_vec_rows(*x0, who, "x0", 4);
+    sa.base.x0 = x0->data_ptr<float>();
+    sa.base.x0_t = x0->stride(0);
+  }
+  if (sconv_out.has_value() && sconv_out->defined()) {
+    check_gpu(*sconv_out, who, "sconv_out");
+    check_dtype(*sconv_out, who, "sconv_out", at::kFloat);
+    TORCH_CHECK(sconv_out->dim() == 2 && sconv_out->size(0) == T &&
+                    sconv_out->size(1) == H,
+                who, ": sconv_out must be [T, H]");
+    check_vec_rows(*sconv_out, who, "sconv_out", 4);
+    sa.sconv_out = sconv_out->data_ptr<float>();
+    sa.sco_t = sconv_out->stride(0);
+  }
+
+  check_gpu(conv_cache, who, "conv_cache");
+  TORCH_CHECK(conv_cache.scalar_type() == at::kHalf && conv_cache.dim() == 4 &&
+                  conv_cache.stride(3) == 1,
+              who, ": conv_cache must be fp16 [blocks, H, ring_rows, W]");
+  TORCH_CHECK(conv_cache.size(2) >= 3, who,
+              ": the conv state keeps at least k - 1 = 3 ring rows per block");
+  for (const auto& p :
+       std::initializer_list<std::pair<const at::Tensor*, const char*>>{
+           {&block_table, "block_table"},
+           {&seq_idx, "seq_idx"},
+           {&query_start_loc, "query_start_loc"},
+           {&seq_lens, "seq_lens"}}) {
+    check_gpu(*p.first, who, p.second);
+    check_dtype(*p.first, who, p.second, at::kInt);
+    TORCH_CHECK(p.first->is_contiguous(), who, ": ", p.second,
+                " must be contiguous");
+  }
+  TORCH_CHECK(block_table.dim() == 2, who, ": block_table must be [R, blocks]");
+  TORCH_CHECK(conv_cache.stride(0) % 4 == 0 && conv_cache.stride(1) % 4 == 0 &&
+                  conv_cache.stride(2) % 4 == 0 &&
+                  (reinterpret_cast<uintptr_t>(conv_cache.data_ptr()) & 7) == 0,
+              who, ": conv_cache must be 8-byte aligned");
+  TORCH_CHECK(num_kv_heads > 0 && H % num_kv_heads == 0, who,
+              ": channels must be divisible by num_kv_heads");
+  const int64_t width = H / num_kv_heads;
+  TORCH_CHECK(width % 4 == 0 && stream_offset % 4 == 0, who,
+              ": stream width and offset must be multiples of 4");
+  TORCH_CHECK(conv_cache.size(1) == num_kv_heads &&
+                  stream_offset + width <= conv_cache.size(3),
+              who, ": conv_cache heads / width do not hold this stream");
+  check_gpu(conv_w, who, "conv_w");
+  TORCH_CHECK(conv_w.scalar_type() == at::kFloat && conv_w.is_contiguous() &&
+                  conv_w.numel() == 4 * H &&
+                  (reinterpret_cast<uintptr_t>(conv_w.data_ptr()) & 15) == 0,
+              who, ": conv_w must be a contiguous fp32 [H, 1, 4] tensor");
+
+  sa.cm.block_table = block_table.data_ptr<int32_t>();
+  sa.cm.seq_idx = seq_idx.data_ptr<int32_t>();
+  sa.cm.qsl = query_start_loc.data_ptr<int32_t>();
+  sa.cm.seq_lens = seq_lens.data_ptr<int32_t>();
+  sa.cm.cache = reinterpret_cast<__half*>(conv_cache.data_ptr());
+  sa.cm.cs0 = conv_cache.stride(0);
+  sa.cm.cs1 = conv_cache.stride(1);
+  sa.cm.cs2 = conv_cache.stride(2);
+  sa.cm.bt_stride = (int)block_table.stride(0);
+  sa.cm.blk_shift = glue_log2_exact(block_size, who);
+  sa.cm.ring = (int)conv_cache.size(2);
+  sa.cm.T_md = (int)std::min<int64_t>(seq_idx.size(0), T);
+  sa.cx = reinterpret_cast<const __half*>(conv_x.data_ptr());
+  sa.cx_t = conv_x.stride(0);
+  sa.cw = conv_w.data_ptr<float>();
+  sa.conv_width = (int)width;
+  sa.conv_o0 = (int)stream_offset;
+  sa.conv_wr = write_state ? 1 : 0;
+  sa.conv_inv = (float)(1.0 / std::sqrt(5.0));
+
+  const at::cuda::OptionalCUDAGuard guard(device_of(conv_x));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (T == 0) return;
+  int iter, block;
+  row_launch_shape(H, who, iter, block);
+#define I2G_SC(QQ, NN, SM) \
+  launch_attn_res_sconv<QQ, NN, SM>(iter, block, T, sa, stream)
+  if (has_x0) {
+    if (Q == 1) {
+      if (norm)
+        I2G_SC(1, true, 1);
+      else
+        I2G_SC(1, false, 1);
+    } else {
+      if (norm)
+        I2G_SC(3, true, 1);
+      else
+        I2G_SC(3, false, 1);
+    }
+  } else {
+    if (norm)
+      I2G_SC(1, true, 2);
+    else
+      I2G_SC(1, false, 2);
+  }
+#undef I2G_SC
 }
 
 // ---------------------------------------------------------------------------
@@ -2089,7 +2529,7 @@ void inkling2_glue_msg_gate_mix(const at::Tensor& h, const at::Tensor& m,
   a.inv_h = 1.0f / (float)H;
 
   // a handful of tokens with fp32 weights: the R-split kernel (opt-in)
-  const bool split = fuse_glue() && !w16 && T <= 8 && R == kMixWaves * kMixRpw;
+  const bool split = fuse_glue() && !w16 && T <= 16 && R == kMixWaves * kMixRpw;
   const int tb = split ? gate_tb(T, 4) : gate_mix_tb(T, G * a.C, w16 ? 16 : 8);
   const int64_t ntiles = (T + tb - 1) / tb;
   if (norm) {
@@ -2369,7 +2809,8 @@ void inkling2_glue_copy_states(const at::Tensor& src, const at::Tensor& dst) {
   check_gpu(src, who, "src");
   check_gpu(dst, who, "dst");
   check_dtype(src, who, "src", at::kFloat);
-  check_dtype(dst, who, "dst", at::kFloat);
+  const bool dst_bf16 = dst.scalar_type() == at::kBFloat16;
+  if (!dst_bf16) check_dtype(dst, who, "dst", at::kFloat);
   TORCH_CHECK((src.dim() == 2 || src.dim() == 3) && dst.sizes() == src.sizes(),
               who, ": src and dst must be [T, H] or [T, P, H] of one shape");
   check_vec_rows(src, who, "src", 4);
@@ -2380,7 +2821,7 @@ void inkling2_glue_copy_states(const at::Tensor& src, const at::Tensor& dst) {
   const int64_t P = src.dim() == 3 ? src.size(1) : 1;
   CopyArgs a{};
   a.src = src.data_ptr<float>();
-  a.dst = dst.data_ptr<float>();
+  a.dst = dst.data_ptr();
   a.s_t = src.stride(0);
   a.d_t = dst.stride(0);
   a.s_p = src.dim() == 3 ? src.stride(1) : 0;
@@ -2390,8 +2831,13 @@ void inkling2_glue_copy_states(const at::Tensor& src, const at::Tensor& dst) {
   const at::cuda::OptionalCUDAGuard guard(device_of(src));
   const hipStream_t stream = at::cuda::getCurrentCUDAStream();
   if (T * P == 0) return;
-  inkling2_glue::copy_states_kernel<0>
-      <<<dim3((unsigned)(T * P)), dim3(256), 0, stream>>>(a);
+  if (dst_bf16) {
+    inkling2_glue::copy_states_kernel<true>
+        <<<dim3((unsigned)(T * P)), dim3(256), 0, stream>>>(a);
+  } else {
+    inkling2_glue::copy_states_kernel<false>
+        <<<dim3((unsigned)(T * P)), dim3(256), 0, stream>>>(a);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

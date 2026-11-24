@@ -279,14 +279,22 @@ def test_moe_block_rows_policy(fmt):
     assert set(rows) <= {1, 2, 4, 8}  # the widths the router and the kernels have
     assert rows == sorted(rows)  # more tokens never narrow the blocks
     assert rows[0] == 1 and rows[-1] == 8
-    # a verify step of up to 4 rows: one-row blocks, except that NVFP4 with
-    # VLLM_INKLING2_FUSE_GLUE (the default) uses two-row blocks from 2 rows on
-    two_row_from_2 = fmt == "nvfp4" and moe_mod.FUSE_GLUE
+    # a verify step of up to 4 rows: one-row blocks, except that with
+    # VLLM_INKLING2_FUSE_GLUE (the default) both NVFP4 and MXFP8 use two-row
+    # blocks from 2 rows on
+    two_row_from_2 = moe_mod.FUSE_GLUE
     assert {policy(t) for t in range(2, 5)} == ({2} if two_row_from_2 else {1})
     assert policy(1) == 1
     # 5..8 rows (a 4-way draft step, five or more requests) were 8-row blocks: the
     # 5 -> 8 cliff
     assert {policy(t) for t in range(5, 9)} == {2}
+    if moe_mod.FUSE_GLUE:
+        prev_bm4 = moe_mod._SPEC_BM4_MIN
+        try:
+            moe_mod._SPEC_BM4_MIN = 8
+            assert [policy(t) for t in (1, 7, 8, 12, 256)] == [1, 2, 4, 4, 8]
+        finally:
+            moe_mod._SPEC_BM4_MIN = prev_bm4
 
 
 def test_repack_mxfp8_refuses_scales_outside_the_exact_range():

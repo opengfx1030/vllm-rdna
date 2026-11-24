@@ -2874,6 +2874,7 @@ def inkling2_glue_attn_res(
     partial_out: torch.Tensor | None = None,
     append: torch.Tensor | None = None,
     norm_w: torch.Tensor | None = None,
+    norm_out2: torch.Tensor | None = None,
     eps: float = 1e-6,
     norm_eps: float = 1e-6,
 ) -> None:
@@ -2897,10 +2898,28 @@ def inkling2_glue_attn_res(
         append: optional ``[T, H]`` fp32 state inserted before the partial.
         norm_w: optional ``[1 or Q, H]`` fp16 / fp32 RMSNorm weight; the
             result is then normalised per query and written as fp16.
+        norm_out2: optional ``[T, H]`` fp32 or bf16 secondary norm output
+            (``Q == 1`` with ``norm_w``), written in the same launch.
         eps: epsilon of the unweighted state norm.
         norm_eps: epsilon of the weighted output norm.
 
     """
+    if norm_out2 is not None:
+        torch.ops._rocm_C.inkling2_glue_attn_res_dual(
+            blocks,
+            n_blocks,
+            x0,
+            x1,
+            partial_out,
+            append,
+            query,
+            norm_w,
+            out,
+            norm_out2,
+            eps,
+            norm_eps,
+        )
+        return
     torch.ops._rocm_C.inkling2_glue_attn_res(
         blocks,
         n_blocks,
@@ -2911,6 +2930,67 @@ def inkling2_glue_attn_res(
         query,
         norm_w,
         out,
+        eps,
+        norm_eps,
+    )
+
+
+def inkling2_glue_attn_res_sconv(
+    blocks: torch.Tensor,
+    n_blocks: int,
+    x0: torch.Tensor | None,
+    conv_x: torch.Tensor,
+    conv_w: torch.Tensor,
+    conv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_idx: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    stream_offset: int,
+    num_kv_heads: int,
+    block_size: int,
+    write_state: bool,
+    query: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    sconv_out: torch.Tensor | None = None,
+    partial_out: torch.Tensor | None = None,
+    append: torch.Tensor | None = None,
+    norm_w: torch.Tensor | None = None,
+    norm_out2: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+) -> None:
+    """Static depthwise short-conv fused into the ``inkling2_glue_attn_res`` prologue.
+
+    Computes the 4-tap depthwise conv of ``conv_x [T, H]`` fp16 in an isolated
+    register prologue (optionally writing ``conv_cache`` when ``write_state`` is
+    True, and optionally storing ``sconv_out [T, H]`` fp32), forms the partial
+    state ``x0 + conv`` (or ``conv`` alone when ``x0`` is None), and executes
+    ``attn_res`` (+ optional ``norm_out2`` fp32/bf16) in one launch.
+    """
+    torch.ops._rocm_C.inkling2_glue_attn_res_sconv(
+        blocks,
+        n_blocks,
+        x0,
+        conv_x,
+        conv_w,
+        conv_cache,
+        block_table,
+        seq_idx,
+        query_start_loc,
+        seq_lens,
+        stream_offset,
+        num_kv_heads,
+        block_size,
+        write_state,
+        sconv_out,
+        partial_out,
+        append,
+        query,
+        norm_w,
+        out,
+        norm_out2,
         eps,
         norm_eps,
     )
@@ -7155,6 +7235,55 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_glue_s
         norm_eps: float,
     ) -> None:
         return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_glue_attn_res_dual"):
+
+        @register_fake("_rocm_C::inkling2_glue_attn_res_dual")
+        def _inkling2_glue_attn_res_dual_fake(
+            blocks: torch.Tensor,
+            n_blocks: int,
+            x0: torch.Tensor,
+            x1: torch.Tensor | None,
+            partial_out: torch.Tensor | None,
+            append: torch.Tensor | None,
+            query: torch.Tensor,
+            norm_w: torch.Tensor | None,
+            out: torch.Tensor,
+            norm_out2: torch.Tensor | None,
+            eps: float,
+            norm_eps: float,
+        ) -> None:
+            return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_glue_attn_res_sconv"):
+
+        @register_fake("_rocm_C::inkling2_glue_attn_res_sconv")
+        def _inkling2_glue_attn_res_sconv_fake(
+            blocks: torch.Tensor,
+            n_blocks: int,
+            x0: torch.Tensor | None,
+            conv_x: torch.Tensor,
+            conv_w: torch.Tensor,
+            conv_cache: torch.Tensor,
+            block_table: torch.Tensor,
+            seq_idx: torch.Tensor,
+            query_start_loc: torch.Tensor,
+            seq_lens: torch.Tensor,
+            stream_offset: int,
+            num_kv_heads: int,
+            block_size: int,
+            write_state: bool,
+            sconv_out: torch.Tensor | None,
+            partial_out: torch.Tensor | None,
+            append: torch.Tensor | None,
+            query: torch.Tensor,
+            norm_w: torch.Tensor | None,
+            out: torch.Tensor,
+            norm_out2: torch.Tensor | None,
+            eps: float,
+            norm_eps: float,
+        ) -> None:
+            return
 
     @register_fake("_rocm_C::inkling2_glue_msg_gate_down")
     def _inkling2_glue_msg_gate_down_fake(
