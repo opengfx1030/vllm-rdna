@@ -26,6 +26,15 @@ _WRAPPER = """
 #include <torch/extension.h>
 #include <optional>
 
+void inkling2_glue_attn_res(const at::Tensor& blocks, int64_t n_blocks,
+                            const at::Tensor& x0,
+                            const std::optional<at::Tensor>& x1,
+                            const std::optional<at::Tensor>& partial_out,
+                            const std::optional<at::Tensor>& append,
+                            const at::Tensor& query,
+                            const std::optional<at::Tensor>& norm_w,
+                            const at::Tensor& out, double eps,
+                            double norm_eps);
 void inkling2_glue_msg_gate_down(const at::Tensor& h, const at::Tensor& m,
                                  const at::Tensor& wd, const at::Tensor& d,
                                  double eps);
@@ -50,6 +59,7 @@ void inkling2_glue_swiglu(const at::Tensor& gate_up, const at::Tensor& out,
                           double gate_cap, double up_cap);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("attn_res", &inkling2_glue_attn_res);
   m.def("msg_gate_down", &inkling2_glue_msg_gate_down);
   m.def("msg_gate_mix", &inkling2_glue_msg_gate_mix);
   m.def("moe_route", &inkling2_glue_moe_route);

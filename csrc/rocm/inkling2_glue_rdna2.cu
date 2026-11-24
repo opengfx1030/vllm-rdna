@@ -70,8 +70,9 @@ constexpr int kWave = 32;
 constexpr int kMaxStates = 64;    // block states (+ append + partial) per call
 constexpr int kMaxExperts = 255;  // expert id is a byte, 0xFF is the pad
 constexpr int kMaxTopK = 16;
-constexpr int kRouteThreads = 256;      // 8 waves, one expert row per wave
-constexpr int kRouteMaxEntries = 8192;  // tokens * top_k of one call
+constexpr int kRouteThreads = 256;       // 8 waves, one expert row per wave
+constexpr int kRouteSmallThreads = 128;  // 4 waves per expert CTA (T <= 4)
+constexpr int kRouteMaxEntries = 8192;   // tokens * top_k of one call
 // align scratch in the router's dynamic LDS: per-wave expert histograms
 // [waves][256], the wave sums of the expert scan, the routed ids as bytes
 constexpr int kAlignOffWs = (kRouteThreads / kWave) * 256 * 4;
@@ -85,18 +86,65 @@ constexpr int kMixWaves = 8;      // waves of a split gate_mix CTA
 constexpr int kMixRpw = 8;        // rows of the gate rank per wave: R = 64
 
 // ---------------------------------------------------------------------------
-// Small helpers (arch independent)
+// Small helpers (wave32 DPP butterflies on gfx1030, bit-identical to shfl_xor)
 // ---------------------------------------------------------------------------
+#if defined(__HIP__RDNA2__)
+template <int O>
+__device__ __forceinline__ int xor_lane_i32(int x) {
+  if constexpr (O == 16)
+    return __builtin_amdgcn_permlanex16(x, x, 0x76543210u, 0xfedcba98u, false,
+                                        false);
+  else if constexpr (O == 8)
+    return __builtin_amdgcn_update_dpp(x, x, 0x168, 0xF, 0xF, false);
+  else if constexpr (O == 4)
+    return __builtin_amdgcn_update_dpp(x, x, 0x164, 0xF, 0xF, false);
+  else if constexpr (O == 2)
+    return __builtin_amdgcn_update_dpp(x, x, 0x4E, 0xF, 0xF, false);
+  else
+    return __builtin_amdgcn_update_dpp(x, x, 0xB1, 0xF, 0xF, false);
+}
+#else
+template <int O>
+__device__ __forceinline__ int xor_lane_i32(int x) {
+  return __shfl_xor(x, O);
+}
+#endif
+
+template <int O>
+__device__ __forceinline__ float xor_lane(float v) {
+  return __int_as_float(xor_lane_i32<O>(__float_as_int(v)));
+}
+
 __device__ __forceinline__ float wave_sum(float v) {
-#pragma unroll
-  for (int o = kWave / 2; o > 0; o >>= 1) v += __shfl_xor(v, o);
+  v += xor_lane<16>(v);
+  v += xor_lane<8>(v);
+  v += xor_lane<4>(v);
+  v += xor_lane<2>(v);
+  v += xor_lane<1>(v);
   return v;
 }
 
 __device__ __forceinline__ float wave_max(float v) {
-#pragma unroll
-  for (int o = kWave / 2; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor(v, o));
+  v = fmaxf(v, xor_lane<16>(v));
+  v = fmaxf(v, xor_lane<8>(v));
+  v = fmaxf(v, xor_lane<4>(v));
+  v = fmaxf(v, xor_lane<2>(v));
+  v = fmaxf(v, xor_lane<1>(v));
   return v;
+}
+
+template <int N>
+__device__ __forceinline__ void wave_sum_n(float (&v)[N]) {
+#pragma unroll
+  for (int i = 0; i < N; ++i) v[i] += xor_lane<16>(v[i]);
+#pragma unroll
+  for (int i = 0; i < N; ++i) v[i] += xor_lane<8>(v[i]);
+#pragma unroll
+  for (int i = 0; i < N; ++i) v[i] += xor_lane<4>(v[i]);
+#pragma unroll
+  for (int i = 0; i < N; ++i) v[i] += xor_lane<2>(v[i]);
+#pragma unroll
+  for (int i = 0; i < N; ++i) v[i] += xor_lane<1>(v[i]);
 }
 
 // All threads of the block get the sum (same order in every thread).
@@ -223,8 +271,6 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
   const int V = a.H >> 2;
 
   __shared__ float s_red[8][kMaxStates * kQ1];
-  __shared__ float s_tot[kMaxStates * kQ1];
-  __shared__ float s_coef[Q][kMaxStates];
 
   const bool has_x1 = a.x1 != nullptr;
   const bool has_app = a.append != nullptr;
@@ -277,16 +323,18 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
     }
   };
 
-  // pass 1: per state sum of squares and the dot product with every query
+  // pass 1: issue all register-resident state loads together, then reduce
   float4 S[kNReg][ITER];
   #pragma unroll
   for (int j = 0; j < kNReg; ++j) {
+    if (j < NS) fetch(j, S[j]);
+  }
+  #pragma unroll
+  for (int j = 0; j < kNReg; ++j) {
     if (j < NS) {
-      fetch(j, S[j]);
       float v[kQ1];
       state_partials<Q, ITER>(S[j], Qv, v);
-  #pragma unroll
-      for (int i = 0; i < kQ1; ++i) v[i] = wave_sum(v[i]);
+      wave_sum_n<kQ1>(v);
       if (lane == 0) {
   #pragma unroll
         for (int i = 0; i < kQ1; ++i) s_red[wave][j * kQ1 + i] = v[i];
@@ -298,52 +346,56 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
     fetch(j, s);
     float v[kQ1];
     state_partials<Q, ITER>(s, Qv, v);
-  #pragma unroll
-    for (int i = 0; i < kQ1; ++i) v[i] = wave_sum(v[i]);
+    wave_sum_n<kQ1>(v);
     if (lane == 0) {
   #pragma unroll
       for (int i = 0; i < kQ1; ++i) s_red[wave][j * kQ1 + i] = v[i];
     }
   }
   __syncthreads();
-  for (int i = tid; i < NS * kQ1; i += nth) {
-    float acc = 0.f;
-    for (int w = 0; w < nwaves; ++w) acc += s_red[w][i];
-    s_tot[i] = acc;
-  }
-  __syncthreads();
 
-  // scores -> softmax over the states -> coefficients c[q][j] = p[q][j] * r[j]
-  if (wave == 0) {
-    float rr[2];
+  // Every wave independently reduces s_red across waves and computes softmax
+  // coefficients in registers (eliminates s_tot / s_coef LDS and 2 barriers).
+  float rr[2];
+  float tot_q[Q][2];
+  #pragma unroll
+  for (int u = 0; u < 2; ++u) {
+    const int j = lane + kWave * u;
+    if (j < NS) {
+      float s0 = 0.f;
+      for (int w = 0; w < nwaves; ++w) s0 += s_red[w][j * kQ1];
+      rr[u] = rsqrtf(s0 * a.inv_h + a.eps);
+  #pragma unroll
+      for (int q = 0; q < Q; ++q) {
+        float sq = 0.f;
+        for (int w = 0; w < nwaves; ++w) sq += s_red[w][j * kQ1 + 1 + q];
+        tot_q[q][u] = sq;
+      }
+    } else {
+      rr[u] = 0.f;
+  #pragma unroll
+      for (int q = 0; q < Q; ++q) tot_q[q][u] = 0.f;
+    }
+  }
+  float coef[Q][2];
+  #pragma unroll
+  for (int q = 0; q < Q; ++q) {
+    float sc[2], e[2];
   #pragma unroll
     for (int u = 0; u < 2; ++u) {
       const int j = lane + kWave * u;
-      rr[u] = j < NS ? rsqrtf(s_tot[j * kQ1] * a.inv_h + a.eps) : 0.f;
+      sc[u] = j < NS ? (tot_q[q][u] * rr[u]) * a.scale : -INFINITY;
     }
+    const float m = wave_max(fmaxf(sc[0], sc[1]));
   #pragma unroll
-    for (int q = 0; q < Q; ++q) {
-      float sc[2], e[2];
-  #pragma unroll
-      for (int u = 0; u < 2; ++u) {
-        const int j = lane + kWave * u;
-        sc[u] = j < NS ? (s_tot[j * kQ1 + 1 + q] * rr[u]) * a.scale : -INFINITY;
-      }
-      const float m = wave_max(fmaxf(sc[0], sc[1]));
-  #pragma unroll
-      for (int u = 0; u < 2; ++u) {
-        const int j = lane + kWave * u;
-        e[u] = j < NS ? expf(sc[u] - m) : 0.f;
-      }
-      const float den = wave_sum(e[0] + e[1]);
-  #pragma unroll
-      for (int u = 0; u < 2; ++u) {
-        const int j = lane + kWave * u;
-        if (j < NS) s_coef[q][j] = (e[u] / den) * rr[u];
-      }
+    for (int u = 0; u < 2; ++u) {
+      const int j = lane + kWave * u;
+      e[u] = j < NS ? expf(sc[u] - m) : 0.f;
     }
+    const float den = wave_sum(e[0] + e[1]);
+  #pragma unroll
+    for (int u = 0; u < 2; ++u) coef[q][u] = (e[u] / den) * rr[u];
   }
-  __syncthreads();
 
   // pass 2: out[q] = sum_j c[q][j] * state_j
   float4 acc[Q][ITER];
@@ -356,7 +408,7 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
     if (j < NS) {
   #pragma unroll
       for (int q = 0; q < Q; ++q) {
-        const float c = s_coef[q][j];
+        const float c = __shfl(coef[q][0], j);
   #pragma unroll
         for (int k = 0; k < ITER; ++k) acc[q][k] = fma4(c, S[j][k], acc[q][k]);
       }
@@ -367,7 +419,8 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
     fetch(j, s);
   #pragma unroll
     for (int q = 0; q < Q; ++q) {
-      const float c = s_coef[q][j];
+      const float c =
+          (j < kWave) ? __shfl(coef[q][0], j) : __shfl(coef[q][1], j - kWave);
   #pragma unroll
       for (int k = 0; k < ITER; ++k) acc[q][k] = fma4(c, s[k], acc[q][k]);
     }
@@ -390,12 +443,26 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
       float s = 0.f;
   #pragma unroll
       for (int k = 0; k < ITER; ++k) s += dot4(acc[q][k], acc[q][k]);
-      ssq[q] = wave_sum(s);
+      ssq[q] = s;
     }
-    __syncthreads();
+    wave_sum_n<Q>(ssq);
     if (lane == 0) {
   #pragma unroll
       for (int q = 0; q < Q; ++q) s_nrm[wave][q] = ssq[q];
+    }
+    // Prefetch norm weights while waves arrive at the single norm barrier.
+    float4 nw[Q][ITER];
+  #pragma unroll
+    for (int q = 0; q < Q; ++q) {
+      if (q == 0 || a.nw_rows > 1) {
+        const int64_t wrow = (a.nw_rows == 1 ? 0 : q) * a.nw_s;
+  #pragma unroll
+        for (int k = 0; k < ITER; ++k) {
+          const int v = tid + k * nth;
+          nw[q][k] = v < V ? load4_dyn(a.norm_w, wrow + 4 * v, a.nw_f16)
+                           : make_float4(0.f, 0.f, 0.f, 0.f);
+        }
+      }
     }
     __syncthreads();
     float rs[Q];
@@ -408,12 +475,11 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
     __half* out = reinterpret_cast<__half*>(a.out) + t * a.o_t;
   #pragma unroll
     for (int q = 0; q < Q; ++q) {
-      const int64_t wrow = (a.nw_rows == 1 ? 0 : q) * a.nw_s;
   #pragma unroll
       for (int k = 0; k < ITER; ++k) {
         const int v = tid + k * nth;
         if (v < V) {
-          const float4 w = load4_dyn(a.norm_w, wrow + 4 * v, a.nw_f16);
+          const float4 w = (a.nw_rows == 1) ? nw[0][k] : nw[q][k];
           const float4 y = make_float4(
               w.x * (acc[q][k].x * rs[q]), w.y * (acc[q][k].y * rs[q]),
               w.z * (acc[q][k].z * rs[q]), w.w * (acc[q][k].w * rs[q]));
@@ -1102,7 +1168,11 @@ struct RouteArgs {
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // Top-k of the token handled by this wave (experts lane, lane + 32, ...).
-__device__ __forceinline__ void route_topk_wave(const RouteArgs& a, int t) {
+// When `flat_ids_out != nullptr`, also writes the selected expert ids as bytes
+// into LDS (`flat_ids_out[t * K + k]`) so small-T align avoids a global
+// readback.
+__device__ __forceinline__ void route_topk_wave(
+    const RouteArgs& a, int t, uint8_t* flat_ids_out = nullptr) {
   constexpr int kMaxEpl = (kMaxExperts + kWave - 1) / kWave;
   const int lane = threadIdx.x & (kWave - 1);
   const int epl = (a.E + kWave - 1) / kWave;
@@ -1121,6 +1191,12 @@ __device__ __forceinline__ void route_topk_wave(const RouteArgs& a, int t) {
   __shared__ int s_sel_id[kRouteThreads / kWave][kMaxTopK];
   __shared__ float s_sel_w[kRouteThreads / kWave][kMaxTopK];
   const int wave = threadIdx.x / kWave;
+  auto step_max = [](float& bv, int& bi, float ov, int oi) {
+    if (ov > bv || (ov == bv && oi < bi)) {
+      bv = ov;
+      bi = oi;
+    }
+  };
   for (int k = 0; k < a.K; ++k) {
     float bv = -INFINITY;
     int bi = 0x7fffffff;
@@ -1131,15 +1207,11 @@ __device__ __forceinline__ void route_topk_wave(const RouteArgs& a, int t) {
         bi = lane + kWave * i;
       }
     }
-  #pragma unroll
-    for (int o = kWave / 2; o > 0; o >>= 1) {
-      const float ov = __shfl_xor(bv, o);
-      const int oi = __shfl_xor(bi, o);
-      if (ov > bv || (ov == bv && oi < bi)) {
-        bv = ov;
-        bi = oi;
-      }
-    }
+    step_max(bv, bi, xor_lane<16>(bv), xor_lane_i32<16>(bi));
+    step_max(bv, bi, xor_lane<8>(bv), xor_lane_i32<8>(bi));
+    step_max(bv, bi, xor_lane<4>(bv), xor_lane_i32<4>(bi));
+    step_max(bv, bi, xor_lane<2>(bv), xor_lane_i32<2>(bi));
+    step_max(bv, bi, xor_lane<1>(bv), xor_lane_i32<1>(bi));
     // NaN scores never win a comparison: keep the id a valid expert index
     if (bi >= a.E) bi = a.E - 1;
     float mine = 0.f;
@@ -1150,7 +1222,7 @@ __device__ __forceinline__ void route_topk_wave(const RouteArgs& a, int t) {
         bs[i] = -INFINITY;
       }
     }
-    const float sval = wave_sum(mine);  // only the owner lane is non-zero
+    const float sval = __shfl(mine, bi & (kWave - 1));
     if (lane == 0) {
       s_sel_id[wave][k] = bi;
       s_sel_w[wave][k] = sval;
@@ -1161,8 +1233,10 @@ __device__ __forceinline__ void route_topk_wave(const RouteArgs& a, int t) {
     for (int k = 0; k < a.K; ++k) sum += s_sel_w[wave][k];
     const float den = sum + 1e-20f;
     for (int k = 0; k < a.K; ++k) {
-      a.topk_ids[(int64_t)t * a.K + k] = s_sel_id[wave][k];
+      const int id = s_sel_id[wave][k];
+      a.topk_ids[(int64_t)t * a.K + k] = id;
       a.topk_w[(int64_t)t * a.K + k] = (s_sel_w[wave][k] / den) * a.route_scale;
+      if (flat_ids_out != nullptr) flat_ids_out[t * a.K + k] = (uint8_t)id;
     }
   }
 }
@@ -1396,6 +1470,168 @@ __device__ __forceinline__ void moe_route_body(const RouteArgs& a) {
   if (tid == 0) a.counters[a.NT] = 0;
 }
 
+// Small-T router (T <= 8, decode & speculative verification): 1 expert per CTA
+// (4 waves = 128 threads splitting H across all E CTAs -> 128 CTAs across 72
+// CUs instead of 16, zero dynamic LDS, direct cached x reads), ONE global
+// barrier, and an in-LDS O(T*K) align without histogram/ballot/sort passes.
+template <typename WT, int TB>
+__device__ __forceinline__ void moe_route_small_body(const RouteArgs& a) {
+  __shared__ float s_part[4][TB];
+  __shared__ int s_flag;
+  __shared__ uint8_t s_flat_ids[8 * kMaxTopK];
+  __shared__ int s_ws[8];
+  const int tid = threadIdx.x;
+  const int lane = tid & (kWave - 1);
+  const int wave = tid / kWave;
+  const int bid = blockIdx.x;
+
+  if (bid < a.nzero) {
+    const int64_t n1 = a.zero1_n >> 3, n2 = a.zero2_n >> 3;
+    for (int64_t i = (int64_t)bid * kRouteSmallThreads + tid; i < n1 + n2;
+         i += (int64_t)a.nzero * kRouteSmallThreads) {
+      uint4* p = i < n1 ? reinterpret_cast<uint4*>(a.zero1) + i
+                        : reinterpret_cast<uint4*>(a.zero2) + (i - n1);
+      *p = make_uint4(0u, 0u, 0u, 0u);
+    }
+    return;
+  }
+
+  const int e = bid - a.nzero;
+  const int H = a.H, E = a.E;
+  float acc[TB];
+  #pragma unroll
+  for (int tb = 0; tb < TB; ++tb) acc[tb] = 0.f;
+
+  if constexpr (std::is_same_v<WT, float>) {
+    const int V = H >> 2;
+    const float4* w4 = reinterpret_cast<const float4*>(a.w) + (int64_t)e * V;
+  #pragma unroll 4
+    for (int i = tid; i < V; i += kRouteSmallThreads) {
+      const float4 wv = w4[i];
+  #pragma unroll
+      for (int tb = 0; tb < TB; ++tb) {
+        if (tb < a.T) {
+          const uint2 u = *reinterpret_cast<const uint2*>(
+              a.x + (int64_t)tb * a.x_t + 4 * i);
+          acc[tb] = fmaf(wv.x, h2f_lo(u.x), acc[tb]);
+          acc[tb] = fmaf(wv.y, h2f_hi(u.x), acc[tb]);
+          acc[tb] = fmaf(wv.z, h2f_lo(u.y), acc[tb]);
+          acc[tb] = fmaf(wv.w, h2f_hi(u.y), acc[tb]);
+        }
+      }
+    }
+  } else {
+    const int H8 = H >> 3;
+    const uint4* w8 = reinterpret_cast<const uint4*>(a.w) + (int64_t)e * H8;
+  #pragma unroll 4
+    for (int i = tid; i < H8; i += kRouteSmallThreads) {
+      const uint4 wv = w8[i];
+      const half2* wh = reinterpret_cast<const half2*>(&wv);
+  #pragma unroll
+      for (int tb = 0; tb < TB; ++tb) {
+        if (tb < a.T) {
+          const uint4 xv = *reinterpret_cast<const uint4*>(
+              a.x + (int64_t)tb * a.x_t + 8 * i);
+          const half2* xh = reinterpret_cast<const half2*>(&xv);
+          float c = acc[tb];
+          c = __builtin_amdgcn_fdot2(wh[0], xh[0], c, false);
+          c = __builtin_amdgcn_fdot2(wh[1], xh[1], c, false);
+          c = __builtin_amdgcn_fdot2(wh[2], xh[2], c, false);
+          c = __builtin_amdgcn_fdot2(wh[3], xh[3], c, false);
+          acc[tb] = c;
+        }
+      }
+    }
+  }
+
+  wave_sum_n<TB>(acc);
+  if (lane == 0) {
+  #pragma unroll
+    for (int tb = 0; tb < TB; ++tb) s_part[wave][tb] = acc[tb];
+  }
+  __syncthreads();
+
+  if (wave == 0) {
+    if (lane < TB && lane < a.T) {
+      const float sum = (s_part[0][lane] + s_part[1][lane]) +
+                        (s_part[2][lane] + s_part[3][lane]);
+      a.logits[(int64_t)lane * E + e] = sum;
+    }
+    __threadfence();
+    if (lane == 0) {
+      const int old = atomicAdd(a.counters, 1);
+      s_flag = (old == E - 1);
+    }
+  }
+  __syncthreads();
+  if (!s_flag) return;
+  __threadfence();
+
+  // Last-arriver CTA: top-k per token (4 waves cover up to 8 tokens) + direct
+  // small-numel align
+  for (int t = wave; t < a.T; t += 4) route_topk_wave(a, t, s_flat_ids);
+  const int numel = a.T * a.K;
+  for (int p = tid; p < a.max_padded; p += kRouteSmallThreads)
+    a.sorted_ids[p] = numel;
+  __syncthreads();
+
+  const int BM = a.BM;
+  const int e0 = tid;
+  const int e1 = tid + kRouteSmallThreads;
+  int cnt0 = 0, cnt1 = 0;
+  for (int i = 0; i < numel; ++i) {
+    const int key = (int)s_flat_ids[i];
+    cnt0 += (key == e0) ? 1 : 0;
+    cnt1 += (key == e1) ? 1 : 0;
+  }
+  const int nb0 = (e0 < E) ? (cnt0 + BM - 1) / BM : 0;
+  const int nb1 = (e1 < E) ? (cnt1 + BM - 1) / BM : 0;
+  int v0 = nb0, v1 = nb1;
+  #pragma unroll
+  for (int d = 1; d < kWave; d <<= 1) {
+    const int n0 = __shfl_up(v0, d);
+    const int n1 = __shfl_up(v1, d);
+    if (lane >= d) {
+      v0 += n0;
+      v1 += n1;
+    }
+  }
+  if (lane == kWave - 1) {
+    s_ws[wave] = v0;
+    s_ws[4 + wave] = v1;
+  }
+  __syncthreads();
+  int base0 = 0, base1 = 0, total = 0;
+  #pragma unroll
+  for (int w = 0; w < 8; ++w) {
+    if (w < wave) base0 += s_ws[w];
+    if (w < 4 + wave) base1 += s_ws[w];
+    total += s_ws[w];
+  }
+  if (nb0 > 0) {
+    const int fb = base0 + v0 - nb0;
+    for (int b = 0; b < nb0; ++b) a.expert_ids[fb + b] = e0;
+    int pos = fb * BM;
+    for (int i = 0; i < numel; ++i) {
+      if ((int)s_flat_ids[i] == e0) a.sorted_ids[pos++] = i;
+    }
+  }
+  if (nb1 > 0) {
+    const int fb = base1 + v1 - nb1;
+    for (int b = 0; b < nb1; ++b) a.expert_ids[fb + b] = e1;
+    int pos = fb * BM;
+    for (int i = 0; i < numel; ++i) {
+      if ((int)s_flat_ids[i] == e1) a.sorted_ids[pos++] = i;
+    }
+  }
+  for (int b = total + tid; b < a.max_blocks; b += kRouteSmallThreads)
+    a.expert_ids[b] = -1;
+  if (tid == 0) {
+    a.post_pad[0] = total * BM;
+    a.counters[0] = 0;
+  }
+}
+
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
 template <typename WT, int TB>
@@ -1403,6 +1639,14 @@ __global__ void __launch_bounds__(kRouteThreads)
     moe_route_kernel(const RouteArgs a) {
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
   moe_route_body<WT, TB>(a);
+#endif
+}
+
+template <typename WT, int TB>
+__global__ void __launch_bounds__(kRouteSmallThreads)
+    moe_route_small_kernel(const RouteArgs a) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  moe_route_small_body<WT, TB>(a);
 #endif
 }
 
@@ -1845,7 +2089,7 @@ void inkling2_glue_msg_gate_mix(const at::Tensor& h, const at::Tensor& m,
   a.inv_h = 1.0f / (float)H;
 
   // a handful of tokens with fp32 weights: the R-split kernel (opt-in)
-  const bool split = fuse_glue() && !w16 && T <= 4 && R == kMixWaves * kMixRpw;
+  const bool split = fuse_glue() && !w16 && T <= 8 && R == kMixWaves * kMixRpw;
   const int tb = split ? gate_tb(T, 4) : gate_mix_tb(T, G * a.C, w16 ? 16 : 8);
   const int64_t ntiles = (T + tb - 1) / tb;
   if (norm) {
@@ -2155,6 +2399,26 @@ void inkling2_glue_copy_states(const at::Tensor& src, const at::Tensor& dst) {
 // inkling2_glue_moe_route
 // ---------------------------------------------------------------------------
 template <typename WT>
+static void launch_route_small(int tb, unsigned grid, const RouteArgs& a,
+                               hipStream_t stream) {
+  switch (tb) {
+    case 1:
+      inkling2_glue::moe_route_small_kernel<WT, 1>
+          <<<dim3(grid), dim3(kRouteSmallThreads), 0, stream>>>(a);
+      break;
+    case 2:
+      inkling2_glue::moe_route_small_kernel<WT, 2>
+          <<<dim3(grid), dim3(kRouteSmallThreads), 0, stream>>>(a);
+      break;
+    default:
+      inkling2_glue::moe_route_small_kernel<WT, 4>
+          <<<dim3(grid), dim3(kRouteSmallThreads), 0, stream>>>(a);
+      break;
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template <typename WT>
 static void launch_route(int tb, unsigned grid, size_t shmem,
                          const RouteArgs& a, hipStream_t stream) {
   switch (tb) {
@@ -2293,6 +2557,31 @@ void inkling2_glue_moe_route(
     }
   }
 
+  const at::cuda::OptionalCUDAGuard guard(device_of(x));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (T == 0) return;
+
+  // Small-T path (decode and speculative verify steps): 1 expert per CTA,
+  // zero dynamic LDS, single global barrier, in-LDS align.  Capped at T <= 4:
+  // at T=5..8 per-CTA register pressure and the serial align loop make the
+  // 16-CTA path faster.
+  if (fuse_glue() && T <= 4) {
+    const int stb = T == 1 ? 1 : (T == 2 ? 2 : 4);
+    a.NT = 1;
+    a.NEG = (int)E;
+    TORCH_CHECK(counters.numel() >= a.NT + 1, who,
+                ": counters needs >= ", a.NT + 1, " int32 (zero on entry)");
+    a.nzero = (int)std::min<int64_t>(
+        (zero_bytes + 16 * kRouteSmallThreads - 1) / (16 * kRouteSmallThreads),
+        kMaxZeroCtas);
+    const unsigned sgrid = (unsigned)(a.nzero + E);
+    if (w16)
+      launch_route_small<__half>(stb, sgrid, a, stream);
+    else
+      launch_route_small<float>(stb, sgrid, a, stream);
+    return;
+  }
+
   // tokens per CTA tile: fp32 weights stage x as fp32 (LDS), fp16 as fp16
   const int xsz = w16 ? 2 : 4;
   int tb = 1;
@@ -2316,9 +2605,6 @@ void inkling2_glue_moe_route(
   const unsigned grid = (unsigned)(a.nzero + (int64_t)a.NT * a.NEG);
   const size_t shmem = std::max<size_t>((size_t)tb * H * xsz, kAlignSmemBytes);
 
-  const at::cuda::OptionalCUDAGuard guard(device_of(x));
-  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (T == 0) return;
   if (w16)
     launch_route<__half>(tb, grid, shmem, a, stream);
   else

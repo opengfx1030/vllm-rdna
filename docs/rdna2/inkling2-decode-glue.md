@@ -446,3 +446,28 @@ was not available here, so the lever stays `[INFERENCE]`.
    tax the remaining fusion candidates are each ~0.2 ms or less
    (sconv + attn_res, kv_prep + decode, combine + decode); `moe_route` is
    0.75 ms (15.7 us per launch) and the largest single glue kernel.
+
+## 8. Follow-on glue levers (2026-11-24: DPP reductions, small-T `moe_route`, `gate_mix_split` to T <= 8)
+
+Implemented in `csrc/rocm/inkling2_glue_rdna2.cu` behind `VLLM_INKLING2_FUSE_GLUE` (default on; `=0` restores the previous paths):
+
+* **RDNA2 wave32 DPP / `permlanex16` reductions** (`xor_lane_i32`, `xor_lane`, `wave_sum_n`) under `#if defined(__HIP__RDNA2__)`, eliminating LDS crossbar `__shfl_xor` across `attn_res`, `route_topk_wave`, `gate_down`, `gate_mix`, and `rms_norm`.
+* **`attn_res` barrier and norm-weight prefetch cleanup**: bulk state loads, `wave_sum_n`, dropped `s_tot` / `s_coef` LDS and two `__syncthreads()`, prefetched `norm_w` across the single `NORM` barrier. Graph-timed microbench (`B=4, H=2304`, with `norm_w`): `Q=1` `5.93 -> 5.12 us` (**1.16x**), `Q=3` `8.25 -> 7.38 us` (**1.12x**) across `T=1..8`.
+* **`moe_route_small_kernel` (`T <= 4`)**: 1 expert/CTA (`E` CTAs across 72 CUs instead of 16), zero dynamic LDS, direct cached `x` reads, single global barrier, and in-LDS stable align. Graph-timed microbench (`E=128, H=2304, K=8`): `T=1` `10.79 -> 7.59 us` (**1.42x**), `T=2` `11.68 -> 8.57 us` (**1.36x**), `T=4` `12.85 -> 10.43 us` (**1.23x**). Capped at `T <= 4` (`T=6/8` stays on the 16-CTA kernel).
+* **`gate_mix_split_kernel` extended to `T <= 8`** (two `TB=4` tiles for `T=5..8`): graph-timed microbench (`fp32` weights with norm) `G=1 T=8` `8.78 -> 6.93 us` (**1.27x**), `G=3 T=8` `31.84 -> 9.94 us` (**3.20x**, `-21.9 us/call`).
+
+### Qualification and end-to-end TP=1 serving (`par1-cs25`, HIP 2, `inkling2-mini-tp1`, random prompts, `temp=0`)
+
+* **Kernel oracle**: `test_inkling2_glue_rdna2.py` **232/232 passed** (`FUSE_GLUE=1` and `FUSE_GLUE=0`, including `t2_e255_k16_f32w` for `E > 128`).
+* **Hand mutants**: 5/5 killed (`glue_dpp_xor8`, `glue_attn_res_wave_drop`, `glue_route_small_e1_drop`, `glue_route_small_counter_reset`, `glue_route_small_wave_sum_drop`).
+* **6-arch `archdiff`**: `gfx90a/942/950/1100/1200` 0 differences (empty stubs only); `gfx1030` expected families only.
+* **NLL gate (`real_check.py`, TP=1 `FULL_AND_PIECEWISE`, `FUSE_GLUE=1` vs `=0`)**: **PASS** (`|dlogp| mean 0.0294`, 16/16 greedy tokens identical on both prompts).
+* **End-to-end serving vs `inkling2-baseline-2026-11-24.md`** (0 faults, PPL 5.20, prefix 18.22x, `PROBE-AFTER-LOAD PASS`):
+
+| cell | baseline ITL p50 / out tok/s | new ITL p50 / out tok/s | delta |
+| --- | --- | --- | --- |
+| `1024/512 c=1` | `18.0 ms` / `52.9` agg (TTFT `493 ms`, `2,075` tok/s) | **`17.8 ms` / `53.57` agg** (`56.26` req, TTFT `475 ms`, `2,154` tok/s) | `-0.2 ms`, `+1.3%` out, `+3.8%` prefill |
+| `1024/512 c=2` | `21.8 ms` / `84.4` agg | **`21.6 ms` / `85.36` agg** | `-0.2 ms`, `+1.1%` out |
+| `1024/512 c=4` | `27.6 ms` / `127.6` agg | **`27.2 ms` / `129.37` agg** | `-0.4 ms`, `+1.4%` out |
+| `1024/512 c=8` | `37.2 ms` / `178.3` agg | **`35.2 ms` / `188.33` agg** | **`-2.0 ms` (-5.4%), `+10.0 tok/s` (+5.6%)** |
+| `16384/512 c=1` | `19.2 ms` / `27.9` agg | **`19.0 ms` / `27.97` agg** | `-0.2 ms` |
