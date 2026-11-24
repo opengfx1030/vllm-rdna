@@ -193,8 +193,27 @@ TP=1 (`docs/rdna2/inkling2-port-spec.md:240`); HI2 at TP=2 is smaller per rank.
 | 1 | This survey/plan | `docs/rdna2/inkling-hi2-runtime-plan.md` |
 | 2 | Format detection, HF→serving names, HI2 stack container/slicing, loader wiring, CPU tests (config declaration, name map, stack slice, memory census helper) | `vllm/models/inkling2_loop/amd/loader.py`, `amd/hi2.py` (new), `amd/model.py`, `amd/moe.py`, `tests/models/inkling2_loop/test_hi2_loader.py` (new) |
 | 3 | Pure-torch HI2 expert reference (dequant + routed MoE: softcaps, route_scale, fp32 top-k sum) and a CPU test against the quantizer's dequant/eval on a tiny HI2 directory generated from the quantizer's tiny fixture | `amd/hi2.py`, `amd/moe.py`, `tests/models/inkling2_loop/test_hi2_reference.py` (new), `tools/inkling_hi2/make_tiny_hi2.py` (new, box-side fixture generator) |
-| 4 | Kernel path: grouped transform + GEMM + softcapped activation + weighted sum; GPU-marked unit test vs. the reference; exact GPU command | `amd/moe.py`, `tests/models/inkling2_loop/test_hi2_kernel_gpu.py` (new) |
-| 5 | GPU run kit: serve/smoke/KL/bench scripts, lease-quiet-boot protocol README, ordered checklist | `tools/inkling_hi2/{serve.sh,smoke.sh,kl_probe.py,bench.py,prepare_serve_dir.sh,README.md}` (new) |
+| 4 | Kernel path: grouped transform + GEMM + softcapped activation + weighted sum in the eager forward; the same kernels from preallocated workspace buffers in `forward_hip`; GPU-marked unit test vs. the reference; exact GPU command | `amd/moe.py`, `amd/glue.py`, `amd/model.py`, `tests/models/inkling2_loop/test_hi2_kernel_gpu.py` (new) |
+| 5 | GPU run kit: serve/smoke/KL/bench scripts, lease-quiet-boot protocol README, ordered checklist | `tools/inkling_hi2/{serve.sh,smoke.sh,kl_probe.py,bench.py,README.md}` (new) |
+
+### Status (branch `feat/inkling2-hi2-runtime`)
+
+* Steps 1-3 are committed and pushed: the plan, the loader (format declaration,
+  name map, TP slices) and the float64/fp32 reference, proven against the
+  quantizer's own tiny output: `test_hi2_loader.py` 18 passed,
+  `test_hi2_reference.py` 4 passed (bit-identical decode, exact TP columns, routed
+  MoE == transformers reference; 3m41s fixture).
+* Step 4 is committed: `_forward_chunk_hi2` drives the generic
+  `rdna_hint_flex_moe_transform_rdna2` + `..._gemm_rdna2` at block 64 with the
+  Inkling soft-capped SwiGLU (`inkling2_glue_swiglu`) and a fp32 weighted sum;
+  `_forward_hip_hi2` runs the same kernels from the workspace (`moe_x`, block-64
+  routing buffers), so the serving path allocates nothing on the device. The CPU
+  side is covered by the loader tests (unsmoothed stacks, the workspace views);
+  the kernel test is `tests/models/inkling2_loop/test_hi2_kernel_gpu.py` and has
+  **not run**: every GPU is leased.
+* Step 5 is committed: `tools/inkling_hi2/{serve.sh,smoke.sh,kl_probe.py,bench.py}`
+  and the ordered checklist in `tools/inkling_hi2/README.md`. Nothing in the kit
+  has been executed on a GPU.
 
 ## 4. Risks / unknowns
 
@@ -202,10 +221,11 @@ TP=1 (`docs/rdna2/inkling2-port-spec.md:240`); HI2 at TP=2 is smaller per rank.
    ~8-pair decode does 8 × 64 rows of work. Expect a slow first decode
    (**[inference]** several × to ~10× the stock kernel at c=1). Correctness first;
    the per-pair GEMV variant and a fused softcap kernel are follow-ups.
-2. **CUDA-graph capture.** `moe_align_block_size` + per-call allocations run inside
-   `forward_hip`; the GPU kit must boot with `FULL_AND_PIECEWISE` and confirm graphs
-   capture, or fall back to `--enforce-eager` for the first correctness probe and
-   report the difference.
+2. **CUDA-graph capture.** `forward_hip` writes only preallocated workspace buffers
+   (the block-64 routing layout included); capture is still unproven on the device,
+   so the kit boots with `FULL_AND_PIECEWISE` and falls back to `EAGER=1` only to
+   report the difference. The `torch.mul_`/`torch.sum` epilogue is two captured torch
+   kernels; if the graph rejects them the fallback is a small HIP epilogue.
 3. **Load-time memory.** The loader reads the whole 13.7 GiB shard per rank (mmap);
    page cache is shared on the box. Host RSS peak is one stack group (~0.5 GiB) plus
    the dense tensors. Not measured on the real directory yet.
@@ -223,7 +243,9 @@ TP=1 (`docs/rdna2/inkling2-port-spec.md:240`); HI2 at TP=2 is smaller per rank.
 ## 5. GPU session checklist (details in `tools/inkling_hi2/README.md`)
 
 1. Lease slot A, quiet protocol, `boot.lock`; build my tree (MAX_JOBS ≤ 8, build.lock).
-2. `prepare_serve_dir.sh` → new serve dir with the MTP link; `validate` the directory.
+2. The HI2 output directory is directly servable (it carries the tokenizer);
+   `validate` the directory and link the stock `mtp.safetensors` only for the later
+   DSpark step.
 3. CPU import/loader smoke on the box: tiny HI2 fixture round-trip.
 4. Language-model-only, TP=2, `FULL_AND_PIECEWISE`, greedy smoke: load, one forward,
    16 decoded tokens; compare against stock-model greedy ids on the same prompts.
