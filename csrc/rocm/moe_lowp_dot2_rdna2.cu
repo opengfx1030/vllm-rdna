@@ -382,14 +382,6 @@ void launch_moe_nvfp4(
           mul_topk_weight, output_topk, gate_cap, up_cap, stream);
       return;
     }
-    if (variant == 2) {
-      launch_moe_nvfp4_cfg<T, BLOCK_SIZE_M, 256, 384>(
-          a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids,
-          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
-          size_k, top_k, expert_weight_stride, expert_scales_stride,
-          mul_topk_weight, output_topk, gate_cap, up_cap, stream);
-      return;
-    }
   }
   launch_moe_nvfp4_cfg<T, BLOCK_SIZE_M, THREADS_X, BLOCK_KN_SIZE>(
       a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids,

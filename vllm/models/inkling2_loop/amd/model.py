@@ -595,7 +595,10 @@ class Inkling2DecoderLayer(nn.Module):
                 )  # fmt: skip
 
         # ---- MoE (route, gemm1, swiglu, gemm2) + post-mlp short convolution
-        moe = self.tp.all_reduce(self.mlp.forward_hip(hq, ws, v.moe_out))
+        max_q = 0 if conv_md is None else conv_md.max_query_len
+        moe = self.tp.all_reduce(
+            self.mlp.forward_hip(hq, ws, v.moe_out, max_query_len=max_q)
+        )
         next_n = n_blocks + int(self.is_block_boundary)
         out_c = v.mlp_c if mlp_c_out is None else mlp_c_out
         if conv_md is None:

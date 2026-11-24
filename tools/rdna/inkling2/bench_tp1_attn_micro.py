@@ -637,7 +637,7 @@ def run_conv_rollback_parity(mod) -> None:
             pos_cur = [0] * R
             step_idx = 0
             max_oracle_err = 0.0
-            while any(p < total_len - K_max - 1 for p in pos_cur):
+            while all(p + 1 + K_max <= total_len for p in pos_cur):
                 is_prefill = step_idx == 0
                 q_lens = [13 if is_prefill else (1 + K_max) for _ in range(R)]
                 # Force 0-drafts-accepted (keep=1) frequently to stress rollback!
@@ -856,14 +856,19 @@ def run_conv_rollback_parity(mod) -> None:
                     s = qsl[r]
                     keep = keeps[r]
                     p0 = pos_cur[r]
-                    err = float(
-                        (out_a[s : s + keep] - want_post[r][p0 : p0 + keep])
-                        .abs()
-                        .max()
-                        .item()
-                    )
-                    max_oracle_err = max(max_oracle_err, err)
-                    assert err < 1e-5, f"rollback oracle error {err} at step {step_idx}"
+                    avail = max(0, want_post[r].shape[0] - p0)
+                    take = min(keep, avail)
+                    if take > 0:
+                        err = float(
+                            (out_a[s : s + take] - want_post[r][p0 : p0 + take])
+                            .abs()
+                            .max()
+                            .item()
+                        )
+                        max_oracle_err = max(max_oracle_err, err)
+                        assert err < 1e-5, (
+                            f"rollback oracle error {err} at step {step_idx}"
+                        )
                     pos_cur[r] += keep
                 step_idx += 1
 

@@ -3026,9 +3026,14 @@ void inkling2_attention(
     const int v = std::atoi(s);
     return (v == 8 || v == 16) ? v : 0;
   }();
-  const bool use_legacy_nh = ((tile_impl & 16) != 0) || (env_nh == 1);
   const int nw_flag = (int)((tile_impl >> 2) & 3);
   const int total_gqa_ctas = nkv * fused_max_q * R;
+  // At q=1 with <24 GQA CTAs (e.g. R<=2 on SWA nkv=8, R<=5 on Full nkv=4),
+  // the nh-grid fills all 36 WGPs (~7.5 us vs ~10.3 us); for multi-query
+  // verify (q>=2) or R where GQA fills the GPU, 1x KV reads win by 1.2-4.2x.
+  const bool use_legacy_nh =
+      ((tile_impl & 16) != 0) || (env_nh == 1) ||
+      (nw_flag == 0 && env_nw == 0 && fused_max_q == 1 && total_gqa_ctas < 24);
   const bool short_window = (window > 0 && window <= 1024);
   const int gqa_nw = (nw_flag == 1)   ? kI2FusedWavesShort
                      : (nw_flag == 2) ? kI2FusedWaves

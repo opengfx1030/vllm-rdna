@@ -331,18 +331,18 @@ def verify_and_bench_gpu(ext, iters: int = 80) -> dict[str, Any]:
                     f"GEMV fp16 mismatch at rows={rows} ({tag})"
                 )
             part_idx = torch.empty(
-                4, rows, DRAFT_VOCAB, dtype=torch.float32, device=device
+                3, rows, DRAFT_VOCAB, dtype=torch.float32, device=device
             )
             part_mat = torch.empty(
-                4, rows, DRAFT_VOCAB, dtype=torch.float32, device=device
+                3, rows, DRAFT_VOCAB, dtype=torch.float32, device=device
             )
-            ext.gemv(x_max, w_full, part_idx, None, rows, 4, 0, w_row_ids_i32)
-            ext.gemv(x_max, w_sub, part_mat, None, rows, 4, 0, None)
+            ext.gemv(x_max, w_full, part_idx, None, rows, 3, 0, w_row_ids_i32)
+            ext.gemv(x_max, w_sub, part_mat, None, rows, 3, 0, None)
             assert torch.equal(part_idx, part_mat), (
                 f"GEMV split-K fp32 mismatch at rows={rows}"
             )
             print(
-                f"  [PASS] rows={rows:2d} (gemv fp16 i32/i64 + split-K=4 fp32): "
+                f"  [PASS] rows={rows:2d} (gemv fp16 i32/i64 + split-K=3 fp32): "
                 "bit-exact (0 ULP)"
             )
         else:
