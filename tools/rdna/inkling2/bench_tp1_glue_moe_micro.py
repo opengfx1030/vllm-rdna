@@ -679,7 +679,7 @@ void exp_gate_mix_launch(int variant, const at::Tensor& h, const at::Tensor& m,
                          const at::Tensor& out, const at::Tensor& scratch,
                          const at::Tensor& partials, const at::Tensor& counters,
                          double norm_eps) {
-#if defined(__HIP__RDNA2__)
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
   const int64_t T = m.size(0), G = m.size(1), H = m.size(2), R = d.size(2);
   const int64_t SH = h.size(1);
   ExpGateArgs a{};
