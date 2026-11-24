@@ -79,7 +79,7 @@ V=$HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python
 cd $TREE && env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
     PYTHONPATH=$TREE $V -c "import vllm._custom_ops, vllm.models.inkling2_loop.amd.moe"
 
-# CPU gates: loader (23), the slot/HIP->PCI gate (14), quantizer reference on the
+# CPU gates: loader (23), the slot/HIP->PCI gate (15), quantizer reference on the
 # tiny HI2 directory (4; the fixture is built by the quantizer's own pipeline,
 # ~3.7 min), legacy loader (6), plus the GPU kernel tests collected-and-skipped on
 # CPU (5). H is the quantizer tree; it provides the `hi2` package the reference
@@ -92,7 +92,7 @@ PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
   tests/models/inkling2_loop/test_loader.py \
   tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
   tests/models/inkling2_loop/test_hi2_reference.py -q
-# 47 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
+# 48 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
 # reuses the <dir>/stock + <dir>/hi2 pair built below instead of rebuilding it.
 # The slot test needs no torch: it fakes the visible-device table and reads the
 # launcher scripts.

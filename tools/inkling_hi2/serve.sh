@@ -100,7 +100,6 @@ check_devices() {
 # would silently change the set the server sees.  HIP_VISIBLE_DEVICES is the one
 # filter this kit sets, and the check below runs with exactly the server's env.
 unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
-check_devices
 
 # Another owner's holder file for this slot means somebody else has it leased.
 # request/release per the lease README; never delete another agent's file.
@@ -119,6 +118,9 @@ lease_check() {
     fi
 }
 lease_check
+# The slot is ours per the holder; resolve HIP -> PCI now (fail fast before the
+# quiet wait) and again under the boot lock before the launch.
+check_devices
 
 # --- quiet windows + one cross-slot boot lock, held until the server is ready ---
 mkdir -p "$(dirname "$BOOT_LOCK")" "$QUIET_DIR"

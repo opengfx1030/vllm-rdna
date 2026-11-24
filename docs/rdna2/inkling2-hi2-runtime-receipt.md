@@ -22,9 +22,9 @@ tools below.
 
 | Step | Command (abbreviated) | Exit | Result |
 | --- | --- | --- | --- |
-| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 47 passed, 5 skipped (the 5 GPU tests) |
+| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 48 passed, 5 skipped (the 5 GPU tests) |
 | Pre-fix check | the same gate on the 5 new regression tests, old product files | 1 | 5 failed, 16 deselected (the tests can fail) |
-| Kit pre-fix | the new `test_hi2_slots.py` inside a scratch copy of `git archive f34d6cf6bc tools/` (old kit and recipes) | 1 | 10 failed, 4 passed (the protocol tests can fail) |
+| Kit pre-fix | the new `test_hi2_slots.py` inside a scratch copy of `git archive f34d6cf6bc tools/` (old kit and recipes) | 1 | 11 failed, 4 passed (the protocol tests can fail) |
 | Mutants | `python tools/inkling_hi2/mutants.py --tree <scratch copy>` | 0 | baseline 27 passed; all 21 killed: the 20-mutant battery on the pre-B4 tree plus the changed `hi2_uneven_rows_check_off` and the new `moe_w2_reduce_rows_as_tokens` on the final tree |
 | Real-dir load | `python tools/inkling_hi2/check_real_dir.py --model <bpw3.5> --stock <stock>` | 0 | 1125 text tensors loaded, 0 missing parameters, lm_head == stock |
 | TP suite | `pytest tests/models/inkling2_loop/test_tensor_parallel.py -q` with the workaround below | 0 | 156 passed |
@@ -37,7 +37,7 @@ tools below.
 
 The CPU gate is the six-layer HI2 test set: format declaration/name map/TP slice
 (`test_hi2_loader.py`, 23), the slot/HIP->PCI gate and launcher protocol
-(`test_hi2_slots.py`, 14 on a fake visible-device table plus script checks), the
+(`test_hi2_slots.py`, 15 on a fake visible-device table plus script checks), the
 legacy loader (`test_loader.py`, 6), the kernel tests
 collected and skipped off a GPU (5), and the reference against the quantizer's own
 `hi2.format.dequantize` on a tiny HI2 export of the quantizer's fixture (4, fp16
@@ -68,7 +68,7 @@ its quiet file every 5 min (<= 15 min) and journals junction temperatures
 (non-zero exit), never a pass.  `bench.py --server-pid` samples the same two
 signals and records them in its JSON.
 
-Kit protocol round (P1-P3), each covered by `test_hi2_slots.py` (10 of its 14 tests
+Kit protocol round (P1-P3), each covered by `test_hi2_slots.py` (11 of its 15 tests
 fail on `f34d6cf6bc`):
 
 1. **P1 lease holder.** `OWNER` defaults to `HI2Inkling`; a different

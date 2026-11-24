@@ -132,6 +132,14 @@ def test_the_launchers_check_the_lease_and_take_an_owner():
         assert "holds the $SLOT lease" in text, name
 
 
+def test_the_launchers_confirm_the_lease_before_touching_the_gpus():
+    serve = _read("serve.sh")
+    smoke = _read("smoke.sh")
+    assert "\ncheck_devices\n" not in serve.split("Another owner's holder")[0]
+    assert "\ncheck_devices\n" in serve.split("lease_check")[-1]
+    assert "\ncheck_devices\n" not in smoke.split("Another owner's holder")[0]
+
+
 def test_smoke_retouches_quiet_and_samples_the_window():
     smoke = _read("smoke.sh")
     assert "gpu_temps.py" in smoke

@@ -82,7 +82,9 @@ check_devices() {
         "$VENV/bin/python" "$HERE/slot.py" --slot "$SLOT" \
         --hip "$HIP_VISIBLE_DEVICES" --expect-buses "$EXPECT_PCI_BUSES"
 }
-check_devices
+# No live check here: it would initialize the slot's cards before the lease is
+# confirmed and before the quiet/lock wait.  serve.sh checks before its boot and
+# measure_begin() re-checks before each measured cell.
 
 # Another owner's holder file for this slot means the slot is not ours to boot.
 lease_check() {
