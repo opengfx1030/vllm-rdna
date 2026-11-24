@@ -32,27 +32,42 @@ Six V620s in two leases; this kit is the TP=2 one on a2:
 
 `SLOT` selects the lease (`a2` default; `b4` is refused by the TP=2 launchers).
 `HIP_VISIBLE_DEVICES` and `EXPECT_PCI_BUSES` default from `SLOT` and must be given
-together; `tools/inkling_hi2/slot.py` resolves the HIP indexes to their live PCI
-buses (clearing the visibility variables so it sees the physical enumeration) and
-refuses a moved bus, a missing index or a non-V620 before the boot and again
-immediately before the launch. The HTTP clients (`kl_probe.py`, `bench.py`) cannot
-see the GPUs and check the declared env pair against the same table, recording the
-slot in their JSON.
+together; `serve.sh` and `smoke.sh` clear `ROCR_VISIBLE_DEVICES` and
+`CUDA_VISIBLE_DEVICES` (a stale filter must not hide or add cards), then
+`tools/inkling_hi2/slot.py` enumerates the GPUs with exactly the server's
+environment (`HIP_VISIBLE_DEVICES` only) and refuses a moved bus, a missing or extra
+device, a non-V620 or a W7800 before the boot and before every measured cell. The
+HTTP clients (`kl_probe.py`, `bench.py`) cannot see the GPUs and check the declared
+env pair against the same table, recording the slot in their JSON.
+
+As of 2026-11-24 the user approved both a2 cards (HIP 0,1) for this work; the
+AGENTS.md table above is authoritative (a2 = HIP 0,1 / PCI `d1 d4`, b4 = HIP
+2,3,4,5 / TP4). An earlier note in this file that read those numbers the other way
+is superseded. The holder file is `HI2Inkling.a2`.
 
 Every GPU command carries `HIP_VISIBLE_DEVICES=<leased HIP list>` on its own command
 line; CPU-only commands use
 `env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= <cmd>`.
 Leases live in `~/w4a8_runs/lanes/lease/README.md` (holder files `<owner>.a2` /
-`<owner>.b4`, requests, release trap; kill the holder's `sleep` on release). Boots
-take `flock -w 900 ~/w4a8_runs/boot.lock` and the two slots boot in parallel. A
-measured window touches `~/w4a8_runs/lanes/quiet-a2/<Agent>` or
-`quiet-b4/<Agent>` (<= 15 min, re-touched every 5 min), waits until no file in its
-slot is newer than 6 min, then waits for `flock -n` on the boot lock and re-checks
-it before each cell; `MEASURE_LOCK=` is empty (one slot cannot block the other).
-`serve.sh` does the quiet wait (`WAIT_QUIET=1`) and the boot lock; `smoke.sh`
-touches its quiet file after the boot and re-checks the boot lock before each
-probe. A window with a KFD `evicted_ms` jump or a thermal alarm is invalid and is
-rerun; no measured window while a `docker buildx build` runs.
+`<owner>.b4`, requests, release trap; kill the holder's `sleep` on release). This
+work's holder is `HI2Inkling.a2` (`OWNER`, default `HI2Inkling`). `serve.sh` and
+`smoke.sh` refuse to boot when another `<holder>.a2` file exists: inspect and clear
+it per the lease README, never delete another agent's file.
+
+Boot protocol (AGENTS.md, two-slot note): a booter waits until no quiet file in its
+slot is newer than 6 min, takes `flock ~/w4a8_runs/boot.lock`, re-checks the quiet
+files *under* the lock, and holds the lock until the server answers `/health`
+(`READY_SECONDS=1800`), then releases it and keeps serving. `smoke.sh` delegates
+that boot carrier to `serve.sh` (it never takes the boot lock for the whole serve)
+and re-checks the lock per measured cell. A measured window touches
+`~/w4a8_runs/lanes/quiet-a2/inkling-hi2-smoke`, is re-touched every 5 min for up to
+15 min while it runs, waits until the slot is quiet for 6 min, then re-checks the
+boot lock before each cell; `MEASURE_LOCK=` is empty (one slot cannot block the
+other). The window journals junction temperatures (`gpu_temps.py`; a 95 C sample
+aborts it) and the vLLM tree's KFD evictions (`kfd_evictions.py`; `serve.sh` writes
+`SERVER_PID_FILE`, `bench.py --server-pid` samples the same tree). A hot or evicted
+window prints `INVALID`, exits non-zero and is rerun — never counted. No measured
+window while a `docker buildx build` runs.
 
 ## 1. Preconditions (CPU only, no lease)
 
@@ -64,7 +79,7 @@ V=$HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python
 cd $TREE && env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
     PYTHONPATH=$TREE $V -c "import vllm._custom_ops, vllm.models.inkling2_loop.amd.moe"
 
-# CPU gates: loader (23), the slot/HIP->PCI gate (7), quantizer reference on the
+# CPU gates: loader (23), the slot/HIP->PCI gate (14), quantizer reference on the
 # tiny HI2 directory (4; the fixture is built by the quantizer's own pipeline,
 # ~3.7 min), legacy loader (6), plus the GPU kernel tests collected-and-skipped on
 # CPU (5). H is the quantizer tree; it provides the `hi2` package the reference
@@ -77,9 +92,10 @@ PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
   tests/models/inkling2_loop/test_loader.py \
   tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
   tests/models/inkling2_loop/test_hi2_reference.py -q
-# 40 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
+# 47 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
 # reuses the <dir>/stock + <dir>/hi2 pair built below instead of rebuilding it.
-# The slot test needs no torch: it fakes the six-V620 PCI table.
+# The slot test needs no torch: it fakes the visible-device table and reads the
+# launcher scripts.
 
 # mutant battery: the loader / name map / TP slice / reference tests must kill
 # every mutant (21; exit 0). Use a scratch copy of the tree, not the checkout.
@@ -138,6 +154,7 @@ the log.
    ```bash
    MODEL=$HOME/hfcache/inkling2-mini SLOT=a2 \
    HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   SERVER_PID_FILE=$HOME/w4a8_runs/inkling-hi2-runtime/server-stock.pid \
    VENV=$(dirname $(dirname $V)) PORT=18231 MAXLEN=8192 MAXBAT=256 SEQS=1 \
    bash $TREE/tools/inkling_hi2/serve.sh > ~/w4a8_runs/inkling-hi2-runtime/logs/stock.log 2>&1 &
    ```
@@ -146,8 +163,9 @@ the log.
    the loader changes). Wait for `/health`; record "Model loading took" and the
    `max_model_len=8192`.
 
-3. **HI2 server**: same command with `MODEL=$HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5`
-   and `PORT=18230`, log `logs/serve.log`; the env pair stays
+3. **HI2 server**: same command with `MODEL=$HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5`,
+   `PORT=18230`, `SERVER_PID_FILE=$HOME/w4a8_runs/inkling-hi2-runtime/server-hi2.pid`
+   and log `logs/serve.log`; the env pair stays
    `SLOT=a2 HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4`. Verifies: all 24 layers
    find their `gate_up`/`down` stacks (`HI2 expert groups incomplete` and
    `unmapped ... tensor` must NOT appear); the engine reports the model memory
@@ -170,8 +188,11 @@ the log.
    Verifies: `/v1/models` name and context; the greedy chat answer names Paris
    (`RESULT greedy PASS`); the greedy prefix comparison against the stock server
    prints the first-divergence length (3.5 bpw top-1 is 93 %, so short prefixes, not
-   full streams, are expected). The smoke touches `lanes/quiet-a2/inkling-hi2-smoke`
-   before each probe and waits for the boot lock.
+   full streams, are expected). The smoke re-touches `lanes/quiet-a2/inkling-hi2-smoke`
+   every 5 min, checks the boot lock before each probe, and ends with
+   `RESULT measured window PASS` (or `INVALID` plus exit 1) from the junction
+   temperatures and the KFD eviction counters; `$RUN_DIR/logs/temps-*.csv` and the
+   serve log keep the evidence.
 
 5. **KL vs stock on the quantizer's held-out windows** (mixed set, first 32 of 96,
    2048 tokens each; the same windows the published 0.0996 nats were measured on):
@@ -210,7 +231,12 @@ the log.
    ```
 
    Verifies: prefill prompt-tokens/s, decode wall per step at batch 1 and 4, and the
-   engine's model-load/KV/workspace lines. No pass/fail: record the ratios. Known
+   engine's model-load/KV/workspace lines, plus the window record (max junction
+   temperature, KFD evictions). Pass `--server-pid $(cat
+   ~/w4a8_runs/inkling-hi2-runtime/server-hi2.pid)` to the HI2 run so an evicted
+   window is detected; without it the window is marked unsampled. An `INVALID`
+   window (exit 3) is rerun, never recorded. No pass/fail on the numbers: record the
+   ratios. Known
    expectation [inference]: the block-64 HI2 GEMM pads an 8-pair decode to 64 rows,
    so batch-1 decode can be slower than the stock NVFP4 kernel; the memory cell must
    show the HI2 weights smaller. A decode step slower than ~10x stock is a finding.

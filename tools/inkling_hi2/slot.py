@@ -16,9 +16,10 @@ refuse a mismatch (AGENTS.md rule 1).  The HTTP prediction kit (``kl_probe.py``,
 ``SLOT``/``HIP_VISIBLE_DEVICES``/``EXPECT_PCI_BUSES`` agree with the documented
 table, so a moved enumeration is caught by the launcher, not by the client.
 
-No import-time torch: the declared check is CPU-only, and :func:`physical_table`
-imports torch lazily after clearing the visibility variables so it always sees the
-physical enumeration.
+No import-time torch: the declared check is CPU-only, and :func:`visible_table`
+imports torch lazily *with the slot's ``HIP_VISIBLE_DEVICES`` set* (the caller
+unsets ``ROCR_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES`` first), so it resolves
+exactly the environment the server will get and never opens a card outside the slot.
 """
 
 from __future__ import annotations
@@ -36,11 +37,6 @@ DEFAULT_SLOT = "a2"
 ENV_SLOT = "SLOT"
 ENV_HIP = "HIP_VISIBLE_DEVICES"
 ENV_BUSES = "EXPECT_PCI_BUSES"
-VISIBILITY_VARS = (
-    "HIP_VISIBLE_DEVICES",
-    "ROCR_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-)
 
 
 class SlotError(RuntimeError):
@@ -138,15 +134,17 @@ def check_declared(slot: str, hip: str, buses: str) -> None:
         )
 
 
-def check_physical(
+def check_visible(
     hip: str,
     buses: str,
     table: Mapping[int, tuple[str, str]],
 ) -> None:
-    """Refuse unless every declared HIP index is the expected bus and a V620.
+    """Refuse unless the visible devices are the expected buses, in order.
 
-    ``table`` maps a physical HIP index to ``(pci_bus, device_name)``; a CPU test
-    passes a fake table, :func:`physical_table` builds the live one.
+    ``table`` maps a device ordinal *as the server will see it* to
+    ``(pci_bus, name)``.  A CPU test passes a fake table; :func:`visible_table`
+    builds it from exactly the visibility variables the server inherits, so a
+    slot that moved, lost a card or points at a non-V620 is refused.
     """
     hips = parse_hip_list(hip)
     expected = parse_bus_list(buses)
@@ -155,35 +153,49 @@ def check_physical(
             f"HIP_VISIBLE_DEVICES lists {len(hips)} GPUs but EXPECT_PCI_BUSES "
             f"lists {len(expected)} buses"
         )
-    missing = [index for index in hips if index not in table]
-    if missing:
+    if len(table) != len(hips):
         raise SlotError(
-            f"no GPU at HIP {missing}; present HIP indexes: "
-            f"{', '.join(str(index) for index in sorted(table))}"
+            f"the process sees {len(table)} GPUs, but HIP_VISIBLE_DEVICES={hip} "
+            f"declares {len(hips)}"
         )
-    observed = tuple(normalise_bus(table[index][0]) for index in hips)
+    try:
+        observed = tuple(normalise_bus(table[index][0]) for index in range(len(hips)))
+    except KeyError as exc:
+        raise SlotError(f"the visible table has no ordinal {exc}") from exc
     if observed != expected:
         raise SlotError(
-            f"HIP {','.join(map(str, hips))} sits on PCI {','.join(observed)}, "
-            f"not the expected {','.join(expected)} (AGENTS two-slot table)"
+            f"HIP_VISIBLE_DEVICES={hip} shows PCI {','.join(observed)}, not the "
+            f"expected {','.join(expected)} (AGENTS two-slot table)"
         )
     foreign = [
-        (index, table[index][1]) for index in hips if "V620" not in table[index][1]
+        (index, table[index][1])
+        for index in range(len(hips))
+        if "V620" not in table[index][1]
     ]
     if foreign:
         raise SlotError(f"not V620 devices: {foreign}")
 
 
-def physical_table() -> dict[int, tuple[str, str]]:
-    """``{physical HIP: (pci_bus, name)}`` with the visibility vars cleared."""
-    saved = {
-        name: os.environ.pop(name) for name in VISIBILITY_VARS if name in os.environ
-    }
+def visible_table() -> dict[int, tuple[str, str]]:
+    """Bus/name of the GPUs this process can see, in ordinal order.
+
+    Requires ``HIP_VISIBLE_DEVICES`` (the slot's list) and no
+    ``ROCR_VISIBLE_DEVICES`` / ``CUDA_VISIBLE_DEVICES``: the check must run with
+    exactly the environment the server will get, and must never initialize a card
+    outside the slot.  ``serve.sh`` unsets the other two and exports the pair.
+    """
+    if not os.environ.get(ENV_HIP):
+        raise SlotError(f"set {ENV_HIP} before the live check")
+    for name in ("ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        if name in os.environ:
+            raise SlotError(
+                f"unset {name} before the live check: the server would not see "
+                "the checked devices"
+            )
     try:
         import torch
         import torch.accelerator
 
-        torch.cuda.init()
         return {
             index: (
                 normalise_bus(torch.cuda.get_device_properties(index).pci_bus_id),
@@ -194,9 +206,7 @@ def physical_table() -> dict[int, tuple[str, str]]:
     except SlotError:
         raise
     except Exception as exc:  # torch missing, no GPU, driver error
-        raise SlotError(f"cannot enumerate the GPUs: {exc}") from exc
-    finally:
-        os.environ.update(saved)
+        raise SlotError(f"cannot enumerate the visible GPUs: {exc}") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -230,9 +240,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.declared_only:
             print(f"slot.py: SLOT={args.slot} HIP {hip} -> PCI {buses} (declared)")
             return 0
-        table = physical_table()
-        check_physical(hip, buses, table)
-        names = {table[index][1] for index in parse_hip_list(hip)}
+        if os.environ.get(ENV_HIP) != hip:
+            raise SlotError(
+                f"run the live check with {ENV_HIP}={hip} (the server's list); "
+                "use --declared-only on a CPU host"
+            )
+        table = visible_table()
+        check_visible(hip, buses, table)
+        names = {table[index][1] for index in range(len(table))}
         print(
             f"slot.py: SLOT={args.slot} HIP {hip} -> PCI {buses} "
             f"({', '.join(sorted(names))})"

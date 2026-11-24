@@ -2,18 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU test of the HI2 kit's slot / HIP -> PCI gate (AGENTS.md two-slot table).
 
-The live table is faked: no GPU and no torch are needed, and a moved enumeration
-or a W7800 must be refused before a launch.
+The live table is faked: no GPU and no torch are needed, and a moved enumeration,
+a W7800 or a check that would open a card outside the slot must be refused before
+a launch.  The launcher-contract tests read the scripts (``INKLING2_KIT_ROOT``
+points them at an older tree for the pre-fix run).
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools" / "inkling_hi2"))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+KIT = Path(os.environ.get("INKLING2_KIT_ROOT", REPO_ROOT / "tools" / "inkling_hi2"))
+sys.path.insert(0, str(REPO_ROOT / "tools" / "inkling_hi2"))
 
 import slot  # noqa: E402  (the sys.path line above finds the kit module)
 
@@ -26,6 +31,10 @@ TABLE = {
     4: ("df", V620),
     5: ("e2", V620),
 }
+
+
+def _read(name: str) -> str:
+    return (KIT / name).read_text()
 
 
 def test_the_two_slot_table_is_the_agents_one():
@@ -53,24 +62,96 @@ def test_declared_mismatches_are_refused():
         slot.check_declared("a2", "0,1", "d1,zz")
 
 
-def test_the_live_check_accepts_a2_and_b4():
-    slot.check_physical("0,1", "d1,d4", TABLE)
-    slot.check_physical("2,3,4,5", "d9,dc,df,e2", TABLE)
+def test_the_live_check_accepts_the_visible_pair():
+    slot.check_visible("0,1", "d1,d4", {0: TABLE[0], 1: TABLE[1]})
+    slot.check_visible(
+        "2,3,4,5", "d9,dc,df,e2", {0: TABLE[2], 1: TABLE[3], 2: TABLE[4], 3: TABLE[5]}
+    )
 
 
 def test_the_live_check_refuses_a_moved_or_foreign_device():
-    swapped = {**TABLE, 0: ("d4", V620), 1: ("d1", V620)}
-    with pytest.raises(slot.SlotError, match="not the expected d1,d4"):
-        slot.check_physical("0,1", "d1,d4", swapped)
-    with pytest.raises(slot.SlotError, match="no GPU at HIP"):
-        slot.check_physical("0,1", "d1,d4", {0: ("d1", V620)})
+    swapped = {0: ("d4", V620), 1: ("d1", V620)}
+    with pytest.raises(slot.SlotError, match="shows PCI d4,d1"):
+        slot.check_visible("0,1", "d1,d4", swapped)
+    # six visible devices while the slot declares two: the check opened all cards
+    with pytest.raises(slot.SlotError, match="sees 6 GPUs"):
+        slot.check_visible("0,1", "d1,d4", TABLE)
     with pytest.raises(slot.SlotError, match="not V620"):
-        slot.check_physical("0,1", "d1,d4", {0: ("d1", "W7800"), 1: ("d4", V620)})
+        slot.check_visible("0,1", "d1,d4", {0: ("d1", "W7800"), 1: ("d4", V620)})
     with pytest.raises(slot.SlotError, match="lists 2 GPUs"):
-        slot.check_physical("0,1", "d1", TABLE)
+        slot.check_visible("0,1", "d1", {0: TABLE[0], 1: TABLE[1]})
     # the old 0/5 W7800 pair can never pass
     with pytest.raises(slot.SlotError):
-        slot.check_physical("0,5", "d1,d4", TABLE)
+        slot.check_visible("0,5", "d1,d4", {0: TABLE[0], 1: TABLE[5]})
+
+
+def test_the_live_check_uses_only_the_server_environment(monkeypatch):
+    """No visibility var is cleared: the check sees exactly the server's devices."""
+    for name in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(slot.SlotError, match="set HIP_VISIBLE_DEVICES"):
+        slot.visible_table()
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2,3,4,5")
+    with pytest.raises(slot.SlotError, match="unset ROCR_VISIBLE_DEVICES"):
+        slot.visible_table()
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3,4,5")
+    with pytest.raises(slot.SlotError, match="unset CUDA_VISIBLE_DEVICES"):
+        slot.visible_table()
+    assert "os.environ.pop" not in _read("slot.py")
+    assert "torch.cuda.init" not in _read("slot.py")
+
+
+def test_the_launchers_unset_the_other_visibility_vars():
+    for name in ("serve.sh", "smoke.sh"):
+        text = _read(name)
+        assert "unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES" in text, name
+        assert "env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES" in text, name
+
+
+def test_the_boot_lock_is_held_until_the_server_is_ready():
+    serve = _read("serve.sh")
+    assert "exec 9>" in serve
+    assert "flock 9" in serve
+    assert "exec 9>&-" in serve
+    assert serve.index("exec 9>&-") > serve.index("READY_SECONDS")
+    assert 'EXTRA_ARGS="$EXTRA" 9>&-' in serve  # the server child must not hold it
+    assert 'flock -w 900 "$BOOT_LOCK" true' not in serve
+    # the quiet directory is re-checked while the lock is held
+    assert "quiet window opened under the boot lock" in serve
+
+
+def test_the_launchers_check_the_lease_and_take_an_owner():
+    for name in ("serve.sh", "smoke.sh"):
+        text = _read(name)
+        assert "OWNER=${OWNER:-HI2Inkling}" in text, name
+        assert "LEASE_DIR" in text, name
+        assert "holds the $SLOT lease" in text, name
+
+
+def test_smoke_retouches_quiet_and_samples_the_window():
+    smoke = _read("smoke.sh")
+    assert "gpu_temps.py" in smoke
+    assert "kfd_evictions.py" in smoke
+    assert "95" in smoke
+    assert "sleep 300" in smoke  # re-touch every 5 min
+    assert "READY_SECONDS" in smoke
+
+
+def test_bench_samples_the_window():
+    bench = _read("bench.py")
+    assert "gpu_temps.py" in bench
+    assert "kfd_evictions.py" in bench
+    assert "95" in bench
+
+
+def test_the_hi2_recipe_defaults_to_the_a2_pair():
+    recipe = (
+        REPO_ROOT / "tools" / "rdna" / "recipes" / "inkling2-hi2-tp2.env"
+    ).read_text()
+    assert "HIP_VISIBLE_DEVICES=0,1" in recipe
+    assert "<slotA" not in recipe
 
 
 def test_bus_names_normalise():
@@ -79,7 +160,7 @@ def test_bus_names_normalise():
     assert slot.normalise_bus("0000:d1:00.0") == "d1"
     assert slot.normalise_bus(0x0A) == "0a"
     assert slot.normalise_bus(0xD1) == "d1"  # the int torch reports
-    slot.check_physical("0,1", "d1,d4", {0: (0xD1, V620), 1: (0xD4, V620)})
+    slot.check_visible("0,1", "d1,d4", {0: (0xD1, V620), 1: (0xD4, V620)})
 
 
 def test_the_cli_checks_without_touching_torch(monkeypatch, capsys):
