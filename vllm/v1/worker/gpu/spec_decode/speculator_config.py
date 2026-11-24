@@ -145,7 +145,7 @@ class SpeculatorConfig:
         return False
 
     def make_num_tokens_policy(
-        self, max_tokens: Sequence[int]
+        self, max_tokens: Sequence[int], tensor_parallel_size: int = 1
     ) -> "AdaptiveSpecTokens | None":
         """The per-step policy for `uses_adaptive_num_tokens`, with
         `max_tokens[b]` the most drafts a step of `b` requests may verify."""
