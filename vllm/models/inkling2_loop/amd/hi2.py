@@ -191,6 +191,12 @@ def validate_stack(
         )
     if int(part_off[-1]) != r or bool((part_off[1:] < part_off[:-1]).any()):
         raise ValueError("hi2 stack part_off does not cover the rows")
+    if parts == 1:
+        # a one-part stack (the down projection) must give every expert the same
+        # number of rows; the kernels index expert blocks by a uniform block count
+        counts = part_off[1:] - part_off[:-1]
+        if counts.numel() > 1 and bool((counts != counts[0]).any()):
+            raise ValueError("hi2 stack experts have different row counts")
 
 
 # ---------------------------------------------------------------------------

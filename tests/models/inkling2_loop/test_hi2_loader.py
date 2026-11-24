@@ -386,7 +386,7 @@ def test_an_unsmoothed_group_finalizes_at_the_end_of_loading():
     assert torch.isfinite(layer.forward_reference(x).float()).all()
 
 
-def test_the_hi2_serving_workspace_reuses_the_gate_up_scratch():
+def test_the_hi2_serving_workspace_sizes_the_w2_output_and_block64():
     pytest.importorskip("vllm.models.inkling2_loop.amd.glue")
     from vllm.models.inkling2_loop.amd import glue
 
@@ -394,8 +394,68 @@ def test_the_hi2_serving_workspace_reuses_the_gate_up_scratch():
     ws = glue.Inkling2GlueWorkspace(cfg, 8, "cpu", hi2=True)
     assert ws.moe_x_view(8, cfg.hidden_size).shape == (16, cfg.hidden_size)
     assert ws.moe_x_view(8, cfg.intermediate_size).shape == (16, 64)
+    assert ws.moe_hidden_view(8).shape == (16, cfg.hidden_size)
     sorted_ids, expert_ids, ntpp = ws.moe64_views(8)
-    assert sorted_ids.numel() == 16 + 4 * 63 and expert_ids.numel() == 5
+    assert sorted_ids.numel() % 64 == 0
+    assert expert_ids.numel() == 5
     assert ntpp.numel() == 1
-    with pytest.raises(ValueError, match="2 \\* intermediate"):
-        glue.Inkling2GlueWorkspace(_config(192, 64, 4, 2), 8, "cpu", hi2=True)
+    # hidden need not be 2 * intermediate: the w2 output has its own buffer
+    wide = _config(192, 64, 4, 2)
+    ws = glue.Inkling2GlueWorkspace(wide, 8, "cpu", hi2=True)
+    assert 2 * wide.intermediate_size != wide.hidden_size
+    assert ws.moe_hidden_view(8).shape == (16, 192)
+
+
+def test_the_hi2_block64_layout_is_padded_for_every_chunk():
+    """The HIP GEMM's check is ``sorted_ids.numel() % 64 == 0``; every chunk of the
+    real config (1..1024 routed tokens) must pass it."""
+    pytest.importorskip("vllm.models.inkling2_loop.amd.glue")
+    from vllm.models.inkling2_loop.amd import glue
+
+    cfg = _config(2304, 1152, 128, 8)
+    for tp in (1, 2):
+        ws = glue.Inkling2GlueWorkspace(cfg, 1024, "cpu", tp_size=tp, hi2=True)
+        if tp == 2:  # the real TP=2 rank: 2 * 576 != 2304
+            assert cfg.hidden_size != 2 * ws.I
+        assert ws.moe_hidden_view(1024).shape == (8192, cfg.hidden_size)
+        for tokens in range(1, ws.moe_chunk + 1):
+            sorted_ids, _, ntpp = ws.moe64_views(tokens)
+            assert sorted_ids.numel() % 64 == 0, (tp, tokens)
+            assert sorted_ids.numel() >= tokens * cfg.num_experts_per_tok
+            assert ntpp.numel() == 1
+
+
+def test_a_stack_with_uneven_expert_rows_is_refused():
+    t = make_stack(2, 32, 64, 1, seed=7)
+    hi2.validate_stack(t, 1, 64, 2)
+    broken = dict(t)
+    broken["part_off"] = torch.tensor([0, 30, 64], dtype=torch.int32)
+    with pytest.raises(ValueError, match="different row counts"):
+        hi2.validate_stack(broken, 1, 64, 2)
+
+
+def test_the_hi2_kernel_paths_refuse_other_architectures(monkeypatch):
+    pytest.importorskip("vllm.models.inkling2_loop.amd.moe")
+    import vllm.platforms.rocm as rocm
+    from vllm.models.inkling2_loop.amd.moe import Inkling2LoopMoE
+
+    cfg = _config(128, 64, 4, 2)
+    layer = Inkling2LoopMoE(cfg, "hi2", prefix="test.mlp")
+    monkeypatch.setattr(rocm, "on_gfx10x", lambda: False)
+    x = torch.zeros(1, cfg.hidden_size, dtype=torch.float16)
+    ids = torch.zeros(1, 1, dtype=torch.int64)
+    with pytest.raises(RuntimeError, match="gfx1030"):
+        layer._forward_chunk_hi2(x, ids, torch.ones(1, 1))
+    with pytest.raises(RuntimeError, match="gfx1030"):
+        layer._forward_hip_hi2(x, None, torch.empty_like(x))
+
+
+def test_the_unembed_name_is_aliased():
+    pytest.importorskip("vllm.models.inkling2_loop.amd.model")
+    from vllm.models.inkling2_loop.amd.model import serving_checkpoint_name
+
+    assert serving_checkpoint_name("lm_head.weight") == "model.llm.unembed.weight"
+    assert (
+        serving_checkpoint_name("model.language_model.embed_tokens.weight")
+        == "model.language_model.embed_tokens.weight"
+    )

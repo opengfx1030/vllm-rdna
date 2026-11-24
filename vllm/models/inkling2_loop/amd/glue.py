@@ -184,22 +184,20 @@ class Inkling2GlueWorkspace:
         self.route_counters = torch.zeros(chunk + 1, **i32)  # zero ONCE
         self.no_weights = torch.empty(0, **f32)
 
-        # HI2 experts (``rdna_hint_flex_moe_*``): a block-64 routing layout and the
-        # per-pair transformed activations.  The w2 output reuses ``gu`` and the
-        # activation transform reuses ``moe_x``, so hidden must be 2 * intermediate.
+        # HI2 experts (``rdna_hint_flex_moe_*``): a block-64 routing layout, the
+        # per-pair transformed activations and a w2 output buffer of its own (at TP>1
+        # the rank's intermediate size is not half the hidden size, so the gate/up
+        # scratch cannot hold the down output).  The block-64 buffer is rounded up to
+        # the kernel's TORCH_CHECK: ``sorted_ids.numel() % 64 == 0``.
         self.hi2 = hi2
         self.sorted_ids64: torch.Tensor | None = None
         self.expert_ids64: torch.Tensor | None = None
         self.post_pad64: torch.Tensor | None = None
         if hi2:
-            if 2 * inter != H:
-                raise ValueError(
-                    "the HI2 serving path reuses the gate/up scratch for the down "
-                    f"output: hidden {H} must be 2 * intermediate {inter}"
-                )
             self.f16["moe_x"] = torch.empty(chunk * K * H, **f16)
+            self.f16["moe_w2"] = torch.empty(chunk * K * H, **f16)
             n_pad64, n_blk64, _ = ops.inkling2_glue_moe_route_sizes(chunk, E, K, 64)
-            self.sorted_ids64 = torch.empty(n_pad64, **i32)
+            self.sorted_ids64 = torch.empty(-(-n_pad64 // 64) * 64, **i32)
             self.expert_ids64 = torch.empty(n_blk64, **i32)
             self.post_pad64 = torch.empty(1, **i32)
 
@@ -329,10 +327,19 @@ class Inkling2GlueWorkspace:
         assert self.expert_ids64 is not None
         assert self.post_pad64 is not None
         n_pad, n_blk, _ = ops.inkling2_glue_moe_route_sizes(tokens, self.E, self.K, 64)
+        # the HI2 GEMM TORCH_CHECK requires ``sorted_ids.numel() % 64 == 0``; the
+        # extra rows are pad ids the GEMM never reads (it stops at ``ntpp``)
+        n_pad64 = -(-n_pad // 64) * 64
         return (
-            self.sorted_ids64[:n_pad],
+            self.sorted_ids64[:n_pad64],
             self.expert_ids64[:n_blk],
             self.post_pad64,
+        )
+
+    def moe_hidden_view(self, tokens: int) -> torch.Tensor:
+        """``[tokens * top_k, H]`` w2 output scratch (fp16, preallocated)."""
+        return self.f16["moe_w2"][: tokens * self.K * self.H].view(
+            tokens * self.K, self.H
         )
 
     def moe_x_view(self, tokens: int, width: int) -> torch.Tensor:

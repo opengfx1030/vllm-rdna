@@ -168,6 +168,34 @@ MUTANTS = [
             )
         ],
     ),
+    (
+        "hi2_uneven_rows_check_off",
+        "vllm/models/inkling2_loop/amd/hi2.py",
+        "        if counts.numel() > 1 and bool((counts != counts[0]).any()):",
+        "        if False:",
+        [_L + "test_a_stack_with_uneven_expert_rows_is_refused"],
+    ),
+    (
+        "glue_block64_no_round_up",
+        "vllm/models/inkling2_loop/amd/glue.py",
+        "n_pad64 = -(-n_pad // 64) * 64",
+        "n_pad64 = n_pad",
+        [_L + "test_the_hi2_block64_layout_is_padded_for_every_chunk"],
+    ),
+    (
+        "model_lm_head_alias_off",
+        "vllm/models/inkling2_loop/amd/model.py",
+        '    if name == "lm_head.weight":\n        return "model.llm.unembed.weight"',
+        '    if False:\n        return "model.llm.unembed.weight"',
+        [_L + "test_the_unembed_name_is_aliased"],
+    ),
+    (
+        "moe_gfx_guard_off",
+        "vllm/models/inkling2_loop/amd/moe.py",
+        "    if not on_gfx10x():",
+        "    if False:",
+        [_L + "test_the_hi2_kernel_paths_refuse_other_architectures"],
+    ),
 ]
 
 _BASELINE = [

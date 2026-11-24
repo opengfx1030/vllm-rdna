@@ -129,8 +129,11 @@ def read_expert_formats(
 # model and writes the dense text tensors under the Hugging Face names of the
 # reference model (``model.language_model.*``); the serving checkpoint and this
 # loader use ``model.llm.*``.  This is the inverse of the reference name map
-# (``tools/rdna/inkling2/ref_checkpoint.py::build_name_map``); ``lm_head.weight``
-# and ``model.visual.*`` are already identical in both.
+# (``tools/rdna/inkling2/ref_checkpoint.py::build_name_map``).  ``model.visual.*``
+# is already identical in both.  The unembedding is the exception: the exporter
+# keeps the stock top-level ``lm_head.weight``, which is not a
+# ``model.language_model.*`` name; ``model.serving_checkpoint_name`` maps it to
+# ``model.llm.unembed.weight`` before this function is consulted.
 _HF_TEXT_PREFIX = "model.language_model."
 _SERVING_TEXT_PREFIX = "model.llm"
 

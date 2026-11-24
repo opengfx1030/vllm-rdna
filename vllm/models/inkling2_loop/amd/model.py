@@ -778,6 +778,20 @@ def _check_expert(name: str, src: torch.Tensor, target: torch.Tensor) -> None:
         )
 
 
+def serving_checkpoint_name(name: str) -> str:
+    """Top-level checkpoint name -> the serving name ``_map_name`` understands.
+
+    The HI2 exporter writes the unembedding as the stock top-level
+    ``lm_head.weight`` (it is the multimodal wrapper's head), while the text model
+    calls it ``model.llm.unembed.weight``; ``_map_name`` maps that back to
+    ``lm_head.weight`` and ``_load_tensor`` takes this rank's vocabulary shard.
+    ``model.visual.*`` is loaded by the multimodal class and keeps its name.
+    """
+    if name == "lm_head.weight":
+        return "model.llm.unembed.weight"
+    return name
+
+
 class Inkling2LoopTextForCausalLM(nn.Module):
     """Text model of Inkling-2-Mini; the served class adds the vision tower (below).
 
@@ -1098,6 +1112,9 @@ class Inkling2LoopTextForCausalLM(nn.Module):
                 if served is None:
                     raise KeyError(f"unmapped Inkling-2 HI2 tensor {name!r}")
                 name = served
+            # the HI2 output keeps the stock top-level unembed name; the text model
+            # calls it model.llm.unembed.weight (see serving_checkpoint_name)
+            name = serving_checkpoint_name(name)
             if name in (
                 "model.llm.middle_cycle_cross_pass_queries",
                 "model.llm.middle_cycle_cross_pass_kv_queries",

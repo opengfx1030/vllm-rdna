@@ -131,6 +131,18 @@ def softcapped_swiglu(
     return out.to(out_dtype)
 
 
+def _require_gfx10x(where: str) -> None:
+    """The HI2 expert GEMMs are gfx1030 kernels (``rdna_hint_flex_rdna2.cu``).
+
+    vLLM registers an empty stub on other architectures; refuse them here instead
+    of returning zeros from a model that looks healthy.
+    """
+    from vllm.platforms.rocm import on_gfx10x
+
+    if not on_gfx10x():
+        raise RuntimeError(f"{where}: the HI2 expert GEMMs need gfx1030 (RDNA2)")
+
+
 # ---------------------------------------------------------------------------
 # Experts
 # ---------------------------------------------------------------------------
@@ -1140,6 +1152,7 @@ class Inkling2LoopMoE(_ExpertsKernel):
         Inkling soft-capped two-argument SwiGLU (the fused ``_moe_rdna2`` op only
         implements SiLU, so the two GEMMs are driven directly).
         """
+        _require_gfx10x(f"{self.prefix}: HI2 eager experts")
         from vllm import _custom_ops as ops
         from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
             moe_align_block_size,
@@ -1241,11 +1254,20 @@ class Inkling2LoopMoE(_ExpertsKernel):
         """HI2 experts on the generic grouped kernels, from the workspace buffers.
 
         The glue router launch computes the fp32 routing (its 8-row block layout is
-        unused); ``moe_align_block_size`` writes the block-64 layout the HI2 GEMM
-        consumes into preallocated buffers, so nothing here allocates on the device.
-        ``hidden == 2 * intermediate`` lets the w2 output reuse the gate/up scratch
-        (Inkling-2-Mini: 2304 = 2 * 1152; the workspace enforces it).
+        unused); ``moe_align_block_size`` writes the block-64 layout (sized to the
+        kernel's ``numel % 64 == 0`` check) into preallocated buffers.  The
+        transform/GEMM/SwiGLU outputs and the w2 output (:meth:`moe_hidden_view`)
+        are workspace views; the only allocation is the alignment op's empty
+        ``expert_map`` placeholder, as in the generic MoE path.  At TP>1 the rank's
+        w2 output is ``hidden`` wide and does not fit the gate/up scratch.
+
+        The w2 GEMM writes fp16 (kernel output); ``torch.sum`` over the
+        ``[tokens, top_k, hidden]`` fp16 products accumulates in fp32 (PyTorch's
+        half reduction accumulator) and writes the fp16 output.  The eager path and
+        the reference sum fp32 products; ``test_hi2_kernel_gpu.py`` and the KL probe
+        compare the two.
         """
+        _require_gfx10x(f"{self.prefix}: HI2 serving experts")
         from vllm import _custom_ops as ops
 
         T, K = x16.shape[0], self.top_k
@@ -1295,10 +1317,9 @@ class Inkling2LoopMoE(_ExpertsKernel):
             ops.inkling2_glue_swiglu(m.gu, m.act, self.gate_softcap, self.up_softcap)
             hp = ws.moe_x_view(tc, inter)
             ops.rdna_hint_flex_moe_transform_rdna2(m.act, 1, flat, w2, tr2, hp)
-            # rows of m.gu are [gate | up] = ``hidden`` wide after the w2 GEMM
-            y = m.gu[: tc * K * hidden].view(tc, K, hidden)
+            y = ws.moe_hidden_view(tc)
             ops.rdna_hint_flex_moe_gemm_rdna2(
-                hp, sorted_ids, expert_ids, ntpp, w2, hidden, m.gu
+                hp, sorted_ids, expert_ids, ntpp, w2, hidden, y
             )
             y.mul_(m.topk_w.unsqueeze(-1))
             torch.sum(y, dim=1, out=out)
