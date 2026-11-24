@@ -69,9 +69,7 @@
 // scoped constexpr values inside templated __global__ functions.
 constexpr int kI2D = 128;  // head dim
 constexpr int kI2BR = 16;  // query tokens per tile CTA
-constexpr int kI2BC = 64;  // keys per tile
 constexpr int kI2TileThreads = 128;
-constexpr int kI2SubTile = 16;     // keys per decode super-tile
 constexpr int kI2MaxSplits = 256;  // split-K partials per (request, kv head)
 constexpr int kI2FusedWaves = 16;  // waves (= splits) of a fused decode CTA
 constexpr int kI2FusedWavesShort =
@@ -124,6 +122,9 @@ struct I2AttnArgs {
 };
 
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+
+constexpr int kI2BC = 64;       // keys per tile
+constexpr int kI2SubTile = 16;  // keys per decode super-tile
 
   #if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN_WAVEFRONT_SIZE) && \
       (__AMDGCN_WAVEFRONT_SIZE != 32)
