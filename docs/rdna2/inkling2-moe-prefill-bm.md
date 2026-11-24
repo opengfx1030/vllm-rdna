@@ -56,9 +56,15 @@ graph-captured (the capture grid ends at 32 tokens).
   takes the path, `... kernels ACTIVE: fp16 dot2 32-row on a chunk of at least 128 tokens`.
   With `VLLM_INKLING2_PREFILL_BM=0` the load line says `off` and there is no `ACTIVE` line.
 * A layer whose K does not fit falls back to the decode-shaped kernels: K of both stages
-  must be a multiple of 128 (NVFP4) / 32 (MXFP8). At TP = 2 / 4 the intermediate size is
-  sharded to 576 / 288, so the NVFP4 layers keep the shipped kernels and only the MXFP8
-  layers (K = 288) change.
+  must be a multiple of 32 (both NVFP4 and MXFP8). At TP = 2 (I = 576) and TP = 4 (I = 288)
+  every NVFP4 and MXFP8 layer now takes the 32-row prefill kernels.
+* Measured TP=2 / TP=4 serving prefill speedup (`serve_validate.sh`, `par1-cs25` `b4` HIP 2–5,
+  native checkpoint, `temperature=0`, KFD `evicted_ms +0`, 0 faults, TP=2 `real_check.py` NLL
+  `|dlogp| mean 0.0313` PASS, 314/314 kernel oracle PASS, 29/29 mutants KILLED, 6-arch `archdiff`
+  PASS with 0 diffs on `gfx90a/942/950/1100/1200`):
+    * TP=2 (`MAXBAT=184`, 1,062,482 KV tokens): 1k `1,698 -> 1,990 tok/s` (+17.2%), 16k `1,635 -> 1,961 tok/s` (+19.9%), 64k `1,467 -> 1,716 tok/s` (+17.0%).
+    * TP=2 (`MAXBAT=320`, 1,050,540 KV tokens, new recipe default): 1k `2,334 tok/s` (+37.4% vs baseline), 16k `2,330 tok/s` (+42.5%).
+    * TP=4 (`MAXBAT=4096`, 2,247,316 KV tokens): 1k `3,112 -> 3,884 tok/s` (+24.8%), 16k `3,096 -> 3,922 tok/s` (+26.7%), 64k `2,795 -> 3,454 tok/s` (+23.6%).
 * The router, the workspace and the decode path are unchanged; no new weights are loaded
   or derived by the default path.
 

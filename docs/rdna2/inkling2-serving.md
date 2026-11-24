@@ -33,7 +33,7 @@ bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1 MODEL=/path/to/inkling2-m
 | Recipe | Cards | Port | `MAXLEN` | `SEQS` | `MAXBAT` | Use it for |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | [`inkling2-mini-tp1`](../../tools/rdna/recipes/inkling2-mini-tp1.env) | 1 | 18221 | 180,000 | 16 | 1,024 | one card: short and medium contexts, up to 16 concurrent requests |
-| [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | 2 | 18222 | 1,048,576 | 8 | 184 | the full context on two cards; lower latency than TP=1 |
+| [`inkling2-mini-tp2`](../../tools/rdna/recipes/inkling2-mini-tp2.env) | 2 | 18222 | 1,048,576 | 8 | 320 | the full context on two cards; lower latency than TP=1 |
 | [`inkling2-mini-tp4`](../../tools/rdna/recipes/inkling2-mini-tp4.env) | 4 | 18223 | 1,048,576 | 8 | 4,096 | the full context with room for two such requests; fastest prefill |
 | [`inkling2-mini-tp1-dspark`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark.env) | 1 | 18221 | 125,000 | 2 | 1,024 | `inkling2-mini-tp1` with the DSpark draft: one request decodes 1.3x faster (1.1x - 1.6x by kind of text), two about 1.1x, with less context |
 | [`inkling2-mini-tp1-dspark-adaptive`](../../tools/rdna/recipes/inkling2-mini-tp1-dspark-adaptive.env) | 1 | 18221 | 105,000 | 2 | 1,024 | that with adaptive K and a 32,768-id draft vocabulary (an ids file made once): one request decodes 1.5x faster, with less context still |
@@ -97,11 +97,11 @@ The default capture grid for this architecture is decode graphs for every reques
 to min(16, `SEQS`) and mixed / prefill graphs for 1, 2, 4, 8, 16, 24 and 32 tokens; a step with
 more tokens (a prefill chunk) runs eager.
 
-The prefill expert kernels apply to the layers whose expert K fits (TP=1: every NVFP4 and MXFP8
-layer). At TP=2 / TP=4 the intermediate size is sharded to 576 / 288 and only the MXFP8 layers
-(K = 288) take them; the NVFP4 layers keep the shipped kernels. The prefill timings below
-(`Boot, capture and prefix cache`, `Long context`, the full-length prompts) were measured with
-the shipped expert kernels; see "Prefill (expert kernels)" for the 32-row kernels.
+The prefill expert kernels apply to every NVFP4 and MXFP8 layer across TP=1 (I = 1152),
+TP=2 (I = 576), and TP=4 (I = 288) (`K % 32 == 0` supported for both formats). The earlier
+prefill timings below (`Boot, capture and prefix cache`, `Long context`, the full-length prompts)
+were measured with the shipped expert kernels; see "Prefill (expert kernels)" and
+[`inkling2-moe-prefill-bm.md`](inkling2-moe-prefill-bm.md) for the 32-row kernels.
 
 ## Slots and memory
 

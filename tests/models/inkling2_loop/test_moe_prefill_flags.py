@@ -60,10 +60,11 @@ def test_token_gate_override():
     "fmt,hidden,inter,want",
     [
         ("nvfp4", 2304, 1152, True),  # real shapes, TP = 1
-        ("nvfp4", 2304, 576, False),  # TP = 2: K of the down projection 576
-        ("nvfp4", 2304, 288, False),  # TP = 4
+        ("nvfp4", 2304, 576, True),  # TP = 2: K of the down projection 576 (32-aligned)
+        ("nvfp4", 2304, 288, True),  # TP = 4: K of the down projection 288 (32-aligned)
         ("nvfp4", 256, 128, True),  # tiny harness
-        ("nvfp4", 288, 128, False),
+        ("nvfp4", 288, 128, True),
+        ("nvfp4", 2304, 48, False),  # not a multiple of 32
         ("mxfp8", 2304, 1152, True),
         ("mxfp8", 2304, 576, True),
         ("mxfp8", 2304, 288, True),

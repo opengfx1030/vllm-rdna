@@ -826,11 +826,9 @@ class Inkling2LoopMoE(_ExpertsKernel):
 
     def _prefill_supported(self) -> bool:
         """Eligibility of the prefill kernels: K of both stages (hidden, this rank's
-        intermediate size) must be a multiple of 128 (NVFP4) / 32 (MXFP8).  TP > 1
-        shards the intermediate size (576 / 288): those layers keep the decode-shaped
-        kernels."""
-        align = 32 if self.quant_format == "mxfp8" else 128
-        return self.hidden_dim % align == 0 and self.intermediate_dim % align == 0
+        intermediate size) must be a multiple of 32 (both NVFP4 and MXFP8 kernels
+        handle K tails in 32-K steps, covering TP = 1, 2 and 4)."""
+        return self.hidden_dim % 32 == 0 and self.intermediate_dim % 32 == 0
 
     def _gemm(
         self,
