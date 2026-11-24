@@ -60,6 +60,7 @@ Serving, switches and limits are in `inkling2-serving.md`; the recipes are `inkl
 | [`inkling2-glue-kernels.md`](inkling2-glue-kernels.md) | guide | Glue kernels for everything else in a layer visit. |
 | [`inkling2-moe-prefill-bm.md`](inkling2-moe-prefill-bm.md) | guide | Prefill expert GEMMs for prefill-sized chunks (`moe_prefill_bm_rdna2.cu`). |
 | [`inkling2-fuse-attn-chain.md`](inkling2-fuse-attn-chain.md) | guide | `VLLM_INKLING2_FUSE_ATTN_CHAIN`: the fused attention-side decode chain and graph node count. |
+| [`inkling2-baseline-2026-11-24.md`](inkling2-baseline-2026-11-24.md) | dated record | Full TP=1, TP=2 and TP=4 serving baseline (DSpark off and on) on `rdna_extras` `36a09895bb`. |
 | [`inkling2-benchmarks.md`](inkling2-benchmarks.md) | dated record | Serving benchmarks at TP=1 on one V620. |
 | [`inkling2-decode-glue.md`](inkling2-decode-glue.md) | dated record | b=1 decode: glue launches and speculation cost. |
 | [`inkling2-decode-moe-profile.md`](inkling2-decode-moe-profile.md) | dated record | Decode at b = 1..4: expert kernels, Infinity Cache, prefetch, attention decode. |
