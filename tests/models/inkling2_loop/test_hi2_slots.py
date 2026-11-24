@@ -146,6 +146,7 @@ def test_smoke_retouches_quiet_and_samples_the_window():
     assert "kfd_evictions.py" in smoke
     assert "95" in smoke
     assert "sleep 300" in smoke  # re-touch every 5 min
+    assert 'timeout "$CELL_TIMEOUT"' in smoke  # <= 15 min per measured probe
     assert "READY_SECONDS" in smoke
 
 

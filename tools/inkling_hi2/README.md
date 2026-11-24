@@ -214,7 +214,9 @@ the log.
    `heldout_pydocs_ids.npy` (0.0305) — those are stricter relative checks than the
    mixed set. Both servers must have `--max-logprobs 128` (serve.sh passes it).
    A measured window is <= 15 min: split a long set into `--windows` chunks and
-   re-touch the quiet file (and re-check the boot lock) between chunks.
+   re-touch the quiet file (and re-check the boot lock) between chunks; `smoke.sh`
+   caps each measured probe at `CELL_TIMEOUT=900` s and dies at the cap (rerun with
+   a smaller `--windows`), never silently shortening a probe.
 
 6. **Bench cells**, same lease, stock then HI2:
 

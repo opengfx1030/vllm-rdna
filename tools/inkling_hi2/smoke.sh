@@ -27,7 +27,8 @@
 #           IDS=$HOME/w4a8_runs/inkling-hi2/stage4/calib/heldout_mixed_ids.npy,
 #           WINDOWS=32, KEEP=1 (leave the server up), MAXLEN/MAXBAT/SEQS/EAGER,
 #           OWNER=HI2Inkling, LEASE_DIR=~/w4a8_runs/lanes/lease,
-#           READY_SECONDS=2400 (boot) and BOOT_TIMEOUT_SECONDS=900.
+#           READY_SECONDS=2400 (boot), BOOT_TIMEOUT_SECONDS=900 and
+#           CELL_TIMEOUT=900 (s per measured probe; a longer one is split).
 set -euo pipefail
 
 : "${MODEL:?MODEL must point at the HI2 output directory}"
@@ -66,6 +67,7 @@ LOG=${LOG:-$RUN_DIR/logs/serve-$(date +%Y%m%d-%H%M%S).log}
 KEEP=${KEEP:-0}
 WAIT_SECONDS=${WAIT_SECONDS:-2400}
 BOOT_TIMEOUT_SECONDS=${BOOT_TIMEOUT_SECONDS:-900}
+CELL_TIMEOUT=${CELL_TIMEOUT:-900}
 BOOT_LOCK=${BOOT_LOCK:-$HOME/w4a8_runs/boot.lock}
 QUIET_DIR=${QUIET_DIR:-$HOME/w4a8_runs/lanes/quiet-$SLOT}
 QUIET_FILE=${QUIET_FILE:-$QUIET_DIR/inkling-hi2-smoke}
@@ -265,14 +267,14 @@ PY
 if [[ -n ${STOCK_URL:-} ]]; then
     measure_begin
     HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES EXPECT_PCI_BUSES=$EXPECT_PCI_BUSES \
-    python3 "$HERE/kl_probe.py" \
+    timeout "$CELL_TIMEOUT" python3 "$HERE/kl_probe.py" \
         --hi2-url "$URL" --stock-url "$STOCK_URL" \
         --ids "${IDS:-$HOME/w4a8_runs/inkling-hi2/stage4/calib/heldout_mixed_ids.npy}" \
         --windows "${WINDOWS:-32}" --greedy
     if [[ ${RUN_KL:-0} == 1 ]]; then
         measure_begin
         HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES EXPECT_PCI_BUSES=$EXPECT_PCI_BUSES \
-        python3 "$HERE/kl_probe.py" \
+        timeout "$CELL_TIMEOUT" python3 "$HERE/kl_probe.py" \
             --hi2-url "$URL" --stock-url "$STOCK_URL" \
             --ids "${IDS:-$HOME/w4a8_runs/inkling-hi2/stage4/calib/heldout_mixed_ids.npy}" \
             --windows "${WINDOWS:-32}" --max-kl "${MAX_KL:-0.15}"
