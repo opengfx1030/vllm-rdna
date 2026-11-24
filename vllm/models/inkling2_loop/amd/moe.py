@@ -619,8 +619,14 @@ _BLOCK_M_WIDE = 8
 #: one-row blocks.
 _BLOCK_M_BY_TOKENS_SPEC = {
     "nvfp4": ((1, 1), (12, 2), (64, 4)),
-    "mxfp8": ((4, 1), (48, 2)),
+    "mxfp8": ((1, 1), (12, 2), (48, 4)),
 }
+
+#: Optional knob ``VLLM_INKLING2_SPEC_BM4_MIN`` (default ``0`` = off): when ``> 0``
+#: (e.g. ``8``), raises ``block_size_m`` to at least ``4`` from that token count up
+#: under ``FUSE_GLUE``, allowing A/B sweeps of correlated verify routing without
+#: rebuilding.
+_SPEC_BM4_MIN = int(os.environ.get("VLLM_INKLING2_SPEC_BM4_MIN", "0"))
 
 #: ``VLLM_INKLING2_FUSE_GLUE``: chunks of at most this many tokens run the SwiGLU
 #: inside the w2 GEMM (``moe_*_gemm_swiglu_rdna2``).  The fused load recomputes the
@@ -819,10 +825,14 @@ class Inkling2LoopMoE(_ExpertsKernel):
 
     def _default_block_size_m(self, num_tokens: int, top_k: int) -> int:
         table = _BLOCK_M_BY_TOKENS_SPEC if FUSE_GLUE else _BLOCK_M_BY_TOKENS
-        for limit, rows in table[self.quant_format]:
+        rows = _BLOCK_M_WIDE
+        for limit, r in table[self.quant_format]:
             if num_tokens <= limit:
-                return rows
-        return _BLOCK_M_WIDE
+                rows = r
+                break
+        if FUSE_GLUE and _SPEC_BM4_MIN > 0 and num_tokens >= _SPEC_BM4_MIN:
+            return max(rows, 4)
+        return rows
 
     def _prefill_supported(self) -> bool:
         """Eligibility of the prefill kernels: K of both stages (hidden, this rank's

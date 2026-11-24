@@ -37,6 +37,15 @@ MAX_MOE_TOKENS = 1024
 #: weights (only the fp32 summation order of the rank sum changes).
 FUSE_GLUE = os.environ.get("VLLM_INKLING2_FUSE_GLUE", "1") not in ("", "0")
 
+#: ``VLLM_INKLING2_FUSE_SCONV_ATTN_RES`` (default on, ``0`` restores standalone
+#: ``inkling2_sconv_static`` launches): fuses the post-attention and post-MLP
+#: 4-tap static depthwise short convolutions into the prologue of the consuming
+#: ``inkling2_glue_attn_res_sconv`` launch at TP=1 for decode / verify batches.
+FUSE_SCONV_ATTN_RES = os.environ.get("VLLM_INKLING2_FUSE_SCONV_ATTN_RES", "1") not in (
+    "",
+    "0",
+)
+
 #: ``inkling2_attention`` keeps split-K partial rows only for the requests / tokens
 #: whose split factor is > 1.  With ``splits_decode > 1`` the batch has at most
 #: ``127 / H_kv`` requests (``ceil(256 / (R * H_kv)) >= 2``), which gives at most
@@ -116,11 +125,15 @@ class Inkling2GlueWorkspace:
         max_tokens: int,
         device: torch.device | str,
         tp_size: int = 1,
+        tap_dtype: torch.dtype = torch.float32,
     ) -> None:
         if max_tokens < 1:
             raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+        if tap_dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError(f"tap_dtype must be float32 or bfloat16, got {tap_dtype}")
         self.cfg = cfg
         self.device = torch.device(device)
+        self.tap_dtype = tap_dtype
         T, H, R = max_tokens, cfg.hidden_size, cfg.loop_gate_rank
         E, K = cfg.n_routed_experts, cfg.num_experts_per_tok
         if cfg.intermediate_size % tp_size:
@@ -174,7 +187,17 @@ class Inkling2GlueWorkspace:
         self.f32["logits"] = torch.empty(chunk * E, **f32)
         self.f32["topk_w"] = torch.empty(chunk * K, **f32)
         self.f16["gu"] = torch.empty(chunk * K * 2 * inter, **f16)
-        self.f16["act"] = torch.empty(chunk * K * inter, **f16)
+        # ``g_scratch`` ([3, T, H] fp32) is temporary scratch inside ``msg_gate_mix``
+        # and is never live during ``mlp.forward_hip``; alias ``act`` into it when it
+        # fits (always for Inkling-2-Mini: 8 * 1152 * 2 <= 3 * 2304 * 4 per token),
+        # saving 18 MiB at chunk=1024 while keeping ``act`` valid for tc > 16.
+        act_numel = chunk * K * inter
+        if self.has_loop and self.f32["g_scratch"].numel() * 2 >= act_numel:
+            self.f16["act"] = self.f32["g_scratch"].view(torch.float16)[:act_numel]
+            self._act_aliased = True
+        else:
+            self.f16["act"] = torch.empty(act_numel, **f16)
+            self._act_aliased = False
         n_pad, n_blk, _ = ops.inkling2_glue_moe_route_sizes(chunk, E, K, 8)
         self.sorted_ids = torch.empty(n_pad, **i32)
         self.expert_ids = torch.empty(n_blk, **i32)
@@ -205,6 +228,11 @@ class Inkling2GlueWorkspace:
 
     def tensors(self) -> list[torch.Tensor]:
         """Every persistent device buffer of the workspace (each once)."""
+        f16_vals = (
+            (t for k, t in self.f16.items() if k != "act")
+            if self._act_aliased
+            else self.f16.values()
+        )
         held: list[torch.Tensor | None] = [
             self.blk,
             self.prev_blk,
@@ -218,7 +246,7 @@ class Inkling2GlueWorkspace:
             self.o_out,
             self.final32,
             *self.f32.values(),
-            *self.f16.values(),
+            *f16_vals,
             *self._segments.values(),
             *self._attn_out.values(),
             *self.taps,
@@ -257,16 +285,17 @@ class Inkling2GlueWorkspace:
         """Allocate ``count`` partial-block taps and the final-output tap (once)."""
         if len(self.taps) < count:
             self.taps += [
-                torch.empty(self.T, self.H, dtype=torch.float32, device=self.device)
+                torch.empty(self.T, self.H, dtype=self.tap_dtype, device=self.device)
                 for _ in range(count - len(self.taps))
             ]
         if count and self.final32 is None:
             self.final32 = torch.empty(
-                self.T, self.H, dtype=torch.float32, device=self.device
+                self.T, self.H, dtype=self.tap_dtype, device=self.device
             )
 
     def final_tap(self, tokens: int) -> torch.Tensor:
-        """fp32 ``[tokens, H]`` view of the final-output tap."""
+        """``[tokens, H]`` view (``tap_dtype``: bf16 under DSpark, fp32 otherwise) of
+        the final-output tap."""
         if self.final32 is None:
             raise RuntimeError("the DSpark taps were never allocated (ensure_taps)")
         return self.final32[:tokens]

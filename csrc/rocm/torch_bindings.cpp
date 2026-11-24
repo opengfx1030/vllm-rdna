@@ -1109,12 +1109,44 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
                 &inkling2_linear_argmax_reduce);
 
   // Inkling-2-Mini glue kernels (csrc/rocm/inkling2_glue_rdna2.cu).
+  void inkling2_glue_attn_res_dual(
+      const at::Tensor&, int64_t, const at::Tensor&,
+      const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
+      const std::optional<at::Tensor>&, const at::Tensor&,
+      const std::optional<at::Tensor>&, const at::Tensor&,
+      const std::optional<at::Tensor>&, double, double);
+  void inkling2_glue_attn_res_sconv(
+      const at::Tensor&, int64_t, const std::optional<at::Tensor>&,
+      const at::Tensor&, const at::Tensor&, const at::Tensor&,
+      const at::Tensor&, const at::Tensor&, const at::Tensor&,
+      const at::Tensor&, int64_t, int64_t, int64_t, bool,
+      const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
+      const std::optional<at::Tensor>&, const at::Tensor&,
+      const std::optional<at::Tensor>&, const at::Tensor&,
+      const std::optional<at::Tensor>&, double, double);
   rocm_ops.def(
       "inkling2_glue_attn_res(Tensor! blocks, int n_blocks, Tensor x0, "
       "Tensor? x1, Tensor!? partial_out, Tensor? append, Tensor query, "
       "Tensor? norm_w, Tensor! out, float eps, float norm_eps) -> ()");
   rocm_ops.impl("inkling2_glue_attn_res", torch::kCUDA,
                 &inkling2_glue_attn_res);
+  rocm_ops.def(
+      "inkling2_glue_attn_res_dual(Tensor! blocks, int n_blocks, Tensor x0, "
+      "Tensor? x1, Tensor!? partial_out, Tensor? append, Tensor query, "
+      "Tensor? norm_w, Tensor! out, Tensor!? norm_out2, float eps, "
+      "float norm_eps) -> ()");
+  rocm_ops.impl("inkling2_glue_attn_res_dual", torch::kCUDA,
+                &inkling2_glue_attn_res_dual);
+  rocm_ops.def(
+      "inkling2_glue_attn_res_sconv(Tensor! blocks, int n_blocks, Tensor? x0, "
+      "Tensor conv_x, Tensor conv_w, Tensor! conv_cache, Tensor block_table, "
+      "Tensor seq_idx, Tensor query_start_loc, Tensor seq_lens, "
+      "int stream_offset, int num_kv_heads, int block_size, bool write_state, "
+      "Tensor!? sconv_out, Tensor!? partial_out, Tensor? append, Tensor query, "
+      "Tensor? norm_w, Tensor! out, Tensor!? norm_out2, float eps, "
+      "float norm_eps) -> ()");
+  rocm_ops.impl("inkling2_glue_attn_res_sconv", torch::kCUDA,
+                &inkling2_glue_attn_res_sconv);
   // Inkling-2-Mini attention-chain node fusions
   // (csrc/rocm/inkling2_fuse_attn_rdna2.cu).
   rocm_ops.def(
