@@ -29,7 +29,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 from ..configs import Inkling2LoopConfig, Inkling2LoopTextConfig
-from . import blocks, fuse_chain, loader
+from . import blocks, fuse_chain, hi2, loader
 from .attention import (
     Inkling2Attention,
     StaticSconv,
@@ -129,7 +129,11 @@ class Inkling2DecoderLayer(nn.Module):
         self.mlp_input = blocks.BlockAttentionResidual(config)
         self.self_attn = Inkling2Attention(config, layer_idx, tp)
         self.mlp = Inkling2LoopMoE(
-            config, quant_format, prefix=f"{prefix}.mlp", tp_size=tp.size
+            config,
+            quant_format,
+            prefix=f"{prefix}.mlp",
+            tp_size=tp.size,
+            tp_rank=tp.rank,
         )
         if self.is_full:
             self.q_input_layernorm = blocks.Inkling2RMSNorm(H, eps)
@@ -1007,6 +1011,11 @@ class Inkling2LoopTextForCausalLM(nn.Module):
             return "model.norm.weight"
         if name == "model.llm.unembed.weight":
             return "lm_head.weight"
+        if name == "model.llm.message_input.query":
+            # the HI2 exporter writes the four message queries as one tensor
+            # (``model.language_model.message_input.query``); the stock directory
+            # keeps them in two cross-pass tensors (combined below)
+            return "model.message_input.query"
         if name == "model.llm.attn_res.output_query":
             return "model.final_input.query"
         m = re.match(r"^model\.llm\.attn_res\.mlp_queries\.(\d+)$", name)
@@ -1072,6 +1081,19 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         for name, tensor in weights:
             if name.startswith("mtp."):
                 continue
+            if name.startswith("model.language_model."):
+                # an HI2 output: the experts are stacked containers collected by the
+                # layer; the dense text tensors keep the reference model's names
+                parsed = hi2.parse_tensor_name(name)
+                if parsed is not None:
+                    layer, group, field = parsed
+                    self.model.layers[layer].mlp.load_hi2_field(group, field, tensor)
+                    loaded.add(f"model.layers.{layer}.mlp.experts.{group}.{field}")
+                    continue
+                served = loader.hf_to_serving(name)
+                if served is None:
+                    raise KeyError(f"unmapped Inkling-2 HI2 tensor {name!r}")
+                name = served
             if name in (
                 "model.llm.middle_cycle_cross_pass_queries",
                 "model.llm.middle_cycle_cross_pass_kv_queries",

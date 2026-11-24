@@ -51,6 +51,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from . import hi2
 from .glue import FUSE_GLUE
 
 __all__ = [
@@ -685,11 +686,12 @@ class Inkling2LoopMoE(_ExpertsKernel):
     def __init__(
         self,
         config: Any,
-        quant_format: Literal["nvfp4", "mxfp8"],
+        quant_format: Literal["nvfp4", "mxfp8", "hi2"],
         prefix: str = "",
         tp_size: int = 1,
+        tp_rank: int = 0,
     ) -> None:
-        if quant_format not in ("nvfp4", "mxfp8"):
+        if quant_format not in ("nvfp4", "mxfp8", "hi2"):
             raise ValueError(f"unsupported quant_format {quant_format!r}")
         super().__init__(config)
         if config.intermediate_size % tp_size:
@@ -698,11 +700,33 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 f"tensor parallel size {tp_size}"
             )
         self.tp_size = tp_size
+        self.tp_rank = tp_rank
         self.intermediate_dim = config.intermediate_size // tp_size
         self.quant_format = quant_format
         self.prefix = prefix
         self.top_k = config.num_experts_per_tok
         self.gate = _MoEGate(config)
+        self._expert_names: tuple[str, ...] = ()
+        if quant_format == "hi2":
+            # HI2 stacks are data-dependent (row widths and block sizes are per
+            # row), so the buffers are built when the ten arrays of a group have
+            # been read; nothing is created here beyond the collector.
+            if self.hidden_dim % hi2.K_MULTIPLE or (
+                self.intermediate_dim % hi2.K_MULTIPLE
+            ):
+                raise ValueError(
+                    f"{prefix}: HI2 expert GEMMs need hidden and intermediate (per "
+                    f"rank) multiples of {hi2.K_MULTIPLE}, got {self.hidden_dim}, "
+                    f"{self.intermediate_dim}"
+                )
+            self._hi2_pending: dict[str, dict[str, torch.Tensor]] = {
+                "w13": {},
+                "w2": {},
+            }
+            self._hi2_seen = {"w13": False, "w2": False}
+            self._hi2_transform = {"w13": False, "w2": False}
+            self._processed = False
+            return
 
         num_e, hidden, inter = self.num_experts, self.hidden_dim, self.intermediate_dim
         fp8 = torch.float8_e4m3fn
@@ -755,9 +779,99 @@ class Inkling2LoopMoE(_ExpertsKernel):
         """Checkpoint ``mlp.gate.bias`` -> ``gate.e_score_correction_bias``."""
         self.gate.e_score_correction_bias.data.copy_(bias)
 
+    # -- HI2 (rdna_hint_flex) experts -------------------------------------
+
+    @torch.no_grad()
+    def load_hi2_field(self, group: str, field: str, tensor: torch.Tensor) -> None:
+        """Collect one array of a stacked expert group of the HI2 checkpoint.
+
+        ``group`` is ``gate_up`` or ``down`` (quantizer naming); ``field`` the
+        suffix after ``hi2_``.  When the ten arrays of a group have arrived they
+        are validated, sliced to this rank and moved to the device; the
+        checkpoint arrays are dropped, so peak host memory is one group.
+        """
+        if self.quant_format != "hi2":
+            raise ValueError(f"{self.prefix}: not an HI2 layer")
+        if group not in hi2.STACK_GROUPS:
+            raise ValueError(f"{self.prefix}: unknown HI2 expert group {group!r}")
+        if field not in hi2.STACK_FIELDS:
+            raise ValueError(f"{self.prefix}: unknown HI2 field {field!r}")
+        stage, _ = hi2.STACK_GROUPS[group]
+        pending = self._hi2_pending[stage]
+        if field in pending:
+            raise ValueError(f"{self.prefix}: duplicate HI2 field {stage}.{field}")
+        pending[field] = tensor.detach()
+        if set(hi2.STACK_FIELDS).issubset(pending):
+            self._finalize_hi2(stage)
+
+    @torch.no_grad()
+    def _finalize_hi2(self, stage: str) -> None:
+        """Validate, slice and register one HI2 expert group of this rank."""
+        if stage == "w13":
+            parts, k_full = 2, self.hidden_dim
+            rows_per_part = self.intermediate_dim * self.tp_size
+        else:
+            parts, k_full = 1, self.intermediate_dim * self.tp_size
+            rows_per_part = self.hidden_dim
+        full = hi2.canonicalize_stack(self._hi2_pending[stage])
+        hi2.validate_stack(full, parts, k_full, self.num_experts)
+        lo = self.tp_rank * self.intermediate_dim
+        hi = lo + self.intermediate_dim
+        if self.tp_size == 1:
+            t = full
+        else:
+            t = hi2.slice_stack(
+                full,
+                stage,
+                parts=parts,
+                rows_per_part=rows_per_part,
+                k=k_full,
+                lo=lo,
+                hi=hi,
+                experts=self.num_experts,
+            )
+            hi2.validate_stack(
+                t,
+                parts,
+                self.hidden_dim if stage == "w13" else self.intermediate_dim,
+                self.num_experts,
+            )
+        device = self.gate.weight.device
+        for f in hi2.FIELDS:
+            self.register_buffer(f"{stage}_{f}", t[f].to(device), persistent=False)
+        if t.get("col_scale") is not None:
+            self.register_buffer(
+                f"{stage}_col_scale", t["col_scale"].to(device), persistent=False
+            )
+        self.register_buffer(
+            f"{stage}_part_off", t["part_off"].to(device), persistent=False
+        )
+        self._hi2_transform[stage] = t.get("col_scale") is not None or bool(
+            t["had"].any()
+        )
+        self._hi2_seen[stage] = True
+        self._hi2_pending[stage] = {}
+
+    def _hi2_weights(self, stage: str) -> dict[str, torch.Tensor]:
+        """Kernel/reference view of one registered HI2 group."""
+        out = {f: getattr(self, f"{stage}_{f}") for f in hi2.FIELDS}
+        out["part_off"] = getattr(self, f"{stage}_part_off")
+        scale = getattr(self, f"{stage}_col_scale", None)
+        if scale is not None:
+            out["col_scale"] = scale
+        return out
+
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
         if self._processed:
+            return
+        if self.quant_format == "hi2":
+            missing = [s for s in ("w13", "w2") if not self._hi2_seen[s]]
+            if missing:
+                raise ValueError(
+                    f"{self.prefix}: HI2 expert groups incomplete: {missing}"
+                )
+            self._processed = True
             return
         device = self.gate.weight.device
         step = self.repack_chunk_experts
@@ -991,6 +1105,19 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 f"{self.prefix}: call process_weights_after_loading() before forward"
             )
         _, weights, ids = self.gate(hidden_states)
+        if self.quant_format == "hi2":
+            # eager reference: dequantize the stored ladders and run fp32 matmuls
+            # (the oracle of the grouped kernels; not used in serving)
+            return hi2.reference_moe(
+                hidden_states,
+                ids,
+                weights,
+                self._hi2_weights("w13"),
+                self._hi2_weights("w2"),
+                self.gate_softcap,
+                self.up_softcap,
+                experts=self.num_experts,
+            )
         return super().forward(hidden_states, ids, weights)
 
     # -- HIP serving path -------------------------------------------------
@@ -1027,6 +1154,11 @@ class Inkling2LoopMoE(_ExpertsKernel):
         """
         from vllm import _custom_ops as ops
 
+        if self.quant_format == "hi2":
+            raise NotImplementedError(
+                f"{self.prefix}: the HI2 grouped-GEMM serving path is not wired yet; "
+                "the eager reference (VLLM_INKLING2_PATH=reference) is the oracle"
+            )
         T, K = x16.shape[0], self.top_k
         step = min(self.max_tokens_per_call, ws.moe_chunk)
         scale = self.gate.routed_scaling_factor

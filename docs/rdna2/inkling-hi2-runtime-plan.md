@@ -173,14 +173,18 @@ learns to read it:
 | dense text (embed/unembed vocab-sharded, attention KV-head-sharded; router/norms replicated) | ≈ 1.6-2.2 GiB **[inference]** |
 | vision tower, replicated when images are enabled | 0.59 GiB |
 | serving workspace (1024 tokens) | 0.33 GiB (measured on the stock model, port spec) |
-| KV cache + conv state, TP=2: ≈ 6 GiB for 8k, ≈ 12 GiB for 32k | dynamic |
-| **weights total** | **≈ 7.2-7.8 GiB** |
+| full-attention KV, fp16 | 16 KiB/token/rank (8 full layers; 128 MiB at 8k, 512 MiB at 32k, 16 GiB at 1M) |
+| sliding-window KV + conv state | 0.835 GiB fixed (window-bound, `1/tp` of 1.42 + 0.25 GiB) |
+| **weights total** | **≈ 7.1-8.6 GiB** |
 
-At 8k context a rank holds ~13-15 GiB, leaving > 14 GiB for activations and the
-allocator reserve; at 32k ~21 GiB still fits. The load-time transient (checkpoint
-format per-layer group before slicing, CPU) is bounded by one layer and does not touch
-the device. The stock NVFP4 model measured 17.74 GiB model memory at TP=1
-(`docs/rdna2/inkling2-port-spec.md:240`); HI2 at TP=2 is smaller per rank.
+At 8k context a rank holds ≈ 9.6 GiB (with the conservative replicated-dense bound),
+at 32k ≈ 10 GiB, leaving > 19 GiB for activations and the allocator reserve; even the
+1M-token plan (≈ 25.4 GiB) fits the 29.98 GiB card only with the measured sharded
+dense size and no extra transients **[inference]**. The load-time transient
+(checkpoint format per-layer group before slicing, CPU) is bounded by one layer and
+does not touch the device. The stock NVFP4 model measured 17.74 GiB model memory at
+TP=1 (`docs/rdna2/inkling2-port-spec.md:240`); HI2 at TP=2 is smaller per rank.
+`tools/inkling_hi2/memory_estimate.py` reproduces the table from the shard headers.
 
 ## 3. Work breakdown
 
