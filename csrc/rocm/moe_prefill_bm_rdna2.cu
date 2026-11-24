@@ -22,7 +22,7 @@
 //   * every (row, column) keeps ONE fp32 accumulator chained through V_DOT2.
 //
 //   NVFP4  b_q_weight [E, K/8, N] uint32, b_scales [E, K/16, N] e4m3,
-//          b_globals [E] float; K % 128 == 0
+//          b_globals [E] float; K % 32 == 0
 //   MXFP8  b_q_weight [E, K/4, N] uint32, b_scales [E, K/32, N] ue8m0; K % 32
 //   == 0
 //
@@ -242,12 +242,13 @@ __global__ __launch_bounds__(NT) void nvfp4_prefill_kernel(
   const uint32_t* ew = b_q + (int64_t)expert_id * ew_stride;
   const uint8_t* es = b_s + (int64_t)expert_id * es_stride;
   const float g22 = b_g[expert_id] * 4194304.0f;  // global * 2^22
-  const int nchunks = size_k / KC;
+  const int nchunks = (size_k + KC - 1) / KC;
   const int total_groups = size_k >> 4;
 
   // staging descriptors: thread t moves chunks t + i * NT of the BM x CPR grid
   int soff[NS];
   int loff[NS];
+  int sk_off[NS];
   bool sval[NS];
   #pragma unroll
   for (int i = 0; i < NS; ++i) {
@@ -256,27 +257,34 @@ __global__ __launch_bounds__(NT) void nvfp4_prefill_kernel(
     const int ch = q - r * CPR;
     const int id = sh_id[r];
     sval[i] = (id >= 0) && (r < nrows);
+    sk_off[i] = 8 * ch;
     soff[i] = sval[i] ? (id / top_k) * size_k + 8 * ch : 0;
     loff[i] = r * KC + 8 * ch;
   }
   uint4 sreg[NS];
   #pragma unroll
   for (int i = 0; i < NS; ++i)
-    sreg[i] =
-        sval[i] ? *(const uint4*)(a + soff[i]) : make_uint4(0u, 0u, 0u, 0u);
+    sreg[i] = (sval[i] && sk_off[i] < size_k) ? *(const uint4*)(a + soff[i])
+                                              : make_uint4(0u, 0u, 0u, 0u);
   #pragma unroll
   for (int i = 0; i < NS; ++i)
     *(uint4*)(&lds_a[0][0] + loff[i]) = perm_k8(sreg[i]);
 
   const uint32_t* b_ptr = ew + n;
   const uint8_t* s_ptr = es + n;
-  // two prefetch sets: groups 0 and 1
-  uint4 wa0 = *(const uint4*)(b_ptr);
-  uint4 wa1 = *(const uint4*)(b_ptr + size_n);
-  uint32_t sa = *(const uint32_t*)(s_ptr);
-  uint4 wb0 = *(const uint4*)(b_ptr + 2 * (int64_t)size_n);
-  uint4 wb1 = *(const uint4*)(b_ptr + 3 * (int64_t)size_n);
-  uint32_t sbb = *(const uint32_t*)(s_ptr + size_n);
+  // two prefetch sets: groups 0 and 1 (total_groups >= 2 since size_k % 32 ==
+  // 0)
+  uint4 wa0 = make_uint4(0u, 0u, 0u, 0u), wa1 = wa0;
+  uint4 wb0 = wa0, wb1 = wa0;
+  uint32_t sa = 0u, sbb = 0u;
+  if (active) {
+    wa0 = *(const uint4*)(b_ptr);
+    wa1 = *(const uint4*)(b_ptr + size_n);
+    sa = *(const uint32_t*)(s_ptr);
+    wb0 = *(const uint4*)(b_ptr + 2 * (int64_t)size_n);
+    wb1 = *(const uint4*)(b_ptr + 3 * (int64_t)size_n);
+    sbb = *(const uint32_t*)(s_ptr + size_n);
+  }
   __syncthreads();
 
   float acc[BM][4];
@@ -335,13 +343,15 @@ __global__ __launch_bounds__(NT) void nvfp4_prefill_kernel(
       const int kn = (ck + 1) * KC;
   #pragma unroll
       for (int i = 0; i < NS; ++i)
-        sreg[i] = sval[i] ? *(const uint4*)(a + soff[i] + kn)
-                          : make_uint4(0u, 0u, 0u, 0u);
+        sreg[i] = (sval[i] && kn + sk_off[i] < size_k)
+                      ? *(const uint4*)(a + soff[i] + kn)
+                      : make_uint4(0u, 0u, 0u, 0u);
     }
     const half* cur = &lds_a[ck & 1][0];
+    const int ng = min(KC, size_k - ck * KC) >> 4;
     if (active) {
   #pragma unroll 1
-      for (int g = 0; g < NG; g += 2) {
+      for (int g = 0; g < ng; g += 2) {
         const int G = ck * NG + g;
         {
           const uint4 w0 = wa0, w1 = wa1;
@@ -914,7 +924,7 @@ void moe_nvfp4_bm_rdna2(torch::Tensor a, torch::Tensor c,
               "b_scales K-dim * 16 must equal a.size(1)");
   TORCH_CHECK((int)b_scales.size(2) == size_n, "b_scales N-dim must equal N");
   TORCH_CHECK(size_n % 8 == 0, "N must be a multiple of 8");
-  TORCH_CHECK(size_k % kNvfp4Kc == 0, "K must be a multiple of ", kNvfp4Kc);
+  TORCH_CHECK(size_k % 32 == 0, "K must be a multiple of 32");
   TORCH_CHECK(b_globals.numel() == (int64_t)b_q_weight.size(0),
               "b_globals must hold one scale per expert");
   TORCH_CHECK(top_k >= 1 && output_topk >= 0, "top_k / output_topk");

@@ -377,18 +377,94 @@ def _align_ba(ids: torch.Tensor, ba: int):
     return moe_align_block_size(ids.to(DEV), ba, E)
 
 
+@pytest.mark.parametrize("k", [32, 64, 96, 288, 576])
+@pytest.mark.parametrize("stage", ["up", "down"])
+def test_nvfp4_k_tails_match_fp64(ops, k, stage):
+    """NVFP4 32-K tail shapes including TP=4 (K=288) and TP=2 (K=576) down proj."""
+    seed = 7000 + k + (1 if stage == "down" else 0)
+    g = torch.Generator().manual_seed(seed)
+    n = 576 if k == 288 else 1152
+    q = torch.randint(
+        -(2**31), 2**31 - 1, (E, k // 8, n), generator=g, dtype=torch.int32
+    )
+    scales = torch.randint(
+        0x18, 0x50, (E, k // 16, n), generator=g, dtype=torch.int32
+    ).to(torch.uint8)
+    glob = (0.02 + 0.04 * torch.rand(E, generator=g)).float()
+    nib = torch.stack([(q.to(torch.int64) >> (4 * i)) & 0xF for i in range(8)], dim=2)
+    table = torch.tensor(FP4_VALUES, dtype=torch.float64)
+    mag = (table[nib & 7] * torch.where((nib >> 3) & 1 == 1, -1.0, 1.0)).reshape(
+        E, k, n
+    )
+    sc = (
+        (_e4m3(scales).float() * glob.view(E, 1, 1) * 16384.0)
+        .half()
+        .double()
+        .repeat_interleave(16, dim=1)
+    )
+    w = ((mag * 2.0**-14).half().double() * sc).half().double()
+
+    tokens = 130
+    ids = _routing(tokens, seed, True)
+    pairs = tokens * TOP_K_ROUTE
+    sorted_ids, expert_ids, ntpp = _align(ids, 8)
+    cta = ops.moe_prefill_cta_rdna2(expert_ids, ntpp, E, 8)
+    a = torch.randn(tokens if stage == "up" else pairs, k, generator=g).half()
+    if stage == "up":
+        rows, top_k, mul, otk = pairs, TOP_K_ROUTE, False, 0
+        tw = torch.empty(0, dtype=torch.float32, device=DEV)
+        ref = _per_pair(
+            a.double()[torch.arange(pairs) // TOP_K_ROUTE], ids.reshape(-1).long(), w
+        )
+        buf = torch.full(
+            (rows + CANARY_ROWS, n), CANARY, dtype=torch.float16, device=DEV
+        )
+        buf[:rows] = float("nan")
+    else:
+        rows, top_k, mul, otk = tokens, 1, True, TOP_K_ROUTE
+        weights = torch.rand(pairs, generator=g)
+        tw = weights.to(DEV)
+        per_pair = _per_pair(a.double(), ids.reshape(-1).long(), w)
+        ref = (
+            (per_pair * weights.double()[:, None])
+            .reshape(tokens, TOP_K_ROUTE, n)
+            .sum(1)
+        )
+        buf = torch.full(
+            (rows + CANARY_ROWS, n), CANARY, dtype=torch.float16, device=DEV
+        )
+        buf[:rows] = 0.0
+    out = buf[:rows]
+    ops.moe_nvfp4_bm_rdna2(
+        a.to(DEV),
+        out,
+        q.to(DEV),
+        scales.to(DEV),
+        glob.to(DEV),
+        tw,
+        sorted_ids,
+        cta,
+        top_k,
+        mul,
+        otk,
+    )
+    torch.accelerator.synchronize()
+    assert torch.all(buf[rows:] == CANARY), "the kernel wrote past the output rows"
+    _check(out.double().cpu(), ref, f"nvfp4_ktail/{stage}/K{k}/N{n}")
+
+
 def test_unsupported_shapes_are_rejected(ops):
     ids = _routing(8, 5, False)
     sorted_ids, expert_ids, ntpp = _align(ids, 8)
     cta = ops.moe_prefill_cta_rdna2(expert_ids, ntpp, E, 8)
-    k = 144  # a multiple of 16 but not of 128
+    k = 144  # a multiple of 16 but not of 32
     q = torch.zeros(E, k // 8, N, dtype=torch.int32, device=DEV)
     scales = torch.zeros(E, k // 16, N, dtype=torch.uint8, device=DEV)
     glob = torch.ones(E, dtype=torch.float32, device=DEV)
     a = torch.zeros(8, k, dtype=torch.float16, device=DEV)
     out = torch.zeros(32, N, dtype=torch.float16, device=DEV)
     tw = torch.empty(0, dtype=torch.float32, device=DEV)
-    with pytest.raises(RuntimeError, match="multiple of 128"):
+    with pytest.raises(RuntimeError, match="multiple of 32"):
         ops.moe_nvfp4_bm_rdna2(
             a, out, q, scales, glob, tw, sorted_ids, cta, TOP_K_ROUTE, False, 0
         )

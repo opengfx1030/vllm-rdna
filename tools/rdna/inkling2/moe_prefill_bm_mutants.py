@@ -64,8 +64,14 @@ MUTANTS = [
     (
         "k_chunk_count",
         "the last K chunk is never computed",
-        "const int nchunks = size_k / KC;",
-        "const int nchunks = size_k / KC - 1;",
+        "const int nchunks = (size_k + KC - 1) / KC;",
+        "const int nchunks = (size_k + KC - 1) / KC - 1;",
+    ),
+    (
+        "nvfp4_k_tail_groups",
+        "NVFP4 K-tail drops the last 32-K pair",
+        "const int ng = min(KC, size_k - ck * KC) >> 4;",
+        "const int ng = max(0, (min(KC, size_k - ck * KC) >> 4) - 2);",
     ),
     ("mxfp8_block_factor", "UE8M0 block scale off by 2", "* 256.0f));", "* 128.0f));"),
     (
