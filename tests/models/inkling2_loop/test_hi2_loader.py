@@ -425,6 +425,31 @@ def test_the_hi2_block64_layout_is_padded_for_every_chunk():
             assert ntpp.numel() == 1
 
 
+def test_the_w2_output_is_reduced_over_top_k():
+    """The serving path sums the ``[T*K, H]`` w2 view over top-k into ``[T, H]``;
+    the K axis exists only as a view of that 2-D workspace buffer.  ``topk_w`` is
+    the workspace's own fp32 ``[T, K]`` view, exactly what the call site passes."""
+    pytest.importorskip("vllm.models.inkling2_loop.amd.glue")
+    from vllm.models.inkling2_loop.amd import glue, moe
+
+    cfg = _config(128, 64, 4, 2)
+    ws = glue.Inkling2GlueWorkspace(cfg, 8, "cpu", hi2=True)
+    torch.manual_seed(0)
+    for tokens in (1, 3, 8):
+        rows = ws.moe_hidden_view(tokens)
+        rows.copy_(torch.randn_like(rows))
+        before = rows.clone()
+        topk_w = ws.moe_views(tokens, 8).topk_w
+        topk_w.copy_(torch.rand_like(topk_w))
+        out = torch.empty(tokens, cfg.hidden_size, dtype=torch.float16)
+        moe._sum_topk_rows(rows, topk_w, out)
+        want = (
+            before.view(tokens, ws.K, cfg.hidden_size).float() * topk_w.unsqueeze(-1)
+        ).sum(dim=1)
+        assert out.shape == (tokens, cfg.hidden_size)
+        assert torch.allclose(out.float(), want, atol=5e-3, rtol=5e-3), tokens
+
+
 def test_a_stack_with_uneven_expert_rows_is_refused():
     t = make_stack(2, 32, 64, 1, seed=7)
     hi2.validate_stack(t, 1, 64, 2)
@@ -432,6 +457,17 @@ def test_a_stack_with_uneven_expert_rows_is_refused():
     broken["part_off"] = torch.tensor([0, 30, 64], dtype=torch.int32)
     with pytest.raises(ValueError, match="different row counts"):
         hi2.validate_stack(broken, 1, 64, 2)
+
+
+def test_a_multipart_stack_with_uneven_rows_is_refused():
+    """The gate/up stack at TP=1 has two parts per expert; the kernel's block
+    offset is uniform, so every part of every expert must have equal rows."""
+    t = make_stack(2, 16, 64, 2, seed=8)
+    hi2.validate_stack(t, 2, 64, 2)
+    broken = dict(t)
+    broken["part_off"] = torch.tensor([0, 16, 32, 47, 64], dtype=torch.int32)
+    with pytest.raises(ValueError, match="different row counts"):
+        hi2.validate_stack(broken, 2, 64, 2)
 
 
 def test_the_hi2_kernel_paths_refuse_other_architectures(monkeypatch):

@@ -171,9 +171,12 @@ MUTANTS = [
     (
         "hi2_uneven_rows_check_off",
         "vllm/models/inkling2_loop/amd/hi2.py",
-        "        if counts.numel() > 1 and bool((counts != counts[0]).any()):",
+        "        if counts.numel() > 1 and bool((counts != counts[0, 0]).any()):",
         "        if False:",
-        [_L + "test_a_stack_with_uneven_expert_rows_is_refused"],
+        [
+            _L + "test_a_stack_with_uneven_expert_rows_is_refused",
+            _L + "test_a_multipart_stack_with_uneven_rows_is_refused",
+        ],
     ),
     (
         "glue_block64_no_round_up",
@@ -195,6 +198,13 @@ MUTANTS = [
         "    if not on_gfx10x():",
         "    if False:",
         [_L + "test_the_hi2_kernel_paths_refuse_other_architectures"],
+    ),
+    (
+        "moe_w2_reduce_rows_as_tokens",
+        "vllm/models/inkling2_loop/amd/moe.py",
+        "    y = rows.view(t, k, rows.shape[-1])",
+        "    y = rows.view(t * k, rows.shape[-1])",
+        [_L + "test_the_w2_output_is_reduced_over_top_k"],
     ),
 ]
 

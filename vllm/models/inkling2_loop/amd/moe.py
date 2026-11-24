@@ -143,6 +143,20 @@ def _require_gfx10x(where: str) -> None:
         raise RuntimeError(f"{where}: the HI2 expert GEMMs need gfx1030 (RDNA2)")
 
 
+def _sum_topk_rows(rows: torch.Tensor, topk_w: torch.Tensor, out: torch.Tensor) -> None:
+    """``out[t] = sum_k rows[t * K + k] * topk_w[t, k]``, in place.
+
+    ``rows`` is the 2-D ``[T * K, H]`` w2 output view of the workspace and
+    ``topk_w`` is the workspace's fp32 ``[T, K]`` view; ``out`` is ``[T, H]``.
+    The w2 GEMM writes the per-expert rows in that 2-D view, so the K axis is
+    only a view here.
+    """
+    t, k = topk_w.shape
+    y = rows.view(t, k, rows.shape[-1])
+    y.mul_(topk_w.unsqueeze(-1))
+    torch.sum(y, dim=1, out=out)
+
+
 # ---------------------------------------------------------------------------
 # Experts
 # ---------------------------------------------------------------------------
@@ -1321,8 +1335,7 @@ class Inkling2LoopMoE(_ExpertsKernel):
             ops.rdna_hint_flex_moe_gemm_rdna2(
                 hp, sorted_ids, expert_ids, ntpp, w2, hidden, y
             )
-            y.mul_(m.topk_w.unsqueeze(-1))
-            torch.sum(y, dim=1, out=out)
+            _sum_topk_rows(y, m.topk_w, out)
         return out_all
 
     def forward_hip(
