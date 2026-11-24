@@ -372,10 +372,13 @@ class Inkling2VisionEncoder(nn.Module):
         cs = torch.empty((T, 32, 2), dtype=f32, device=dev)
         ops.inkling2_vit_rope_tables(meta, self.inv_freq, cs)
 
+        # Lifetimes within a ViT block are disjoint: a -> qkv -> o -> h, then
+        # a -> f -> h. Sharing (a, o) and (qkv, f) cuts ViT scratch by 45%.
         a = torch.empty((T, D), dtype=f16, device=dev)
-        qkv = torch.empty((T, 3 * D), dtype=f16, device=dev)
-        o = torch.empty((T, D), dtype=f16, device=dev)
-        f = torch.empty((T, self.mlp_dim), dtype=f16, device=dev)
+        o = a
+        scratch = torch.empty(T * max(self.mlp_dim, 3 * D), dtype=f16, device=dev)
+        qkv = scratch[: T * 3 * D].view(T, 3 * D)
+        f = scratch[: T * self.mlp_dim].view(T, self.mlp_dim)
         nq = int(plan.blk_prefix[-1])
         for layer in bb.layers:
             ops.inkling2_vit_layernorm(
@@ -395,7 +398,7 @@ class Inkling2VisionEncoder(nn.Module):
             ops.inkling2_vit_gemm_residual(
                 f, layer.mlp.c_proj.weight, layer.mlp.c_proj.bias, layer.ls_2.gamma, h
             )
-        del a, qkv, o, f, cs
+        del a, o, qkv, f, scratch, cs
 
         pooled = torch.empty((P, D), dtype=f16, device=dev)
         ops.inkling2_vit_pool(h, meta, pooled)
