@@ -22,7 +22,7 @@ tools below.
 
 | Step | Command (abbreviated) | Exit | Result |
 | --- | --- | --- | --- |
-| CPU gate | `pytest test_hi2_loader.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 33 passed, 5 skipped (the 5 GPU tests) |
+| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 40 passed, 5 skipped (the 5 GPU tests) |
 | Pre-fix check | the same gate on the 5 new regression tests, old product files | 1 | 5 failed, 16 deselected (the tests can fail) |
 | Mutants | `python tools/inkling_hi2/mutants.py --tree <scratch copy>` | 0 | baseline 27 passed; all 21 killed: the 20-mutant battery on the pre-B4 tree plus the changed `hi2_uneven_rows_check_off` and the new `moe_w2_reduce_rows_as_tokens` on the final tree |
 | Real-dir load | `python tools/inkling_hi2/check_real_dir.py --model <bpw3.5> --stock <stock>` | 0 | 1125 text tensors loaded, 0 missing parameters, lm_head == stock |
@@ -35,13 +35,28 @@ tools below.
 | Recipe assembly | `PRINT=1 serve_rdna.sh RECIPE=inkling2-hi2-tp2 MODEL=...` | 0 | command below |
 
 The CPU gate is the six-layer HI2 test set: format declaration/name map/TP slice
-(`test_hi2_loader.py`, 23), the legacy loader (`test_loader.py`, 6), the kernel tests
+(`test_hi2_loader.py`, 23), the slot/HIP->PCI gate (`test_hi2_slots.py`, 7 on a
+fake six-V620 table), the legacy loader (`test_loader.py`, 6), the kernel tests
 collected and skipped off a GPU (5), and the reference against the quantizer's own
 `hi2.format.dequantize` on a tiny HI2 export of the quantizer's fixture (4, fp16
 exact).  `test_hi2_reference.py` needs the quantizer on `PYTHONPATH`
 (`HI2_SRC=$HOME/w4a8_runs/inkling-hi2/tree`) and reuses its fixture with
 `INKLING2_TINY_OUT`; without the quantizer the 4 tests skip (do not read a skip as a
 pass).
+
+### GPU kit on the six-V620 two-slot box (2026-11-24)
+
+The kit follows AGENTS.md "Two-slot box operation 2026-11-15" instead of the
+retired 10-GPU slot A/B lists: `SLOT=a2` (HIP 0,1; PCI `d1 d4`) is the TP=2 lease
+and the default, `b4` (HIP 2,3,4,5; `d9 dc df e2`) is refused by the TP=2
+launchers. `tools/inkling_hi2/slot.py` resolves the declared HIP indexes to their
+live PCI buses (clearing the visibility variables for the lookup) and refuses a
+moved bus, a missing index or a non-V620 before the boot and again immediately
+before the launch; the HTTP clients check the declared pair and record it. Boots
+wait on the slot's `lanes/quiet-a2` or `quiet-b4` directory and on
+`~/w4a8_runs/boot.lock`, with `MEASURE_LOCK=` empty (cross-slot lock off);
+`smoke.sh` touches its slot quiet file for its measured cells. `test_hi2_slots.py`
+is the CPU gate of the bus table (fake six-V620 table, no torch).
 
 ### Verifier round (fix-first -> fixed)
 

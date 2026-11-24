@@ -27,12 +27,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import regex as re
+import slot  # tools/inkling_hi2/slot.py, next to this script
 
 PARAGRAPH = (
     "The ink dries slowly on the page while the reader follows the line of the "
@@ -138,18 +140,27 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
+    slot_name = os.environ.get(slot.ENV_SLOT) or slot.DEFAULT_SLOT
+    hip, buses = slot.env_pair(slot_name)
+    try:
+        slot.check_declared(slot_name, hip, buses)
+    except slot.SlotError as exc:
+        print(f"bench: {exc}", file=sys.stderr)
+        return 2
+
     info = models(args.url)
     name = info["id"]
     result = {
         "label": args.label,
+        "slot": {"name": slot_name, "hip": hip, "pci_buses": buses},
         "model": name,
         "max_model_len": info.get("max_model_len"),
         "cells": [],
         "engine": engine_log(args.log),
     }
     print(
-        f"bench[{args.label}]: {name} max_model_len={result['max_model_len']} "
-        f"engine={result['engine']}"
+        f"bench[{args.label}]: slot={slot_name} HIP={hip} PCI={buses} {name} "
+        f"max_model_len={result['max_model_len']} engine={result['engine']}"
     )
     cells = [prefill(args.url, name, args.prefill_tokens)]
     for batch in (int(b) for b in args.batches.split(",") if b):

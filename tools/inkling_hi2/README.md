@@ -21,18 +21,38 @@ fused generic op `rdna_hint_flex_moe_rdna2` implements SiLU, so this path drives
 `rdna_hint_flex_moe_transform_rdna2` + `rdna_hint_flex_moe_gemm_rdna2` and
 `inkling2_glue_swiglu`; no new HIP kernel, no csrc change, no rebuild needed.
 
-## 0. Protocol (AGENTS.md: "GPU selection on par1-cs25")
+## 0. Protocol (AGENTS.md: "Two-slot box operation 2026-11-15")
+
+Six V620s in two leases; this kit is the TP=2 one on a2:
+
+| Lease | HIP | V620 PCI bus | Use |
+| --- | --- | --- | --- |
+| a2 | 0, 1 | `d1`, `d4` | this kit (TP=2) |
+| b4 | 2, 3, 4, 5 | `d9`, `dc`, `df`, `e2` | TP4 work (not this recipe) |
+
+`SLOT` selects the lease (`a2` default; `b4` is refused by the TP=2 launchers).
+`HIP_VISIBLE_DEVICES` and `EXPECT_PCI_BUSES` default from `SLOT` and must be given
+together; `tools/inkling_hi2/slot.py` resolves the HIP indexes to their live PCI
+buses (clearing the visibility variables so it sees the physical enumeration) and
+refuses a moved bus, a missing index or a non-V620 before the boot and again
+immediately before the launch. The HTTP clients (`kl_probe.py`, `bench.py`) cannot
+see the GPUs and check the declared env pair against the same table, recording the
+slot in their JSON.
 
 Every GPU command carries `HIP_VISIBLE_DEVICES=<leased HIP list>` on its own command
 line; CPU-only commands use
 `env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= <cmd>`.
-Leases live in `~/w4a8_runs/lanes/lease/README.md` (holder files `<owner>.slotA|B`,
-requests, release trap). Boots take `flock -w 900 ~/w4a8_runs/boot.lock`; a measured
-window touches `~/w4a8_runs/lanes/quiet/<Agent>` (<= 15 min, re-touched every 5 min)
-and waits until no quiet file is newer than 6 min. `serve.sh` does the quiet wait
-(`WAIT_QUIET=1`) and takes the boot lock before launching; it refuses a device that
-is not a V620 by name and prints the HIP -> PCI bus mapping to the log. A measured
-window with a KFD `evicted_ms` jump is invalid and is rerun.
+Leases live in `~/w4a8_runs/lanes/lease/README.md` (holder files `<owner>.a2` /
+`<owner>.b4`, requests, release trap; kill the holder's `sleep` on release). Boots
+take `flock -w 900 ~/w4a8_runs/boot.lock` and the two slots boot in parallel. A
+measured window touches `~/w4a8_runs/lanes/quiet-a2/<Agent>` or
+`quiet-b4/<Agent>` (<= 15 min, re-touched every 5 min), waits until no file in its
+slot is newer than 6 min, then waits for `flock -n` on the boot lock and re-checks
+it before each cell; `MEASURE_LOCK=` is empty (one slot cannot block the other).
+`serve.sh` does the quiet wait (`WAIT_QUIET=1`) and the boot lock; `smoke.sh`
+touches its quiet file after the boot and re-checks the boot lock before each
+probe. A window with a KFD `evicted_ms` jump or a thermal alarm is invalid and is
+rerun; no measured window while a `docker buildx build` runs.
 
 ## 1. Preconditions (CPU only, no lease)
 
@@ -44,19 +64,22 @@ V=$HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python
 cd $TREE && env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
     PYTHONPATH=$TREE $V -c "import vllm._custom_ops, vllm.models.inkling2_loop.amd.moe"
 
-# CPU gates: loader (23), quantizer reference on the tiny HI2 directory (4; the
-# fixture is built by the quantizer's own pipeline, ~3.7 min), legacy loader (6),
-# plus the GPU kernel tests collected-and-skipped on CPU (5). H is the quantizer
-# tree; it provides the `hi2` package the reference test imports.
+# CPU gates: loader (23), the slot/HIP->PCI gate (7), quantizer reference on the
+# tiny HI2 directory (4; the fixture is built by the quantizer's own pipeline,
+# ~3.7 min), legacy loader (6), plus the GPU kernel tests collected-and-skipped on
+# CPU (5). H is the quantizer tree; it provides the `hi2` package the reference
+# test imports.
 H=$HOME/w4a8_runs/inkling-hi2/tree
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
 PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
   tests/models/inkling2_loop/test_hi2_loader.py \
+  tests/models/inkling2_loop/test_hi2_slots.py \
   tests/models/inkling2_loop/test_loader.py \
   tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
   tests/models/inkling2_loop/test_hi2_reference.py -q
-# 33 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
+# 40 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
 # reuses the <dir>/stock + <dir>/hi2 pair built below instead of rebuilding it.
+# The slot test needs no torch: it fakes the six-V620 PCI table.
 
 # mutant battery: the loader / name map / TP slice / reference tests must kill
 # every mutant (21; exit 0). Use a scratch copy of the tree, not the checkout.
@@ -86,14 +109,18 @@ $V $TREE/tools/inkling_hi2/make_tiny_hi2.py --out $HOME/w4a8_runs/inkling-hi2-ru
 
 ## 2. Ordered GPU checklist
 
-One lease of two V620s (slot A = HIP 1,2,3,4 or slot B = HIP 6,7,8,9; never 0/5).
-Every step prints a `RESULT ... PASS` or a numeric record; stop at the first failure
-and keep the log.
+One lease of two V620s: the a2 slot (HIP 0,1; PCI `d1 d4`) from Main. b4
+(HIP 2,3,4,5; `d9 dc df e2`) is the TP4 lease and is not used by this TP=2 kit.
+Each command repeats `HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4` on its own
+line; `serve.sh`/`smoke.sh` resolve the pair to the live PCI buses before the boot
+and before the measured cells and refuse a moved or foreign device. Every step
+prints a `RESULT ... PASS` or a numeric record; stop at the first failure and keep
+the log.
 
 1. **Kernel unit test** (no server). `HI2_TINY_DIR` set to the fixture's `hi2/`:
 
    ```bash
-   cd $TREE && HIP_VISIBLE_DEVICES=<pair> PYTHONPATH=$TREE \
+   cd $TREE && HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 PYTHONPATH=$TREE \
    HI2_TINY_DIR=$HOME/w4a8_runs/inkling-hi2-runtime/tiny/hi2 \
    $V -m pytest tests/models/inkling2_loop/test_hi2_kernel_gpu.py -q
    ```
@@ -109,7 +136,8 @@ and keep the log.
    probes have a baseline:
 
    ```bash
-   MODEL=$HOME/hfcache/inkling2-mini HIP_VISIBLE_DEVICES=<pair> \
+   MODEL=$HOME/hfcache/inkling2-mini SLOT=a2 \
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
    VENV=$(dirname $(dirname $V)) PORT=18231 MAXLEN=8192 MAXBAT=256 SEQS=1 \
    bash $TREE/tools/inkling_hi2/serve.sh > ~/w4a8_runs/inkling-hi2-runtime/logs/stock.log 2>&1 &
    ```
@@ -119,25 +147,37 @@ and keep the log.
    `max_model_len=8192`.
 
 3. **HI2 server**: same command with `MODEL=$HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5`
-   and `PORT=18230`, log `logs/serve.log`. Verifies: all 24 layers find their
-   `gate_up`/`down` stacks (`HI2 expert groups incomplete` and `unmapped ... tensor`
-   must NOT appear); the engine reports the model memory (expect ~7.1-8.6 GiB/rank
-   for the weights, versus 18.68 GiB for the stock NVFP4 at TP=1); FULL_AND_PIECEWISE
-   graph capture succeeds; `VLLM_INKLING2_PATH` is unset (native HIP path) and the
-   log shows "Inkling-2 HIP serving path: workspace ...". If capture fails, rerun
-   with `EAGER=1` and record the difference (FULL graphs are a production
-   requirement; an eager-only boot is a finding).
+   and `PORT=18230`, log `logs/serve.log`; the env pair stays
+   `SLOT=a2 HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4`. Verifies: all 24 layers
+   find their `gate_up`/`down` stacks (`HI2 expert groups incomplete` and
+   `unmapped ... tensor` must NOT appear); the engine reports the model memory
+   (expect ~7.1-8.6 GiB/rank for the weights, versus 18.68 GiB for the stock NVFP4
+   at TP=1); FULL_AND_PIECEWISE graph capture succeeds; `VLLM_INKLING2_PATH` is
+   unset (native HIP path) and the log shows "Inkling-2 HIP serving path: workspace
+   ...". If capture fails, rerun with `EAGER=1` and record the difference (FULL
+   graphs are a production requirement; an eager-only boot is a finding).
 
-4. **Greedy smoke**: `bash tools/inkling_hi2/smoke.sh` with the HI2 server (it boots
-   its own) and `STOCK_URL=http://127.0.0.1:18231`. Verifies: `/v1/models` name and
-   context; the greedy chat answer names Paris (`RESULT greedy PASS`); the greedy
-   prefix comparison against the stock server prints the first-divergence length
-   (3.5 bpw top-1 is 93 %, so short prefixes, not full streams, are expected).
+4. **Greedy smoke** with the HI2 server (it boots its own) and the stock server as
+   the reference:
+
+   ```bash
+   MODEL=$HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5 SLOT=a2 \
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   VENV=$(dirname $(dirname $V)) STOCK_URL=http://127.0.0.1:18231 \
+   bash $TREE/tools/inkling_hi2/smoke.sh
+   ```
+
+   Verifies: `/v1/models` name and context; the greedy chat answer names Paris
+   (`RESULT greedy PASS`); the greedy prefix comparison against the stock server
+   prints the first-divergence length (3.5 bpw top-1 is 93 %, so short prefixes, not
+   full streams, are expected). The smoke touches `lanes/quiet-a2/inkling-hi2-smoke`
+   before each probe and waits for the boot lock.
 
 5. **KL vs stock on the quantizer's held-out windows** (mixed set, first 32 of 96,
    2048 tokens each; the same windows the published 0.0996 nats were measured on):
 
    ```bash
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
    python3 $TREE/tools/inkling_hi2/kl_probe.py \
      --hi2-url http://127.0.0.1:18230 --stock-url http://127.0.0.1:18231 \
      --ids $HOME/w4a8_runs/inkling-hi2/stage4/calib/heldout_mixed_ids.npy \
@@ -152,13 +192,17 @@ and keep the log.
    `heldout_wiki_ids.npy` (17 windows, reference 0.0468) and
    `heldout_pydocs_ids.npy` (0.0305) — those are stricter relative checks than the
    mixed set. Both servers must have `--max-logprobs 128` (serve.sh passes it).
+   A measured window is <= 15 min: split a long set into `--windows` chunks and
+   re-touch the quiet file (and re-check the boot lock) between chunks.
 
 6. **Bench cells**, same lease, stock then HI2:
 
    ```bash
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
    python3 $TREE/tools/inkling_hi2/bench.py --url http://127.0.0.1:18231 \
      --label stock --log ~/w4a8_runs/inkling-hi2-runtime/logs/stock.log \
      --out ~/w4a8_runs/inkling-hi2-runtime/bench_stock.json
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
    python3 $TREE/tools/inkling_hi2/bench.py --url http://127.0.0.1:18230 \
      --label hi2 --log ~/w4a8_runs/inkling-hi2-runtime/logs/serve.log \
      --baseline ~/w4a8_runs/inkling-hi2-runtime/bench_stock.json \

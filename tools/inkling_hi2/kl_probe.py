@@ -27,10 +27,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import urllib.request
 
 import numpy as np
+import slot  # tools/inkling_hi2/slot.py, next to this script
 
 
 def call(url: str, payload: dict, timeout: float = 3600.0) -> dict:
@@ -145,13 +147,24 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
+    slot_name = os.environ.get(slot.ENV_SLOT) or slot.DEFAULT_SLOT
+    hip, buses = slot.env_pair(slot_name)
+    try:
+        slot.check_declared(slot_name, hip, buses)
+    except slot.SlotError as exc:
+        print(f"kl_probe: {exc}", file=sys.stderr)
+        return 2
+
     windows = np.load(args.ids)
     if windows.ndim != 2:
         ap.error(f"--ids must be [windows, seq_len], got {windows.shape}")
     n = min(args.windows, windows.shape[0])
     hi2_name, stock_name = served_name(args.hi2_url), served_name(args.stock_url)
     print(f"kl: {n} of {windows.shape[0]} windows of {windows.shape[1]} tokens")
-    print(f"kl: hi2={hi2_name} stock={stock_name} topk={args.topk}")
+    print(
+        f"kl: slot={slot_name} HIP={hip} PCI={buses} "
+        f"hi2={hi2_name} stock={stock_name} topk={args.topk}"
+    )
 
     kls, top1 = [], []
     for i in range(n):
@@ -178,6 +191,7 @@ def main() -> int:
     sem = float(np.std(kls, ddof=1) / math.sqrt(len(kls))) if len(kls) > 1 else 0.0
     top1_mean = float(np.mean(top1))
     result = {
+        "slot": {"name": slot_name, "hip": hip, "pci_buses": buses},
         "windows": n,
         "seq_len": int(windows.shape[1]),
         "kl_mean": mean,
