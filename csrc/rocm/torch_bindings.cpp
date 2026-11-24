@@ -734,14 +734,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "num_rows) -> ()");
   rocm_ops.impl("inkling2_dspark_gather_rows", torch::kCUDA,
                 &inkling2_dspark_gather_rows);
+  void inkling2_dspark_gemv_v2(
+      torch::Tensor x, torch::Tensor w, torch::Tensor out,
+      std::optional<torch::Tensor> x_index, int64_t num_rows, int64_t splits,
+      int64_t variant, std::optional<torch::Tensor> w_row_ids);
   rocm_ops.def(
       "inkling2_dspark_gemv(Tensor x, Tensor w, Tensor! out, Tensor? "
-      "x_index, int num_rows, int splits, int variant) -> ()");
-  rocm_ops.impl("inkling2_dspark_gemv", torch::kCUDA, &inkling2_dspark_gemv);
+      "x_index, int num_rows, int splits=0, int variant=0, Tensor? "
+      "w_row_ids=None) -> ()");
+  rocm_ops.impl("inkling2_dspark_gemv", torch::kCUDA, &inkling2_dspark_gemv_v2);
+  void inkling2_dspark_gemm_v2(
+      torch::Tensor x, torch::Tensor w, torch::Tensor out, int64_t num_rows,
+      int64_t design, std::optional<torch::Tensor> w_row_ids);
   rocm_ops.def(
       "inkling2_dspark_gemm(Tensor x, Tensor w, Tensor! out, int num_rows, "
-      "int design) -> ()");
-  rocm_ops.impl("inkling2_dspark_gemm", torch::kCUDA, &inkling2_dspark_gemm);
+      "int design, Tensor? w_row_ids=None) -> ()");
+  rocm_ops.impl("inkling2_dspark_gemm", torch::kCUDA, &inkling2_dspark_gemm_v2);
   rocm_ops.def(
       "inkling2_dspark_qkv_prep(Tensor qkv, Tensor positions, Tensor slots, "
       "Tensor q_norm_w, Tensor k_norm_w, Tensor inv_freq, Tensor!? q_out, "
@@ -772,16 +780,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "inkling2_dspark_fold_bias(Tensor head, Tensor b, Tensor! out) -> ()");
   rocm_ops.impl("inkling2_dspark_fold_bias", torch::kCUDA,
                 &inkling2_dspark_fold_bias);
+  void inkling2_dspark_argmax_v2(torch::Tensor logits, torch::Tensor out,
+                                 int64_t num_rows, int64_t vocab,
+                                 std::optional<torch::Tensor> token_map);
   rocm_ops.def(
       "inkling2_dspark_argmax(Tensor logits, Tensor! out, int num_rows, int "
-      "vocab) -> ()");
+      "vocab, Tensor? token_map=None) -> ()");
   rocm_ops.impl("inkling2_dspark_argmax", torch::kCUDA,
-                &inkling2_dspark_argmax);
+                &inkling2_dspark_argmax_v2);
+  void inkling2_dspark_argmax_partial_v2(
+      torch::Tensor logits, torch::Tensor part, int64_t num_rows, int64_t vocab,
+      int64_t first_id, std::optional<torch::Tensor> token_map);
   rocm_ops.def(
       "inkling2_dspark_argmax_partial(Tensor logits, Tensor! part, int "
-      "num_rows, int vocab, int first_id) -> ()");
+      "num_rows, int vocab, int first_id, Tensor? token_map=None) -> ()");
   rocm_ops.impl("inkling2_dspark_argmax_partial", torch::kCUDA,
-                &inkling2_dspark_argmax_partial);
+                &inkling2_dspark_argmax_partial_v2);
   rocm_ops.def(
       "inkling2_dspark_prepare_inputs(Tensor! input_ids, Tensor! positions, "
       "Tensor! is_padding, Tensor! query_start_loc, Tensor! seq_lens, "

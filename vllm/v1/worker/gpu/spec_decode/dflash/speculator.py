@@ -155,7 +155,8 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
-        # The draft's attention differs from the target's in causality.
+        # The draft's attention differs from the target's in causality and can
+        # capture wider uniform blocks (r * num_query_per_req) than target decode.
         config = super().attn_vllm_config
         if self.draft_model_config.dtype != config.model_config.dtype:
             config.model_config = self.draft_model_config
@@ -163,6 +164,23 @@ class DFlashSpeculator(DraftModelSpeculator):
             config.attention_config,
             use_non_causal=self.requires_non_causal,
         )
+        max_draft_tokens = min(
+            self._max_draft_reqs() * self.num_query_per_req, self.max_num_tokens
+        )
+        cc = config.compilation_config
+        if max_draft_tokens > 0 and cc is not None:
+            cur_max = cc.max_cudagraph_capture_size or 0
+            cur_dec = cc.max_decode_cudagraph_capture_tokens
+            if cur_max < max_draft_tokens or (
+                cur_dec is not None and cur_dec < max_draft_tokens
+            ):
+                cc = copy.copy(cc)
+                cc.max_cudagraph_capture_size = max(cur_max, max_draft_tokens)
+                if cur_dec is not None:
+                    cc.max_decode_cudagraph_capture_tokens = max(
+                        cur_dec, max_draft_tokens
+                    )
+                config.compilation_config = cc
         return config
 
     def _max_draft_reqs(self) -> int:
