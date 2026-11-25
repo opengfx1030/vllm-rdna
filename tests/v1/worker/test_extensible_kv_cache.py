@@ -296,6 +296,19 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     left_free = 2 * gib - extensible_kv_cache.KV_CACHE_NON_TORCH_RESERVE_BYTES
     assert limits == [2 * gib + left_free]
 
+    # When VLLM_KV_CACHE_MARGIN_FLOOR_MIB is explicitly lowered below
+    # KV_CACHE_NON_TORCH_RESERVE_BYTES, the non-torch reserve clamps to it.
+    limits.clear()
+    monkeypatch.setenv("VLLM_KV_CACHE_MARGIN_FLOOR_MIB", "256")
+    extensible_kv_cache.measure_kv_cache_blocks(
+        kv_cache,  # type: ignore[arg-type]
+        vllm_config,  # type: ignore[arg-type]
+        torch.device("cpu"),
+        init_free_memory=10 * gib,
+        requested_memory=10 * gib,
+    )
+    assert limits == [2 * gib + (2 * gib - (256 << 20))]
+
 
 @pytest.mark.parametrize(
     ("utilization", "init_free_gib", "warns"),

@@ -197,7 +197,26 @@ def _query_gcn_arch_from_amdsmi() -> str:
     """Query GCN arch from amdsmi. Raises if not available."""
     handles = amdsmi_get_processor_handles()
     if handles:
-        asic_info = amdsmi_get_gpu_asic_info(handles[0])
+        phys_idx = 0
+        for env_key in (
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+            "ROCR_VISIBLE_DEVICES",
+        ):
+            visible = os.environ.get(env_key)
+            if visible is not None and visible.strip():
+                first = visible.split(",")[0].strip()
+                if not first.isdigit():
+                    raise RuntimeError(
+                        f"Cannot map non-integer {env_key}={first!r} to amdsmi index"
+                    )
+                phys_idx = int(first)
+                if phys_idx >= len(handles):
+                    raise RuntimeError(
+                        f"{env_key} index {phys_idx} out of range ({len(handles)})"
+                    )
+                break
+        asic_info = amdsmi_get_gpu_asic_info(handles[phys_idx])
         # Use target_graphics_version which contains the gfx name
         # e.g., 'gfx942' for MI300X/MI325X
         target_gfx = asic_info.get("target_graphics_version", "")
@@ -1319,11 +1338,12 @@ class RocmPlatform(Platform):
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
 
-        # Default the gated RMSNorm custom op on for unquantized models. Quantized
-        # is untested in serving.
+        # Default the gated RMSNorm custom op on for unquantized CDNA models.
+        # Quantized and RDNA paths are untested/slower than Inductor fusion.
         model_config = vllm_config.model_config
         if (
-            model_config is not None
+            on_cdna()
+            and model_config is not None
             and model_config.quantization is None
             and "+rms_norm_gated" not in compilation_config.custom_ops
             and "-rms_norm_gated" not in compilation_config.custom_ops
@@ -1656,6 +1676,7 @@ class RocmPlatform(Platform):
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
+            and on_cdna()
             and not on_gfx90a()  # AITER not built for gfx90a, rmsnorm -> SEGV.
         ):
             rms_norm = ["aiter"] + default
