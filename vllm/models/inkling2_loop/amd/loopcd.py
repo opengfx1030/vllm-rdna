@@ -205,6 +205,20 @@ def read_loopcd_env_defaults() -> LoopCDParams:
     )
 
 
+def loopcd_graph_hooks_enabled() -> bool:
+    """Whether LoopCD hooks are baked into captured CUDA graphs.
+
+    Defaults to ``True`` so per-request ``vllm_xargs`` LoopCD works out of the
+    box without a separate recipe. Set ``VLLM_INKLING2_LOOPCD_ENABLE=0`` (when
+    ``VLLM_INKLING2_LOOPCD_ALPHA=0``) to strip the 3 graph-baked LoopCD launches
+    and restore layer 17->18 ``attn_res_sconv`` fusion.
+    """
+    raw = os.environ.get("VLLM_INKLING2_LOOPCD_ENABLE")
+    if raw is not None and raw.strip() != "":
+        return _parse_bool(raw, "VLLM_INKLING2_LOOPCD_ENABLE")
+    return True
+
+
 def parse_loopcd_params(
     extra_args: Mapping[str, Any] | None = None,
     defaults: LoopCDParams | None = None,
@@ -372,6 +386,8 @@ class Inkling2ModelState(DefaultModelState):
         self._req_id_to_slot: dict[str, int] = {}
         self._slot_modes = np.zeros(self.max_num_reqs, dtype=np.int8)
         self._slot_dirty = np.zeros(self.max_num_reqs, dtype=np.bool_)
+        self._num_active_loopcd_reqs = 0
+        self._has_staged_writes = False
         self._was_hidden_active = False
         self._was_logits_active = False
         self._cur_input_batch: InputBatch | None = None
@@ -384,8 +400,13 @@ class Inkling2ModelState(DefaultModelState):
             else None
         )
         p = parse_loopcd_params(extra_args, self.default_params)
+        prev_mode = int(self._slot_modes[req_index])
+        if prev_mode != LOOPCD_MODE_OFF:
+            self._num_active_loopcd_reqs = max(0, self._num_active_loopcd_reqs - 1)
         self._req_id_to_slot[new_req_data.req_id] = req_index
         self._slot_modes[req_index] = p.mode_code
+        if p.mode_code != LOOPCD_MODE_OFF:
+            self._num_active_loopcd_reqs += 1
 
         if p.enabled:
             self.req_alpha.stage_write(req_index, 0, [p.alpha])
@@ -394,6 +415,7 @@ class Inkling2ModelState(DefaultModelState):
             self.req_adaptive.stage_write_elem(req_index, 1 if p.adaptive else 0)
             self.req_log_beta.stage_write(req_index, 0, [p.log_beta])
             self._slot_dirty[req_index] = True
+            self._has_staged_writes = True
         elif self._slot_dirty[req_index]:
             self.req_alpha.stage_write(req_index, 0, [0.0])
             self.req_mode.stage_write_elem(req_index, LOOPCD_MODE_OFF)
@@ -401,6 +423,7 @@ class Inkling2ModelState(DefaultModelState):
             self.req_adaptive.stage_write_elem(req_index, 0)
             self.req_log_beta.stage_write(req_index, 0, [0.0])
             self._slot_dirty[req_index] = False
+            self._has_staged_writes = True
 
         ws = self.lm.model.glue_ws
         if (
@@ -420,15 +443,20 @@ class Inkling2ModelState(DefaultModelState):
         super().remove_request(req_id)
         slot = self._req_id_to_slot.pop(req_id, None)
         if slot is not None:
+            if int(self._slot_modes[slot]) != LOOPCD_MODE_OFF:
+                self._num_active_loopcd_reqs = max(0, self._num_active_loopcd_reqs - 1)
             self._slot_modes[slot] = LOOPCD_MODE_OFF
 
     def apply_staged_writes(self) -> None:
         super().apply_staged_writes()
+        if not self._has_staged_writes:
+            return
         self.req_alpha.apply_write()
         self.req_mode.apply_write()
         self.req_blend_blk.apply_write()
         self.req_adaptive.apply_write()
         self.req_log_beta.apply_write()
+        self._has_staged_writes = False
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         ws = self.lm.model.glue_ws
@@ -453,6 +481,17 @@ class Inkling2ModelState(DefaultModelState):
         out = super().prepare_inputs(input_batch, req_states)
         ws = self.lm.model.glue_ws
         if ws is None or not ws.has_loop:
+            return out
+
+        if (
+            self._num_active_loopcd_reqs == 0
+            and not self._was_hidden_active
+            and not self._was_logits_active
+        ):
+            ws.loopcd_hidden_active = False
+            ws.loopcd_logits_active = False
+            ws.loopcd_logits_indices = None
+            self._cur_input_batch = None
             return out
 
         batch_modes = self._slot_modes[input_batch.idx_mapping_np]
@@ -535,8 +574,10 @@ class Inkling2ModelState(DefaultModelState):
             self._logits_stats_scratch = torch.empty(
                 (M, 32, 2), dtype=torch.float32, device=z_final.device
             )
-        z_final = z_final.contiguous()
-        z_first = z_first.contiguous()
+        if z_final.stride(-1) != 1:
+            z_final = z_final.contiguous()
+        if z_first.stride(-1) != 1:
+            z_first = z_first.contiguous()
         ops.inkling2_loopcd_logits(
             z_final,
             z_first,
