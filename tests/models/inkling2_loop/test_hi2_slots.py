@@ -4,7 +4,8 @@
 
 The live GPU is faked: a fake ``torch`` under a fake venv enumerates a table of
 PCI buses, a stub ``serve_rdna.sh`` serves ``/health`` and refuses to run with a
-foreign visibility filter or a free boot lock, and all paths live under a tmp dir.
+foreign visibility filter or a free boot lock, and all paths live under a $HOME
+scratch dir (``$HI2_TEST_BASE``, never /tmp).
 No GPU, no torch and no network beyond 127.0.0.1 are needed.
 
 ``INKLING2_KIT_ROOT`` points the launcher text/logic tests at another kit tree
@@ -13,9 +14,12 @@ No GPU, no torch and no network beyond 127.0.0.1 are needed.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -70,6 +74,50 @@ def _wait_port(port: int, timeout: float = 20.0) -> bool:
         except OSError:
             time.sleep(0.1)
     return False
+
+
+def _test_tmp_base() -> Path:
+    return Path(
+        os.environ.get("HI2_TEST_BASE", Path.home() / ".cache" / "inkling2-hi2-tests")
+    )
+
+
+def _kill_processes_matching(pattern: str) -> None:
+    """Kill processes whose full command line contains ``pattern`` (ours only)."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "--", pattern], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    for token in result.stdout.split():
+        with contextlib.suppress(ProcessLookupError, ValueError):
+            os.kill(int(token), signal.SIGKILL)
+
+
+@pytest.fixture
+def tmp_path(request):
+    """Per-test scratch dir under ``$HOME``, never /tmp (the box keeps logs in $HOME).
+
+    Overrides pytest's builtin so the fake kit, the stub servers and the thermal
+    trees live under ``$HI2_TEST_BASE`` (default ``~/.cache/inkling2-hi2-tests``)
+    and are removed after the test.
+    """
+    nodeid = request.node.nodeid
+    name = "".join(c if c.isalnum() or c in "_.-" else "_" for c in nodeid)[-100:]
+    path = _test_tmp_base() / str(os.getpid()) / name
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _stub_servers_do_not_outlive_the_session():
+    yield
+    _kill_processes_matching(str(_test_tmp_base() / str(os.getpid())))
 
 
 FAKE_INIT = """\
@@ -432,13 +480,18 @@ class DryKit:
                     proc.kill()
                     proc.wait()
         self.procs.clear()
+        # serve.sh backgrounds the stub server; a SIGTERM that races its trap or a
+        # timed-out run can orphan it.  Sweep the exact script this kit wrote.
+        _kill_processes_matching(str(self.http))
 
 
 @pytest.fixture
 def dry(tmp_path):
     kit = DryKit(tmp_path / "dry")
-    yield kit
-    kit.stop()
+    try:
+        yield kit
+    finally:
+        kit.stop()
 
 
 def test_the_two_slot_table_is_the_agents_one():
@@ -573,6 +626,65 @@ def test_serve_waits_for_free_vram(dry):
     assert "MiB free per GPU" in result.stdout + result.stderr
     assert not (dry.lease / "HI2InklingRuntime.a2").exists()
     assert not (dry.lease / "a2.request").exists()
+
+
+def test_serve_never_overwrites_another_owners_request(dry):
+    """The lane README has one <slot>.request; a foreign one is queued behind."""
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        request = dry.lease / "a2.request"
+        original = f"OtherAgent pid {sleeper.pid} since 2026-11-25T09:00:00+00:00\n"
+        request.write_text(original)
+        result = dry.run_serve(LEASE_WAIT_SECONDS="1", LEASE_POLL_SECONDS="0.2")
+        out = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert request.read_text() == original, (
+            "another owner's request was overwritten"
+        )
+        assert "a2.request belongs to OtherAgent" in out
+        assert "queueing" in out
+        assert not (dry.lease / "HI2InklingRuntime.a2").exists()
+        assert not dry.fake_log.exists() or dry.fake_log.read_text() == ""
+    finally:
+        sleeper.terminate()
+        sleeper.wait()
+
+
+def test_serve_drops_a_stale_own_holder_and_still_waits_for_vram(dry):
+    dead = subprocess.Popen(["sleep", "0.01"])
+    dead.wait()
+    holder = dry.lease / "HI2InklingRuntime.a2"
+    holder.write_text(
+        f"HI2InklingRuntime pid {dead.pid} since 2026-11-25T09:00:00+00:00\n"
+    )
+    dry.set_vram_free(5)
+    result = dry.run_serve(LEASE_WAIT_SECONDS="1", LEASE_POLL_SECONDS="0.2")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "dropping stale holder HI2InklingRuntime.a2" in out
+    assert "MiB free per GPU" in out
+    assert "reusing our holder" not in out
+    assert not holder.exists()
+    assert not (dry.lease / "a2.request").exists()
+
+
+def test_serve_rechecks_free_vram_before_reusing_a_live_own_holder(dry):
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        holder = dry.lease / "HI2InklingRuntime.a2"
+        holder.write_text(
+            f"HI2InklingRuntime pid {sleeper.pid} since 2026-11-25T09:00:00+00:00\n"
+        )
+        dry.set_vram_free(5)
+        result = dry.run_serve(LEASE_WAIT_SECONDS="1", LEASE_POLL_SECONDS="0.2")
+        out = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "MiB free per GPU" in out
+        assert "reusing our holder" not in out
+        assert holder.exists(), "another live job's holder must not be removed"
+    finally:
+        sleeper.terminate()
+        sleeper.wait()
 
 
 def test_serve_holds_the_boot_lock_until_ready(dry):

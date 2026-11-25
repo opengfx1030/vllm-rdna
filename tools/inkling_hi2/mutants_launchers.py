@@ -48,8 +48,44 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
     ),
     (
         "lease_vram_ignored",
-        [("lease.sh", "if ((free >= want)); then", "if ((1)); then")],
+        [("lease.sh", "((free >= want)); then", "((1)); then")],
         "free_vram",
+    ),
+    (
+        "lease_request_clobbers",
+        [
+            (
+                "lease.sh",
+                "if [[ -z $request_blocked && -z $LEASE_REQUEST ]]; then",
+                "if true; then",
+            )
+        ],
+        "never_overwrites",
+    ),
+    (
+        "lease_request_owner_ignored",
+        [
+            (
+                "lease.sh",
+                'if [[ $req_owner != "$OWNER" ]]; then',
+                "if false; then",
+            )
+        ],
+        "never_overwrites",
+    ),
+    (
+        "lease_stale_holder_not_detected",
+        [
+            (
+                "lease.sh",
+                (
+                    'if lease_pid_alive "$LEASE_DIR/$OWNER.$SLOT"; then\n'
+                    "                own_holder=1"
+                ),
+                "if true; then\n                own_holder=1",
+            )
+        ],
+        "stale_own_holder",
     ),
     (
         "boot_lock_released_early",
@@ -206,7 +242,8 @@ def main() -> int:
             "checks_the_devices_around_the_boot or rechecks_the_devices or hot or "
             "rechecks_the_devices_after_health or "
             "without_kfd_workers or refuse_b4 or bench_invalid_without_kfd_workers "
-            "or bench_window_record"
+            "or bench_window_record or never_overwrites or stale_own_holder or "
+            "live_own_holder"
         )
         baseline = pytest_run(scratch, subset)
         if baseline.returncode != 0:

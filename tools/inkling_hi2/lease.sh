@@ -5,10 +5,12 @@
 # Shared GPU-lease carrier for the Inkling-2 HI2 kit (AGENTS.md, "Two-slot box
 # operation"; ~/w4a8_runs/lanes/lease/README.md):
 #
-#   holder files <owner>.<slot>; the next job writes <slot>.request (trap armed
-#   before the request), waits until no other holder exists and every GPU of the
-#   lease has >= 28 GiB free, then writes its holder; the holder is removed by
-#   the release trap.
+#   holder files <owner>.<slot>; request files <slot>.request (one per slot, per
+#   the lane README).  The next job queues behind another owner's request - it is
+#   never overwritten - drops its own holder when the recorded pid is gone, arms
+#   the release trap before writing, and takes the lease only when no other holder
+#   exists and every GPU of the lease has >= 28 GiB free (the gate is re-checked
+#   even when reusing its own holder); the holder is removed by the release trap.
 #
 # Expects OWNER, LEASE_DIR, SLOT and (for the free-VRAM gate) EXPECT_PCI_BUSES as
 # a comma list of PCI bus numbers.  Reads DRM_SYSFS (default /sys/class/drm; the
@@ -72,9 +74,31 @@ lease_min_free_mib() {
     printf '%s\n' "$min"
 }
 
-# Remove our request (always) and our holder (only if this process wrote it).
+# First field and the recorded pid of a holder/request line
+# ("<owner> pid <pid> since <date>").
+lease_line_owner() {
+    awk 'NR==1{print $1}' "$1" 2>/dev/null
+}
+
+lease_line_pid() {
+    awk 'NR==1{for (i = 1; i < NF; i++) if ($i == "pid") { print $(i + 1); exit }}' \
+        "$1" 2>/dev/null
+}
+
+# True when the process recorded in a holder/request file is still alive.
+lease_pid_alive() {
+    local pid
+    pid=$(lease_line_pid "$1")
+    [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# Remove our request (only while it is still ours) and our holder (only if this
+# process wrote it).
 lease_release() {
-    [[ -n $LEASE_REQUEST ]] && rm -f "$LEASE_REQUEST"
+    if [[ -n $LEASE_REQUEST ]] &&
+        [[ $(lease_line_owner "$LEASE_REQUEST") == "$OWNER" ]]; then
+        rm -f "$LEASE_REQUEST"
+    fi
     if [[ -n $LEASE_HOLDER_CREATED ]]; then
         rm -f "$LEASE_DIR/$OWNER.$SLOT"
     fi
@@ -93,42 +117,79 @@ lease_refuse_foreign() {
 }
 
 # Refuse a foreign holder, then wait for a free lease and write our holder.
+# The request file is one per slot (lane README): another owner's is never
+# overwritten, we queue behind it.  An own holder is reused only while its pid is
+# alive and the GPUs still show LEASE_FREE_GIB free; a stale one is dropped.
 lease_acquire() {
-    local f free want deadline
+    local f free want deadline req_owner request_blocked own_holder
     lease_refuse_foreign "serve.sh" || return 1
-    if [[ -e $LEASE_DIR/$OWNER.$SLOT ]]; then
-        echo "lease: reusing our holder $OWNER.$SLOT"
-        return 0
-    fi
     mkdir -p "$LEASE_DIR"
     # Armed before the request is written; serve.sh later replaces both traps
     # with its combined cleanup (server kill + lease_release).
     trap lease_release EXIT
     trap 'lease_release; exit 130' TERM INT
-    LEASE_REQUEST="$LEASE_DIR/$SLOT.request"
-    printf '%s pid %s since %s\n' "$OWNER" "$$" "$(date -Is)" >"$LEASE_REQUEST"
     want=$((LEASE_FREE_GIB * 1024))
     deadline=$((SECONDS + LEASE_WAIT_SECONDS))
     while :; do
-        if f=$(lease_foreign_holder); then
-            echo "lease: $(basename "$f") holds $SLOT; waiting (${LEASE_POLL_SECONDS} s)" >&2
-        elif free=$(lease_min_free_mib); then
-            if ((free >= want)); then
-                break
+        request_blocked=
+        own_holder=
+        if [[ -e $LEASE_DIR/$SLOT.request ]]; then
+            req_owner=$(lease_line_owner "$LEASE_DIR/$SLOT.request")
+            if [[ $req_owner != "$OWNER" ]]; then
+                request_blocked=1
+                echo "lease: $SLOT.request belongs to $req_owner; queueing (${LEASE_POLL_SECONDS} s)" >&2
+            elif lease_pid_alive "$LEASE_DIR/$SLOT.request"; then
+                request_blocked=1
+                echo "lease: our own $SLOT.request is live (pid $(lease_line_pid "$LEASE_DIR/$SLOT.request")); queueing (${LEASE_POLL_SECONDS} s)" >&2
+            else
+                rm -f "$LEASE_DIR/$SLOT.request"
             fi
-            echo "lease: ${free} MiB free per GPU (< ${want} MiB); waiting (${LEASE_POLL_SECONDS} s)" >&2
+        fi
+        if [[ -e $LEASE_DIR/$OWNER.$SLOT ]]; then
+            if lease_pid_alive "$LEASE_DIR/$OWNER.$SLOT"; then
+                own_holder=1
+            else
+                echo "lease: dropping stale holder $OWNER.$SLOT (pid $(lease_line_pid "$LEASE_DIR/$OWNER.$SLOT") is gone)" >&2
+                rm -f "$LEASE_DIR/$OWNER.$SLOT"
+            fi
+        fi
+        if [[ -z $request_blocked && -z $LEASE_REQUEST ]]; then
+            LEASE_REQUEST="$LEASE_DIR/$SLOT.request"
+            printf '%s pid %s since %s\n' "$OWNER" "$$" "$(date -Is)" >"$LEASE_REQUEST"
+        fi
+        if [[ -n $request_blocked ]]; then
+            : # the queue message above is this iteration's wait reason
+        elif f=$(lease_foreign_holder); then
+            echo "lease: $(basename "$f") holds $SLOT; waiting (${LEASE_POLL_SECONDS} s)" >&2
+        else
+            free=$(lease_min_free_mib) || free=
+            if [[ -n $free ]] && ((free >= want)); then
+                if [[ -n $own_holder ]]; then
+                    echo "lease: reusing our holder $OWNER.$SLOT (${free} MiB free per GPU)"
+                else
+                    printf '%s pid %s since %s\n' "$OWNER" "$$" "$(date -Is)" >"$LEASE_DIR/$OWNER.$SLOT"
+                    LEASE_HOLDER_CREATED=1
+                    echo "lease: took $OWNER.$SLOT (${free} MiB free per GPU)"
+                fi
+                if [[ -n $LEASE_REQUEST ]]; then
+                    rm -f "$LEASE_REQUEST"
+                fi
+                LEASE_REQUEST=
+                return 0
+            fi
+            if [[ -n $free ]]; then
+                echo "lease: ${free} MiB free per GPU (< ${want} MiB); waiting (${LEASE_POLL_SECONDS} s)" >&2
+            fi
         fi
         if ((SECONDS >= deadline)); then
             echo "lease: no free $SLOT window after ${LEASE_WAIT_SECONDS} s" >&2
-            rm -f "$LEASE_REQUEST"
+            if [[ -n $LEASE_REQUEST ]] &&
+                [[ $(lease_line_owner "$LEASE_REQUEST") == "$OWNER" ]]; then
+                rm -f "$LEASE_REQUEST"
+            fi
             LEASE_REQUEST=
             return 1
         fi
         sleep "$LEASE_POLL_SECONDS"
     done
-    printf '%s pid %s since %s\n' "$OWNER" "$$" "$(date -Is)" >"$LEASE_DIR/$OWNER.$SLOT"
-    LEASE_HOLDER_CREATED=1
-    rm -f "$LEASE_REQUEST"
-    LEASE_REQUEST=
-    echo "lease: took $OWNER.$SLOT (${free} MiB free per GPU)"
 }
