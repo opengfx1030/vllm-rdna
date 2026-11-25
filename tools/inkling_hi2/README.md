@@ -96,18 +96,20 @@ cd $TREE && env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVI
 
 # CPU gates: loader (23), the launcher/lease/window protocol (31), quantizer
 # reference on the tiny HI2 directory (4; the fixture is built by the quantizer's
-# own pipeline, ~3.7 min), legacy loader (6), plus the GPU kernel tests collected
-# and skipped on CPU (5). H is the quantizer tree; it provides the `hi2` package
-# the reference test imports.
+# own pipeline, ~3.7 min), legacy loader (6), the vision/MTP/recipe checks
+# (test_hi2_vision_mtp.py, 19), plus the GPU kernel tests collected and skipped
+# on CPU (5). H is the quantizer tree; it provides the `hi2` package the
+# reference test imports.
 H=$HOME/w4a8_runs/inkling-hi2/tree
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
 PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
   tests/models/inkling2_loop/test_hi2_loader.py \
   tests/models/inkling2_loop/test_hi2_slots.py \
+  tests/models/inkling2_loop/test_hi2_vision_mtp.py \
   tests/models/inkling2_loop/test_loader.py \
   tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
   tests/models/inkling2_loop/test_hi2_reference.py -q
-# 71 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
+# 90 passed, 5 skipped (419 s, 2026-11-25); INKLING2_TINY_OUT=<dir>
 # reuses the <dir>/stock + <dir>/hi2 pair built below instead of rebuilding it.
 # The launcher test (37) needs no torch: it fakes the visible-device table (a fake
 # torch under a fake venv), the stub HTTP server and the scripts, and covers the
@@ -123,18 +125,32 @@ env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
 PYTHONPATH=$H:$HOME/w4a8_runs/pydeps/tfm-main INKLING2_TINY_OUT=$HOME/w4a8_runs/inkling-hi2-runtime/tiny \
 $V $TREE/tools/inkling_hi2/mutants.py --tree <scratch copy>
 
-# launcher mutant battery: must kill 13/13 (exit 0, ~5 min). It copies tools/ and
+# launcher mutant battery: must kill every mutant (16 as of 2026-11-25; exit 0,
+# ~5 min). It copies tools/ and
 # the launcher test into its own scratch dir; no PYTHONPATH or fixture needed.
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
 $V $TREE/tools/inkling_hi2/mutants_launchers.py
 
+# the serve directory (symlinks; the quantizer output is only read) with the
+# stock bf16 MTP file required: DSpark loads it and the quantizer does not write it
+env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+REQUIRE_MTP=1 PYTHONPATH=$TREE $V $TREE/tools/inkling_hi2/prep_serve_dir.sh \
+  $HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5 \
+  $HOME/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5
+# if the serve dir already exists add FORCE=1; MTP_STOCK overrides the stock file
+# (default ~/hfcache/inkling2-mini/mtp.safetensors)
+
 # the real quantizer output, loaded on CPU (the first-boot proxy): no GPU
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
 PYTHONPATH=$TREE $V $TREE/tools/inkling_hi2/check_real_dir.py \
-  --model $HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5 \
-  --stock $HOME/hfcache/inkling2-mini
+  --model $HOME/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5 \
+  --stock $HOME/hfcache/inkling2-mini --vision --mtp
 # expected: 1125 text tensors, 0 missing parameters, 480 expert buffers,
-# lm_head equals the stock unembed's first 200058 rows, 643 dense tensors bit-equal
+# lm_head equals the stock unembed's first 200058 rows, 643 dense tensors
+# bit-equal, vision tensors bit-equal to stock: 422/422, mtp.safetensors:
+# 54 tensors bit-equal to stock: True.  The vision shard in the output is
+# model-vision.safetensors; prep_serve_dir.sh links it and the stock MTP file,
+# so the serve directory has both for VISION=1 and DSPARK=1.
 ```
 
 Build the tiny HI2 fixture once for the GPU kernel test (it is the same fixture the
@@ -223,7 +239,50 @@ the log.
    ...". If capture fails, rerun with `EAGER=1` and record the difference (FULL
    graphs are a production requirement; an eager-only boot is a finding).
 
-4. **Greedy smoke** with the HI2 server (it boots its own) and the stock server as
+3b. **DSpark / MTP probe** (the production card's speculative path). The draft is
+   the stock bf16 `mtp.safetensors` that `prep_serve_dir.sh` links into the serve
+   directory; its 3 layers and Markov head are not quantized and read the target's
+   hidden-state taps, which `_forward_hip_hi2` writes like the stock path. Boot
+   **two HI2 servers of the same directory** (spec and plain) with a small context
+   so both fit without the stock server:
+
+   ```bash
+   MODEL=$HOME/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5 SLOT=a2 \
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   SERVER_PID_FILE=$HOME/w4a8_runs/inkling-hi2-runtime/server-hi2-plain.pid \
+   VENV=$(dirname $(dirname $V)) PORT=18231 MAXLEN=16384 MAXBAT=1024 SEQS=8 \
+   GMEM=0.45 DSPARK=0 \
+   bash $TREE/tools/inkling_hi2/serve.sh > ~/w4a8_runs/inkling-hi2-runtime/logs/hi2-plain.log 2>&1 &
+
+   MODEL=$HOME/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5 SLOT=a2 \
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   SERVER_PID_FILE=$HOME/w4a8_runs/inkling-hi2-runtime/server-hi2-dspark.pid \
+   VENV=$(dirname $(dirname $V)) PORT=18230 MAXLEN=16384 MAXBAT=1024 SEQS=8 \
+   GMEM=0.45 DSPARK=1 \
+   bash $TREE/tools/inkling_hi2/serve.sh > ~/w4a8_runs/inkling-hi2-runtime/logs/hi2-dspark.log 2>&1 &
+
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   python3 $TREE/tools/inkling_hi2/mtp_probe.py \
+     --spec-url http://127.0.0.1:18230 --plain-url http://127.0.0.1:18231 \
+     --log ~/w4a8_runs/inkling-hi2-runtime/logs/hi2-dspark.log \
+     --drop-batch 3 --json ~/w4a8_runs/inkling-hi2-runtime/mtp_probe.json
+   ```
+
+   The spec boot must log `Inkling-2 DSpark weights: bf16 -> fp16, ... 54 tensors`
+   (no `mtp.safetensors` parse error, no `get_draft_quant_config` failure: the
+   draft's config has no quantization and the HI2 quant config stays on the
+   target) and `SpecDecoding metrics:` lines. Verifies, all hard checks in the
+   probe: greedy outputs token-identical with and without DSpark on the 8
+   code/chat/agentic prompts, deterministic on repeat, clean non-empty text; a
+   mean acceptance length and per-position acceptance rates from the log (record
+   them; the stock card's numbers are the reference, HI2's are unmeasured); decode
+   tokens/s at c=1 (spec vs plain) and c=2; at `--drop-batch 3`
+   `vllm:spec_decode_num_drafts_total` does not move and every request succeeds
+   (`[[1,2,2],[3,8,0]]`). Exit 0 = all checks passed; keep `mtp_probe.json`.
+   Stop both servers afterwards (send SIGTERM to the pid files; the lease trap
+   releases the holder).
+
+1. **Greedy smoke** with the HI2 server (it boots its own) and the stock server as
    the reference:
 
    ```bash
@@ -252,7 +311,7 @@ the log.
    `$RUN_DIR/logs/temps-*.csv` and the serve log keep the evidence. It refuses b4
    and a foreign holder.
 
-5. **KL vs stock on the quantizer's held-out windows** (mixed set, first 32 of 96,
+2. **KL vs stock on the quantizer's held-out windows** (mixed set, first 32 of 96,
    2048 tokens each; the same windows the published 0.0996 nats were measured on):
 
    ```bash
@@ -286,7 +345,7 @@ the log.
    caps each measured probe at `CELL_TIMEOUT=900` s and dies at the cap (rerun with
    a smaller `--windows`), never silently shortening a probe.
 
-6. **Bench cells**, same lease, stock then HI2:
+3. **Bench cells**, same lease, stock then HI2:
 
    ```bash
    HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
@@ -313,16 +372,81 @@ the log.
    so batch-1 decode can be slower than the stock NVFP4 kernel; the memory cell must
    show the HI2 weights smaller. A decode step slower than ~10x stock is a finding.
 
-7. **Graph-mode A/B** (only if step 3 needed it): rerun step 4/5 with `EAGER=1`; the
+4. **Graph-mode A/B** (only if step 3 needed it): rerun step 4/5 with `EAGER=1`; the
    numbers from the eager boot are not the serving record, they bound the graph
    contribution.
 
-## 3. What is deliberately not covered by this kit
+5. **Production-context boot and the vision session** (single-server, `GMEM=0.92`):
 
-* Vision (`--limit-mm-per-prompt {"image":0}`): the tower is bf16 and carried
-  bit-exact by the loader, but the HI2 serving path is validated on text first.
-* MTP / DSpark (`DSPARK=0`): the draft file beside the output is not served; the
-  recipe's draft needs its own conversion and a separate probe.
-* Long context: `MAXLEN=8192` first; the TP=2 recipe's 720k plan applies to the
-  stock model and must be re-measured with the HI2 KV (same 16 KiB/token/rank).
+   (a) The recipe default (DSpark on, 720000) — this is the context/KV check:
+
+   ```bash
+   MODEL=$HOME/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5 SLOT=a2 \
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   SERVER_PID_FILE=$HOME/w4a8_runs/inkling-hi2-runtime/server-hi2-720k.pid \
+   VENV=$(dirname $(dirname $V)) PORT=18230 EAGER=0 \
+   bash $TREE/tools/inkling_hi2/serve.sh > ~/w4a8_runs/inkling-hi2-runtime/logs/hi2-720k.log 2>&1 &
+   ```
+
+   serve.sh with `DSPARK=1` defaults `MAXLEN=720000 MAXBAT=1024`; the boot must
+   reach `/health`, log `max_model_len=720000`, the model-memory line and the KV
+   blocks, and then `smoke.sh` (step 4) must pass against it. If the KV does not
+   fit, record the largest `MAXLEN` that boots (the KV is 32 KiB/token/rank) —
+   that number is the card's context, not 720000.
+
+   (b) Vision (`VISION=1` loads the multimodal class; the tower's 422 `model.visual.*`
+   tensors come from the directory's vision shard). For the stock comparison both
+   servers are resident:
+
+   ```bash
+   # stock reference (as in step 2) + HI2 with images
+   MODEL=$HOME/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5 SLOT=a2 \
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   SERVER_PID_FILE=$HOME/w4a8_runs/inkling-hi2-runtime/server-hi2-vision.pid \
+   VENV=$(dirname $(dirname $V)) PORT=18230 MAXLEN=8192 MAXBAT=256 SEQS=4 \
+   GMEM=0.45 VISION=1 DSPARK=0 \
+   bash $TREE/tools/inkling_hi2/serve.sh > ~/w4a8_runs/inkling-hi2-runtime/logs/hi2-vision.log 2>&1 &
+
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   python3 $TREE/tools/inkling_hi2/vision_probe.py \
+     --make-images ~/w4a8_runs/inkling-hi2-runtime/images
+   HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
+   python3 $TREE/tools/inkling_hi2/vision_probe.py \
+     --hi2-url http://127.0.0.1:18230 --stock-url http://127.0.0.1:18231 \
+     --images ~/w4a8_runs/inkling-hi2-runtime/images \
+     --json ~/w4a8_runs/inkling-hi2-runtime/vision_probe.json
+   ```
+
+   `VISION=1` allows `VISION_IMAGES=1` image per prompt by default; a multi-image
+   eval set needs `VISION_IMAGES=<n>` on the boot line.  The boot must show the
+   vision tower as loaded (no `unexpected vision tensor`, no missing-parameter
+   line) and `/v1/models` must report image support (the stock recipe serves
+   images the same way). The probe requires, per image: a
+   clean one-sentence answer (HTTP 200, `finish_reason` stop/length, no U+FFFD),
+   word overlap with the stock answer >= `--min-overlap 0.3`, and a mixed batch of
+   images and text in flight at `--concurrency 4` (it defaults to the built-in 4
+   PNGs; pass the eval harness's image directory instead if it exists). Keep
+   `vision_probe.json`; the outputs' texts are the evidence. The tower's bit-exact
+   equality is already the CPU `--vision` gate (422/422), so a coherent answer here
+   gates the served path, not the weights.
+
+## 3. Deliberate limits and unrun items
+
+* As of 2026-11-25 every GPU is leased: everything after step 1 is prepared and
+  CPU-checked but unrun. DSPARK=1 and VISION=1 are wired in `serve.sh` and the HI2
+  recipe (defaults: DSPARK on, vision off) and tested on CPU; the first boot should
+  still be `DSPARK=0 VISION=0`.
+* DSpark: the draft is the stock bf16 `mtp.safetensors` (54 tensors), no conversion
+  and no quantizer change; the HI2 serve directory must carry it
+  (`validate_dir.py --require-mtp`, `prep_serve_dir.sh` links it). Identity,
+  acceptance length and speed are unmeasured on HI2; acceptance is expected to be
+  lower than stock (the experts are quantized) and the probe records it without a
+  gate.
+* Vision: the tower is bf16 bit-exact (CPU check 422/422), the head build registers
+  the `inkling2_vit_*` ops (44 rocm ops in `torch.ops._rocm_C`), and the stock
+  recipe serves images; the HI2 image path is unmeasured. `vision_probe.py` is the
+  gate; the tower is loaded only with `VISION=1` (no `--language-model-only`).
+* Long context: 720000 with DSpark is the stock card's number. The HI2 KV is the
+  same 32 KiB/token/rank; step 8a must show the blocks that fit or the honest
+  lower `MAXLEN`.
 * TP=4 and CUDA: the kernel test is gfx1030-only, as the fork requires.

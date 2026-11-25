@@ -281,3 +281,68 @@ TP=1 (`docs/rdna2/inkling2-port-spec.md:240`); HI2 at TP=2 is smaller per rank.
 6. Decode / prefill / memory cells, quiet protocol; record tok/s, TTFT, KV blocks,
    peak GPU memory, kernel counts.
 7. Only then: vision + MTP smoke.
+
+## 6. 2026-11-25 addendum: DSpark, vision, MTP (file:line evidence)
+
+The text path of step 4-6 is unchanged.  This addendum covers the two things the
+first session parked, and the reason neither needs a format change:
+
+* **DSpark / MTP.**  The draft is the stock bf16 `mtp.safetensors`
+  (`vllm/models/inkling2_loop/amd/dspark.py:526`, loaded by
+  `allow_patterns_overrides = ["mtp.safetensors"]` at `:530`), never quantized:
+  its loader requires bf16 and rejects anything else (`:652`); the file on the box
+  has 54 BF16 tensors (checked 2026-11-25).  It reads the *target's* hidden-state
+  taps, which the HI2 serving path writes like the stock one: the taps are
+  allocated in the workspace with `tap_dtype = bf16 under DSpark`
+  (`amd/model.py:1282`, `amd/glue.py:130-138`, `amd/glue.py:258/324`) and the
+  draft is fed through the EAGLE3 tap interface (`amd/model.py:1227`).  The draft's
+  own quantization config is read from the *draft* model config
+  (`vllm/model_executor/models/utils.py:1149`,
+  `vllm/v1/worker/gpu/spec_decode/dspark/utils.py:117`), so the target's HI2
+  `quantization_config` cannot leak into it.  The draft's 3 layers and Markov head
+  use their own fp16 kernels (`csrc/rocm/inkling2_dspark_rdna2.cu`), not the
+  expert GEMM.  **No conversion, no quantizer change.**  The serve directory must
+  carry the stock file, which `prep_serve_dir.sh` already links; `validate_dir.py
+  --require-mtp` makes it a hard check.
+* **Vision.**  `Inkling2LoopForConditionalGeneration` is registered as the
+  multimodal class (`amd/multimodal.py:13`, `:1960`); its wrapper streams
+  `model.visual.*` into `Inkling2VisionEncoder` and delegates everything else to
+  the text loader (`amd/multimodal.py:145-161`).  The 422 tower tensors are bf16
+  in the HI2 output in their own `model-vision.safetensors` shard, bit-equal by
+  construction (verified with `check_real_dir.py --vision`), and the tower runs
+  native HIP ops (`inkling2_vit_*` declared at `csrc/rocm/torch_bindings.cpp:1059-1063`,
+  built from `CMakeLists.txt:1828`; the head build has them).  Serving needs
+  `--limit-mm-per-prompt {"image":1}` and **no** `--language-model-only`:
+  `VISION=1` in `tools/inkling_hi2/serve.sh` and the recipe does exactly that.
+* **Boot switches.**  The HI2 recipe now owns the production card: `DSPARK=1`
+  (default) sets the stock `{"method":"dspark","num_speculative_tokens":7,
+  "num_speculative_tokens_per_batch_size":[[1,2,2],[3,8,0]]}`, MAXLEN=720000,
+  MAXBAT=1024 (recipe `tools/rdna/recipes/inkling2-hi2-tp2.env:57-68`); `DSPARK=0`
+  is the plain 1,048,576/320 boot.  `VISION=1` drops `--language-model-only` and
+  allows an image (`:76-82`).  `serve.sh` forwards both
+  (`tools/inkling_hi2/serve.sh:80-88`, `:157-182`).
+* **Tests/tools added (CPU).**  `tests/models/inkling2_loop/test_hi2_vision_mtp.py`
+  covers the vision/MTP census helpers, the bit-exact compare on tiny safetensors,
+  the recipe branches and the probes' parsers;
+  `tools/inkling_hi2/mtp_probe.py` (greedy identity spec vs plain, per-position
+  acceptance from the log, c=1/c=2 speed, the `[[3,8,0]]` no-draft region) and
+  `tools/inkling_hi2/vision_probe.py` (deterministic PNGs, stock overlap, mixed
+  batch) are the GPU gates; both are in README steps 3b and 8.
+* **Scout reconciliation.**  `InklingRuntimeScout` surveyed the same question on
+  the pre-HI2 merge tree (`ee27e18374`): "no HI2 expert path, loader accepts only
+  NVFP4/MXFP8, the rdna_hint_flex MoE only takes SiLU, no MTP/vision detail".
+  That is the state this branch already changed (section 4): `hi2_expert_formats`,
+  the stacked HI2 loader/TP slice and `_forward_chunk_hi2` are in this worktree and
+  its CPU gates pass.  The scout's MTP/vision line numbers are from that older
+  revision; the names and the "draft is bf16, no conversion" conclusion agree.  No
+  remaining difference affects this slice.
+* **Scout reconciliation.**  `InklingRuntimeScout` surveyed the same question on
+  the pre-HI2 merge tree (`ee27e18374`): "no HI2 expert path, loader accepts only
+  NVFP4/MXFP8, the rdna_hint_flex MoE only takes SiLU, no MTP/vision detail".
+  That is the state this branch already changed (section 4): `hi2_expert_formats`,
+  the stacked HI2 loader/TP slice and `_forward_chunk_hi2` are in this worktree and
+  its CPU gates pass.  The scout's MTP/vision line numbers are from that older
+  revision; the names and the "draft is bf16, no conversion" conclusion agree.  No
+  remaining difference affects this slice.
+* **Still unmeasured:** every GPU number (identity/acceptance/speed, the 720k KV
+  fit, and the served image path).  All GPUs were leased on 2026-11-25.

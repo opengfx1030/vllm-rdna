@@ -92,8 +92,8 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
         [
             (
                 "serve.sh",
-                "    break\ndone\n\nEXTRA=",
-                "    break\ndone\nexec 9>&-\n\nEXTRA=",
+                "    break\ndone\n\nif [[ $VISION == 1 ]]; then",
+                "    break\ndone\nexec 9>&-\n\nif [[ $VISION == 1 ]]; then",
             ),
             (
                 "serve.sh",

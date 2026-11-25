@@ -3,10 +3,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Boot an HI2 Inkling-2-Mini directory on the a2 lease (HIP 0,1; PCI buses d1 d4),
-# two V620s (TP=2), language model only.
+# two V620s (TP=2).
 #
 #   MODEL=/path/to/bpw3.5 VENV=/path/to/venv bash tools/inkling_hi2/serve.sh
 #   SLOT=a2 HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 ...
+#
+# DSPARK=1 boots the target with the stock DSpark block (the bf16 MTP file that
+# prep_serve_dir.sh links next to the HI2 shards; the draft is format-independent),
+# VISION=1 drops --language-model-only and allows VISION_IMAGES images per prompt
+# (default 1; the multimodal class loads model.visual.* bit-exact from the
+# directory's vision shard).  Both default to 0: the first boot is the text-only
+# plain decode.
 #
 # Required: MODEL (a directory written by the quantizer; it carries the tokenizer),
 #           VENV (the box venv with the built vllm).
@@ -20,9 +27,11 @@
 #           DRM_SYSFS=/sys/class/drm and LEASE_FREE_GIB=28 (then the holder is
 #           written only when no other holder exists and every slot GPU has
 #           >= 28 GiB free; the release trap is armed before a2.request),
-#           TREE (default: this worktree), PORT=18230, MAXLEN=8192, MAXBAT=256,
-#           SEQS=1, EAGER=0, GMEM=0.92, WAIT_QUIET=1 (wait out the slot's quiet
-#           windows), BOOT_LOCK=~/w4a8_runs/boot.lock, QUIET_DIR (default:
+#           TREE (default: this worktree), RECIPE=inkling2-mini-tp2, PORT=18230,
+#           VISION_IMAGES=1 (the per-prompt image cap when VISION=1),
+#           MAXLEN (default 8192; 720000 when DSPARK=1), MAXBAT (default 256;
+#           1024 when DSPARK=1), SEQS=1, EAGER=0, GMEM=0.92, WAIT_QUIET=1 (wait
+#           out the slot's quiet windows), BOOT_LOCK=~/w4a8_runs/boot.lock, QUIET_DIR (default:
 #           ~/w4a8_runs/lanes/quiet-$SLOT), MEASURE_LOCK= (empty: cross-slot lock
 #           off), READY_SECONDS=1800, SERVER_PID_FILE= (write the server pid here
 #           for the window samplers), REGRESSION=1 (the HI2 kernel path; 0 boots
@@ -68,9 +77,18 @@ LEASE_DIR=${LEASE_DIR:-$HOME/w4a8_runs/lanes/lease}
 MEASURE_LOCK=${MEASURE_LOCK:-}
 export MEASURE_LOCK
 TREE=${TREE:-$(cd "$HERE/../.." && pwd)}
+RECIPE=${RECIPE:-inkling2-mini-tp2}
 PORT=${PORT:-18230}
-MAXLEN=${MAXLEN:-8192}
-MAXBAT=${MAXBAT:-256}
+DSPARK=${DSPARK:-0}
+VISION=${VISION:-0}
+VISION_IMAGES=${VISION_IMAGES:-1}
+if [[ $DSPARK == 1 ]]; then
+    MAXLEN=${MAXLEN:-720000}
+    MAXBAT=${MAXBAT:-1024}
+else
+    MAXLEN=${MAXLEN:-8192}
+    MAXBAT=${MAXBAT:-256}
+fi
 SEQS=${SEQS:-1}
 EAGER=${EAGER:-0}
 GMEM=${GMEM:-0.92}
@@ -139,12 +157,16 @@ while :; do
     break
 done
 
-EXTRA="--limit-mm-per-prompt {\"image\":0} --max-logprobs 128"
+if [[ $VISION == 1 ]]; then
+    EXTRA="--limit-mm-per-prompt {\"image\":$VISION_IMAGES} --max-logprobs 128"
+else
+    EXTRA='--limit-mm-per-prompt {"image":0} --max-logprobs 128'
+fi
 if [[ $REGRESSION == 0 ]]; then
     export VLLM_INKLING2_PATH=reference
 fi
 
-echo "serve.sh: SLOT=$SLOT HIP=$HIP_VISIBLE_DEVICES PCI=$EXPECT_PCI_BUSES MODEL=$MODEL TP=2 PORT=$PORT MAXLEN=$MAXLEN MAXBAT=$MAXBAT SEQS=$SEQS EAGER=$EAGER OWNER=$OWNER"
+echo "serve.sh: SLOT=$SLOT HIP=$HIP_VISIBLE_DEVICES PCI=$EXPECT_PCI_BUSES MODEL=$MODEL TP=2 PORT=$PORT MAXLEN=$MAXLEN MAXBAT=$MAXBAT SEQS=$SEQS EAGER=$EAGER DSPARK=$DSPARK VISION=$VISION OWNER=$OWNER"
 check_devices
 if [[ -n $SERVER_PID_FILE ]]; then
     mkdir -p "$(dirname "$SERVER_PID_FILE")"
@@ -152,12 +174,13 @@ fi
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
     HIP_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES" EXPECT_PCI_BUSES="$EXPECT_PCI_BUSES" \
     bash "$TREE/tools/rdna/serve_rdna.sh" \
-    RECIPE=inkling2-mini-tp2 \
+    RECIPE="$RECIPE" \
     MODEL="$MODEL" \
     VENV="$VENV" \
     HIP_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES" \
     PORT="$PORT" \
-    DSPARK=0 MTP=0 EAGER="$EAGER" CG_MODE=FULL_AND_PIECEWISE \
+    DSPARK="$DSPARK" VISION="$VISION" SPEC_CONFIG="${SPEC_CONFIG:-}" \
+    MTP=0 EAGER="$EAGER" CG_MODE=FULL_AND_PIECEWISE \
     MAXLEN="$MAXLEN" MAXBAT="$MAXBAT" SEQS="$SEQS" GMEM="$GMEM" \
     EXTRA_ARGS="$EXTRA" 9>&- &
 SERVER=$!

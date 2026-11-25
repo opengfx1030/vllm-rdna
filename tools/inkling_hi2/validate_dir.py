@@ -16,7 +16,9 @@ Exit 0: every check passed (warnings are printed but do not fail).  Exit 1: an
 error.  Exit 2: bad input.  The offsets inside the row buffers are checked by
 the loader when it loads the tensors; this tool checks that every stacked group
 of every layer is present, in an indexed shard, with the shapes and dtypes the
-kernels read, plus the MTP file and the tokenizer.
+kernels read, the 422-tensor bf16 vision tower (the multimodal class loads
+``model.visual.*`` from its own shard), the MTP file (``--require-mtp`` makes a
+missing one an error: DSpark needs it) and the tokenizer.
 """
 
 from __future__ import annotations
@@ -99,6 +101,99 @@ def nbytes(entry: dict) -> int:
     return int(hi) - int(lo)
 
 
+def check_vision(weight_map: dict[str, str], get_entry) -> tuple[dict, list[str]]:
+    """Every indexed ``model.visual.*`` tensor: present, in a float dtype.
+
+    ``get_entry(name)`` returns the safetensors header entry of a tensor (or
+    None when its shard/tensor is absent).  Returns the census and the errors.
+    """
+    prefix = "model.visual."
+    names = sorted(n for n in weight_map if n.startswith(prefix))
+    shards = sorted({weight_map[n] for n in names})
+    dtypes: dict[str, int] = {}
+    nbytes_total = 0
+    missing = []
+    errors: list[str] = []
+    for name in names:
+        e = get_entry(name)
+        if e is None:
+            missing.append(name)
+            continue
+        dtypes[e["dtype"]] = dtypes.get(e["dtype"], 0) + 1
+        nbytes_total += nbytes(e)
+    if not names:
+        errors.append(
+            f"the index has no {prefix}* tensors: the vision tower is missing "
+            "(VISION=1 cannot load)"
+        )
+    if missing:
+        errors.append(
+            f"{len(missing)} {prefix}* tensors are missing, e.g. {missing[:2]}"
+        )
+    bad = sorted(set(dtypes) - {"BF16", "F32"})
+    if bad:
+        errors.append(
+            f"the vision tower has non-float dtypes {bad}; the multimodal loader "
+            "copies the tower as loaded (the stock checkpoint is bf16)"
+        )
+    return {
+        "tensors": len(names),
+        "missing": missing,
+        "shards": shards,
+        "dtypes": dtypes,
+        "bytes": nbytes_total,
+    }, errors
+
+
+def check_mtp(
+    header: dict | None,
+    weight_map: dict[str, str],
+    path: str,
+    require: bool,
+) -> tuple[dict, list[str], list[str]]:
+    """The MTP file DSpark loads: present (when required), bf16, no overlap.
+
+    ``header`` is the safetensors header of the MTP file (None when absent).
+    Returns the census, the errors and the warnings.
+    """
+    info = {
+        "path": path,
+        "present": header is not None,
+        "bytes": 0,
+        "keys": 0,
+        "dtypes": {},
+    }
+    errors: list[str] = []
+    warnings: list[str] = []
+    if header is None:
+        message = f"no MTP file at {path} (DSpark needs one)"
+        if require:
+            errors.append(
+                message + "; prep_serve_dir.sh links the stock bf16 mtp.safetensors"
+            )
+        else:
+            warnings.append(message)
+        return info, errors, warnings
+    info["bytes"], info["keys"] = sum(nbytes(e) for e in header.values()), len(header)
+    for e in header.values():
+        dt = e["dtype"]
+        info["dtypes"][dt] = info["dtypes"].get(dt, 0) + 1
+    overlap = set(header) & set(weight_map)
+    if overlap:
+        errors.append(
+            f"mtp.safetensors shares {len(overlap)} indexed tensors, "
+            f"e.g. {sorted(overlap)[:2]}"
+        )
+    non_bf16 = sorted(set(info["dtypes"]) - {"BF16"})
+    if non_bf16:
+        errors.append(
+            f"mtp.safetensors has non-bf16 tensors ({non_bf16}); "
+            "Inkling2DSparkModel.load_weights raises on them (the stock MTP file "
+            "is 54 BF16 tensors)"
+        )
+    return info, errors, warnings
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True, help="the prepared serve directory")
@@ -109,6 +204,11 @@ def main() -> int:
     )
     ap.add_argument("--json", default=None, help="also write the report as JSON")
     ap.add_argument("--tp", type=int, default=2, help="tensor parallel size")
+    ap.add_argument(
+        "--require-mtp",
+        action="store_true",
+        help="a missing MTP file is an error (DSpark boots need it)",
+    )
     args = ap.parse_args()
 
     model = Path(args.model).expanduser()
@@ -250,12 +350,10 @@ def main() -> int:
     }
     dense_names = [n for n in weight_map if n not in expert_names]
     dense_bytes = sum(nbytes(entry(n)) for n in dense_names if entry(n) is not None)
-    vision_bytes = sum(
-        nbytes(e)
-        for rel, h in shards.items()
-        if "vision" in Path(rel).name
-        for e in h.values()
-    )
+
+    visual, visual_errors = check_vision(weight_map, entry)
+    errors.extend(visual_errors)
+    visual_bytes = visual["bytes"]
     unindexed = sorted(
         p.name
         for p in model.glob("*.safetensors")
@@ -268,27 +366,21 @@ def main() -> int:
         mtp_path = (
             Path(args.mtp).expanduser() if args.mtp else model / "mtp.safetensors"
         )
-    mtp = {
-        "path": str(mtp_path) if mtp_path is not None else "",
-        "present": mtp_path is not None and mtp_path.is_file(),
-        "bytes": 0,
-        "keys": 0,
-    }
-    if mtp["present"]:
+    mtp_header: dict | None = None
+    if mtp_path is not None and mtp_path.is_file():
         try:
-            assert mtp_path is not None
-            h = read_header(mtp_path)
-            mtp["bytes"], mtp["keys"] = sum(nbytes(e) for e in h.values()), len(h)
-            overlap = set(h) & set(weight_map)
-            if overlap:
-                errors.append(
-                    f"mtp.safetensors shares {len(overlap)} indexed tensors, "
-                    f"e.g. {sorted(overlap)[:2]}"
-                )
+            mtp_header = read_header(mtp_path)
         except (ValueError, json.JSONDecodeError) as exc:
             errors.append(f"mtp.safetensors: {exc}")
-    else:
-        warnings.append(f"no MTP file at {mtp_path} (DSpark needs one)")
+            mtp_header = {}
+    mtp, mtp_errors, mtp_warnings = check_mtp(
+        mtp_header,
+        weight_map,
+        str(mtp_path) if mtp_path is not None else "",
+        args.require_mtp,
+    )
+    errors.extend(mtp_errors)
+    warnings.extend(mtp_warnings)
 
     tokenizer = model / "tokenizer.json"
     if not tokenizer.is_file():
@@ -303,11 +395,11 @@ def main() -> int:
 
     if args.tp > 1:
         per_rank_experts = expert_bytes / args.tp
-        upper = per_rank_experts + dense_bytes + vision_bytes + mtp["bytes"]
-        lower = per_rank_experts + dense_bytes / args.tp + vision_bytes + mtp["bytes"]
+        upper = per_rank_experts + dense_bytes + visual_bytes + mtp["bytes"]
+        lower = per_rank_experts + dense_bytes / args.tp + visual_bytes + mtp["bytes"]
     else:
         per_rank_experts = expert_bytes
-        upper = lower = expert_bytes + dense_bytes + vision_bytes + mtp["bytes"]
+        upper = lower = expert_bytes + dense_bytes + visual_bytes + mtp["bytes"]
 
     gib = 1 << 30
     report = {
@@ -323,11 +415,12 @@ def main() -> int:
         "col_scale_groups": col_scale_groups,
         "files": sorted(p.name for p in model.iterdir()) if model.is_dir() else [],
         "unindexed_safetensors": unindexed,
+        "vision": visual,
         "bytes": {
             "indexed_total": total_bytes,
             "experts": expert_bytes,
             "dense": dense_bytes,
-            "vision_shard": vision_bytes,
+            "vision": visual_bytes,
             "mtp": mtp["bytes"],
             "per_field": per_field,
             "tp": args.tp,
@@ -352,6 +445,15 @@ def main() -> int:
         f"{experts} experts"
     )
     print(f"groups         {groups} ({col_scale_groups} with col_scale)")
+    print(
+        f"vision         {visual['tensors']} tensors {visual['dtypes']} in "
+        f"{visual['shards']}, {visual_bytes / gib:.2f} GiB"
+    )
+    print(
+        "mtp            {} tensors {} {:.2f} GiB".format(
+            mtp["keys"], mtp["dtypes"] or "-", mtp["bytes"] / gib
+        )
+    )
     print(f"shards         {sorted(set(weight_map.values()))}")
     if unindexed:
         print(f"unindexed      {unindexed}")
@@ -360,7 +462,7 @@ def main() -> int:
         "MTP {:.2f} GiB, indexed total {:.2f} GiB".format(
             expert_bytes / gib,
             dense_bytes / gib,
-            vision_bytes / gib,
+            visual_bytes / gib,
             mtp["bytes"] / gib,
             total_bytes / gib,
         )

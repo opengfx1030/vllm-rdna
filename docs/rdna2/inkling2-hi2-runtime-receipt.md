@@ -644,3 +644,78 @@ env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
 PRINT=1 bash $TREE/tools/rdna/serve_rdna.sh RECIPE=inkling2-hi2-tp2 MODEL=$O VENV=$V \
   HIP_VISIBLE_DEVICES=<leased HIP ids>
 ```
+
+## 2026-11-25 addendum: DSpark, vision, MTP wiring (CPU only, no GPU run)
+
+Trigger: the final card needs DSpark on and the vision tower served; the kit
+forced `DSPARK=0` and `{"image":0}`.  Findings and the resulting change:
+
+- Both blockers were in the kit, not the model.  The draft reads the *draft's*
+  quantization config (`vllm/model_executor/models/utils.py:1149` via
+  `vllm/v1/worker/gpu/spec_decode/dspark/utils.py:117`), so an HI2 target leaves
+  it unquantized; it loads the stock bf16 `mtp.safetensors` (54 BF16 tensors,
+  `amd/dspark.py:526/530/652`, dtype enforced on load) from the same directory
+  (`allow_patterns_overrides`).  `prep_serve_dir.sh` already links that file.
+  The vision tower is the registered multimodal class
+  (`amd/multimodal.py:13/145-161`) with native HIP ops
+  (`csrc/rocm/torch_bindings.cpp:1059-1063`, `CMakeLists.txt:1828`); the head
+  tree's built `_rocm_C.abi3.so` registers 44 rocm ops including
+  `inkling2_vit_gather_patches` (checked on the box; `~/w4a8_runs/
+  inkling-hi2-runtime/tree`, not the older `tree-cp` control copy, which lacks
+  them).  The 422 `model.visual.*` tensors are bf16 in the quantizer output.
+- Changes: `serve.sh` gained `DSPARK` (spec block via the mini recipe, 720000/
+  1024 defaults), `VISION` (drops `--language-model-only`, allows one image) and
+  a `RECIPE` override; the HI2 recipe owns the same branches; `validate_dir.py`
+  checks the vision census and (with `--require-mtp`) the MTP file, including
+  bf16; `check_real_dir.py` gained `--vision` (bit-exact tower compare) and
+  `--mtp`; `mtp_probe.py` and `vision_probe.py` are the GPU gates
+  (README steps 3b and 8); `test_hi2_vision_mtp.py` covers all of it on CPU.
+- The recipe now defaults to `DSPARK=1`; the first boot stays
+  `DSPARK=0 VISION=0` (README step 3).  Nothing here changes the quantizer: the
+  MTP file is the stock one and the vision tower is carried bit-exact.
+
+Commands (CPU; `$TREE` = this worktree, `$V` = the box venv):
+
+```bash
+# the new tests with the rest of the CPU gate (counts below are from the run)
+env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+  PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
+    $TREE/tests/models/inkling2_loop/test_hi2_loader.py \
+    $TREE/tests/models/inkling2_loop/test_hi2_slots.py \
+    $TREE/tests/models/inkling2_loop/test_hi2_vision_mtp.py \
+    $TREE/tests/models/inkling2_loop/test_loader.py \
+    $TREE/tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
+    $TREE/tests/models/inkling2_loop/test_hi2_reference.py -q
+# the serve directory (prep_serve_dir.sh output; the raw quantizer directory has
+# no MTP file), now with the vision and MTP comparisons
+REQUIRE_MTP=1 bash $TREE/tools/inkling_hi2/prep_serve_dir.sh \
+  ~/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5 \
+  ~/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5
+env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+  PYTHONPATH=$TREE $V $TREE/tools/inkling_hi2/check_real_dir.py \
+    --model ~/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5 \
+    --stock ~/hfcache/inkling2-mini --vision --mtp
+# the prepared serve directory (MTP required for the DSpark boots)
+env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+  PYTHONPATH=$TREE $V $TREE/tools/inkling_hi2/validate_dir.py \
+    --model ~/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5 --require-mtp
+# the recipe's two branches, no GPU (assemble only)
+PRINT=1 DSPARK=1 bash $TREE/tools/rdna/serve_rdna.sh RECIPE=inkling2-hi2-tp2 \
+  MODEL=<serve dir> VENV=$V HIP_VISIBLE_DEVICES=0,1   # --speculative-config ...; max-model-len 720000
+PRINT=1 DSPARK=0 bash $TREE/tools/rdna/serve_rdna.sh RECIPE=inkling2-hi2-tp2 \
+  MODEL=<serve dir> VENV=$V HIP_VISIBLE_DEVICES=0,1   # max-model-len 1048576, no spec args
+```
+
+Run of 2026-11-25 on the box (CPU only, head tree `~/w4a8_runs/inkling-hi2-runtime/
+tree`): the six-file CPU gate **90 passed, 5 skipped in 419 s**;
+`check_real_dir.py --model <serve dir> --stock <stock> --vision --mtp` loaded
+1125 text tensors with 0 missing parameters and 480 expert buffers, the lm_head's
+first 200058 rows equal the stock unembed, 643 dense text tensors, **422/422
+vision tensors** and **54/54 MTP tensors** bit-equal, then `PASS`;
+`validate_dir.py --model <serve dir> --require-mtp` printed the vision census
+(422 BF16 in `model-vision.safetensors`), the MTP census and `VALID`;
+`mutants_launchers.py` killed **16/16** mutants (including the boot-lock mutant,
+whose pattern now follows the `VISION` branch).  Two findings were real and
+fixed: `compare_mtp` only checked the dtype of the served file (now both files),
+and the `validate_dir` census used a stale `vision_bytes` name after the
+refactor.  GPU numbers remain unmeasured (all GPUs leased).
