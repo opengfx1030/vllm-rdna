@@ -265,16 +265,17 @@ class RdnaHintFlexMoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(f"rdna_hint_flex MoE: activation {act}")
         x2 = x.reshape(-1, x.shape[-1]).to(torch.float16)
         m = x2.shape[0]
-        ids = topk_ids.reshape(m, -1).long()
+        ids_2d = topk_ids.reshape(m, -1)
         emap = getattr(layer, "expert_map", None)
         if m > GROUPED_MIN_TOKENS and self.compute_mode == 0:
-            return self._apply_grouped(layer, x2, topk_ids.reshape(m, -1),
+            return self._apply_grouped(layer, x2, ids_2d,
                                        topk_weights.reshape(m, -1), emap)  # fmt: skip
-        if emap is not None:
-            ids = emap[ids]
+        ids = emap[ids_2d.long()] if emap is not None else ids_2d
+        if ids.dtype != torch.int32:
+            ids = ids.to(torch.int32)
         return ops.rdna_hint_flex_moe_rdna2(
             x2,
-            ids.to(torch.int32).contiguous(),
+            ids.contiguous(),
             topk_weights.reshape(m, -1).float().contiguous(),
             layer._rdna_hint_flex_w13,
             layer._rdna_hint_flex_w13_tr,
@@ -316,7 +317,8 @@ class RdnaHintFlexMoEMethod(FusedMoEMethodBase):
         ops.rdna_hint_flex_moe_gemm_rdna2(
             xp, sorted_ids, expert_ids, ntpp, w13, 2 * n, g13
         )
-        hmid = F.silu(g13[:, :n]) * g13[:, n:]
+        hmid = torch.empty(p, n, dtype=g13.dtype, device=g13.device)
+        torch.ops._C.silu_and_mul(hmid, g13)
         hp = torch.empty(p, n, dtype=torch.float16, device=x2.device)
         ops.rdna_hint_flex_moe_transform_rdna2(
             hmid, 1, local, w2, layer._rdna_hint_flex_w2_tr, hp
