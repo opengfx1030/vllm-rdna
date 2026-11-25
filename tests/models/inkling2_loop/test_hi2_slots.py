@@ -829,6 +829,41 @@ def test_clients_refuse_b4(monkeypatch):
     assert kl_probe.main() == 2
 
 
+def test_kl_probe_scores_from_position_one():
+    # vLLM returns None for the first prompt position (no context).  The old
+    # parser indexed it and raised AttributeError; the probe must score from 1.
+    kl = importlib.import_module("kl_probe")
+    choice = {
+        "logprobs": {
+            "tokens": ["a", "b", "c"],
+            "top_logprobs": [
+                None,
+                {"a": -0.1, "b": -1.0},
+                {"a": -0.2},
+            ],
+        }
+    }
+    assert kl.top_distribution(choice, 0) is None
+    assert kl.top_distribution(choice, 1) == {"a": -0.1, "b": -1.0}
+    assert kl.top_entry_size(choice) == 2
+    values, agrees, skipped, considered = kl.score_window(choice, choice, 3)
+    assert (skipped, considered, len(values), agrees) == (0, 2, 2, 2)
+
+
+def test_kl_probe_skips_omitted_positions():
+    kl = importlib.import_module("kl_probe")
+    gaps = {"logprobs": {"top_logprobs": [None, {"a": -0.1}, None, {"a": -0.2}]}}
+    full = {"logprobs": {"top_logprobs": [None, {"a": -0.1}, {"a": -0.2}, {"a": -0.3}]}}
+    values, agrees, skipped, considered = kl.score_window(gaps, full, 4)
+    assert considered == 3
+    assert skipped == 1
+    assert len(values) == 2
+    assert agrees == 2
+    empty = {"logprobs": {"top_logprobs": [None]}}
+    assert kl.score_window(empty, empty, 2)[0] == []
+    assert kl.top_entry_size(empty) == 0
+
+
 def test_bench_window_record_requires_eviction_evidence():
     bench = importlib.import_module("bench")
     ok = bench.window_record(60.0, "evicted_ms 1=+0 -> ok", True)

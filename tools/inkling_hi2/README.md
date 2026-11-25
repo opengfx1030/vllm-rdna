@@ -107,14 +107,15 @@ PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
   tests/models/inkling2_loop/test_loader.py \
   tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
   tests/models/inkling2_loop/test_hi2_reference.py -q
-# 69 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
+# 71 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
 # reuses the <dir>/stock + <dir>/hi2 pair built below instead of rebuilding it.
-# The launcher test (35) needs no torch: it fakes the visible-device table (a fake
+# The launcher test (37) needs no torch: it fakes the visible-device table (a fake
 # torch under a fake venv), the stub HTTP server and the scripts, and covers the
 # lease (request, holder, VRAM wait, trap release, foreign/live/queued refusals),
 # quiet + boot.lock order, the three device checks, the b4 refusal, both thermal
 # and both KFD window outcomes, the greedy/capsule probes and their failures
-# (including smoke's non-zero exit), and the cells (capture + bench).
+# (including smoke's non-zero exit), the KL parser (None at position 0 and omitted
+# positions skipped), and the cells (capture + bench).
 
 # mutant battery: the loader / name map / TP slice / reference tests must kill
 # every mutant (21; exit 0). Use a scratch copy of the tree, not the checkout.
@@ -255,7 +256,17 @@ the log.
 
    Verifies: mean truncated KL near the full-logit reference (0.0996; expect the
    same order, gate 0.15), top-1 >= 0.90 (reference 0.930), per-window spread and
-   prompt-token counts equal between the servers. Repeat with
+   prompt-token counts equal between the servers.  Positions are scored from 1
+   (position 0 has no context and vLLM returns `None`); any position whose top-k
+   entry a server omitted is skipped, printed as `skipped S/considered`, and a
+   window with more than `--max-skipped-share 0.05` of them fails instead of
+   silently scoring fewer positions.  The request uses `temperature=1` and raw
+   post-softcap logprobs truncated to the top-k (no renormalisation); the first
+   window prints the number of top entries each server returned (`... (requested
+   100)`) and the JSON records them as `topk_entries` — fewer than requested means
+   the served KL is truncated further, so the served number is an fp16-path top-100
+   approximation of the quantizer's float32 full-logit eval: compare it within
+   `--max-kl`, not for equality.  Repeat with
    `heldout_wiki_ids.npy` (17 windows, reference 0.0468) and
    `heldout_pydocs_ids.npy` (0.0305) — those are stricter relative checks than the
    mixed set. Both servers must have `--max-logprobs 128` (serve.sh passes it).

@@ -5,13 +5,17 @@
 
 The windows are the stage-4 evaluation ids (``heldout_mixed_ids.npy``,
 ``[96, 2048]`` int32; the first 32 are the published 0.0996 nats at 3.5 bpw).
-Both servers answer a completions request with ``prompt=<ids>``, ``echo=true`` and
-``logprobs=--topk``; the probe compares the next-token distributions position by
-position and reports the mean KL, its standard error over windows, top-1 agreement
-and the expected speculative acceptance.  The HTTP distribution is truncated to
-the top-k tokens, so the number is an approximation of the quantizer's full-logit
-KL (which the reference eval JSON carries); the gate defaults to that reference
-plus the quantization's own headroom.
+Both servers answer a completions request with ``prompt=<ids>``, ``echo=true``,
+``temperature=1`` and ``logprobs=--topk``; the probe scores the next-token
+distributions from position 1 (position 0 predicts the first token with no
+context, and vLLM returns ``None`` there), skips any position whose top-k entry a
+server omitted, and caps the skipped share at ``--max-skipped-share`` (default 5 %
+of a window).  It reports the mean KL, its standard error over windows, top-1
+agreement and the expected speculative acceptance.  The served number is a top-k
+truncated KL on the fp16 path (raw post-softcap logits, no renormalisation), so it
+approximates rather than equals the quantizer's float32 full-logit eval: the
+reference is 0.0996 nats and top-1 93.0 % on the 32 mixed windows, and the gate
+(``--max-kl 0.15`` / ``--min-top1 0.90``) leaves that tolerance.
 
     python tools/inkling_hi2/kl_probe.py \\
         --hi2-url http://127.0.0.1:18230 --stock-url http://127.0.0.1:18231 \\
@@ -54,9 +58,49 @@ def _key(k: str) -> str:
     return k
 
 
-def top_distribution(choice: dict, position: int) -> dict[str, float]:
-    top = choice["logprobs"]["top_logprobs"][position]
-    return {_key(k): float(v) for k, v in top.items()}
+def top_distribution(choice: dict, position: int) -> dict[str, float] | None:
+    """Top-k logprob dict at ``position``, or None when the server omitted it.
+
+    vLLM returns ``None`` for the first prompt position (no context) and can omit
+    an entry entirely; the caller skips those positions and counts them.
+    """
+    logprobs = choice.get("logprobs") or {}
+    tops = logprobs.get("top_logprobs") or []
+    if position >= len(tops) or tops[position] is None:
+        return None
+    return {_key(k): float(v) for k, v in tops[position].items()}
+
+
+def top_entry_size(choice: dict) -> int:
+    """Number of top-k entries the server returned (0 if it ignored logprobs).
+
+    A response with fewer than the requested ``logprobs`` entries means the served
+    KL is truncated further than asked, so the probe prints and records this.
+    """
+    tops = (choice.get("logprobs") or {}).get("top_logprobs") or []
+    return next((len(t) for t in tops if t), 0)
+
+
+def score_window(
+    c_stock: dict, c_hi2: dict, seq_len: int
+) -> tuple[list[float], int, int, int]:
+    """Per-position KLs, top-1 agreements, skipped positions, considered positions.
+
+    Positions are scored from 1: position 0 predicts the first prompt token with no
+    context and its top-k entry is None on vLLM.  A position where either server
+    omitted the entry is skipped and counted (the caller caps the share).
+    """
+    values, agrees, skipped = [], 0, 0
+    for pos in range(1, seq_len):
+        p = top_distribution(c_stock, pos)
+        q = top_distribution(c_hi2, pos)
+        if p is None or q is None:
+            skipped += 1
+            continue
+        kl, same = truncated_kl(p, q)
+        values.append(kl)
+        agrees += int(same)
+    return values, agrees, skipped, seq_len - 1
 
 
 def window_kl(url: str, model: str, ids: list[int], topk: int):
@@ -66,15 +110,17 @@ def window_kl(url: str, model: str, ids: list[int], topk: int):
             "model": model,
             "prompt": ids,
             "max_tokens": 1,
-            "temperature": 0.0,
+            # T=1 scores the raw, post-softcap logits the quantizer's eval used;
+            # logprobs are returned truncated to the top-k, not renormalised.
+            "temperature": 1.0,
             "echo": True,
             "logprobs": topk,
             "return_tokens_as_token_ids": True,
         },
     )
     choice = out["choices"][0]
-    if choice["logprobs"] is None:
-        raise RuntimeError(f"{url}: no logprobs in the response")
+    if choice.get("logprobs") is None:
+        raise RuntimeError(f"{url}: no logprobs in the response (echo=True?)")
     return choice, out["usage"]
 
 
@@ -142,6 +188,12 @@ def main() -> int:
     ap.add_argument("--topk", type=int, default=100)
     ap.add_argument("--max-kl", type=float, default=None)
     ap.add_argument("--min-top1", type=float, default=0.90)
+    ap.add_argument(
+        "--max-skipped-share",
+        type=float,
+        default=0.05,
+        help="fail a window if more of its positions lack a top-k distribution",
+    )
     ap.add_argument("--reference-eval", default=None)
     ap.add_argument("--greedy", action="store_true")
     ap.add_argument("--out", default=None)
@@ -174,23 +226,37 @@ def main() -> int:
     )
 
     kls, top1 = [], []
+    skipped_total, considered_total = 0, 0
+    topk_entries = None
     for i in range(n):
         ids = windows[i].tolist()
         c_stock, u_stock = window_kl(args.stock_url, stock_name, ids, args.topk)
         c_hi2, u_hi2 = window_kl(args.hi2_url, hi2_name, ids, args.topk)
-        values = []
-        agrees = 0
-        for pos in range(len(ids) - 1):
-            p = top_distribution(c_stock, pos)
-            q = top_distribution(c_hi2, pos)
-            kl, same = truncated_kl(p, q)
-            values.append(kl)
-            agrees += int(same)
+        if i == 0:
+            topk_entries = {
+                "stock": top_entry_size(c_stock),
+                "hi2": top_entry_size(c_hi2),
+            }
+            print(
+                f"kl: top entries per position stock={topk_entries['stock']} "
+                f"hi2={topk_entries['hi2']} (requested {args.topk})"
+            )
+        values, agrees, skipped, considered = score_window(c_stock, c_hi2, len(ids))
+        if not values:
+            raise RuntimeError(f"kl: window {i} has no usable prompt logprobs")
+        if skipped > args.max_skipped_share * considered:
+            raise RuntimeError(
+                f"kl: window {i} skipped {skipped}/{considered} positions "
+                f"(> {args.max_skipped_share:.0%})"
+            )
+        skipped_total += skipped
+        considered_total += considered
         mean = float(np.mean(values))
         kls.append(mean)
-        top1.append(agrees / max(len(values), 1))
+        top1.append(agrees / len(values))
         print(
             f"kl: window {i:03d} KL {mean:.5f} top1 {top1[-1]:.4f} "
+            f"skipped {skipped}/{considered} "
             f"prompt_tokens {u_stock.get('prompt_tokens')}/{u_hi2.get('prompt_tokens')}"
         )
 
@@ -205,6 +271,12 @@ def main() -> int:
         "kl_sem": sem,
         "top1": top1_mean,
         "per_window_kl": kls,
+        "skipped_share": skipped_total / max(considered_total, 1),
+        "topk_entries": topk_entries,
+        "note": (
+            "served KL: top-k truncated, temperature 1, post-softcap fp16 path; "
+            "the reference is the quantizer's float32 full-logit eval"
+        ),
     }
     if args.reference_eval:
         with open(args.reference_eval) as f:
