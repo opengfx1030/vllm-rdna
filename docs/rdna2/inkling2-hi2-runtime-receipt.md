@@ -337,8 +337,9 @@ equality.  The 03:43 crash (`top_logprobs[0]` is `None`) was fixed in
   the `Inkling2LoopForConditionalGeneration` registry entry and the
   `inkling2-mini-tp{1,2,4}.env` recipes all exist at `1fdcb3a66e` (introduced by
   `7eeb0da81b` and merged into `rdna_extras` before the cut; the draft PR #195 is
-  not needed to serve it).  The base tree boots `~/hfcache/inkling2-mini` with
-  `inkling2-mini-tp2.env`; that recipe differs from head only in a comment.  So
+  not needed to serve it).  The base tree has `~/hfcache/inkling2-mini` with
+  `inkling2-mini-tp2.env` (the stock-path boot is the receipt's XA boot and has not
+  been run on the base yet); that recipe differs from head only in a comment.  So
   **base-vs-head gates on the stock model are definable and owed**.
 - The **HI2 path is not in the base**: base cannot load an `rdna_hint_flex` (HI2)
   directory at all.  Therefore the base-vs-head token-exact, quality-floor and ABBA
