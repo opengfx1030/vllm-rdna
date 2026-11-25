@@ -26,7 +26,10 @@
 #
 # Optional: STOCK_URL=http://127.0.0.1:18231 (a stock-model server), RUN_KL=1,
 #           IDS=$HOME/w4a8_runs/inkling-hi2/stage4/calib/heldout_mixed_ids.npy,
-#           WINDOWS=32, KEEP=1 (leave the server up), MAXLEN/MAXBAT/SEQS/EAGER,
+#           WINDOWS=32, GREEDY_TOKENS=160 (France probe; a reasoning prefix counts),
+#           CAPSULE_TOKENS=48 (deterministic-repeat probe),
+#           STOCK_KL=1 (0: with STOCK_URL, only the France comparison, no KL cell),
+#           KEEP=1 (leave the server up), MAXLEN/MAXBAT/SEQS/EAGER,
 #           OWNER=HI2InklingRuntime, LEASE_DIR=~/w4a8_runs/lanes/lease,
 #           READY_SECONDS=2400 (boot), BOOT_TIMEOUT_SECONDS=900 and
 #           CELL_TIMEOUT=900 (s per measured probe; a longer one is split),
@@ -241,44 +244,101 @@ sample_temps_start
 
 HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES EXPECT_PCI_BUSES=$EXPECT_PCI_BUSES \
 python3 - "$URL" <<'PY'
-import json, sys, time, urllib.request
+import json, os, sys, time, urllib.request
 
 url = sys.argv[1]
+stock = os.environ.get("STOCK_URL") or ""
+greedy_tokens = int(os.environ.get("GREEDY_TOKENS", "160"))
+capsule_tokens = int(os.environ.get("CAPSULE_TOKENS", "48"))
+served = {}
 
-def call(path, payload=None):
+
+def call(base, path, payload=None):
     data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(
-        url + path, data=data, headers={"Content-Type": "application/json"}
+        base + path, data=data, headers={"Content-Type": "application/json"}
     )
     with urllib.request.urlopen(req, timeout=1200) as r:
         return json.loads(r.read())
 
-models = call("/v1/models")
-name = models["data"][0]["id"]
-print(f"greedy: served={name} max_model_len={models['data'][0].get('max_model_len')}")
-t0 = time.time()
-out = call(
-    "/v1/chat/completions",
+
+def model_name(base):
+    if base not in served:
+        served[base] = call(base, "/v1/models")["data"][0]["id"]
+    return served[base]
+
+
+def chat(base, messages, max_tokens):
+    t0 = time.time()
+    out = call(
+        base,
+        "/v1/chat/completions",
+        {
+            "model": model_name(base),
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+        },
+    )
+    text = out["choices"][0]["message"].get("content") or ""
+    return text, time.time() - t0, out["usage"]
+
+
+FRANCE = [
     {
-        "model": name,
-        "messages": [
-            {
-                "role": "user",
-                "content": "What is the capital of France? Reply with the city name.",
-            }
-        ],
-        "max_tokens": 32,
-        "temperature": 0.0,
-    },
+        "role": "user",
+        "content": "What is the capital of France? Reply with the city name.",
+    }
+]
+hi2_text, hi2_s, hi2_usage = chat(url, FRANCE, greedy_tokens)
+print(f"greedy: hi2 {hi2_text!r} ({hi2_s:.2f} s, {hi2_usage})")
+if stock:
+    stock_text, stock_s, stock_usage = chat(stock, FRANCE, greedy_tokens)
+    print(f"greedy: stock {stock_text!r} ({stock_s:.2f} s, {stock_usage})")
+    divergence = next(
+        (
+            i
+            for i, (a, b) in enumerate(zip(hi2_text, stock_text))
+            if a != b
+        ),
+        min(len(hi2_text), len(stock_text)),
+    )
+    print(
+        f"greedy: hi2 {len(hi2_text)} chars, stock {len(stock_text)} chars, "
+        f"first divergence at char {divergence}"
+    )
+# A reasoning model may emit its plan before the answer: 160 tokens, and the city
+# is accepted anywhere in the reasoning + answer text (lower case).
+assert "paris" in hi2_text.lower(), (
+    f"the greedy answer does not name Paris within {greedy_tokens} tokens: "
+    f"{hi2_text!r}"
 )
-text = out["choices"][0]["message"].get("content") or ""
-elapsed = time.time() - t0
-print(f"greedy: {text!r} ({elapsed:.2f} s, {out['usage']})")
-assert "paris" in text.lower(), "the greedy answer does not name Paris"
 print("RESULT greedy PASS")
+
+# The capsule does not judge wording: two identical greedy requests must return
+# the same non-empty text (deterministic repeat + something decodable).
+CAPSULE = [
+    {
+        "role": "user",
+        "content": "Write the numbers 1 to 5 separated by spaces. Output only that.",
+    }
+]
+cap_first, _, _ = chat(url, CAPSULE, capsule_tokens)
+cap_second, _, _ = chat(url, CAPSULE, capsule_tokens)
+print(f"capsule: first {cap_first!r}")
+print(f"capsule: second {cap_second!r}")
+assert cap_first.strip(), "the greedy capsule returned an empty answer"
+assert sum(ch.isalnum() for ch in cap_first) >= 2, (
+    f"the greedy capsule has no decodable token: {cap_first!r}"
+)
+assert cap_first == cap_second, (
+    "the greedy capsule is not a deterministic repeat: "
+    f"{cap_first!r} != {cap_second!r}"
+)
+print("RESULT capsule PASS")
 PY
 
-if [[ -n ${STOCK_URL:-} ]]; then
+if [[ -n ${STOCK_URL:-} && ${STOCK_KL:-1} == 1 ]]; then
     measure_begin
     HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES EXPECT_PCI_BUSES=$EXPECT_PCI_BUSES \
     timeout "$CELL_TIMEOUT" python3 "$HERE/kl_probe.py" \

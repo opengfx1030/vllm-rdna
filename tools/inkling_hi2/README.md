@@ -107,13 +107,14 @@ PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
   tests/models/inkling2_loop/test_loader.py \
   tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
   tests/models/inkling2_loop/test_hi2_reference.py -q
-# 65 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
+# 69 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
 # reuses the <dir>/stock + <dir>/hi2 pair built below instead of rebuilding it.
-# The launcher test (32) needs no torch: it fakes the visible-device table (a fake
+# The launcher test (35) needs no torch: it fakes the visible-device table (a fake
 # torch under a fake venv), the stub HTTP server and the scripts, and covers the
 # lease (request, holder, VRAM wait, trap release, foreign/live/queued refusals),
 # quiet + boot.lock order, the three device checks, the b4 refusal, both thermal
-# and both KFD window outcomes, and the cells (greedy capsule + bench).
+# and both KFD window outcomes, the greedy/capsule probes and their failures
+# (including smoke's non-zero exit), and the cells (capture + bench).
 
 # mutant battery: the loader / name map / TP slice / reference tests must kill
 # every mutant (21; exit 0). Use a scratch copy of the tree, not the checkout.
@@ -224,14 +225,20 @@ the log.
    holder `HI2InklingRuntime.a2`, 28 GiB wait, quiet wait, boot lock until
    `/health`; stop the step-3 server first, the default port is the same); the
    pre-launch device check and a per-cell check see only the leased V620s;
-   `/v1/models` name and context; the greedy capsule (`RESULT greedy PASS`) and the
-   greedy prefix comparison against the stock server prints the first-divergence
-   length (3.5 bpw top-1 is 93 %, so short prefixes, not full streams, are
-   expected). The smoke re-touches `lanes/quiet-a2/inkling-hi2-smoke` every 5 min,
-   re-checks the boot lock before each probe, and ends with
-   `RESULT measured window PASS` (or `INVALID` plus exit 1) from the junction
-   temperatures and the KFD eviction counters; `$RUN_DIR/logs/temps-*.csv` and the
-   serve log keep the evidence. It refuses b4 and a foreign holder.
+   `/v1/models` name and context; the France probe runs `GREEDY_TOKENS=160`
+   tokens (the model's reasoning prefix counts, so the city is accepted anywhere
+   in the reasoning + answer text); with `STOCK_URL` set the same request runs on
+   the stock server and the log prints both outputs and the first-divergence
+   character position (set `STOCK_KL=0` to keep only that comparison and skip the
+   held-out KL cell); the greedy capsule sends the same request twice and
+   requires a non-empty deterministic repeat (it does not judge wording). A
+   failed Python probe aborts `smoke.sh` with a non-zero exit before any
+   measured-window PASS (the CPU tests assert this). The smoke re-touches
+   `lanes/quiet-a2/inkling-hi2-smoke` every 5 min, re-checks the boot lock before
+   each probe, and ends with `RESULT measured window PASS` (or `INVALID` plus
+   exit 1) from the junction temperatures and the KFD eviction counters;
+   `$RUN_DIR/logs/temps-*.csv` and the serve log keep the evidence. It refuses b4
+   and a foreign holder.
 
 5. **KL vs stock on the quantizer's held-out windows** (mixed set, first 32 of 96,
    2048 tokens each; the same windows the published 0.0996 nats were measured on):

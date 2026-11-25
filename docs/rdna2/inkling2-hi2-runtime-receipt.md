@@ -16,7 +16,7 @@ Files added by this change set: `vllm/models/inkling2_loop/amd/{hi2,loader}.py`
 changes plus `hi2.py` decoding/reference, `amd/moe.py` HI2 experts
 (`_forward_chunk_hi2`, `forward_reference`, `_forward_hip_hi2`), `amd/glue.py`
 (`hi2=True` workspace), `amd/model.py` loader wiring, three test modules (the
-launcher module is `test_hi2_slots.py`, 32 tests), and the tools below
+launcher module is `test_hi2_slots.py`, 35 tests), and the tools below
 (`tools/inkling_hi2/lease.sh` and `quiet_touch.py` carry the lease and the quiet
 touch; `mutants_launchers.py` is the 13-mutant battery; `gpu_temps.py` gained the
 watcher flags; the recipe pins a2 by PCI bus).
@@ -25,9 +25,9 @@ watcher flags; the recipe pins a2 by PCI bus).
 
 | Step | Command (abbreviated) | Exit | Result |
 | --- | --- | --- | --- |
-| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 65 passed, 5 skipped (the 5 GPU tests) |
+| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 69 passed, 5 skipped (the 5 GPU tests) |
 | Pre-fix check | the same gate on the 5 new regression tests, old product files | 1 | 5 failed, 16 deselected (the tests can fail) |
-| Kit pre-fix | the new `test_hi2_slots.py` inside a scratch copy of `git archive f34d6cf6bc tools/` (old kit and recipes) | 1 | 27 failed, 5 passed (the protocol tests can fail) |
+| Kit pre-fix | the new `test_hi2_slots.py` inside a scratch copy of `git archive f34d6cf6bc tools/` (old kit and recipes) | 1 | 30 failed, 5 passed (the protocol tests can fail) |
 | Mutants | `python tools/inkling_hi2/mutants.py --tree <scratch copy>` | 0 | baseline 27 passed; all 21 killed: the 20-mutant battery on the pre-B4 tree plus the changed `hi2_uneven_rows_check_off` and the new `moe_w2_reduce_rows_as_tokens` on the final tree |
 | Launcher mutants | `python tools/inkling_hi2/mutants_launchers.py` | 0 | baseline 11 passed; all 13 killed (lease gate/owner/VRAM, boot-lock release, the pre-launch and post-/health device checks, the server env filters, the temperature threshold, the missing-eviction window, the b4 client refusal, the bench evidence) |
 | Real-dir load | `python tools/inkling_hi2/check_real_dir.py --model <bpw3.5> --stock <stock>` | 0 | 1125 text tensors loaded, 0 missing parameters, lm_head == stock |
@@ -41,7 +41,7 @@ watcher flags; the recipe pins a2 by PCI bus).
 
 The CPU gate is the six-layer HI2 test set: format declaration/name map/TP slice
 (`test_hi2_loader.py`, 23), the slot/HIP->PCI gate, the lease carrier and the
-launcher protocol (`test_hi2_slots.py`, 32, on a fake visible-device table, a fake
+launcher protocol (`test_hi2_slots.py`, 35, on a fake visible-device table, a fake
 torch and a stub HTTP server plus script checks), the legacy loader
 (`test_loader.py`, 6), the kernel tests collected and skipped off a GPU (5), and the
 reference against the quantizer's own `hi2.format.dequantize` on a tiny HI2 export of
@@ -123,11 +123,26 @@ Kit protocol round (P1-P3), each covered by the then-15-test `test_hi2_slots.py`
    `HIP_VISIBLE_DEVICES` only; the HTTP clients refuse b4 and record the slot.  The
    recipe pins the a2 pair by PCI bus (`PCI_BUSES="d1 d4"`).
 
-The 32 protocol tests cover these; the launcher mutant battery kills 13/13
-(`mutants_launchers.py`), and 27 of the 32 fail on the pre-round kit
+The 35 protocol tests cover these; the launcher mutant battery kills 13/13
+(`mutants_launchers.py`), and 30 of the 35 fail on the pre-round kit
 (`f34d6cf6bc`).  Residual: no CPU test can prove the real `/sys/class/drm` VRAM
 coresidency or the real `flock`/quiet timing on the box; they run only against
 tmpfs paths and the fake torch.
+
+### Probe round after the first HI2 boot (a2, 2026-11-25 03:29)
+
+The first a2 boot of `bpw3.5` on the branch passed model load (6.87 GiB), the
+native HIP path, FULL+PIECEWISE capture and `/health`; the first greedy request was
+coherent (0.81 s) but `smoke.sh` failed only because the France probe capped
+generation at 32 tokens and the reasoning model was cut before naming Paris.  The
+probe now uses `GREEDY_TOKENS=160`, accepts the city anywhere in the
+reasoning+answer text, runs the same request on `STOCK_URL` and prints both outputs
+and the first-divergence character position.  A second capsule probe re-sends one
+request twice and requires a non-empty deterministic repeat (it does not judge
+wording).  A failed Python probe aborts `smoke.sh` with a non-zero exit; the
+"smoke exit 0" in the driver log was the exit status of its `tee`, not of the
+script.  CPU tests now assert smoke's own exit status for a failed France probe
+and a non-repeating capsule, and exercise the stock-comparison branch.
 
 ### Verifier round (fix-first -> fixed)
 

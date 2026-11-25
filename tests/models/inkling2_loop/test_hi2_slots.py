@@ -162,8 +162,12 @@ exec "${STUB_PYTHON:?}" "$STUB_HTTP" "$PORT"
 
 STUB_HTTP = """\
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+MODE = os.environ.get("STUB_CHAT_MODE", "paris")
+CALLS = [0]
 
 
 class H(BaseHTTPRequestHandler):
@@ -191,7 +195,17 @@ class H(BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(n) or b"{}")
         usage = {"prompt_tokens": 10, "completion_tokens": req.get("max_tokens", 1)}
         if self.path == "/v1/chat/completions":
-            self._send({"choices": [{"message": {"content": "Paris"}}], "usage": usage})
+            prompt = (req.get("messages") or [{}])[0].get("content") or ""
+            if MODE == "reasoning":
+                text = "The question asks for a capital; I will name the city."
+            elif "capital of France" in prompt:
+                text = "The capital of France is Paris."
+            elif MODE == "vary":
+                CALLS[0] += 1
+                text = f"attempt {CALLS[0]}"
+            else:
+                text = "Paris"
+            self._send({"choices": [{"message": {"content": text}}], "usage": usage})
         elif self.path == "/v1/completions":
             self._send({"choices": [{"text": "x"}], "usage": usage})
         else:
@@ -604,9 +618,42 @@ def test_serve_rechecks_the_devices_after_health(dry):
 def test_smoke_passes_with_cool_temps_and_ok_evictions(dry):
     result = dry.run_smoke()
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESULT greedy PASS" in result.stdout
+    assert "RESULT capsule PASS" in result.stdout
     assert "RESULT measured window PASS" in result.stdout
     assert not (dry.lease / "HI2InklingRuntime.a2").exists()
     assert not (dry.quiet / "inkling-hi2-smoke").exists()
+
+
+def test_smoke_runs_the_same_probe_on_the_stock_server(dry):
+    # The stub serves both roles here: the code path prints both outputs and the
+    # first-divergence position (identical texts -> divergence at the end).
+    result = dry.run_smoke(STOCK_URL=f"http://127.0.0.1:{dry.port}", STOCK_KL="0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "greedy: stock" in result.stdout
+    assert "first divergence at char" in result.stdout
+    assert "RESULT greedy PASS" in result.stdout
+
+
+def test_smoke_fails_when_the_greedy_probe_fails(dry):
+    result = dry.run_smoke(STUB_CHAT_MODE="reasoning")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, "smoke.sh exited 0 after a failed assertion"
+    assert "does not name Paris" in out
+    assert "RESULT greedy PASS" not in result.stdout
+    assert "RESULT measured window PASS" not in result.stdout
+    assert not (dry.lease / "HI2InklingRuntime.a2").exists()
+    assert not (dry.quiet / "inkling-hi2-smoke").exists()
+
+
+def test_smoke_fails_when_the_capsule_does_not_repeat(dry):
+    result = dry.run_smoke(STUB_CHAT_MODE="vary")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, "smoke.sh exited 0 after a failed assertion"
+    assert "RESULT greedy PASS" in result.stdout
+    assert "RESULT capsule PASS" not in result.stdout
+    assert "not a deterministic repeat" in out
+    assert "RESULT measured window PASS" not in result.stdout
 
 
 def test_smoke_rechecks_the_devices_before_each_cell(dry):
