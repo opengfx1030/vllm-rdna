@@ -759,6 +759,9 @@ $HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python -m pytest \
 `test_hi2_final_driver.py` is hermetic (stub tools; no GPU, no /tmp): dry-run
 takes no lease, the disk guard stops before any dry-run, a PASSed step is skipped
 on resume, and the first failure writes `| serve_dir | FAIL |` and stops.
-`tools/inkling_hi2/mutants_final.py` killed **4/4** mutants (disk guard off,
+A real `DRY_RUN=1` on the box against the 3.5 bpw directory passed in 30 s
+(RC=0, no lease): the kernel-test collection, all five serve argvs, the four
+probes' --help and the eval CLI --help ran on CPU; results under
+`final/dryrun-1/`.  `tools/inkling_hi2/mutants_final.py` killed **4/4** mutants (disk guard off,
 failed step not fatal, resume ignored, dry-run skips the tool help).  Every GPU
 number and the 720k boot remain unmeasured because all GPUs were leased.
