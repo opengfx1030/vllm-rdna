@@ -12,7 +12,9 @@ quantized to a stacked HI2 directory by the quantizer's own pipeline, then
    decode (the smoothed / rotated basis too),
 3. the routed MoE forward of ``amd.hi2.reference_moe`` and of ``ExpertsReference``
    must match the transformers reference onto which the quantizer unfuses its
-   dequantized experts (fp32 tolerance).
+   dequantized experts (fp32 tolerance),
+4. every tensor the decoder creates must be on the stack's device (a CPU spy on the
+   creators covers the CUDA oracle: no CPU ``zeros``/``arange``/Hadamard matrix).
 
 The quantizer and transformers' ``inkling2_loop`` are only present on the box:
 
@@ -276,3 +278,53 @@ def test_routed_moe_matches_the_transformers_eval(tiny):
         experts=experts,
     )
     _assert_same(got_block, want_block, "block with the fork router", atol=3e-5)
+
+
+class _DeviceSpy(torch.overrides.TorchFunctionMode):
+    """Record the ``device=`` kwarg of every tensor-creation call in the block."""
+
+    _CREATORS = frozenset(
+        {torch.zeros, torch.ones, torch.empty, torch.arange, torch.tensor}
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[str, torch.device | None]] = []
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func in self._CREATORS:
+            self.calls.append((func.__name__, kwargs.get("device")))
+        return func(*args, **kwargs)
+
+
+def test_reference_decode_follows_the_stored_device(tiny):
+    """Every tensor the float64 decoder creates is on the stack's device.
+
+    The GPU oracle calls the decoder with CUDA stacks: a CPU ``zeros``/``arange``
+    or a CPU Hadamard matrix is a device mismatch there.  The spy records the
+    explicit device of every creator, so a CPU run proves the CUDA case; the
+    pre-fix code (no ``device=``) fails on the first recorded call.
+    """
+    stock, directory = tiny
+    hidden, inter, experts, w13, w2 = _stacks(tiny, _LAYER)
+    device = w13["codes"].device
+    spy = _DeviceSpy()
+    with spy:
+        hi2.validate_stack(w13, 2, hidden, experts)
+        gate, up, down = hi2.expert_weights(w13, w2, 0)
+        hi2.slice_stack(
+            w13,
+            "w13",
+            parts=2,
+            rows_per_part=inter,
+            k=hidden,
+            lo=inter // 2,
+            hi=inter,
+            experts=experts,
+        )
+    assert spy.calls, "the decoder created no tensor at all"
+    bad = [(name, dev) for name, dev in spy.calls if dev != device]
+    assert not bad, f"tensor creations without the stored device: {bad}"
+    for tensor in (gate, up, down):
+        assert tensor.device == device

@@ -169,9 +169,9 @@ def validate_stack(
         raise ValueError(f"hi2 stack col_scale {tuple(t['col_scale'].shape)}")
     nb = t["row_nbits"].to(torch.int64)
     bl = t["row_block"].to(torch.int64)
-    if not bool(torch.isin(nb, torch.tensor(NBITS)).all()):
+    if not bool(torch.isin(nb, torch.tensor(NBITS, device=nb.device)).all()):
         raise ValueError("hi2 stack row_nbits outside (2, 4, 8)")
-    if not bool(torch.isin(bl, torch.tensor(BLOCK_SIZES)).all()):
+    if not bool(torch.isin(bl, torch.tensor(BLOCK_SIZES, device=bl.device)).all()):
         raise ValueError("hi2 stack row_block outside (16, 32, 64)")
     co = t["code_off"].to(torch.int64)
     po = t["param_off"].to(torch.int64)
@@ -231,12 +231,15 @@ def _select_cols(
     po = part["param_off"].to(torch.int64)
     w_lo, w_n = k0 * nb // 32, (k1 - k0) * nb // 32
     b_lo, b_n = k0 // bl, (k1 - k0) // bl
-    new_co = torch.zeros(r + 1, dtype=torch.int64)
+    dev = part["codes"].device
+    new_co = torch.zeros(r + 1, dtype=torch.int64, device=dev)
     new_co[1:] = torch.cumsum(w_n, 0)
-    new_po = torch.zeros(r + 1, dtype=torch.int64)
+    new_po = torch.zeros(r + 1, dtype=torch.int64, device=dev)
     new_po[1:] = torch.cumsum(b_n, 0)
-    codes = torch.empty(int(new_co[-1]), dtype=part["codes"].dtype)
-    params = torch.empty(2 * int(new_po[-1]), dtype=part["blk_params"].dtype)
+    codes = torch.empty(int(new_co[-1]), dtype=part["codes"].dtype, device=dev)
+    params = torch.empty(
+        2 * int(new_po[-1]), dtype=part["blk_params"].dtype, device=dev
+    )
     pv = part["blk_params"].view(-1, 2)
     nv = params.view(-1, 2)
     for nbits in sorted(set(nb.tolist())):
@@ -245,11 +248,11 @@ def _select_cols(
             if rows.numel() == 0:
                 continue
             wn, bn = int(w_n[rows[0]]), int(b_n[rows[0]])
-            src = (co[rows] + w_lo[rows]).unsqueeze(1) + torch.arange(wn)
-            dst = new_co[rows].unsqueeze(1) + torch.arange(wn)
+            src = (co[rows] + w_lo[rows]).unsqueeze(1) + torch.arange(wn, device=dev)
+            dst = new_co[rows].unsqueeze(1) + torch.arange(wn, device=dev)
             codes[dst.reshape(-1)] = part["codes"][src.reshape(-1)]
-            src = (po[rows] + b_lo[rows]).unsqueeze(1) + torch.arange(bn)
-            dst = new_po[rows].unsqueeze(1) + torch.arange(bn)
+            src = (po[rows] + b_lo[rows]).unsqueeze(1) + torch.arange(bn, device=dev)
+            dst = new_po[rows].unsqueeze(1) + torch.arange(bn, device=dev)
             nv[dst.reshape(-1)] = pv[src.reshape(-1)]
     out = dict(part)
     out["codes"] = codes
@@ -268,7 +271,9 @@ def _concat_rows(parts: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor
         for p in parts:
             bases.append(p[off].to(torch.int64)[:-1] + total)
             total += int(p[off][-1])
-        out[off] = torch.cat(bases + [torch.tensor([total])]).to(torch.int32)
+        out[off] = torch.cat(
+            bases + [torch.tensor([total], dtype=torch.int64, device=bases[0].device)]
+        ).to(torch.int32)
         out[f] = torch.cat([p[f] for p in parts])
     for f in ("row_consts", "row_nbits", "row_block"):
         out[f] = torch.cat([p[f] for p in parts])
@@ -319,7 +324,12 @@ def slice_stack(
             out["col_scale"] = t["col_scale"]
         nrows = hi - lo
         out["part_off"] = torch.cumsum(
-            torch.tensor([0] + [nrows] * (2 * e), dtype=torch.int64), 0
+            torch.tensor(
+                [0] + [nrows] * (2 * e),
+                dtype=torch.int64,
+                device=t["codes"].device,
+            ),
+            0,
         ).to(torch.int32)
         return out
     if stage != "w2":
@@ -345,9 +355,10 @@ def slice_stack(
     if col_scale:
         out["col_scale"] = torch.stack(col_scale).to(torch.float16)
     # every row is kept; only the columns (K) shrink
-    out["part_off"] = (torch.arange(0, e + 1, dtype=torch.int64) * rows_per_part).to(
-        torch.int32
-    )
+    out["part_off"] = (
+        torch.arange(0, e + 1, dtype=torch.int64, device=t["codes"].device)
+        * rows_per_part
+    ).to(torch.int32)
     validate_stack(out, 1, hi - lo, e)
     return out
 
@@ -357,8 +368,8 @@ def slice_stack(
 # ---------------------------------------------------------------------------
 
 
-def _hadamard16() -> torch.Tensor:
-    h = torch.ones(1, 1, dtype=torch.float64)
+def _hadamard16(device: torch.device | None = None) -> torch.Tensor:
+    h = torch.ones(1, 1, dtype=torch.float64, device=device)
     while h.shape[0] < GROUP:
         h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)], 0)
     return h / math.sqrt(GROUP)
@@ -382,7 +393,8 @@ def dequantize_stored_rows(
     co = t["code_off"].to(torch.int64)
     po = t["param_off"].to(torch.int64)
     pv = t["blk_params"].view(-1, 2)
-    out = torch.zeros(r1 - r0, k, dtype=torch.float64)
+    dev = t["codes"].device
+    out = torch.zeros(r1 - r0, k, dtype=torch.float64, device=dev)
     for nbits in sorted(set(nb.tolist())):
         for bs in sorted(set(bl.tolist())):
             rows = ((nb == nbits) & (bl == bs)).nonzero().flatten()
@@ -390,9 +402,9 @@ def dequantize_stored_rows(
                 continue
             gr = rows + r0
             wr, nblk = k * nbits // 32, k // bs
-            words = t["codes"][co[gr].unsqueeze(1) + torch.arange(wr)]
+            words = t["codes"][co[gr].unsqueeze(1) + torch.arange(wr, device=dev)]
             codes = _unpack_codes(words, nbits).reshape(rows.numel(), nblk, bs)
-            p = pv[po[gr].unsqueeze(1) + torch.arange(nblk)]  # [r, nblk, 2]
+            p = pv[po[gr].unsqueeze(1) + torch.arange(nblk, device=dev)]
             rc = t["row_consts"][gr].double().unsqueeze(1)  # [r, 1, 3]
             lo = (
                 (p[..., 0].double() * rc[..., 1] + rc[..., 0]).float().to(torch.float16)
@@ -407,7 +419,7 @@ def _fwht_groups(x: torch.Tensor, flags: torch.Tensor) -> torch.Tensor:
     """Transform the flagged 16-column groups of ``x[..., K]`` (float64 in/out)."""
     k = x.shape[-1]
     xg = x.reshape(*x.shape[:-1], k // GROUP, GROUP)
-    rot = xg @ _hadamard16()
+    rot = xg @ _hadamard16(xg.device)
     out = torch.where(flags.bool().reshape(-1, 1), rot, xg)
     return out.reshape(x.shape)
 
