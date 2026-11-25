@@ -32,10 +32,14 @@ DROPPED = (
     "EXPERT_SLOTS",
     "EXPERT_CACHE_COPY",
     "EXPERT_CACHE_POLICY",
+    "EXPERT_CACHE_PREFETCH",
     "VLLM_INKLING2_MOE_OFFLOAD_SLOTS",
     "VLLM_INKLING2_MOE_OFFLOAD_COPY",
     "VLLM_INKLING2_MOE_OFFLOAD_POLICY",
     "VLLM_INKLING2_MOE_OFFLOAD_DECAY",
+    "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH",
+    "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_TOPK",
+    "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX",
     "PYTORCH_TUNABLEOP_ENABLED",
 )
 
@@ -261,8 +265,9 @@ def test_tp1_offload_recipe_plan_and_switches(venv):
     assert flag(out, "--gpu-memory-utilization", "0.90")
     assert flag(out, "--compilation-config", '{"cudagraph_mode":"FULL_AND_PIECEWISE"}')
     assert "export VLLM_INKLING2_MOE_OFFLOAD_SLOTS='48'" in out
-    assert "export VLLM_INKLING2_MOE_OFFLOAD_COPY='tensor'" in out
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_COPY='native'" in out
     assert "export VLLM_INKLING2_MOE_OFFLOAD_POLICY='lfu_lru'" in out
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_PREFETCH='1'" in out
     assert "export VLLM_KV_CACHE_MARGIN_FLOOR_MIB='1536'" in out
     assert "--speculative-config" not in out
 
@@ -270,14 +275,16 @@ def test_tp1_offload_recipe_plan_and_switches(venv):
         venv,
         "RECIPE=inkling2-mini-tp1-offload",
         "EXPERT_SLOTS=32",
-        "EXPERT_CACHE_COPY=native",
+        "EXPERT_CACHE_COPY=tensor",
+        "EXPERT_CACHE_PREFETCH=0",
         "MAXLEN=450000",
         "DSPARK=1",
     )
     assert custom.returncode == 0, custom.stderr
     out_c = custom.stdout
     assert "export VLLM_INKLING2_MOE_OFFLOAD_SLOTS='32'" in out_c
-    assert "export VLLM_INKLING2_MOE_OFFLOAD_COPY='native'" in out_c
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_COPY='tensor'" in out_c
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_PREFETCH='0'" in out_c
     assert flag(out_c, "--max-model-len", "450000")
     assert flag(
         out_c,

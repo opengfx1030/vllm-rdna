@@ -576,3 +576,83 @@ def test_native_copy_validates_entire_pass_before_writing(cache_module, invalid)
         torch.ops._rocm_C.rdna2_expert_cache_copy(sources, destinations, experts, slots)
     torch.accelerator.synchronize()
     assert all(payload.eq(-1).all().item() for payload in cache.payload.values())
+
+
+def test_prefetch_loads_misses_protects_hits_and_skips_active_lease(cache_module):
+    bank = _bank(cache_module, 8)
+    cache = cache_module.PackedExpertCache(bank, 3, "cpu", allocate_dummy_slot=False)
+    # Seed slots with experts 0, 1, 2; observe expert 0 once so 1 and 2 are colder.
+    cache.policy.observe([0])
+    cache.release(cache.ensure([0, 1, 2]))
+    freq_before = cache.policy.frequencies
+
+    # Active lease guard: prefetch must be a no-op while a lease is live.
+    active = cache.ensure([0])
+    assert cache.prefetch([3, 4]) == 0
+    cache.release(active)
+
+    # Prefetch [2, 5, 6] with max_experts=1: expert 2 is already resident and
+    # must stay protected; only expert 5 is loaded, evicting expert 1 (coldest
+    # non-protected).
+    queued = cache.prefetch([2, 5, 6], max_experts=1)
+    assert queued == 1
+    assert cache.prefetch_calls == 1
+    assert cache.prefetch_experts == 1
+    assert cache.policy.frequencies == freq_before  # prefetch never inflates LFU
+    assert 2 in cache.policy.mapping and 5 in cache.policy.mapping
+    assert 6 not in cache.policy.mapping
+
+    # Consuming [2, 5] hits both with zero new misses and credits prefetch_hits.
+    misses_before = cache.expert_misses
+    lease = cache.ensure([2, 5])
+    try:
+        assert cache.expert_misses == misses_before
+        assert cache.prefetch_hits == 1
+        for expert, slot, is_miss in lease.bindings:
+            assert not is_miss
+            for name in bank:
+                assert torch.equal(cache.payload[name][slot], bank[name][expert])
+    finally:
+        cache.release(lease)
+
+
+@pytest.mark.parametrize("copy_mode", ["tensor", "native"])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA/HIP")
+def test_prefetch_async_stream_fencing_on_gpu(cache_module, copy_mode):
+    if copy_mode == "native":
+        if torch.version.hip is None:
+            pytest.skip("native expert copies require HIP")
+        import vllm._custom_ops  # noqa: F401
+
+    bank = _bank(cache_module, 6)
+    bank = {
+        name: value.half() if "scale" in name else value for name, value in bank.items()
+    }
+    cache = cache_module.PackedExpertCache(
+        bank, 2, "cuda", copy_mode=copy_mode, allocate_dummy_slot=False
+    )
+    copy_stream = torch.cuda.Stream()
+    compute_stream = torch.cuda.Stream()
+    schedule = ([0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 0])
+    snapshots = []
+    for step_experts in schedule:
+        cache.prefetch(step_experts, copy_stream=copy_stream)
+        with torch.cuda.stream(compute_stream):
+            lease = cache.ensure(step_experts)
+            snap = {
+                expert: {
+                    name: cache.payload[name][slot].clone() for name in cache.payload
+                }
+                for expert, slot, _ in lease.bindings
+            }
+            snapshots.append((step_experts, snap))
+            cache.release(lease)
+    compute_stream.synchronize()
+    copy_stream.synchronize()
+    for step_experts, snap in snapshots:
+        for expert in step_experts:
+            for name, tensor in snap[expert].items():
+                assert torch.equal(tensor.cpu(), bank[name][expert])
+    assert cache.prefetch_calls == len(schedule)
+    assert cache.prefetch_hits >= len(schedule)
+    assert cache.expert_misses == 0

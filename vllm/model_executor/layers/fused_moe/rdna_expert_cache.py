@@ -205,6 +205,10 @@ class PackedExpertCache:
         self._host_slot_map_array = self._host_slot_map.numpy()
         self._consumer_event = None
         self._consumer_stream = None
+        self._prefetch_event = None
+        self._prefetch_stream = None
+        self._default_copy_stream = None
+        self._prefetched_pending: set[int] = set()
         self._active_bindings = None
         self._map_upload_event = None
         # What the offload layer's expert passes run on. Its first pass starts
@@ -239,6 +243,9 @@ class PackedExpertCache:
         self.expert_demands = 0
         self.expert_misses = 0
         self.committed_passes = 0
+        self.prefetch_calls = 0
+        self.prefetch_experts = 0
+        self.prefetch_hits = 0
         self._copy_sources = tuple(
             self.host_payload[name] for name in self.payload_names
         )
@@ -290,8 +297,16 @@ class PackedExpertCache:
                     "host expert planning must run outside graph capture"
                 )
             current = torch.cuda.current_stream(self.device)
+            if self._prefetch_event is not None:
+                current.wait_event(self._prefetch_event)
+                self._prefetch_event = None
             if self._consumer_event is not None and current != self._consumer_stream:
                 current.wait_event(self._consumer_event)
+        if self._prefetched_pending:
+            self.prefetch_hits += sum(
+                1 for e in dict.fromkeys(experts) if e in self._prefetched_pending
+            )
+            self._prefetched_pending.clear()
         lease = self.policy.acquire(experts)
         misses = [binding for binding in lease.bindings if binding[2]]
         try:
@@ -420,6 +435,97 @@ class PackedExpertCache:
         """Mask other passes and map this pass's local expert IDs to slots."""
         safe = local_ids.clamp(0, self.logical_num_experts - 1).long()
         return torch.where(local_ids >= 0, self.slot_map[safe], -1)
+
+    def prefetch(
+        self,
+        experts,
+        *,
+        copy_stream=None,
+        max_experts: int | None = None,
+    ) -> int:
+        """Asynchronously prefetch predicted experts onto ``copy_stream``.
+
+        Non-blocking on the compute stream: copies only experts that are not
+        already resident, protects predicted resident hits from eviction,
+        fences against prior consumers via ``_consumer_event``, and records
+        ``_prefetch_event`` for the next ``ensure()`` to wait on.  Does not
+        call ``policy.observe()``, so speculative false positives never inflate
+        LFU frequencies.  Returns the number of experts queued for transfer.
+        """
+        if self._track or self.policy._active is not None:
+            return 0
+        cuda = self.device.type == "cuda"
+        if cuda and is_capturing_expert_work():
+            return 0
+        valid = list(dict.fromkeys(self.policy._valid_ids(experts)))
+        if not valid:
+            return 0
+        resident_map = self.policy._expert_slots
+        missing = [e for e in valid if e not in resident_map]
+        if not missing:
+            return 0
+        limit = self.slot_count
+        if max_experts is not None:
+            limit = min(limit, max(0, int(max_experts)))
+        if limit <= 0:
+            return 0
+        to_load = missing[:limit]
+        # Protect predicted resident hits from being evicted by the prefetch.
+        keep_hits = self.slot_count - len(to_load)
+        hits = [e for e in valid if e in resident_map][:keep_hits]
+        acquire_set = hits + to_load
+        lease = self.policy.acquire(acquire_set)
+        misses = [binding for binding in lease.bindings if binding[2]]
+        if not misses:
+            lease.commit()
+            lease.release()
+            return 0
+        if cuda:
+            if copy_stream is None:
+                if self._default_copy_stream is None:
+                    self._default_copy_stream = torch.cuda.Stream(self.device)
+                copy_stream = self._default_copy_stream
+            try:
+                with torch.cuda.stream(copy_stream):
+                    if self._consumer_event is not None:
+                        copy_stream.wait_event(self._consumer_event)
+                    if (
+                        self._prefetch_event is not None
+                        and copy_stream != self._prefetch_stream
+                    ):
+                        copy_stream.wait_event(self._prefetch_event)
+                    self._copy(misses)
+                    if self._prefetch_event is None:
+                        self._prefetch_event = torch.cuda.Event()
+                    self._prefetch_event.record(copy_stream)
+                    self._prefetch_stream = copy_stream
+            except Exception:
+                copy_stream.synchronize()
+                lease.cancel()
+                raise
+        else:
+            try:
+                self._copy(misses)
+            except Exception:
+                lease.cancel()
+                raise
+        lease.commit()
+        lease.release()
+        self.prefetch_calls += 1
+        self.prefetch_experts += len(misses)
+        self._prefetched_pending.update(e for e, _, _ in misses)
+        return len(misses)
+
+    def wait_prefetch(self, stream=None) -> None:
+        """Wait for any in-flight asynchronous prefetch to complete."""
+        if self._prefetch_event is None:
+            return
+        if self.device.type == "cuda":
+            if stream is None:
+                self._prefetch_event.synchronize()
+            else:
+                stream.wait_event(self._prefetch_event)
+        self._prefetch_event = None
 
     def release(self, lease):
         """Fence the last consumer before any future slot overwrite."""

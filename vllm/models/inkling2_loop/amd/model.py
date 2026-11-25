@@ -413,6 +413,7 @@ class Inkling2DecoderLayer(nn.Module):
         sconv_out: torch.Tensor | None = None,
         defer_mlp_sconv: bool = False,
         mlp_c_out: torch.Tensor | None = None,
+        next_mlp: Inkling2LoopMoE | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, int, _PendingSconv | None]:
         from vllm import _custom_ops as ops
 
@@ -592,7 +593,9 @@ class Inkling2DecoderLayer(nn.Module):
         # ---- MoE (route, gemm1, swiglu, gemm2) + post-mlp short convolution
         max_q = 0 if conv_md is None else conv_md.max_query_len
         moe = self.tp.all_reduce(
-            self.mlp.forward_hip(hq, ws, v.moe_out, max_query_len=max_q, visit=visit)
+            self.mlp.forward_hip(
+                hq, ws, v.moe_out, max_query_len=max_q, visit=visit, next_mlp=next_mlp
+            )
         )
         next_n = n_blocks + int(self.is_block_boundary)
         out_c = v.mlp_c if mlp_c_out is None else mlp_c_out
@@ -913,6 +916,7 @@ class Inkling2Model(nn.Module):
             first_sconv_out: torch.Tensor | None = None,
             defer_last: bool = True,
             last_mlp_out: torch.Tensor | None = None,
+            next_after_last: Inkling2LoopMoE | None = None,
         ):
             nonlocal seen
             last_j = len(layers) - 1
@@ -923,6 +927,7 @@ class Inkling2Model(nn.Module):
                     fill(j)
                 tap = None if slot is None else ws.taps[slot][:T]
                 is_last = j == last_j
+                next_mlp = next_after_last if is_last else layers[j + 1].mlp
                 x0, x1, n, pending = layer._forward_hip_visit(
                     ws,
                     v,
@@ -939,6 +944,7 @@ class Inkling2Model(nn.Module):
                     ),
                     defer_mlp_sconv=defer_last if is_last else True,
                     mlp_c_out=last_mlp_out if is_last else None,
+                    next_mlp=next_mlp,
                 )
             return x0, x1, n, pending
 
@@ -987,6 +993,8 @@ class Inkling2Model(nn.Module):
                 )
                 ws.loopcd_weak_is_compact = True
 
+        first_loop_mlp = loop_layers[0].mlp if loop_layers else None
+        first_coda_mlp = coda_layers[0].mlp if coda_layers else None
         x0, x1, n, pending = run(
             self.layers[:ls],
             v.hid,
@@ -994,6 +1002,7 @@ class Inkling2Model(nn.Module):
             0,
             0,
             defer_last=bool(loop_layers) or passes <= 1,
+            next_after_last=first_loop_mlp or first_coda_mlp,
         )
         num_pre = n
         if passes > 1:  # the state every later pass restarts from
@@ -1010,6 +1019,7 @@ class Inkling2Model(nn.Module):
             first_sconv_out=v.pre_x1 if passes > 1 else None,
             defer_last=passes <= 1,
             last_mlp_out=v.prev_x1 if passes > 1 else None,
+            next_after_last=first_coda_mlp if passes <= 1 else None,
         )
         if passes > 2 and loop_layers and weak_visit == 0:
             _maybe_weak_readout(v.blk, n, x0, x1)
@@ -1052,6 +1062,7 @@ class Inkling2Model(nn.Module):
                 fill,
                 defer_last=not more_passes,
                 last_mlp_out=v.prev_x1 if more_passes else None,
+                next_after_last=None if more_passes else first_coda_mlp,
             )
         if (
             passes > 1
