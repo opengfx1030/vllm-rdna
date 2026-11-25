@@ -203,7 +203,13 @@ gate, quiet windows, boot.lock, HIP->PCI litmus).  After smoke the driver boots
 one fresh stock+HI2 pair with its own pidfiles; every step that talks to the
 pair starts with a health gate (`require_pair`): a dead port restarts the pair
 once, and if it still does not come up the step fails as `pair-unhealthy`
-instead of dying on a closed port mid-probe.  ~4 h (5 h budget).
+instead of dying on a closed port mid-probe.  `vision` records the probe result
+in `numbers.vision_probe` and, when the probe defects before a verdict, falls
+back to the eval vision compare (`numbers.vision_eval`; comparable, >= 50 paired
+items, non-inferior within its `mdd`); a probe verdict that failed a check stays
+fatal.  `steps/kl.json` carries the three KL numbers (and a resumed run backfills
+them from `steps/kl-*.json` if the first attempt left them empty).  ~4 h
+(5 h budget).
 Useful knobs: `DRY_RUN=1` (assemble and dry-run every GPU argv on CPU, no
 lease), `ONLY=smoke,kl`, `RESUME=1` (default), `BOOT_WAIT`, `CTX`,
 `GMEM_PAIR`, `KL_MIXED_WINDOWS`, `TAG`.  `DETACH=0` for a foreground/tmux run.
@@ -466,6 +472,17 @@ the log.
      --images ~/w4a8_runs/inkling-hi2-runtime/images \
      --json ~/w4a8_runs/inkling-hi2-runtime/vision_probe.json
    ```
+
+   The probe takes server **bases** (`http://host:port`, no `/v1` or other path)
+   and resolves each server's model id from `/v1/models`; it prints both the base
+   and the id and posts to `<base>/v1/chat/completions`.  This matters: the recipe
+   serves `inkling2-hi2`, and vLLM answers **404** for any other model name
+   (`"model": "default"` was the card1 vision failure).  In the driver a probe
+   defect (404/transport, no verdict JSON) does not discard the eval vision
+   evidence: the step passes when `eval/cmp-vision.json` is comparable, paired on
+   >= 50 items and non-inferior within its `mdd`, recording `vision_probe=FAIL`
+   and `vision_eval=<summary>`; a probe that *reached a verdict* and failed a
+   check (empty/garbled image answer, stock disagreement) stays fatal.
 
    `VISION=1` allows `VISION_IMAGES=1` image per prompt by default; a multi-image
    eval set needs `VISION_IMAGES=<n>` on the boot line.  The boot must show the

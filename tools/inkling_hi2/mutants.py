@@ -206,6 +206,36 @@ MUTANTS = [
         "    y = rows.view(t * k, rows.shape[-1])",
         [_L + "test_the_w2_output_is_reduced_over_top_k"],
     ),
+    (
+        "vision_probe_posts_default_model",
+        "tools/inkling_hi2/vision_probe.py",
+        (
+            '        "model": model,\n        "messages": [\n            {\n'
+            '                "role": "user",\n                "content": ['
+        ),
+        (
+            '        "model": "default",\n        "messages": [\n            {\n'
+            '                "role": "user",\n                "content": ['
+        ),
+        [
+            (
+                "tests/models/inkling2_loop/test_hi2_vision_mtp.py::"
+                "test_the_probe_posts_the_model_v1_models_reports"
+            )
+        ],
+    ),
+    (
+        "vision_probe_accepts_a_path_base",
+        "tools/inkling_hi2/vision_probe.py",
+        '    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:',
+        "    if False:",
+        [
+            (
+                "tests/models/inkling2_loop/test_hi2_vision_mtp.py::"
+                "test_base_url_rejects_a_path"
+            )
+        ],
+    ),
 ]
 
 _BASELINE = [

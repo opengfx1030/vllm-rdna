@@ -554,8 +554,49 @@ s_kl() {
             "$V" "$KLPROBE" --hi2-url http://127.0.0.1:18230 \
             --stock-url http://127.0.0.1:18231 --ids "$ids" --windows "$windows" \
             --topk 100 $gate $ref --out "$RUN/steps/kl-$spec.json" || return 1
-        num "kl_$spec" "$("$V" -c "import json;d=json.load(open('$RUN/steps/kl-$spec.json'));print('mean_kl=%.5f top1=%.4f windows=%s' % (d['mean_kl'], d['top1'], d['windows']))")"
+        local kl_line
+        kl_line=$("$V" -c "import json;d=json.load(open('$RUN/steps/kl-$spec.json'));print('mean_kl=%.5f sem=%.5f top1=%.4f windows=%s' % (d['kl_mean'], d.get('kl_sem', 0.0), d['top1'], d['windows']))") ||
+            { log "cannot parse $RUN/steps/kl-$spec.json (keys: kl_mean/top1/windows)"; return 1; }
+        num "kl_$spec" "$kl_line"
     done
+}
+
+# A resumed run skips kl when it already PASSed; the card reads steps/kl.json,
+# so fill its empty numbers from the first attempt's probe JSONs.
+kl_backfill() {
+    [[ -f $RUN/steps/kl.pass && -f $RUN/steps/kl.json ]] || return 0
+    local line
+    line=$("$V" - "$RUN/steps" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+steps = Path(sys.argv[1])
+out = steps / "kl.json"
+data = json.loads(out.read_text())
+if any(data.get("numbers", {}).values()):
+    sys.exit(0)
+numbers = {}
+for spec in ("mixed", "long8k", "long16k"):
+    path = steps / f"kl-{spec}.json"
+    if not path.is_file():
+        continue
+    d = json.loads(path.read_text())
+    numbers[f"kl_{spec}"] = "mean_kl=%.5f sem=%.5f top1=%.4f windows=%s" % (
+        d["kl_mean"],
+        d.get("kl_sem", 0.0),
+        d["top1"],
+        d["windows"],
+    )
+if not numbers:
+    sys.exit(0)
+data["numbers"] = numbers
+out.write_text(json.dumps(data, indent=2) + "\n")
+print(", ".join(f"{k}={v}" for k, v in numbers.items()))
+PY
+)
+    [[ -n $line ]] && log "kl.json numbers backfilled from the probe JSONs: $line"
+    return 0
 }
 
 # --- step 7: bench cells, pair arm then a solo arm -------------------------
@@ -668,16 +709,72 @@ s_eval() {
     done
 }
 
+# A probe defect (404/transport) must not discard the eval vision evidence: the
+# eval compare over the full 88-item vision set is the fallback verdict.  It must
+# be comparable, paired on >= 50 items and non-inferior within the compare's MDD.
+vision_eval_gate() {
+    "$V" - "$RUN/eval/cmp-vision.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    data = json.load(open(path))
+    v = data["categories"]["vision"]
+    ok = (
+        bool(data.get("comparable"))
+        and int(v["n"]) >= 50
+        and float(v["cand_acc"]) >= float(v["ref_acc"]) - float(v["mdd"])
+    )
+    print(
+        "n=%s ref_acc=%.4f cand_acc=%.4f delta=%.4f mdd=%.3f comparable=%s"
+        % (
+            v["n"],
+            v["ref_acc"],
+            v["cand_acc"],
+            float(v["cand_acc"]) - float(v["ref_acc"]),
+            v["mdd"],
+            data.get("comparable"),
+        )
+    )
+except Exception as e:  # any unusable compare fails the verdict
+    print(f"vision eval compare unusable: {e}")
+    sys.exit(1)
+sys.exit(0 if ok else 1)
+PY
+}
+
 # --- step 7: vision probe (pair, VISION=1) ---------------------------------
 s_vision() {
     require_pair vision || return 1
     local images=$RUN/images
     "$V" "$VISION_PROBE" --make-images "$images" || return 1
+    local probe_rc=0
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
         "$V" "$VISION_PROBE" --hi2-url http://127.0.0.1:18230 \
         --stock-url http://127.0.0.1:18231 --images "$images" --concurrency 4 \
-        --json "$RUN/steps/vision.json" || return 1
-    num "vision" "$RUN/steps/vision.json"
+        --json "$RUN/steps/vision.json" || probe_rc=$?
+    if ((probe_rc == 0)); then
+        num "vision_probe" "PASS"
+        num "vision" "$RUN/steps/vision.json"
+        return 0
+    fi
+    if [[ -f $RUN/steps/vision.json ]]; then
+        # The probe ran to its verdict and a check failed (an image answered
+        # empty/garbled or disagreed with stock): a real image failure stays fatal.
+        num "vision_probe" "FAIL (check; $RUN/steps/vision.json)"
+        log "vision probe failed a check; keeping it fatal (see $RUN/steps/vision.log)"
+        return 1
+    fi
+    num "vision_probe" "FAIL (probe defect; log $RUN/steps/vision.log)"
+    local summary
+    if summary=$(vision_eval_gate 2>>"$RUN/steps/vision.log"); then
+        num "vision_eval" "$summary"
+        log "vision probe failed before a verdict; eval vision compare is non-inferior: $summary"
+        return 0
+    fi
+    log "vision probe failed and the eval vision compare is not usable: $summary"
+    return 1
 }
 
 # --- step 8: DSpark/MTP (HI2 spec + plain pair) ----------------------------
@@ -702,16 +799,18 @@ s_boot720() {
     stop_server dspark 18230
     boot_server boot720 18230 "$SERVE_DIR" 720000 1024 1 0 "$GMEM_SINGLE" ||
         { log "720k boot failed (see $RUN/logs/serve-boot720.log)"; return 1; }
-    local served_len
-    served_len=$(curl -sf http://127.0.0.1:18230/v1/models |
-        "$V" -c "import json,sys;print(json.load(sys.stdin)['data'][0].get('max_model_len'))") || return 1
+    local served_name served_len
+    read -r served_name served_len < <(curl -sf http://127.0.0.1:18230/v1/models |
+        "$V" -c "import json,sys;d=json.load(sys.stdin)['data'][0];print(d['id'], d.get('max_model_len'))") || return 1
+    [[ -n $served_name && -n $served_len ]] || return 1
     [[ $served_len == 720000 ]] || {
         log "/v1/models reports max_model_len=$served_len, not 720000"
         return 1
     }
-    local txt
+    local payload txt
+    payload=$("$V" -c "import json,sys;print(json.dumps({'model': sys.argv[1], 'messages': [{'role': 'user', 'content': 'Say OK.'}], 'max_tokens': 8, 'temperature': 0}))" "$served_name") || return 1
     txt=$(curl -sf http://127.0.0.1:18230/v1/chat/completions -H 'Content-Type: application/json' \
-        -d '{"model":"default","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8,"temperature":0}' |
+        -d "$payload" |
         "$V" -c "import json,sys;print(json.load(sys.stdin)['choices'][0]['message']['content'][:40])") || return 1
     log "720k greedy: $txt"
     num "max_model_len" 720000
@@ -746,6 +845,7 @@ run_step kernel s_kernel
 lease_begin
 run_step serve_dir s_serve_dir
 run_step smoke s_smoke
+kl_backfill
 run_step kl s_kl
 run_step eval s_eval
 run_step vision s_vision

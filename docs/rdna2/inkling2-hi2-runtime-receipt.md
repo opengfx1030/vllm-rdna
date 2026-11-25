@@ -818,3 +818,41 @@ one restart -> the probe runs against both health-checked URLs) and
 GPU steps (smoke, kl, eval, vision, bench, dspark, boot720) remain unmeasured:
 a2/b4 are still leased by other jobs; the ordered checklist is unchanged in
 `tools/inkling_hi2/README.md`.
+
+### 2026-11-25 fix: vision probe 404 and the empty KL numbers (card1 vision FAIL)
+
+Card1 passed kernel/serve_dir/smoke/kl/eval, then `vision` failed in 0 s: the
+probe posted `"model": "default"` and vLLM answers **404** for an unknown model
+name (the recipe serves `inkling2-hi2`).  The server was fine: the eval step's
+88-item vision set ran on the same pair (stock 98.8% vs HI2 97.7%, n=85 paired,
+CI -3.5..0, p=1.0), and Main's manual POST with the correct name returned 200.
+
+- `vision_probe.py`: `--hi2-url/--stock-url` must be server bases (no path; a
+  `.../v1` base is refused with exit 2), the probe resolves each server's id from
+  `/v1/models`, prints the base and id, and posts `<base>/v1/chat/completions`
+  with that id.  Every request URL is in the error text (`POST <url>: HTTP 404:
+  <body>`).  The driver's 720k greedy request now also uses `/v1/models`' id.
+- Driver `vision` verdict: `numbers.vision_probe=PASS|FAIL(...)`; a probe that
+  defects before a verdict (404/transport, no `vision.json`) falls back to
+  `eval/cmp-vision.json` when it is comparable, paired on >= 50 items and
+  non-inferior within its `mdd` (`numbers.vision_eval=<summary>`); a probe that
+  reached a verdict and failed a check (empty/garbled image answer, stock
+  disagreement) stays fatal.
+- `steps/kl.json`: the parser read `mean_kl` but `kl_probe.py` writes `kl_mean`
+  (KeyError swallowed into empty strings).  Fixed to `kl_mean`/`kl_sem`/`top1`/
+  `windows`, and a resumed run backfills `steps/kl.json` from `steps/kl-*.json`
+  so a card that skips the PASSed kl step still carries the numbers
+  (mixed 0.0950 +- 0.0168 top1 92.99%, 8k 0.0363 top1 91.44%, 16k 0.0346
+  top1 91.51% from card1's logs).
+
+CPU proof (box, CPU-only): `test_hi2_final_driver.py` + `test_hi2_vision_mtp.py`
+**34 passed** (292 s); the driver module is 15 tests (dead-pair restart, clean
+pair-unhealthy, KL number parsing, KL resume backfill, vision 404 fallback,
+fallback-refused, probe-check-fatal) and the vision module 19 (base-path
+rejection, served-model resolution, exact 404 URL).  `mutants_final.py`: baseline
+15 passed, **15/15 killed** (four new: `kl_old_key`, `kl_backfill_off`,
+`vision_fallback_ignored`, `vision_check_failure_not_fatal`); `mutants.py
+--only vision_probe_posts_default_model` and `--only
+vision_probe_accepts_a_path_base`: both KILLED.  `ruff check`/`format --check`
+clean.  GPU steps still unmeasured; the a2 slot was free after Main's repro and
+the resume (`RESUME=1`) runs vision -> bench -> dspark -> boot720.

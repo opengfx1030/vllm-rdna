@@ -532,7 +532,9 @@ with open(calls, "a") as f:
         + "\\n"
     )
 with open(a.out, "w") as f:
-    json.dump({"mean_kl": 0.1, "top1": 0.93, "windows": int(a.windows)}, f)
+    json.dump(
+        {"kl_mean": 0.1, "kl_sem": 0.01, "top1": 0.93, "windows": int(a.windows)}, f
+    )
 """
 
 DEAD_SERVE = """#!/usr/bin/env bash
@@ -606,6 +608,13 @@ def test_pair_restarted_once_after_smoke_tears_it_down(kit):
     assert all(c["hi2"] == "http://127.0.0.1:18230" for c in calls), calls
     assert all(c["stock"] == "http://127.0.0.1:18231" for c in calls), calls
     assert (rt(kit, "pair-restart") / "steps" / "kl.pass").exists()
+    numbers = json.loads((rt(kit, "pair-restart") / "steps" / "kl.json").read_text())[
+        "numbers"
+    ]
+    line = "mean_kl=0.10000 sem=0.01000 top1=0.9300 windows=%d"
+    assert numbers["kl_mixed"] == line % 2, numbers
+    assert numbers["kl_long8k"] == line % 1, numbers
+    assert numbers["kl_long16k"] == line % 1, numbers
 
 
 def test_pair_unhealthy_fails_cleanly_without_traceback(kit):
@@ -624,3 +633,184 @@ def test_pair_unhealthy_fails_cleanly_without_traceback(kit):
     log = (rt(kit, "pair-dead") / "steps" / "kl.log").read_text()
     assert "Traceback" not in log, log
     assert not (kit["calls"] / "kl").exists()
+
+
+FAKE_VISION_PROBE = """#!/usr/bin/env python3
+import argparse
+import json
+import os
+import sys
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--make-images")
+ap.add_argument("--hi2-url")
+ap.add_argument("--stock-url")
+ap.add_argument("--images")
+ap.add_argument("--concurrency")
+ap.add_argument("--json")
+a = ap.parse_args()
+if a.make_images:
+    os.makedirs(a.make_images, exist_ok=True)
+    with open(os.path.join(a.make_images, "img.png"), "wb") as f:
+        f.write(b"png")
+    sys.exit(0)
+if os.environ.get("FAKE_VISION_MODE") == "check-fail":
+    with open(a.json, "w") as f:
+        json.dump({"checks": {"answered[img]": False}, "numbers": {}, "log": []}, f)
+    sys.exit(1)
+print(
+    "vision_probe: POST http://127.0.0.1:18230/v1/chat/completions model='default'",
+    file=sys.stderr,
+)
+print("urllib.error.HTTPError: HTTP Error 404: Not Found", file=sys.stderr)
+sys.exit(1)
+"""
+
+VISION_CMP_PASS = {
+    "comparable": True,
+    "categories": {
+        "vision": {"n": 85, "ref_acc": 0.9882, "cand_acc": 0.9765, "mdd": 0.09}
+    },
+}
+
+
+def _start_health_pair(kit: dict, tag: str) -> list:
+    _free_ports()
+    (kit["kit"] / "fake_health.py").write_text(FAKE_HEALTH)
+    run_dir = rt(kit, tag)
+    (run_dir / "pids").mkdir(parents=True, exist_ok=True)
+    servers = []
+    for name, port in (("stock", 18231), ("hi2", 18230)):
+        servers.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(kit["kit"] / "fake_health.py"),
+                    str(port),
+                    str(run_dir / "pids" / f"{name}.pid"),
+                ]
+            )
+        )
+    deadline = time.time() + 15
+    for port in (18230, 18231):
+        while True:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    pytest.skip("fake health server did not start")
+                time.sleep(0.1)
+    return servers
+
+
+def _vision_kit(kit: dict, tag: str, cmp: dict | None) -> Path:
+    (kit["kit"] / "vision_stub.py").write_text(FAKE_VISION_PROBE)
+    run_dir = rt(kit, tag)
+    (run_dir / "eval").mkdir(parents=True, exist_ok=True)
+    if cmp is not None:
+        (run_dir / "eval" / "cmp-vision.json").write_text(json.dumps(cmp))
+    return run_dir
+
+
+def test_vision_falls_back_to_the_eval_compare_on_a_probe_defect(kit):
+    run_dir = _vision_kit(kit, "vfb", VISION_CMP_PASS)
+    servers = _start_health_pair(kit, "vfb")
+    try:
+        r = run(
+            kit,
+            "vfb",
+            ONLY="vision",
+            VISION_PROBE=str(kit["kit"] / "vision_stub.py"),
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        numbers = json.loads((run_dir / "steps" / "vision.json").read_text())["numbers"]
+        assert numbers["vision_probe"].startswith("FAIL (probe defect"), numbers
+        assert "n=85" in numbers["vision_eval"], numbers
+        status = (run_dir / "STATUS.log").read_text()
+        assert "eval vision compare is non-inferior" in status
+        assert (run_dir / "steps" / "vision.pass").exists()
+    finally:
+        for proc in servers:
+            proc.kill()
+
+
+def test_vision_probe_defect_without_a_usable_compare_fails(kit):
+    bad = {"comparable": False, "categories": VISION_CMP_PASS["categories"]}
+    run_dir = _vision_kit(kit, "vbad", bad)
+    servers = _start_health_pair(kit, "vbad")
+    try:
+        r = run(
+            kit,
+            "vbad",
+            ONLY="vision",
+            VISION_PROBE=str(kit["kit"] / "vision_stub.py"),
+        )
+        assert r.returncode == 1, r.stdout + r.stderr
+        status = (run_dir / "STATUS.log").read_text()
+        assert "eval vision compare is not usable" in status
+        assert not (run_dir / "steps" / "vision.pass").exists()
+    finally:
+        for proc in servers:
+            proc.kill()
+
+
+def test_a_vision_probe_check_failure_stays_fatal(kit):
+    run_dir = _vision_kit(kit, "vchk", VISION_CMP_PASS)
+    servers = _start_health_pair(kit, "vchk")
+    try:
+        r = run(
+            kit,
+            "vchk",
+            ONLY="vision",
+            VISION_PROBE=str(kit["kit"] / "vision_stub.py"),
+            FAKE_VISION_MODE="check-fail",
+        )
+        assert r.returncode == 1, r.stdout + r.stderr
+        status = (run_dir / "STATUS.log").read_text()
+        assert "failed a check; keeping it fatal" in status
+        assert not (run_dir / "steps" / "vision.pass").exists()
+    finally:
+        for proc in servers:
+            proc.kill()
+
+
+def test_kl_backfill_fills_numbers_on_resume(kit):
+    """A PASSed kl skipped on resume still reports its numbers (the card reads them)."""
+    run_dir = rt(kit, "klfix")
+    steps = run_dir / "steps"
+    steps.mkdir(parents=True)
+    (steps / "kl.pass").write_text("")
+    (steps / "kl.json").write_text(
+        json.dumps(
+            {
+                "step": "kl",
+                "rc": 0,
+                "seconds": 1321,
+                "numbers": {
+                    "kl_mixed": "",
+                    "kl_long8k": "",
+                    "kl_long16k": "",
+                },
+                "log": str(run_dir / "steps" / "kl.log"),
+            }
+        )
+    )
+    for spec, windows in (("mixed", 32), ("long8k", 8), ("long16k", 8)):
+        (steps / f"kl-{spec}.json").write_text(
+            json.dumps(
+                {
+                    "kl_mean": 0.0346,
+                    "kl_sem": 0.002,
+                    "top1": 0.915,
+                    "windows": windows,
+                }
+            )
+        )
+    r = run(kit, "klfix", ONLY="serve_dir", RESUME=1)
+    assert r.returncode == 0, r.stdout + r.stderr
+    numbers = json.loads((steps / "kl.json").read_text())["numbers"]
+    assert numbers["kl_mixed"] == "mean_kl=0.03460 sem=0.00200 top1=0.9150 windows=32"
+    assert numbers["kl_long8k"] == "mean_kl=0.03460 sem=0.00200 top1=0.9150 windows=8"
+    status = (run_dir / "STATUS.log").read_text()
+    assert "kl.json numbers backfilled" in status

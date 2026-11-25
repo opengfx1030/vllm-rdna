@@ -28,7 +28,7 @@ TEST = "tests/models/inkling2_loop/test_hi2_final_driver.py"
 SUBSET = (
     "dry_run or disk_guard or resume or first_failure or bench or "
     "lease_inherit or own_request or pair_restarted_once or "
-    "pair_unhealthy_fails_cleanly"
+    "pair_unhealthy_fails_cleanly or vision_ or kl_backfill"
 )
 
 # (name, [(file, old, new), ...], pytest -k of the tests that must fail)
@@ -149,6 +149,44 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
             )
         ],
         "pair_unhealthy_fails_cleanly",
+    ),
+    (
+        "kl_old_key",
+        [("validate_final_a2.sh", "d['kl_mean']", "d['mean_kl']")],
+        "pair_restarted_once",
+    ),
+    (
+        "kl_backfill_off",
+        [
+            (
+                "validate_final_a2.sh",
+                "run_step smoke s_smoke\nkl_backfill\nrun_step kl s_kl",
+                "run_step smoke s_smoke\nrun_step kl s_kl",
+            )
+        ],
+        "kl_backfill",
+    ),
+    (
+        "vision_fallback_ignored",
+        [
+            (
+                "validate_final_a2.sh",
+                '    if summary=$(vision_eval_gate 2>>"$RUN/steps/vision.log"); then',
+                "    if summary=$(echo ignored); then",
+            )
+        ],
+        "vision_probe_defect_without",
+    ),
+    (
+        "vision_check_failure_not_fatal",
+        [
+            (
+                "validate_final_a2.sh",
+                "    if [[ -f $RUN/steps/vision.json ]]; then",
+                "    if false; then",
+            )
+        ],
+        "vision_probe_check_failure",
     ),
     (
         "bench_solo_flags_wrong",

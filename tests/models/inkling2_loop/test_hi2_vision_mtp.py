@@ -291,3 +291,91 @@ def test_serve_forwards_recipe_dspark_and_vision():
     assert 'RECIPE="$RECIPE"' in text
     assert "VISION_IMAGES=${VISION_IMAGES:-1}" in text
     assert '\\"image\\":$VISION_IMAGES' in text and '"image":0' in text
+
+
+# --- vision_probe: the served model name and the request URL ----------------
+# Card1 failed with HTTP 404 because the probe posted "model": "default" while
+# the recipe serves inkling2-hi2.  vLLM answers 404 for an unknown model name;
+# these tests pin the resolved name, the exact URL and the error message.
+
+import json  # noqa: E402
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+
+class _VisionStub(BaseHTTPRequestHandler):
+    model = "inkling2-hi2"
+    fail_post = False
+    posts: list = []
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path != "/v1/models":
+            self.send_error(404)
+            return
+        self._send({"data": [{"id": self.model}]})
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        n = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(n))
+        type(self).posts.append({"path": self.path, "payload": payload})
+        if type(self).fail_post:
+            self.send_error(404)
+            return
+        self._send(
+            {
+                "choices": [
+                    {"message": {"content": "a red square"}, "finish_reason": "stop"}
+                ],
+                "usage": {"completion_tokens": 2},
+            }
+        )
+
+    def _send(self, body: dict) -> None:
+        data = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+@pytest.fixture
+def vision_stub():
+    _VisionStub.posts = []
+    _VisionStub.fail_post = False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _VisionStub)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_base_url_rejects_a_path():
+    with pytest.raises(ValueError, match="without a path"):
+        vision_probe.base_url("http://127.0.0.1:18230/v1")
+    assert vision_probe.base_url("http://127.0.0.1:18230/") == "http://127.0.0.1:18230"
+
+
+def test_the_probe_posts_the_model_v1_models_reports(tmp_path, vision_stub):
+    image = vision_probe.make_images(tmp_path)[0]
+    model = vision_probe.served_model(vision_stub)
+    assert model == "inkling2-hi2"
+    got = vision_probe.describe(vision_stub, model, image, 8, 5.0)
+    assert got["text"] == "a red square"
+    last = _VisionStub.posts[-1]
+    assert last["path"] == "/v1/chat/completions"
+    assert last["payload"]["model"] == "inkling2-hi2"
+
+
+def test_a_404_names_the_exact_url(tmp_path, vision_stub):
+    _VisionStub.fail_post = True
+    image = vision_probe.make_images(tmp_path)[0]
+    with pytest.raises(RuntimeError) as e:
+        vision_probe.describe(vision_stub, "default", image, 8, 5.0)
+    assert "POST " + vision_stub + "/v1/chat/completions: HTTP 404" in str(e.value)

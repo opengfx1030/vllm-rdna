@@ -31,6 +31,7 @@ import json
 import struct
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass, field
@@ -100,6 +101,35 @@ def make_images(directory: Path) -> list[Path]:
     return images
 
 
+def base_url(raw: str) -> str:
+    """The server base without a path: http://host:port, never .../v1."""
+    parsed = urllib.parse.urlsplit(raw.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"{raw!r}: not an http(s) base URL")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError(
+            f"{raw!r}: give the server base without a path (got {parsed.path!r}); "
+            "the probe appends /v1/chat/completions itself"
+        )
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def served_model(base: str, timeout: float = 30.0) -> str:
+    """The id /v1/models reports; vLLM answers 404 for any other model name."""
+    url = f"{base}/v1/models"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"GET {url}: HTTP {e.code} {e.read()[:200]!r}") from e
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        raise RuntimeError(f"GET {url}: {e}") from e
+    models = body.get("data") or []
+    if not models:
+        raise RuntimeError(f"GET {url}: no served model")
+    return str(models[0]["id"])
+
+
 def _post(url: str, payload: dict, timeout: float) -> tuple[int, dict]:
     req = urllib.request.Request(
         url,
@@ -107,8 +137,12 @@ def _post(url: str, payload: dict, timeout: float) -> tuple[int, dict]:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-        return resp.status, json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"POST {url}: HTTP {e.code}: {detail}") from e
 
 
 def health(base: str, timeout: float = 5.0) -> bool:
@@ -119,10 +153,12 @@ def health(base: str, timeout: float = 5.0) -> bool:
         return False
 
 
-def describe(base: str, image: Path, max_tokens: int, timeout: float) -> dict:
+def describe(
+    base: str, model: str, image: Path, max_tokens: int, timeout: float
+) -> dict:
     data = binascii.b2a_base64(image.read_bytes(), newline=False).decode()
     payload = {
-        "model": "default",
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -150,9 +186,9 @@ def describe(base: str, image: Path, max_tokens: int, timeout: float) -> dict:
     }
 
 
-def text_only(base: str, max_tokens: int, timeout: float) -> dict:
+def text_only(base: str, model: str, max_tokens: int, timeout: float) -> dict:
     payload = {
-        "model": "default",
+        "model": model,
         "messages": [{"role": "user", "content": TEXT_PROMPT}],
         "max_tokens": max_tokens,
         "temperature": 0.0,
@@ -234,22 +270,37 @@ def main() -> int:
         print(f"vision_probe: no PNG/JPG images in {args.images}", file=sys.stderr)
         return 3
 
-    hi2 = args.hi2_url.rstrip("/")
-    stock = args.stock_url.rstrip("/") if args.stock_url else None
+    try:
+        hi2 = base_url(args.hi2_url)
+        stock = base_url(args.stock_url) if args.stock_url else None
+    except ValueError as e:
+        print(f"vision_probe: {e}", file=sys.stderr)
+        return 2
     if not health(hi2):
         print(f"vision_probe: {hi2} is not serving (/health)", file=sys.stderr)
         return 3
     if stock and not health(stock):
         print(f"vision_probe: {stock} is not serving (/health)", file=sys.stderr)
         return 3
+    try:
+        hi2_model = served_model(hi2, args.timeout)
+        stock_model = served_model(stock, args.timeout) if stock else None
+    except RuntimeError as e:
+        print(f"vision_probe: {e}", file=sys.stderr)
+        return 3
+    print(f"vision_probe: hi2 {hi2} serves {hi2_model!r}")
+    print(f"vision_probe: POST {hi2}/v1/chat/completions model={hi2_model!r}")
+    if stock:
+        print(f"vision_probe: stock {stock} serves {stock_model!r}")
+        print(f"vision_probe: POST {stock}/v1/chat/completions model={stock_model!r}")
 
     report = Report()
     for image in images:
-        got = describe(hi2, image, args.max_tokens, args.timeout)
+        got = describe(hi2, hi2_model, image, args.max_tokens, args.timeout)
         report.check(f"answered[{image.stem}]", clean(got), f"{got['tokens']} tokens")
         report.numbers[f"hi2[{image.stem}]"] = got["text"]
         if stock:
-            ref = describe(stock, image, args.max_tokens, args.timeout)
+            ref = describe(stock, stock_model, image, args.max_tokens, args.timeout)
             report.numbers[f"stock[{image.stem}]"] = ref["text"]
             score = overlap(got["text"], ref["text"])
             report.numbers[f"overlap[{image.stem}]"] = round(score, 3)
@@ -273,8 +324,10 @@ def main() -> int:
             kind, image = job
             try:
                 if kind == "image":
-                    return clean(describe(hi2, image, args.max_tokens, args.timeout))
-                return clean(text_only(hi2, 16, args.timeout))
+                    return clean(
+                        describe(hi2, hi2_model, image, args.max_tokens, args.timeout)
+                    )
+                return clean(text_only(hi2, hi2_model, 16, args.timeout))
             except RuntimeError:
                 return False
 
