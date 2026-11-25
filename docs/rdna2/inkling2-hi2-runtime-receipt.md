@@ -753,7 +753,7 @@ $HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python -m pytest \
   tests/models/inkling2_loop/test_hi2_slots.py \
   tests/models/inkling2_loop/test_hi2_vision_mtp.py \
   tests/models/inkling2_loop/test_hi2_final_driver.py -q
-# 83 passed, 10 skipped (the GPU tests), 15 warnings in 214.99s
+# 83 passed, 10 skipped (the GPU tests), 15 warnings in 223.49s (head 39656c2a3d)
 ```
 
 `test_hi2_final_driver.py` is hermetic (stub tools; no GPU, no /tmp): dry-run
