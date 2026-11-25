@@ -67,6 +67,7 @@ tests/distributed/test_rdna_p2p.py  # fork-only RDNA P2P topology, CPU unit test
 tests/distributed/test_rdna_gather_allreduce.py  # fork-only P2P-less gather replacements, CPU gloo oracle; not in CI
 tests/models/qwen4_exp/test_offload_policy_sweep_tp4.py  # fork-only expert-offload TP4 sweep rank map, CPU unit test; not in CI
 tests/models/qwen4_exp/test_qualify_expert_copy_ranks.py  # fork-only expert-copy qualifier rank check, CPU unit test; not in CI
+tests/models/inkling2_loop/test_hi2_final_driver.py  # fork-only one-shot final-card driver control flow (dry-run without a lease, disk guard, resume skip, stop-on-failure) with stub tools, CPU unit tests; not in CI
 tests/models/inkling2_loop/test_hi2_vision_mtp.py  # fork-only Inkling-2 HI2 kit vision/MTP census, bit-exact compares, recipe switches and probe parsers, CPU unit tests; not in CI
 tests/models/inkling2_loop/test_attention.py  # fork-only Inkling-2 dense-state attention vs transformers reference, CPU unit test; not in CI
 tests/models/inkling2_loop/test_blocks.py  # fork-only Inkling-2 blocks (attn-residual, gates, softcaps) vs reference, CPU unit test; not in CI

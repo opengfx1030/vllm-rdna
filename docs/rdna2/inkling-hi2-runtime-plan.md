@@ -336,13 +336,18 @@ first session parked, and the reason neither needs a format change:
   its CPU gates pass.  The scout's MTP/vision line numbers are from that older
   revision; the names and the "draft is bf16, no conversion" conclusion agree.  No
   remaining difference affects this slice.
-* **Scout reconciliation.**  `InklingRuntimeScout` surveyed the same question on
-  the pre-HI2 merge tree (`ee27e18374`): "no HI2 expert path, loader accepts only
-  NVFP4/MXFP8, the rdna_hint_flex MoE only takes SiLU, no MTP/vision detail".
-  That is the state this branch already changed (section 4): `hi2_expert_formats`,
-  the stacked HI2 loader/TP slice and `_forward_chunk_hi2` are in this worktree and
-  its CPU gates pass.  The scout's MTP/vision line numbers are from that older
-  revision; the names and the "draft is bf16, no conversion" conclusion agree.  No
-  remaining difference affects this slice.
 * **Still unmeasured:** every GPU number (identity/acceptance/speed, the 720k KV
   fit, and the served image path).  All GPUs were leased on 2026-11-25.
+
+* **2026-11-25 (one-shot final-card driver).**  `tools/inkling_hi2/validate_final_a2.sh`
+  runs the ordered GPU card as one detached, resumable, stop-on-first-failure
+  process: per-step `STATUS.log`/JSON, a `summary.md` table, one lease and one
+  quiet/boot.lock discipline, every boot through `serve.sh`.  Step order: kernel
+  (own lease window) -> serve_dir (CPU) -> smoke -> kl -> bench -> eval -> vision
+  -> dspark (spec pair, 16384, GMEM 0.45 each) -> boot720 (single HI2, 720000,
+  GMEM 0.92, verified via `/v1/models`).  Vision sits inside the pair boot instead
+  of after DSpark: a 720k KV failure must not discard the vision evidence; the
+  requested order is otherwise kept.  CPU proof: `test_hi2_final_driver.py` (four
+  stubbed cases: dry-run needs no lease, disk guard, resume skip, stop-on-fail)
+  and `mutants_final.py` (four mutants).  `DRY_RUN=1` assembles and dry-runs every
+  GPU argv on CPU without touching the lease, so the card is ready for a slot.

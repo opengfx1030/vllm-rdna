@@ -108,6 +108,22 @@ if [[ ! -x $VENV/bin/python ]]; then
     exit 2
 fi
 
+if [[ $VISION == 1 ]]; then
+    EXTRA="--limit-mm-per-prompt {\"image\":$VISION_IMAGES} --max-logprobs 128"
+else
+    EXTRA='--limit-mm-per-prompt {"image":0} --max-logprobs 128'
+fi
+
+# Dry run (the final driver's pre-lease argv check): print the exact launcher
+# call and exit before the lease, the quiet wait and any GPU touch.
+if [[ ${PRINT:-0} == 1 ]]; then
+    echo "serve.sh: dry run for SLOT=$SLOT MODEL=$MODEL"
+    printf 'serve_rdna.sh RECIPE=%q MODEL=%q VENV=%q HIP_VISIBLE_DEVICES=%q PORT=%q DSPARK=%q VISION=%q SPEC_CONFIG=%q MTP=0 EAGER=%q CG_MODE=FULL_AND_PIECEWISE MAXLEN=%q MAXBAT=%q SEQS=%q GMEM=%q EXTRA_ARGS=%q\n' \
+        "$RECIPE" "$MODEL" "$VENV" "$HIP_VISIBLE_DEVICES" "$PORT" "$DSPARK" "$VISION" \
+        "${SPEC_CONFIG:-}" "$EAGER" "$MAXLEN" "$MAXBAT" "$SEQS" "$GMEM" "$EXTRA"
+    exit 0
+fi
+
 # Resolve the declared HIP indexes to their live PCI buses and refuse a moved
 # enumeration or a non-V620 (AGENTS.md, "Two-slot box operation 2026-11-15").
 # Called before the quiet wait (fail fast), immediately before the launch, and
@@ -157,11 +173,6 @@ while :; do
     break
 done
 
-if [[ $VISION == 1 ]]; then
-    EXTRA="--limit-mm-per-prompt {\"image\":$VISION_IMAGES} --max-logprobs 128"
-else
-    EXTRA='--limit-mm-per-prompt {"image":0} --max-logprobs 128'
-fi
 if [[ $REGRESSION == 0 ]]; then
     export VLLM_INKLING2_PATH=reference
 fi

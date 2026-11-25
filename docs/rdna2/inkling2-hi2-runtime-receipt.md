@@ -719,3 +719,46 @@ whose pattern now follows the `VISION` branch).  Two findings were real and
 fixed: `compare_mtp` only checked the dtype of the served file (now both files),
 and the `validate_dir` census used a stale `vision_bytes` name after the
 refactor.  GPU numbers remain unmeasured (all GPUs leased).
+
+## 2026-11-25 addendum: one-shot final-card driver (CPU proof)
+
+`tools/inkling_hi2/validate_final_a2.sh` runs the ordered card as one detached,
+resumable, stop-on-first-failure process: one lease, one quiet/boot.lock
+discipline, every boot through `serve.sh`, per-step `STATUS.log`/JSON and a
+`summary.md` table.  Steps: `kernel` (own lease window) -> `serve_dir` (CPU) ->
+`smoke` -> `kl` (mixed gated at KL 0.15; long 8k/16k recorded with `--min-top1 0`)
+-> `bench` -> `eval` (main/agentic-probe/vision on the a2 eval tree) -> `vision`
+-> `dspark` (spec pair, 16384, GMEM 0.45 each) -> `boot720` (single HI2, 720000,
+GMEM 0.92; `/v1/models.max_model_len` must be 720000).  Vision runs inside the
+pair boot instead of after DSpark so a 720k KV failure cannot discard the vision
+evidence; that is the only order change.  `DRY_RUN=1` assembles and dry-runs
+every GPU argv on CPU without taking the lease.
+
+```bash
+TREE=$HOME/w4a8_runs/inkling-hi2-runtime/tree
+MODEL=$HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5
+bash $TREE/tools/inkling_hi2/validate_final_a2.sh
+# prints the pid; then: tail -f $RUN/STATUS.log ; cat $RUN/summary.md
+```
+
+CPU gates on the box (no GPU in the environment):
+
+```bash
+env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+PYTHONPATH=$HOME/w4a8_runs/pydeps/tfm-main \
+$HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python -m pytest \
+  tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
+  tests/models/inkling2_loop/test_hi2_reference.py \
+  tests/models/inkling2_loop/test_hi2_loader.py \
+  tests/models/inkling2_loop/test_hi2_slots.py \
+  tests/models/inkling2_loop/test_hi2_vision_mtp.py \
+  tests/models/inkling2_loop/test_hi2_final_driver.py -q
+# 83 passed, 10 skipped (the GPU tests), 15 warnings in 214.99s
+```
+
+`test_hi2_final_driver.py` is hermetic (stub tools; no GPU, no /tmp): dry-run
+takes no lease, the disk guard stops before any dry-run, a PASSed step is skipped
+on resume, and the first failure writes `| serve_dir | FAIL |` and stops.
+`tools/inkling_hi2/mutants_final.py` killed **4/4** mutants (disk guard off,
+failed step not fatal, resume ignored, dry-run skips the tool help).  Every GPU
+number and the 720k boot remain unmeasured because all GPUs were leased.

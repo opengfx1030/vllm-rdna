@@ -164,6 +164,39 @@ $V $TREE/tools/inkling_hi2/make_tiny_hi2.py --out $HOME/w4a8_runs/inkling-hi2-ru
 # expected: "quantized 144 expert tensors" and .../tiny/hi2
 ```
 
+### One-shot final-card run (no operator loop)
+
+`tools/inkling_hi2/validate_final_a2.sh` is the whole checklist below in one
+detached process: one lease, one quiet/boot.lock discipline, stop on the first
+failure, resumable.  It writes `$RUN/STATUS.log` (every step), `$RUN/steps/*.json`
+(rc, seconds, parsed numbers, log path) and `$RUN/summary.md` (the table to paste
+into the receipt); a PASSed step is skipped on a rerun with the same `TAG`.
+
+```bash
+TREE=$HOME/w4a8_runs/inkling-hi2-runtime/tree   # this fork, synced
+MODEL=$HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5
+bash $TREE/tools/inkling_hi2/validate_final_a2.sh   # prints the pid and the tail command
+```
+
+Step order (the requested order, with the vision probe grouped into the pair
+boot so it cannot be lost to a later 720k boot failure): `kernel` (its own
+lease window + tiny fixture) -> `serve_dir` (prep + validate + check_real on
+CPU) -> `smoke` (stock resident, HI2 boots itself) -> `kl` (mixed gated at 0.15,
+long 8k/16k recorded) -> `bench` (perf, both servers) -> `eval` (two labels on
+the a2 tree) -> `vision` -> `dspark` (spec pair: 16384, GMEM 0.45 each) ->
+`boot720` (single HI2, 720000, GMEM 0.92; `/v1/models` must report 720000).
+`vision` before `dspark` is the only order change and is deliberate: a 720k KV
+failure must not discard the vision evidence.  Everything that shares the
+stock+HI2 pair runs under that one boot (VISION=1, 32768, GMEM 0.45 each); all
+boots go through `serve.sh` (28 GiB lease gate, quiet windows, boot.lock,
+HIP->PCI litmus).  The estimates in the header: ~4 h (5 h budget).
+Useful knobs: `DRY_RUN=1` (assemble and dry-run every GPU argv on CPU, no
+lease), `ONLY=smoke,kl`, `RESUME=1` (default), `BOOT_WAIT`, `CTX`,
+`GMEM_PAIR`, `KL_MIXED_WINDOWS`, `TAG`.  `DETACH=0` for a foreground/tmux run.
+CPU proof: `tests/models/inkling2_loop/test_hi2_final_driver.py` (stubs, no GPU,
+no /tmp) and `tools/inkling_hi2/mutants_final.py` (kills the disk-guard-off,
+failed-step-not-fatal, resume-ignored and dry-run-skips-tools mutants).
+
 ## 2. Ordered GPU checklist
 
 One lease of two V620s: the a2 slot (HIP 0,1; PCI `d1 d4`) from Main. b4
