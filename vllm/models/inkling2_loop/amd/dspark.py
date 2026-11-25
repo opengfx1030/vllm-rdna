@@ -36,7 +36,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import regex as re
@@ -45,6 +45,7 @@ from torch import nn
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import (
@@ -591,13 +592,19 @@ class Inkling2DSparkModel(nn.Module):
         self._markov_steps, self._markov_steps_by_reqs = scheduled_draft_tokens_by_reqs(
             vllm_config, spec.num_speculative_tokens
         )
+        # Optional temporary cap used during K-bucketed draft graph capture.
+        self._active_markov_cap: int | None = None
 
     def steps_for_reqs(self, num_reqs: int) -> int:
         """Markov steps needed for a batch of ``num_reqs`` requests."""
         table = self._markov_steps_by_reqs
         if table is None or num_reqs <= 0:
-            return self._markov_steps
-        return min(self._markov_steps, table[min(num_reqs, len(table) - 1)])
+            steps = self._markov_steps
+        else:
+            steps = min(self._markov_steps, table[min(num_reqs, len(table) - 1)])
+        if self._active_markov_cap is not None:
+            steps = min(steps, self._active_markov_cap)
+        return steps
 
     # -- weights -----------------------------------------------------------
     def _route(self, name: str) -> tuple[str, slice | None]:
@@ -1252,6 +1259,90 @@ class Inkling2DSparkSpeculator(DSparkSpeculator):
         self.f_rnn = torch.zeros(
             self.max_num_reqs, config.hidden_size, dtype=torch.float16, device=device
         )
+        # Secondary b=1 FULL draft graph capped at K=3 Markov steps when
+        # adaptive_k is enabled (saves -0.53 ms full vocab / -0.20 ms 32k vocab
+        # on K<=3 steps with 0-ULP identical draft tokens 0..K-1, ~2 MiB VRAM).
+        self._b1_short_cap: int = 3
+        self._b1_short_graph: torch.cuda.CUDAGraph | None = None
+
+    def capture(self) -> None:
+        super().capture()
+        self._b1_short_graph = None
+        spec_cfg = self.vllm_config.speculative_config
+        mgr = self.query_cudagraph_manager
+        if (
+            spec_cfg is None
+            or not getattr(spec_cfg, "uses_adaptive_num_tokens", False)
+            or mgr is None
+            or mgr.cudagraph_mode.decode_mode() != CUDAGraphMode.FULL
+            or self.model.steps_for_reqs(1) <= self._b1_short_cap
+            or self.dp_size > 1
+        ):
+            return
+        from vllm.distributed.parallel_state import graph_capture
+        from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+        from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import (
+            _prepare_dflash_inputs_to_capture,
+        )
+
+        self.sample_indices.zero_()
+        self.sample_pos.zero_()
+        self.sample_idx_mapping.fill_(-1)
+        self._context_slot_mappings.fill_(PAD_SLOT_ID)
+        attn_metadata, slot_mappings = _prepare_dflash_inputs_to_capture(
+            1,
+            self.num_query_per_req,
+            self.input_buffers,
+            self.block_tables,
+            self.attn_groups,
+            self.kv_cache_config,
+            self.max_model_len,
+            skip_attn=False,
+            causal=self._group_causal,
+        )
+
+        def _run_short() -> None:
+            self._prepare_graph_forward(1, attn_metadata)
+            self._generate_draft(
+                1,
+                self.num_query_per_req,
+                attn_metadata,
+                slot_mappings,
+                None,
+                CUDAGraphMode.FULL,
+            )
+
+        self.model._active_markov_cap = self._b1_short_cap
+        try:
+            with graph_capture(self.device) as gc_ctx:
+                stream = mgr.capture_stream or gc_ctx.stream
+                with torch.cuda.stream(stream):
+                    _run_short()
+                    g = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(g, pool=mgr.pool, stream=stream):
+                        _run_short()
+            self._b1_short_graph = g
+            logger.info(
+                "Inkling-2 DSpark: captured b=1 K<=%d draft graph bucket",
+                self._b1_short_cap,
+            )
+        finally:
+            self.model._active_markov_cap = None
+
+    def _replay_fullgraph(
+        self,
+        batch_desc: Any,
+        num_speculative_tokens: int | None = None,
+    ) -> None:
+        if (
+            self._b1_short_graph is not None
+            and batch_desc.num_reqs == 1
+            and num_speculative_tokens is not None
+            and 0 < num_speculative_tokens <= self._b1_short_cap
+        ):
+            self._b1_short_graph.replay()
+            return
+        super()._replay_fullgraph(batch_desc, num_speculative_tokens)
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # The folded head writes fp16 logits (the target's head is fp32).

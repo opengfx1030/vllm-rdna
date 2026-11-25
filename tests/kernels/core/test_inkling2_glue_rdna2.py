@@ -661,6 +661,84 @@ def test_msg_gate_rejects_bad_arguments():
         ops.inkling2_glue_msg_gate_down(hw, hw, wdw, dw)
 
 
+@pytest.mark.parametrize(
+    ("G", "T", "w16", "norm"),
+    [
+        (1, 1, False, True),
+        (1, 2, False, True),
+        (1, 4, False, True),
+        (1, 8, False, True),
+        (1, 16, False, True),
+        (3, 1, False, True),
+        (3, 2, False, True),
+        (3, 4, False, True),
+        # Fallback paths (ctas > sm_count, T > 16, fp16 weights, no norm)
+        (3, 8, False, True),
+        (1, 20, False, True),
+        (1, 2, True, True),
+        (1, 2, False, False),
+    ],
+)
+def test_msg_gate_down_mix_parity(G, T, w16, norm):
+    if not hasattr(ops, "inkling2_glue_msg_gate_down_mix"):
+        pytest.skip("inkling2_glue_msg_gate_down_mix not built")
+    H, R = 2304, 64
+    g = _gen(100 + G * 31 + T + (1000 if w16 else 0) + (2000 if norm else 0))
+    h_c = _randn(g, T, G, H)
+    m_c = _randn(g, T, G, H)
+    wd_c = _randn(g, G, R, 2 * H, mag=0.1).to(torch.float16)
+    wf_c = _randn(g, G, H, R, mag=0.1)
+    wg_c = _randn(g, G, H, R, mag=0.1)
+    nw_c = _randn(g, G, H, mag=0.5).to(torch.float16) if norm else None
+
+    h_g, m_g, wd_g = h_c.to(DEV), m_c.to(DEV), wd_c.to(DEV)
+    wf_g, wg_g = _pack_gate(wf_c, w16), _pack_gate(wg_c, w16)
+    d_sep = torch.empty(G, T, R, dtype=torch.float16, device=DEV)
+    d_fus = torch.empty(G, T, R, dtype=torch.float16, device=DEV)
+    out_dt = torch.float16 if norm else torch.float32
+    out_sep = torch.empty(G, T, H, dtype=out_dt, device=DEV)
+    out_fus = torch.empty(G, T, H, dtype=out_dt, device=DEV)
+
+    kw_sep: dict = {}
+    kw_fus: dict = {}
+    if norm:
+        assert nw_c is not None
+        nw_g = nw_c.to(DEV)
+        c_chunks = (H + 127) // 128
+        kw_sep = dict(
+            norm_w=nw_g,
+            scratch=torch.empty(G, T, H, device=DEV),
+            partials=torch.empty(G, T, c_chunks, device=DEV),
+            counters=torch.zeros(G * T, dtype=torch.int32, device=DEV),
+        )
+        kw_fus = dict(
+            norm_w=nw_g,
+            scratch=torch.empty(G, T, H, device=DEV),
+            partials=torch.empty(G, T, c_chunks, device=DEV),
+            counters=torch.zeros(2 * G * T, dtype=torch.int32, device=DEV),
+        )
+
+    ops.inkling2_glue_msg_gate_down(h_g, m_g, wd_g, d_sep, EPS)
+    ops.inkling2_glue_msg_gate_mix(h_g, m_g, d_sep, wf_g, wg_g, out_sep, **kw_sep)
+    ops.inkling2_glue_msg_gate_down_mix(
+        h_g, m_g, wd_g, d_fus, wf_g, wg_g, out_fus, eps=EPS, norm_eps=EPS, **kw_fus
+    )
+    torch.accelerator.synchronize()
+    if norm:
+        assert not kw_fus["counters"].any(), "fused counters not left at zero"
+    # Bit-exact against separate down + mix
+    max_diff = (out_fus.float() - out_sep.float()).abs().max().item()
+    assert max_diff == 0.0, f"fused vs sep mismatch: max_diff={max_diff}"
+    # Also check against fp64 reference
+    wf_eff = (wf_c.to(torch.float16) if w16 else wf_c).double()
+    wg_eff = (wg_c.to(torch.float16) if w16 else wg_c).double()
+    ref = ref_gate_mix(h_c, m_c, d_fus.cpu(), wf_eff, wg_eff, nw_c)
+    if norm:
+        check_f16(out_fus, ref, f"fused G={G} T={T}", max_mismatch=1e-2)
+    else:
+        check_f32(out_fus, ref, f"fused G={G} T={T}", rtol=5e-5, atol=5e-5)
+
+
 # ---------------------------------------------------------------------------
 # rms_norm / embed_norm
 # ---------------------------------------------------------------------------

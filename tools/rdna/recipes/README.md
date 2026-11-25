@@ -83,7 +83,7 @@ port on purpose: only one runs on a given set of cards at a time.
 | `inkling2-mini-tp1` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 194000 | 16 | none | `ATTN=none`, one image per prompt, `prompt-tokens-details`, no TunableOp |
 | `inkling2-mini-tp1-dspark` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 135000 | 16 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | sources `inkling2-mini-tp1`; `ADAPTIVE=1` (`MAXLEN=125000`) + optional `DRAFT_VOCAB` built in |
 | `inkling2-mini-tp1-offload` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 65536 | 8 | none (`DSPARK=1` optional) | sources `inkling2-mini-tp1`; TP=1 MoE expert offload (`EXPERT_SLOTS=48`, 16 GiB & 32 GiB unified; `MAXLEN=450000` on 32 GiB) |
-| `inkling2-mini-tp2` | Inkling-2-Mini | 2 x 1 | 2 | 18222 | 720000 | 8 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | one-shot HIP all-reduce, `MAXBAT=1024`; `ADAPTIVE=1` / `DRAFT_VOCAB`, `DSPARK=0` for 1M ctx |
+| `inkling2-mini-tp2` | Inkling-2-Mini | 2 x 1 | 2 | 18222 | 760000 | 8 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | one-shot HIP all-reduce, `MAXBAT=1024`; `ADAPTIVE=1` (`720000`) / `DRAFT_VOCAB`, `DSPARK=0` for 1M ctx |
 | `inkling2-mini-tp4` | Inkling-2-Mini | 4 x 1 | 4 | 18223 | 1048576 | 8 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | one-shot HIP all-reduce, 4096-tok prefill, full 1M ctx fits; `ADAPTIVE=1` / `DRAFT_VOCAB` / `DSPARK=0` |
 
 The three `flashnext-pp3*`, `flashnext-tp4pp2-mtp2` and `flashnext-tp8-mtp2`

@@ -382,6 +382,39 @@ void launch_moe_nvfp4(
           mul_topk_weight, output_topk, gate_cap, up_cap, stream);
       return;
     }
+    if (variant == 0) {
+      // Exact K-split (BK=192) for single-token decode when K is a multiple of
+      // 192 but not 256 (e.g. w2 K=1152 TP1 / K=576 TP2), eliminating the
+      // half-empty K-tail CTA (144 CTAs = 2/CU on 72-CU V620, 0 VGPR spill).
+      if constexpr (BLOCK_SIZE_M == 1) {
+        if (num_token_blocks <= 8 && (size_k % 192 == 0) &&
+            (size_k % 256 != 0)) {
+          launch_moe_nvfp4_cfg<T, 1, 256, 192>(
+              a, c, b_q_weight, b_scales, b_globals, topk_weights,
+              sorted_token_ids, expert_ids, num_tokens_post_padded,
+              num_token_blocks, size_m, size_n, size_k, top_k,
+              expert_weight_stride, expert_scales_stride, mul_topk_weight,
+              output_topk, gate_cap, up_cap, stream);
+          return;
+        }
+      }
+      // Narrower N-tile (TX=64 -> 256 cols/CTA) for w13 (gate_cap == 0) when
+      // TX=256 (1024 cols/CTA) leaves a severe idle N-tail CTA:
+      // - size_n % 1024 == 128 (e.g. TP2 w13 N=1152, 87.5% idle tail): all bm
+      // - size_n % 1024 == 256 (e.g. TP1 w13 N=2304, 75% idle tail): T >= 4
+      const int n_rem = size_n & 1023;
+      if (gate_cap == 0.0f &&
+          (n_rem == 128 ||
+           (n_rem == 256 && (BLOCK_SIZE_M >= 2 || num_token_blocks >= 24)))) {
+        launch_moe_nvfp4_cfg<T, BLOCK_SIZE_M, 64, 256>(
+            a, c, b_q_weight, b_scales, b_globals, topk_weights,
+            sorted_token_ids, expert_ids, num_tokens_post_padded,
+            num_token_blocks, size_m, size_n, size_k, top_k,
+            expert_weight_stride, expert_scales_stride, mul_topk_weight,
+            output_topk, gate_cap, up_cap, stream);
+        return;
+      }
+    }
   }
   launch_moe_nvfp4_cfg<T, BLOCK_SIZE_M, THREADS_X, BLOCK_KN_SIZE>(
       a, c, b_q_weight, b_scales, b_globals, topk_weights, sorted_token_ids,

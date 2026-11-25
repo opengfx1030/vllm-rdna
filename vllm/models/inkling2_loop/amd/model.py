@@ -464,13 +464,11 @@ class Inkling2DecoderLayer(nn.Module):
                         partial_out=hid,
                         eps=eps,
                     )
-                    ops.inkling2_glue_msg_gate_down(
-                        raw, v.msgs_qkv, self.qkv_wd, v.d, eps
-                    )
-                    ops.inkling2_glue_msg_gate_mix(
-                        raw, v.msgs_qkv, v.d, self.qkv_wf, self.qkv_wg, v.x16,
-                        norm_w=self.attn_norm_w, scratch=v.g_scratch, partials=v.g_part,
-                        counters=ws.gate_counters, norm_eps=eps,
+                    ops.inkling2_glue_msg_gate_down_mix(
+                        raw, v.msgs_qkv, self.qkv_wd, v.d, self.qkv_wf, self.qkv_wg,
+                        v.x16, norm_w=self.attn_norm_w, scratch=v.g_scratch,
+                        partials=v.g_part, counters=ws.gate_counters,
+                        eps=eps, norm_eps=eps,
                     )  # fmt: skip
             elif not has_msgs:
                 ops.inkling2_glue_attn_res(
@@ -484,11 +482,11 @@ class Inkling2DecoderLayer(nn.Module):
                     blk, n_blocks, x0, self._attn_query, raw, x1=x1,
                     partial_out=hid, eps=eps,
                 )  # fmt: skip
-                ops.inkling2_glue_msg_gate_down(raw, v.msgs_qkv, self.qkv_wd, v.d, eps)
-                ops.inkling2_glue_msg_gate_mix(
-                    raw, v.msgs_qkv, v.d, self.qkv_wf, self.qkv_wg, v.x16,
-                    norm_w=self.attn_norm_w, scratch=v.g_scratch, partials=v.g_part,
-                    counters=ws.gate_counters, norm_eps=eps,
+                ops.inkling2_glue_msg_gate_down_mix(
+                    raw, v.msgs_qkv, self.qkv_wd, v.d, self.qkv_wf, self.qkv_wg,
+                    v.x16, norm_w=self.attn_norm_w, scratch=v.g_scratch,
+                    partials=v.g_part, counters=ws.gate_counters,
+                    eps=eps, norm_eps=eps,
                 )  # fmt: skip
         if tap is not None:
             ops.inkling2_glue_copy_states(hid, tap)
@@ -562,13 +560,11 @@ class Inkling2DecoderLayer(nn.Module):
                     eps=eps,
                     **extra_s,
                 )
-                ops.inkling2_glue_msg_gate_down(
-                    v.raw1, v.msgs_mlp, self.mlp_wd, v.d1, eps
-                )
-                ops.inkling2_glue_msg_gate_mix(
-                    v.raw1, v.msgs_mlp, v.d1, self.mlp_wf, self.mlp_wg, v.x16_g1,
-                    norm_w=self.post_attn_norm_w, scratch=v.g_scratch,
-                    partials=v.g_part, counters=ws.gate_counters, norm_eps=eps,
+                ops.inkling2_glue_msg_gate_down_mix(
+                    v.raw1, v.msgs_mlp, self.mlp_wd, v.d1, self.mlp_wf, self.mlp_wg,
+                    v.x16_g1, norm_w=self.post_attn_norm_w, scratch=v.g_scratch,
+                    partials=v.g_part, counters=ws.gate_counters,
+                    eps=eps, norm_eps=eps,
                 )  # fmt: skip
         else:
             if (
@@ -586,13 +582,11 @@ class Inkling2DecoderLayer(nn.Module):
                 ops.inkling2_glue_attn_res(
                     blk, n_blocks, a0, self._mlp_query, v.raw1, x1=a1, eps=eps, **extra
                 )
-                ops.inkling2_glue_msg_gate_down(
-                    v.raw1, v.msgs_mlp, self.mlp_wd, v.d1, eps
-                )
-                ops.inkling2_glue_msg_gate_mix(
-                    v.raw1, v.msgs_mlp, v.d1, self.mlp_wf, self.mlp_wg, v.x16_g1,
-                    norm_w=self.post_attn_norm_w, scratch=v.g_scratch,
-                    partials=v.g_part, counters=ws.gate_counters, norm_eps=eps,
+                ops.inkling2_glue_msg_gate_down_mix(
+                    v.raw1, v.msgs_mlp, self.mlp_wd, v.d1, self.mlp_wf, self.mlp_wg,
+                    v.x16_g1, norm_w=self.post_attn_norm_w, scratch=v.g_scratch,
+                    partials=v.g_part, counters=ws.gate_counters,
+                    eps=eps, norm_eps=eps,
                 )  # fmt: skip
 
         # ---- MoE (route, gemm1, swiglu, gemm2) + post-mlp short convolution

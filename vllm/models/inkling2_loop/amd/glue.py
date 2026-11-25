@@ -177,7 +177,7 @@ class Inkling2GlueWorkspace:
                 g_part=3 * T * C,
             )
             sizes16["d"] = 3 * T * R
-            self.gate_counters = torch.zeros(3 * T, **i32)  # zero ONCE
+            self.gate_counters = torch.zeros(6 * T, **i32)  # zero ONCE (mix + down)
             self.loopcd_omega: torch.Tensor | None = torch.zeros(T, **f32)
             self.loopcd_omega_blk: torch.Tensor | None = torch.zeros(T, **f32)
             self.loopcd_logits_flag: torch.Tensor | None = torch.zeros(1, **i32)

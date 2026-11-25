@@ -1183,6 +1183,270 @@ __global__ void __launch_bounds__(kMixWaves* kWave)
 }
 
 // ---------------------------------------------------------------------------
+// Fused MessageGate (down + mix + RMSNorm in 1 launch, 8 down CTAs)
+// ---------------------------------------------------------------------------
+struct GateFusedArgs {
+  const float* h;
+  int64_t h_t, h_s;
+  const float* m;
+  int64_t m_t, m_s;
+  const __half* wd;  // [G, R, 2H]
+  __half* d;         // [G, T, R] scratch
+  const float* wf;   // fp32 [G, R, H]
+  const float* wg;   // fp32 [G, R, H]
+  const void* nw;    // [1 or G, H] fp16/fp32
+  int64_t nw_s;
+  int nw_f16, nw_rows;
+  float* out32;   // [G, T, H]
+  __half* out16;  // [G, T, H]
+  float* part;    // [G, T, C]
+  int* counters;  // [2, G, ntiles] (0: mix done, 1: down done)
+  int T, R, H, C;
+  float eps, norm_eps, inv_h;
+};
+
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+
+template <int TB, int RPW, bool NORM>
+__device__ __forceinline__ void gate_down_mix_fused_body(
+    const GateFusedArgs& a) {
+  constexpr int NW = kMixWaves;  // 8
+  constexpr int WPT = NW / TB;
+  constexpr int kDownCtas = 8;
+  __shared__ int s_last;
+  extern __shared__ __attribute__((aligned(16))) unsigned char smem[];
+
+  const int tid = threadIdx.x;
+  const int lane = tid & (kWave - 1);
+  const int wave = tid / kWave;
+  const int s = blockIdx.y;
+  const int tile = blockIdx.z;
+  const int t0 = tile * TB;
+  const int cc = blockIdx.x;  // 0..C-1 (128-col chunk)
+  const int c = cc * 128 + lane * 4;
+  const bool active = c < a.H;
+  const int H = a.H, V = H >> 2, K2 = 2 * H, R = a.R, T = a.T;
+  const int r0 = wave * RPW;
+  const int ntiles = gridDim.z;
+  int* mix_counter = a.counters + (int64_t)s * ntiles + tile;
+  int* down_counter = a.counters + (int64_t)(gridDim.y + s) * ntiles + tile;
+
+  // Phase 1: CTAs 0..7 (8 CTAs x 8 waves = 64 waves) compute d[s, t, 0..63]
+  if (cc < kDownCtas) {
+    __half* xs = reinterpret_cast<__half*>(smem);  // [TB][2H]
+    for (int vi = wave; vi < 2 * TB; vi += NW) {
+      const int tb = vi >> 1, which = vi & 1;
+      const int t = t0 + tb;
+      __half* dst = xs + (int64_t)tb * K2 + which * H;
+      if (t >= T) {
+        for (int c4 = lane; c4 < V; c4 += kWave)
+          *reinterpret_cast<uint2*>(dst + 4 * c4) = make_uint2(0u, 0u);
+        continue;
+      }
+      const float* src = which ? a.m + t * a.m_t + (int64_t)s * a.m_s
+                               : a.h + t * a.h_t + (int64_t)s * a.h_s;
+      stage_unit_row(src, dst, V, a.inv_h, a.eps, lane);
+    }
+    __syncthreads();
+
+    const uint4* x4 = reinterpret_cast<const uint4*>(xs);
+    const int K8 = K2 >> 3;
+    const int r = cc * NW + wave;
+    if (r < R) {
+      const uint4* w4 =
+          reinterpret_cast<const uint4*>(a.wd + ((int64_t)s * R + r) * K2);
+      float acc[TB];
+  #pragma unroll
+      for (int tb = 0; tb < TB; ++tb) acc[tb] = 0.f;
+  #pragma unroll 6
+      for (int i = lane; i < K8; i += kWave) {
+        const uint4 wv = w4[i];
+        const half2* wh = reinterpret_cast<const half2*>(&wv);
+  #pragma unroll
+        for (int tb = 0; tb < TB; ++tb) {
+          const uint4 xv = x4[(int64_t)tb * K8 + i];
+          const half2* xh = reinterpret_cast<const half2*>(&xv);
+          float cv = acc[tb];
+          cv = __builtin_amdgcn_fdot2(wh[0], xh[0], cv, false);
+          cv = __builtin_amdgcn_fdot2(wh[1], xh[1], cv, false);
+          cv = __builtin_amdgcn_fdot2(wh[2], xh[2], cv, false);
+          cv = __builtin_amdgcn_fdot2(wh[3], xh[3], cv, false);
+          acc[tb] = cv;
+        }
+      }
+  #pragma unroll
+      for (int tb = 0; tb < TB; ++tb) {
+        const float sum = wave_sum(acc[tb]);
+        const int t = t0 + tb;
+        if (lane == 0 && t < T)
+          a.d[((int64_t)s * T + t) * R + r] = __float2half_rn(sum);
+      }
+    }
+    __threadfence();
+    __syncthreads();
+    if (tid == 0) atomicAdd(down_counter, 1);
+  }
+
+  // Overlap Phase 2 weight/input loads while waiting for all 8 down CTAs
+  float4 fv[RPW], gv[RPW];
+  if (active) {
+    const float* wf = a.wf + (int64_t)s * R * H + c;
+    const float* wg = a.wg + (int64_t)s * R * H + c;
+  #pragma unroll
+    for (int i = 0; i < RPW; ++i) {
+      fv[i] = load4(wf + (int64_t)(r0 + i) * H);
+      gv[i] = load4(wg + (int64_t)(r0 + i) * H);
+    }
+  }
+  float4 hv = make_float4(0.f, 0.f, 0.f, 0.f), mv = hv;
+  if (wave < TB && active && t0 + wave < T) {
+    hv = load4(a.h + (t0 + wave) * a.h_t + (int64_t)s * a.h_s + c);
+    mv = load4(a.m + (t0 + wave) * a.m_t + (int64_t)s * a.m_s + c);
+  }
+
+  if (tid == 0) {
+    while (atomicAdd(down_counter, 0) < kDownCtas) {
+      __builtin_amdgcn_s_sleep(1);
+    }
+    __threadfence();
+  }
+  __syncthreads();
+
+  float dd[TB][RPW];
+  #pragma unroll
+  for (int tb = 0; tb < TB; ++tb) {
+    const int tc = min(t0 + tb, T - 1);
+  #pragma unroll
+    for (int i = 0; i < RPW; ++i)
+      dd[tb][i] = __half2float(a.d[((int64_t)s * T + tc) * R + r0 + i]);
+  }
+
+  float accf[TB][4], accg[TB][4];
+  #pragma unroll
+  for (int tb = 0; tb < TB; ++tb)
+  #pragma unroll
+    for (int j = 0; j < 4; ++j) accf[tb][j] = accg[tb][j] = 0.f;
+  if (active) {
+  #pragma unroll
+    for (int i = 0; i < RPW; ++i) {
+  #pragma unroll
+      for (int tb = 0; tb < TB; ++tb) {
+        const float dr = dd[tb][i];
+        accf[tb][0] = fmaf(dr, fv[i].x, accf[tb][0]);
+        accf[tb][1] = fmaf(dr, fv[i].y, accf[tb][1]);
+        accf[tb][2] = fmaf(dr, fv[i].z, accf[tb][2]);
+        accf[tb][3] = fmaf(dr, fv[i].w, accf[tb][3]);
+        accg[tb][0] = fmaf(dr, gv[i].x, accg[tb][0]);
+        accg[tb][1] = fmaf(dr, gv[i].y, accg[tb][1]);
+        accg[tb][2] = fmaf(dr, gv[i].z, accg[tb][2]);
+        accg[tb][3] = fmaf(dr, gv[i].w, accg[tb][3]);
+      }
+    }
+  }
+
+  float4(*s_part)[TB][2][kWave] =
+      reinterpret_cast<float4(*)[TB][2][kWave]>(smem);
+  #pragma unroll
+  for (int tb = 0; tb < TB; ++tb) {
+    s_part[wave][tb][0][lane] =
+        make_float4(accf[tb][0], accf[tb][1], accf[tb][2], accf[tb][3]);
+    s_part[wave][tb][1][lane] =
+        make_float4(accg[tb][0], accg[tb][1], accg[tb][2], accg[tb][3]);
+  }
+  __syncthreads();
+
+  if (wave < TB) {
+    const int t = t0 + wave;
+    float4 f = make_float4(0.f, 0.f, 0.f, 0.f), g = f;
+  #pragma unroll
+    for (int w = 0; w < NW; ++w) {
+      const float4 pf = s_part[w][wave][0][lane];
+      const float4 pg = s_part[w][wave][1][lane];
+      f.x += pf.x;
+      f.y += pf.y;
+      f.z += pf.z;
+      f.w += pf.w;
+      g.x += pg.x;
+      g.y += pg.y;
+      g.z += pg.z;
+      g.w += pg.w;
+    }
+    float ss = 0.f;
+    if (active && t < T) {
+      float4 o;
+      o.x = (1.0f - tanhf(f.x)) * hv.x + tanhf(g.x) * mv.x;
+      o.y = (1.0f - tanhf(f.y)) * hv.y + tanhf(g.y) * mv.y;
+      o.z = (1.0f - tanhf(f.z)) * hv.z + tanhf(g.z) * mv.z;
+      o.w = (1.0f - tanhf(f.w)) * hv.w + tanhf(g.w) * mv.w;
+      store4(a.out32 + ((int64_t)s * T + t) * H + c, o);
+      ss = dot4(o, o);
+    }
+    if constexpr (NORM) {
+      const float tot = wave_sum(ss);
+      if (lane == 0 && t < T && cc < a.C)
+        a.part[((int64_t)s * T + t) * a.C + cc] = tot;
+    }
+  }
+  if constexpr (!NORM) {
+    __syncthreads();
+    if (tid == 0) {
+      const int old = atomicAdd(mix_counter, 1);
+      if (old == (int)gridDim.x - 1) {
+        *mix_counter = 0;
+        *down_counter = 0;
+      }
+    }
+    return;
+  }
+
+  __threadfence();
+  __syncthreads();
+  if (tid == 0) {
+    const int old = atomicAdd(mix_counter, 1);
+    s_last = (old == (int)gridDim.x - 1);
+  }
+  __syncthreads();
+  if (!s_last) return;
+  __threadfence();
+
+  {
+    const int tb = wave / WPT, sw = wave - tb * WPT;
+    const int t = t0 + tb;
+    if (t < T) {
+      const float* pp = a.part + ((int64_t)s * T + t) * a.C;
+      float tot = 0.f;
+      for (int i = lane; i < a.C; i += kWave) tot += pp[i];
+      tot = wave_sum(tot);
+      const float rs = rsqrtf(tot * a.inv_h + a.norm_eps);
+      const int64_t row = ((int64_t)s * T + t) * H;
+      const int64_t wrow = (a.nw_rows == 1 ? 0 : s) * a.nw_s;
+      for (int c4 = sw * kWave + lane; c4 < (H >> 2); c4 += WPT * kWave) {
+        const float4 v = load4(a.out32 + row + 4 * c4);
+        const float4 w = load4_dyn(a.nw, wrow + 4 * c4, a.nw_f16);
+        store4(a.out16 + row + 4 * c4,
+               make_float4(w.x * (v.x * rs), w.y * (v.y * rs), w.z * (v.z * rs),
+                           w.w * (v.w * rs)));
+      }
+    }
+  }
+  __syncthreads();
+  if (tid == 0) {
+    *mix_counter = 0;
+    *down_counter = 0;
+  }
+}
+
+#endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
+
+template <int TB, int RPW, bool NORM>
+__global__ void __launch_bounds__(kMixWaves* kWave)
+    gate_down_mix_fused_kernel(const GateFusedArgs a) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  gate_down_mix_fused_body<TB, RPW, NORM>(a);
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // rms_norm / embed_norm
 // ---------------------------------------------------------------------------
 struct RmsArgs {
@@ -2873,6 +3137,151 @@ void inkling2_glue_msg_gate_mix(const at::Tensor& h, const at::Tensor& m,
     else
       launch_gate_mix<float, false>(tb, grid, block, a, stream);
   }
+}
+
+static int device_cu_count(int dev) {
+  static int cache[64] = {};
+  if (dev >= 0 && dev < 64 && cache[dev] > 0) return cache[dev];
+  int mp = 0;
+  if (hipDeviceGetAttribute(&mp, hipDeviceAttributeMultiprocessorCount, dev) !=
+      hipSuccess) {
+    mp = 0;
+  }
+  if (dev >= 0 && dev < 64 && mp > 0) cache[dev] = mp;
+  return mp;
+}
+
+void inkling2_glue_msg_gate_down_mix(const at::Tensor& h, const at::Tensor& m,
+                                     const at::Tensor& wd, const at::Tensor& d,
+                                     const at::Tensor& wf, const at::Tensor& wg,
+                                     const std::optional<at::Tensor>& norm_w,
+                                     const at::Tensor& out,
+                                     const std::optional<at::Tensor>& scratch,
+                                     const std::optional<at::Tensor>& partials,
+                                     const std::optional<at::Tensor>& counters,
+                                     double eps, double norm_eps) {
+  const char* who = "inkling2_glue_msg_gate_down_mix";
+  const bool w16 = wf.scalar_type() == at::kHalf;
+  const bool norm = out.scalar_type() == at::kHalf;
+  const int64_t T = m.dim() == 3 ? m.size(0) : 0;
+  const int64_t G = m.dim() == 3 ? m.size(1) : 0;
+  const int64_t H = m.dim() == 3 ? m.size(2) : 0;
+  const int64_t R = d.dim() == 3 ? d.size(2) : 0;
+  const int64_t C = (H + 127) / 128;
+  const int tb = gate_tb(T, 4);
+  const int64_t ntiles = T > 0 ? (T + tb - 1) / tb : 0;
+  const int dev = m.is_cuda() ? (int)m.get_device() : -1;
+  const int sm_count = dev >= 0 ? device_cu_count(dev) : 0;
+  const bool can_fuse =
+      fuse_glue() && !w16 && norm && T > 0 && T <= 16 &&
+      R == kMixWaves * kMixRpw && C >= 8 && H <= 4096 && H % 8 == 0 &&
+      sm_count > 0 && (C * G * ntiles) <= sm_count && norm_w.has_value() &&
+      norm_w->defined() && scratch.has_value() && scratch->defined() &&
+      partials.has_value() && partials->defined() && counters.has_value() &&
+      counters->defined() && counters->numel() >= 2 * G * ntiles;
+  if (!can_fuse) {
+    inkling2_glue_msg_gate_down(h, m, wd, d, eps);
+    inkling2_glue_msg_gate_mix(h, m, d, wf, wg, norm_w, out, scratch, partials,
+                               counters, norm_eps);
+    return;
+  }
+
+  check_gpu(h, who, "h");
+  check_gpu(m, who, "m");
+  check_gpu(wd, who, "wd");
+  check_gpu(d, who, "d");
+  check_gpu(wf, who, "wf");
+  check_gpu(wg, who, "wg");
+  check_gpu(*norm_w, who, "norm_w");
+  check_gpu(out, who, "out");
+  check_dtype(h, who, "h", at::kFloat);
+  check_dtype(m, who, "m", at::kFloat);
+  check_dtype(wd, who, "wd", at::kHalf);
+  check_dtype(d, who, "d", at::kHalf);
+  check_dtype(wf, who, "wf", at::kFloat);
+  check_dtype(wg, who, "wg", at::kFloat);
+  TORCH_CHECK(h.dim() == 3 && h.size(0) == T && h.size(2) == H &&
+                  (h.size(1) == G || h.size(1) == 1),
+              who, ": h must be [T, G or 1, H]");
+  check_vec_rows(h, who, "h", 4);
+  check_vec_rows(m, who, "m", 4);
+  TORCH_CHECK(wd.dim() == 3 && wd.size(0) == G && wd.size(1) == R &&
+                  wd.size(2) == 2 * H && wd.is_contiguous(),
+              who, ": wd must be contiguous [G, R, 2H]");
+  TORCH_CHECK(d.dim() == 3 && d.size(0) == G && d.size(1) == T &&
+                  d.size(2) == R && d.is_contiguous(),
+              who, ": d must be contiguous [G, T, R]");
+  TORCH_CHECK(wf.dim() == 3 && wf.size(0) == G && wf.size(1) == R &&
+                  wf.size(2) == H && wf.is_contiguous() &&
+                  wg.sizes() == wf.sizes() && wg.is_contiguous(),
+              who, ": fp32 wf / wg must be contiguous [G, R, H]");
+  TORCH_CHECK(out.dim() == 3 && out.size(0) == G && out.size(1) == T &&
+                  out.size(2) == H && out.is_contiguous(),
+              who, ": out must be contiguous [G, T, H]");
+  TORCH_CHECK(norm_w->dim() == 2 && norm_w->size(1) == H &&
+                  (norm_w->size(0) == 1 || norm_w->size(0) == G),
+              who, ": norm_w must be [1 or G, H]");
+  check_vec_rows(*norm_w, who, "norm_w", 4);
+  TORCH_CHECK(scratch->scalar_type() == at::kFloat &&
+                  scratch->is_contiguous() && scratch->numel() >= G * T * H,
+              who, ": scratch must be fp32 with >= G*T*H elements");
+  TORCH_CHECK(partials->scalar_type() == at::kFloat &&
+                  partials->is_contiguous() && partials->numel() >= G * T * C,
+              who, ": partials must be fp32 with >= G*T*C elements");
+  TORCH_CHECK(counters->scalar_type() == at::kInt &&
+                  counters->is_contiguous() &&
+                  counters->numel() >= 2 * G * ntiles,
+              who, ": counters must be int32 with >= 2*G*ntiles elements");
+
+  GateFusedArgs a{};
+  a.h = h.data_ptr<float>();
+  a.h_t = h.stride(0);
+  a.h_s = h.size(1) == 1 ? 0 : h.stride(1);
+  a.m = m.data_ptr<float>();
+  a.m_t = m.stride(0);
+  a.m_s = m.stride(1);
+  a.wd = reinterpret_cast<const __half*>(wd.data_ptr());
+  a.d = reinterpret_cast<__half*>(d.data_ptr());
+  a.wf = wf.data_ptr<float>();
+  a.wg = wg.data_ptr<float>();
+  a.nw = norm_w->data_ptr();
+  a.nw_s = norm_w->stride(0);
+  a.nw_f16 = is_f16(*norm_w, who, "norm_w");
+  a.nw_rows = (int)norm_w->size(0);
+  a.out32 = scratch->data_ptr<float>();
+  a.out16 = reinterpret_cast<__half*>(out.data_ptr());
+  a.part = partials->data_ptr<float>();
+  a.counters = counters->data_ptr<int>();
+  a.T = (int)T;
+  a.R = (int)R;
+  a.H = (int)H;
+  a.C = (int)C;
+  a.eps = (float)eps;
+  a.norm_eps = (float)norm_eps;
+  a.inv_h = 1.0f / (float)H;
+
+  const at::cuda::OptionalCUDAGuard guard(device_of(m));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  const size_t smem_down = (size_t)tb * 2 * H * sizeof(__half);
+  const size_t smem_mix = (size_t)kMixWaves * tb * 2 * kWave * sizeof(float4);
+  const size_t shmem = std::max(smem_down, smem_mix);
+  const dim3 grid((unsigned)C, (unsigned)G, (unsigned)ntiles);
+  const dim3 block(kMixWaves * kWave);
+  switch (tb) {
+    case 1:
+      inkling2_glue::gate_down_mix_fused_kernel<1, kMixRpw, true>
+          <<<grid, block, shmem, stream>>>(a);
+      break;
+    case 2:
+      inkling2_glue::gate_down_mix_fused_kernel<2, kMixRpw, true>
+          <<<grid, block, shmem, stream>>>(a);
+      break;
+    default:
+      inkling2_glue::gate_down_mix_fused_kernel<4, kMixRpw, true>
+          <<<grid, block, shmem, stream>>>(a);
+      break;
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // ---------------------------------------------------------------------------

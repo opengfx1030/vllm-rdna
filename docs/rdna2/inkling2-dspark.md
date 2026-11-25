@@ -26,7 +26,7 @@ after `RECIPE=`. Smoke test of the running server (text, image, prefix cache, st
 | recipe | cards | what it is | one request decodes (mean of six kinds of text) |
 | --- | --- | --- | --- |
 | `inkling2-mini-tp1-dspark` | 1 | `inkling2-mini-tp1` with DSpark, K = 2 (`[[1,2,2],[3,16,0]]`), `SEQS=16`, `MAXLEN=135000`; `ADAPTIVE=1` (`[[1,1,7],[2,2,2],[3,16,0]]`, `MAXLEN=125000`) + optional `DRAFT_VOCAB` | 1.36x–1.75x K=2; 1.57x–3.05x `ADAPTIVE=1` + 32k vocab |
-| `inkling2-mini-tp2` | 2 | DSpark ON by default, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXBAT=1024`, `MAXLEN=720000`; `ADAPTIVE=1` (`MAXLEN=660000`), `DSPARK=0` for 1M ctx | 1.39x K=2 (113 t/s); 1.65x `ADAPTIVE=1` + 32k vocab (135 t/s) |
+| `inkling2-mini-tp2` | 2 | DSpark ON by default, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXBAT=1024`, `MAXLEN=760000`; `ADAPTIVE=1` (`MAXLEN=720000`), `DSPARK=0` for 1M ctx | 1.39x K=2 (113 t/s); 1.65x `ADAPTIVE=1` + 32k vocab (135 t/s) |
 | `inkling2-mini-tp4` | 4 | DSpark ON by default, K = 2 (`[[1,2,2],[3,8,0]]`), `SEQS=8`, `MAXLEN=1048576`; `ADAPTIVE=1` (1M ctx still fits), `DSPARK=0` for plain | 1.36x K=2 (143 t/s); 1.50x+ `ADAPTIVE=1` + 32k vocab (158+ t/s) |
 
 The adaptive recipe takes a draft vocabulary: an ids file made once, on the CPU (27 s on the box, no GPU). Any code and

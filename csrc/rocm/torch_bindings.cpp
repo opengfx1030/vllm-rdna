@@ -1205,6 +1205,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("inkling2_glue_msg_gate_mix", torch::kCUDA,
                 &inkling2_glue_msg_gate_mix);
   rocm_ops.def(
+      "inkling2_glue_msg_gate_down_mix(Tensor h, Tensor m, Tensor wd, "
+      "Tensor! d, Tensor wf, Tensor wg, Tensor? norm_w, Tensor! out, "
+      "Tensor!? scratch, Tensor!? partials, Tensor!? counters, float eps, "
+      "float norm_eps) -> ()");
+  rocm_ops.impl("inkling2_glue_msg_gate_down_mix", torch::kCUDA,
+                &inkling2_glue_msg_gate_down_mix);
+  rocm_ops.def(
       "inkling2_glue_rms_norm(Tensor x, Tensor? x1, Tensor? weight, "
       "Tensor! out, Tensor!? sum_out, float eps, bool round_fp16) -> ()");
   rocm_ops.impl("inkling2_glue_rms_norm", torch::kCUDA,
