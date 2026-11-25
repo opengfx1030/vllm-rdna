@@ -196,6 +196,9 @@ class Inkling2GlueWorkspace:
         self.loopcd_weak_pass: int = -1
         self.loopcd_logits_indices: torch.Tensor | None = None
         self.loopcd_weak_is_compact: bool = False
+        from .loopcd import loopcd_graph_hooks_enabled
+
+        self.loopcd_graph_hooks: bool = loopcd_graph_hooks_enabled()
         self.f32 = {k: torch.empty(n, **f32) for k, n in sizes.items()}
         self.f16 = {k: torch.empty(n, **f16) for k, n in sizes16.items()}
 

@@ -953,6 +953,8 @@ class Inkling2Model(nn.Module):
         passes = cfg.loop_num_passes
         weak_visit = 0 if ws.loopcd_weak_pass == 0 else (passes - 2)
 
+        loopcd_graph_on = ws.loopcd_graph_hooks
+
         def _maybe_weak_readout(
             blk_t: torch.Tensor,
             n_blk: int,
@@ -960,7 +962,7 @@ class Inkling2Model(nn.Module):
             wx1: torch.Tensor | None,
         ) -> None:
             assert ws.loopcd_weak_h is not None
-            capturing = torch.cuda.is_current_stream_capturing()
+            capturing = loopcd_graph_on and torch.cuda.is_current_stream_capturing()
             if ws.loopcd_weak_h.shape[0] >= T:
                 if ws.loopcd_logits_active or capturing:
                     ops.inkling2_glue_loopcd_readout(
@@ -1067,7 +1069,10 @@ class Inkling2Model(nn.Module):
         if (
             passes > 1
             and loop_layers
-            and (ws.loopcd_hidden_active or torch.cuda.is_current_stream_capturing())
+            and (
+                ws.loopcd_hidden_active
+                or (loopcd_graph_on and torch.cuda.is_current_stream_capturing())
+            )
         ):
             assert ws.loopcd_omega is not None and ws.loopcd_omega_blk is not None
             if pending is not None:
@@ -1543,8 +1548,10 @@ class Inkling2LoopTextForCausalLM(nn.Module):
                     dtype=torch.float32,
                     device=dev,
                 )
-            z_final = z_final.contiguous()
-            z_first = z_first.contiguous()
+            if z_final.stride(-1) != 1:
+                z_final = z_final.contiguous()
+            if z_first.stride(-1) != 1:
+                z_first = z_first.contiguous()
             ops.inkling2_loopcd_logits(
                 z_final,
                 z_first,

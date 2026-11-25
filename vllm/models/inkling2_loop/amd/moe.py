@@ -773,9 +773,16 @@ def _prefill_switches(env) -> tuple[bool, bool, int]:
 _PREFILL_BM, _PREFILL_INT8, _PREFILL_BM_MIN_TOKENS = _prefill_switches(os.environ)
 
 
+_ANNOUNCED_MESSAGES: set[tuple[str, tuple[Any, ...]]] = set()
+
+
 def _announce(message: str, *args: Any) -> None:
     """One INFO line per process through the vLLM logger (imported lazily: this module
     only needs torch)."""
+    key = (message, args)
+    if key in _ANNOUNCED_MESSAGES:
+        return
+    _ANNOUNCED_MESSAGES.add(key)
     from vllm.logger import init_logger
 
     init_logger(__name__).info_once(message, *args)
