@@ -48,6 +48,16 @@ watcher flags; the recipe pins a2 by PCI bus).
 | Receipt dry run | `DRY_RUN=1 BASE_TREE=HEAD_TREE=tree pr_receipt.sh ... RECIPE=inkling2-hi2-tp2` | 0 | 4 boots, 8 speed cells, 2 exactness cells, quality 0 |
 | Recipe assembly | `PRINT=1 serve_rdna.sh RECIPE=inkling2-hi2-tp2 MODEL=...` | 0 | command below |
 
+Everything above was re-run on the **merged** tree (`bae1b21db0` / docs commit
+`ad17998e4e`, csrc = `41ef6ba1e0`, rebuilt `_rocm_C` md5 `3da91a1a5350`): CPU gate
+71 passed / 5 skipped (92.9 s), `mutants.py` 21/21 killed, `mutants_launchers.py`
+13/13 killed, `check_real_dir.py` PASS (1125 tensors, 0 missing, 480 expert
+buffers, 643 dense tensors bit-equal to stock), the stock-recipe `DRY_RUN=1`
+receipt rc 0 with **identical base/head launch plans** and the six boots / 8 speed
+cells / quality / stall plan, archdiff `empty` against `41ef6ba1e0`, and the scan's
+5 `tolist` lines with 0 C findings.  The old kit's pre-fix rows above were measured
+before the merge and were not re-run.
+
 The CPU gate is the six-layer HI2 test set: format declaration/name map/TP slice
 (`test_hi2_loader.py`, 23), the slot/HIP->PCI gate, the lease carrier and the
 launcher protocol (`test_hi2_slots.py`, 37, on a fake visible-device table, a fake
