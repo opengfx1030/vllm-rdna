@@ -51,6 +51,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
 from .glue import FUSE_GLUE
 
 __all__ = [
@@ -61,10 +63,58 @@ __all__ = [
     "Inkling2LoopMoE",
     "Inkling2LoopSparseMoeBlock",
     "Inkling2LoopTopKRouter",
+    "moe_offload_config",
     "repack_mxfp8",
     "repack_nvfp4",
     "softcapped_swiglu",
 ]
+
+_NVFP4_PAYLOAD_NAMES = (
+    "w13_qweight",
+    "w13_scales",
+    "w13_globals",
+    "w2_qweight",
+    "w2_scales",
+    "w2_globals",
+)
+_MXFP8_PAYLOAD_NAMES = (
+    "w13_qweight",
+    "w13_scales",
+    "w2_qweight",
+    "w2_scales",
+)
+
+
+def moe_offload_config(
+    env: Any = None,
+) -> tuple[int, str, str, int]:
+    """Read Inkling-2 MoE expert-offload settings from the environment.
+
+    Returns ``(slots, copy_mode, policy, decay_interval)``.  ``slots == 0``
+    (default) disables offloading completely.
+    """
+    src = os.environ if env is None else env
+    raw_slots = src.get("VLLM_INKLING2_MOE_OFFLOAD_SLOTS", "0").strip()
+    slots = int(raw_slots) if raw_slots else 0
+    if slots < 0:
+        raise ValueError(f"VLLM_INKLING2_MOE_OFFLOAD_SLOTS must be >= 0, got {slots}")
+    copy_mode = src.get("VLLM_INKLING2_MOE_OFFLOAD_COPY", "tensor").strip() or "tensor"
+    if copy_mode not in ("tensor", "native"):
+        raise ValueError(
+            f"VLLM_INKLING2_MOE_OFFLOAD_COPY must be 'tensor' or 'native', "
+            f"got {copy_mode!r}"
+        )
+    policy = src.get("VLLM_INKLING2_MOE_OFFLOAD_POLICY", "lfu_lru").strip() or "lfu_lru"
+    if policy not in ("lfu_lru", "lru"):
+        raise ValueError(
+            f"VLLM_INKLING2_MOE_OFFLOAD_POLICY must be 'lfu_lru' or 'lru', "
+            f"got {policy!r}"
+        )
+    raw_decay = src.get("VLLM_INKLING2_MOE_OFFLOAD_DECAY", "128").strip()
+    decay = int(raw_decay) if raw_decay else 128
+    if decay <= 0:
+        raise ValueError(f"VLLM_INKLING2_MOE_OFFLOAD_DECAY must be > 0, got {decay}")
+    return slots, copy_mode, policy, decay
 
 
 # ---------------------------------------------------------------------------
@@ -288,39 +338,79 @@ class _ExpertsKernel(Inkling2LoopExperts):
             dtype=torch.float16,
             device=device,
         )
-        self._gemm(
-            "w13",
-            x,
-            gate_up,
-            no_weights,
-            sorted_ids,
-            expert_ids,
-            ntpp,
-            top_k,
-            block_size_m,
-            False,
-            0,
-        )
-        act = self._apply_gate(gate_up).contiguous()  # fp32 math, fp16 result
-
-        # GEMM 2: one activation row per routed id (top_k=1); the epilogue
-        # scales by the router weight and sums the k rows of each token.
         out = torch.zeros(
             num_tokens, self.hidden_dim, dtype=torch.float16, device=device
         )
-        self._gemm(
-            "w2",
-            act,
-            out,
-            top_k_weights.to(torch.float32).reshape(-1).contiguous(),
-            sorted_ids,
-            expert_ids,
-            ntpp,
-            1,
-            block_size_m,
-            True,
-            top_k,
-        )
+        topk_w_flat = top_k_weights.to(torch.float32).reshape(-1).contiguous()
+        cache = getattr(self, "expert_cache", None)
+        if cache is None:
+            self._gemm(
+                "w13",
+                x,
+                gate_up,
+                no_weights,
+                sorted_ids,
+                expert_ids,
+                ntpp,
+                top_k,
+                block_size_m,
+                False,
+                0,
+            )
+            act = self._apply_gate(gate_up).contiguous()  # fp32 math, fp16 result
+
+            # GEMM 2: one activation row per routed id (top_k=1); the epilogue
+            # scales by the router weight and sums the k rows of each token.
+            self._gemm(
+                "w2",
+                act,
+                out,
+                topk_w_flat,
+                sorted_ids,
+                expert_ids,
+                ntpp,
+                1,
+                block_size_m,
+                True,
+                top_k,
+            )
+            return out.to(hidden_states.dtype)
+
+        local_ids = ids.cpu().reshape(-1).tolist()
+        cache.policy.observe(local_ids)
+        for pass_experts in cache.policy.plan_passes(local_ids):
+            lease = cache.ensure(pass_experts)
+            try:
+                slot_expert_ids = cache.remap(expert_ids, lease)
+                self._gemm(
+                    "w13",
+                    x,
+                    gate_up,
+                    no_weights,
+                    sorted_ids,
+                    slot_expert_ids,
+                    ntpp,
+                    top_k,
+                    block_size_m,
+                    False,
+                    0,
+                )
+                act = self._apply_gate(gate_up).contiguous()
+                self._gemm(
+                    "w2",
+                    act,
+                    out,
+                    topk_w_flat,
+                    sorted_ids,
+                    slot_expert_ids,
+                    ntpp,
+                    1,
+                    block_size_m,
+                    True,
+                    top_k,
+                )
+            finally:
+                cache.release(lease)
         return out.to(hidden_states.dtype)
 
 
@@ -694,6 +784,11 @@ class Inkling2LoopMoE(_ExpertsKernel):
         quant_format: Literal["nvfp4", "mxfp8"],
         prefix: str = "",
         tp_size: int = 1,
+        *,
+        offload_slots: int | None = None,
+        offload_copy: str | None = None,
+        offload_policy: str | None = None,
+        offload_decay: int | None = None,
     ) -> None:
         if quant_format not in ("nvfp4", "mxfp8"):
             raise ValueError(f"unsupported quant_format {quant_format!r}")
@@ -703,29 +798,70 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 f"intermediate_size {config.intermediate_size} is not divisible by "
                 f"tensor parallel size {tp_size}"
             )
+        env_slots, env_copy, env_policy, env_decay = moe_offload_config()
+        self.offload_slots = env_slots if offload_slots is None else int(offload_slots)
+        self.offload_copy = env_copy if offload_copy is None else offload_copy
+        self.offload_policy = env_policy if offload_policy is None else offload_policy
+        self.offload_decay = env_decay if offload_decay is None else int(offload_decay)
+        if self.offload_slots < 0:
+            raise ValueError(f"offload_slots must be >= 0, got {self.offload_slots}")
+        if self.offload_slots > 0:
+            if tp_size != 1:
+                raise ValueError(
+                    "Inkling-2 MoE expert offloading currently supports TP=1 only "
+                    f"(got tp_size={tp_size})"
+                )
+            if self.offload_copy not in ("tensor", "native"):
+                raise ValueError(
+                    f"offload_copy must be 'tensor' or 'native', got "
+                    f"{self.offload_copy!r}"
+                )
+            if self.offload_policy not in ("lfu_lru", "lru"):
+                raise ValueError(
+                    f"offload_policy must be 'lfu_lru' or 'lru', got "
+                    f"{self.offload_policy!r}"
+                )
+            if self.offload_decay <= 0:
+                raise ValueError(f"offload_decay must be > 0, got {self.offload_decay}")
         self.tp_size = tp_size
         self.intermediate_dim = config.intermediate_size // tp_size
         self.quant_format = quant_format
         self.prefix = prefix
         self.top_k = config.num_experts_per_tok
         self.gate = _MoEGate(config)
+        self.expert_cache: Any = None
+        self._visit_demands: list[int] = [0, 0]
+        self._visit_misses: list[int] = [0, 0]
 
         num_e, hidden, inter = self.num_experts, self.hidden_dim, self.intermediate_dim
         fp8 = torch.float8_e4m3fn
+        # When offloading is enabled, stage the checkpoint-layout experts on CPU so
+        # a 16 GiB GPU never allocates all 14.86 GiB of experts on device at once.
+        expert_dev_kwargs: dict[str, Any] = (
+            {"device": "cpu"} if self.offload_slots > 0 else {}
+        )
         for stage, n, k in (("w13", 2 * inter, hidden), ("w2", hidden, inter)):
             if quant_format == "nvfp4":
                 tensors = {
-                    "weight": torch.empty(num_e, n, k // 2, dtype=torch.uint8),
-                    "weight_scale": torch.empty(num_e, n, k // 16, dtype=fp8),
-                    "weight_amax": torch.empty(num_e, dtype=torch.float32),
+                    "weight": torch.empty(
+                        num_e, n, k // 2, dtype=torch.uint8, **expert_dev_kwargs
+                    ),
+                    "weight_scale": torch.empty(
+                        num_e, n, k // 16, dtype=fp8, **expert_dev_kwargs
+                    ),
+                    "weight_amax": torch.empty(
+                        num_e, dtype=torch.float32, **expert_dev_kwargs
+                    ),
                     "weight_outer_scale_denominator": torch.empty(
-                        1, dtype=torch.float32
+                        1, dtype=torch.float32, **expert_dev_kwargs
                     ),
                 }
             else:
                 tensors = {
-                    "weight": torch.empty(num_e, n, k, dtype=fp8),
-                    "weight_scale": torch.empty(num_e, n, k // 32, dtype=torch.uint8),
+                    "weight": torch.empty(num_e, n, k, dtype=fp8, **expert_dev_kwargs),
+                    "weight_scale": torch.empty(
+                        num_e, n, k // 32, dtype=torch.uint8, **expert_dev_kwargs
+                    ),
                 }
             for tail, tensor in tensors.items():
                 setattr(
@@ -768,6 +904,9 @@ class Inkling2LoopMoE(_ExpertsKernel):
         device = self.gate.weight.device
         step = self.repack_chunk_experts
         nvfp4 = self.quant_format == "nvfp4"
+        if self.offload_slots > 0:
+            self._process_weights_offload(device, step, nvfp4)
+            return
         for stage in ("w13", "w2"):
             weight = getattr(self, f"{stage}_weight").data
             scale = getattr(self, f"{stage}_weight_scale").data
@@ -820,6 +959,129 @@ class Inkling2LoopMoE(_ExpertsKernel):
             "on" if _PREFILL_INT8 else "off",
             _PREFILL_BM_MIN_TOKENS,
         )
+
+    @torch.no_grad()
+    def _process_weights_offload(
+        self, device: torch.device, step: int, nvfp4: bool
+    ) -> None:
+        """Streaming repack into a pinned CPU bank and bounded GPU slot pool."""
+        from vllm.model_executor.layers.fused_moe.rdna_expert_cache import (
+            PackedExpertCache,
+        )
+
+        pin = device.type == "cuda"
+        host_payload: dict[str, torch.Tensor] = {}
+        for stage in ("w13", "w2"):
+            weight = getattr(self, f"{stage}_weight").data
+            scale = getattr(self, f"{stage}_weight_scale").data
+            if nvfp4:
+                amax = getattr(self, f"{stage}_weight_amax").data
+                den = getattr(self, f"{stage}_weight_outer_scale_denominator").data
+            packed = scales = globals_ = None
+            for lo in range(0, self.num_experts, step):
+                hi = min(lo + step, self.num_experts)
+                w_c, s_c = weight[lo:hi].to(device), scale[lo:hi].to(device)
+                if nvfp4:
+                    q_c, s_c, g_c = repack_nvfp4(
+                        w_c, s_c, amax[lo:hi].to(device), den.to(device)
+                    )
+                else:
+                    q_c, s_c = repack_mxfp8(w_c, s_c)
+                q_c = q_c.view(torch.int32)
+                if packed is None:
+                    packed = torch.empty(
+                        (self.num_experts, *q_c.shape[1:]),
+                        dtype=torch.int32,
+                        device="cpu",
+                        pin_memory=pin,
+                    )
+                    scales = torch.empty(
+                        (self.num_experts, *s_c.shape[1:]),
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=pin,
+                    )
+                    if nvfp4:
+                        globals_ = torch.empty(
+                            self.num_experts,
+                            dtype=torch.float32,
+                            device="cpu",
+                            pin_memory=pin,
+                        )
+                assert packed is not None and scales is not None
+                packed[lo:hi].copy_(q_c)
+                scales[lo:hi].copy_(s_c)
+                if nvfp4:
+                    assert globals_ is not None
+                    globals_[lo:hi].copy_(g_c)
+                del w_c, s_c, q_c
+                if nvfp4:
+                    del g_c
+            assert packed is not None and scales is not None
+            host_payload[f"{stage}_qweight"] = packed
+            host_payload[f"{stage}_scales"] = scales
+            if nvfp4:
+                assert globals_ is not None
+                host_payload[f"{stage}_globals"] = globals_
+            # Free this stage's raw checkpoint tensors before repacking the next
+            # stage so host RAM does not double-buffer both stages simultaneously.
+            del weight, scale
+            if nvfp4:
+                del amax, den
+            for name in tuple(
+                n for n in self._expert_names if n.startswith(f"{stage}_")
+            ):
+                if hasattr(self, name):
+                    delattr(self, name)
+
+        payload_names = _NVFP4_PAYLOAD_NAMES if nvfp4 else _MXFP8_PAYLOAD_NAMES
+        self.expert_cache = PackedExpertCache(
+            host_payload,
+            slot_count=self.offload_slots,
+            device=device,
+            policy=self.offload_policy,
+            decay_interval=self.offload_decay,
+            copy_mode=self.offload_copy,
+            payload_names=payload_names,
+            allocate_dummy_slot=False,
+        )
+        # Bind the non-persistent buffers directly to the GPU slot pool so
+        # _gemm / _gemm_swiglu require zero weight-pointer indirection changes.
+        for name in payload_names:
+            self.register_buffer(
+                name, self.expert_cache.payload[name], persistent=False
+            )
+        self._processed = True
+        _announce(
+            "Inkling-2 MoE prefill kernels: dot2 32-row %s, W4A8 %s, chunks of >= %d "
+            "tokens (VLLM_INKLING2_PREFILL_BM / _INT8 / _BM_MIN_TOKENS)",
+            "on" if _PREFILL_BM else "off",
+            "on" if _PREFILL_INT8 else "off",
+            _PREFILL_BM_MIN_TOKENS,
+        )
+
+    def offload_stats(self) -> dict[str, Any] | None:
+        """Return cache hit/miss and transfer counters, or None when resident."""
+        cache = self.expert_cache
+        if cache is None:
+            return None
+        demands = cache.expert_demands
+        misses = cache.expert_misses
+        return {
+            "slots": cache.slot_count,
+            "logical_experts": cache.logical_num_experts,
+            "demands": demands,
+            "misses": misses,
+            "hit_rate": (demands - misses) / demands if demands else 1.0,
+            "copied_bytes": cache.copied_bytes,
+            "committed_passes": cache.committed_passes,
+            "native_copy_calls": cache.native_copy_calls,
+            "batch_copy_calls": cache.batch_copy_calls,
+            "host_bytes": cache.host_bytes,
+            "device_bytes": cache.device_bytes,
+            "visit_demands": tuple(self._visit_demands),
+            "visit_misses": tuple(self._visit_misses),
+        }
 
     # -- compute ----------------------------------------------------------
 
@@ -1038,6 +1300,7 @@ class Inkling2LoopMoE(_ExpertsKernel):
         ws: Any,
         out_all: torch.Tensor,
         max_query_len: int = 0,
+        visit: int = 0,
     ) -> torch.Tensor:
         """Router, expert GEMMs and swiglu on the HIP kernels (no allocation).
 
@@ -1047,6 +1310,9 @@ class Inkling2LoopMoE(_ExpertsKernel):
         zero-fills ``gate_up`` (not on the prefill path, whose w13 kernel stores every
         routed row) and the chunk's output, the GEMMs accumulate into them.
         """
+        if self.expert_cache is not None:
+            return _forward_hip_offload(self, x16, ws, out_all, max_query_len, visit)
+
         from vllm import _custom_ops as ops
 
         T, K = x16.shape[0], self.top_k
@@ -1148,3 +1414,174 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 cta_info=cta,
             )
         return out_all
+
+
+@eager_break_during_capture
+def _forward_hip_offload(
+    mlp: Inkling2LoopMoE,
+    x16: torch.Tensor,
+    ws: Any,
+    out_all: torch.Tensor,
+    max_query_len: int,
+    visit: int,
+) -> torch.Tensor:
+    """Offloaded MoE execution outside stream capture (breakable HIP graphs).
+
+    Runs the router, syncs active logical expert IDs to a reusable pinned host
+    buffer, plans bounded passes (handling ``unique_experts > slot_count``
+    overflow transparently), uploads misses via ``PackedExpertCache.ensure()``,
+    remaps ``expert_ids`` / ``cta_info`` to GPU cache slots, and invokes the
+    unchanged NVFP4/MXFP8 decode and prefill GEMM kernels into ``out_all``.
+    """
+    from vllm import _custom_ops as ops
+
+    cache = mlp.expert_cache
+    assert cache is not None
+    T, K = x16.shape[0], mlp.top_k
+    step = min(mlp.max_tokens_per_call, ws.moe_chunk)
+    scale = mlp.gate.routed_scaling_factor
+    bias = mlp.gate.e_score_correction_bias
+    visit_bucket = 0 if visit <= 0 else 1
+
+    for s in range(0, T, step):
+        e = min(s + step, T)
+        tc = e - s
+        prefill = (
+            _PREFILL_BM and tc >= _PREFILL_BM_MIN_TOKENS and mlp._prefill_supported()
+        )
+        bm = (
+            _BLOCK_M_WIDE
+            if prefill
+            else mlp._default_block_size_m(tc, K, max_query_len=max_query_len)
+        )
+        m = ws.moe_views(tc, bm)
+        x = x16 if tc == T else x16[s:e]
+        out = out_all if tc == T else out_all[s:e]
+        ops.inkling2_glue_moe_route(
+            x,
+            mlp.router_w,
+            bias,
+            m.logits,
+            m.topk_w,
+            m.topk_ids,
+            m.sorted_ids,
+            m.expert_ids,
+            ws.post_pad,
+            ws.route_counters,
+            bm,
+            scale,
+            zero1=None if prefill else m.gu,
+            zero2=out,
+        )
+        host_ids, route_event = ws.offload_route_scratch(tc)
+        host_ids.copy_(m.topk_ids, non_blocking=True)
+        if route_event is not None:
+            route_event.record()
+            route_event.synchronize()
+        local_ids = host_ids.reshape(-1).tolist()
+        cache.policy.observe(local_ids)
+        passes = cache.policy.plan_passes(local_ids)
+
+        cta = None
+        if prefill:
+            _announce(
+                "Inkling-2 MoE prefill kernels ACTIVE: %s on a chunk of at least "
+                "%d tokens",
+                "W4A8 int8 NVFP4 + fp16 MXFP8" if _PREFILL_INT8 else "fp16 dot2 32-row",
+                _PREFILL_BM_MIN_TOKENS,
+            )
+            cta = ops.moe_prefill_cta_rdna2(
+                m.expert_ids, ws.post_pad, mlp.num_experts, bm
+            )
+
+        demands_before = cache.expert_demands
+        misses_before = cache.expert_misses
+        for pass_experts in passes:
+            lease = cache.ensure(pass_experts)
+            try:
+                if cta is not None:
+                    slot_col = cache.remap(cta[:, 0], lease)
+                    cta_pass = cta.clone()
+                    cta_pass[:, 0] = slot_col.clamp(min=0)
+                    cta_pass[:, 2] = torch.where(slot_col >= 0, cta[:, 2], 0)
+                    mlp._gemm(
+                        "w13",
+                        x,
+                        m.gu,
+                        ws.no_weights,
+                        m.sorted_ids,
+                        m.expert_ids,
+                        ws.post_pad,
+                        K,
+                        bm,
+                        False,
+                        0,
+                        cta_info=cta_pass,
+                    )
+                    ops.inkling2_glue_swiglu(
+                        m.gu, m.act, mlp.gate_softcap, mlp.up_softcap
+                    )
+                    mlp._gemm(
+                        "w2",
+                        m.act,
+                        out,
+                        m.topk_w_flat,
+                        m.sorted_ids,
+                        m.expert_ids,
+                        ws.post_pad,
+                        1,
+                        bm,
+                        True,
+                        K,
+                        cta_info=cta_pass,
+                    )
+                else:
+                    slot_expert_ids = cache.remap(m.expert_ids, lease)
+                    mlp._gemm(
+                        "w13",
+                        x,
+                        m.gu,
+                        ws.no_weights,
+                        m.sorted_ids,
+                        slot_expert_ids,
+                        ws.post_pad,
+                        K,
+                        bm,
+                        False,
+                        0,
+                    )
+                    if FUSE_GLUE and tc <= _FUSE_SWIGLU_MAX_TOKENS:
+                        mlp._gemm_swiglu(
+                            m.gu,
+                            out,
+                            m.topk_w_flat,
+                            m.sorted_ids,
+                            slot_expert_ids,
+                            ws.post_pad,
+                            1,
+                            bm,
+                            True,
+                            K,
+                        )
+                    else:
+                        ops.inkling2_glue_swiglu(
+                            m.gu, m.act, mlp.gate_softcap, mlp.up_softcap
+                        )
+                        mlp._gemm(
+                            "w2",
+                            m.act,
+                            out,
+                            m.topk_w_flat,
+                            m.sorted_ids,
+                            slot_expert_ids,
+                            ws.post_pad,
+                            1,
+                            bm,
+                            True,
+                            K,
+                        )
+            finally:
+                cache.release(lease)
+        mlp._visit_demands[visit_bucket] += cache.expert_demands - demands_before
+        mlp._visit_misses[visit_bucket] += cache.expert_misses - misses_before
+    return out_all

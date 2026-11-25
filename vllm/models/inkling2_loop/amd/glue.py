@@ -221,6 +221,10 @@ class Inkling2GlueWorkspace:
         self.post_pad = torch.empty(1, **i32)
         self.route_counters = torch.zeros(chunk + 1, **i32)  # zero ONCE
         self.no_weights = torch.empty(0, **f32)
+        # Reusable pinned host buffer + event for MoE expert offload route readback
+        # (allocated lazily only when an offloaded MoE layer actually uses it).
+        self._offload_host_ids: torch.Tensor | None = None
+        self._offload_route_event: torch.cuda.Event | None = None
 
         # attention: the fused input projections write into per-segment buffers shared
         # by every layer; the output / o_proj buffers and the split-K workspace too
@@ -301,6 +305,20 @@ class Inkling2GlueWorkspace:
         return buf
 
     # -- DSpark taps ----------------------------------------------------------------
+    def offload_route_scratch(
+        self, tc: int
+    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+        """Reusable pinned ``[tc, K]`` int32 host buffer and sync event for MoE
+        expert offloading (allocated lazily on first use)."""
+        if self._offload_host_ids is None:
+            pin = self.device.type == "cuda"
+            self._offload_host_ids = torch.empty(
+                self.moe_chunk, self.K, dtype=torch.int32, device="cpu", pin_memory=pin
+            )
+            if pin:
+                self._offload_route_event = torch.cuda.Event()
+        return self._offload_host_ids[:tc], self._offload_route_event
+
     def ensure_taps(self, count: int) -> None:
         """Allocate ``count`` partial-block taps and the final-output tap (once)."""
         if len(self.taps) < count:
