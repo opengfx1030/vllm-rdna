@@ -3137,6 +3137,30 @@ def inkling2_glue_msg_gate_mix(
     )
 
 
+def inkling2_glue_msg_gate_down_mix(
+    h: torch.Tensor,
+    m: torch.Tensor,
+    wd: torch.Tensor,
+    d: torch.Tensor,
+    wf: torch.Tensor,
+    wg: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    norm_w: torch.Tensor | None = None,
+    scratch: torch.Tensor | None = None,
+    partials: torch.Tensor | None = None,
+    counters: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+) -> None:
+    """Fused MessageGate (``msg_gate_down`` + ``msg_gate_mix``) in one launch
+    when the grid fits one CTA per CU (deadlock-free), falling back to separate
+    ``down`` + ``mix`` otherwise."""
+    torch.ops._rocm_C.inkling2_glue_msg_gate_down_mix(
+        h, m, wd, d, wf, wg, norm_w, out, scratch, partials, counters, eps, norm_eps
+    )
+
+
 def inkling2_glue_rms_norm(
     x: torch.Tensor,
     out: torch.Tensor,
@@ -7404,6 +7428,24 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_glue_s
         scratch: torch.Tensor | None,
         partials: torch.Tensor | None,
         counters: torch.Tensor | None,
+        norm_eps: float,
+    ) -> None:
+        return
+
+    @register_fake("_rocm_C::inkling2_glue_msg_gate_down_mix")
+    def _inkling2_glue_msg_gate_down_mix_fake(
+        h: torch.Tensor,
+        m: torch.Tensor,
+        wd: torch.Tensor,
+        d: torch.Tensor,
+        wf: torch.Tensor,
+        wg: torch.Tensor,
+        norm_w: torch.Tensor | None,
+        out: torch.Tensor,
+        scratch: torch.Tensor | None,
+        partials: torch.Tensor | None,
+        counters: torch.Tensor | None,
+        eps: float,
         norm_eps: float,
     ) -> None:
         return

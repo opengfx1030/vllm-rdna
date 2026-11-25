@@ -325,7 +325,96 @@ def test_nvfp4_scale_keeps_the_shipped_double_rounding_on_tie_cases(ops, block_m
             False,
             0,
         )
-        assert torch.equal(out.cpu().double(), expected), (hex(byte), g)
+        assert torch.equal(out.cpu().double(), expected)
+
+
+@pytest.mark.parametrize(
+    ("k", "n", "tokens", "block_m", "is_w2"),
+    [
+        # TP1 w2 (K=1152, N=2304, T=1 bm=1 -> BK=192 exact K-split)
+        (1152, 2304, 1, 1, True),
+        # TP2 w2 (K=576, N=2304, T=1 bm=1 -> BK=192 exact K-split)
+        (576, 2304, 1, 1, True),
+        # TP2 w13 (K=2304, N=1152 -> TX=64 narrower N-tile)
+        (2304, 1152, 1, 1, False),
+        (2304, 1152, 4, 2, False),
+        (2304, 1152, 8, 4, False),
+        # TP1 w13 (K=2304, N=2304, T>=4 -> TX=64 narrower N-tile)
+        (2304, 2304, 4, 2, False),
+        (2304, 2304, 8, 4, False),
+    ],
+)
+def test_nvfp4_tail_cta_dispatch_parity(ops, k, n, tokens, block_m, is_w2):
+    """Verify exact fp64 reference parity for the tail-CTA-optimized NVFP4
+    dispatch shapes (BK=192 for T=1 w2 and TX=64 for severe N-tail w13)."""
+    e, top_k = E, 4
+    seed = 700 + k + n + tokens * 7 + block_m
+    gen = torch.Generator().manual_seed(seed)
+    q = torch.randint(0, 2**31 - 1, (e, k // 8, n), generator=gen, dtype=torch.int32)
+    scales = torch.randint(
+        0x20, 0x58, (e, k // 16, n), generator=gen, dtype=torch.uint8
+    )
+    glob = torch.rand(e, generator=gen, dtype=torch.float32) * 0.04 + 0.005
+    w_ref = _nvfp4_dequant(q, scales, glob)  # [E, K, N] float64
+
+    ids = torch.stack([torch.randperm(e, generator=gen)[:top_k] for _ in range(tokens)])
+    ids = ids.to(torch.int32)
+    sorted_ids, expert_ids, ntpp = _align(ids, block_m)
+    if is_w2:
+        a_c = (torch.randn(tokens * top_k, k, generator=gen) * 0.2).half()
+        tw_c = torch.softmax(torch.randn(tokens, top_k, generator=gen), dim=-1).float()
+        out = torch.zeros(tokens, n, dtype=torch.float16, device=DEV)
+        ops.moe_nvfp4_gemm_rdna2(
+            a_c.to(DEV),
+            out,
+            q.to(DEV),
+            scales.to(DEV),
+            glob.to(DEV),
+            tw_c.reshape(-1).to(DEV),
+            sorted_ids,
+            expert_ids,
+            ntpp,
+            1,
+            block_m,
+            True,
+            top_k,
+        )
+        ref = torch.zeros(tokens, n, dtype=torch.float64)
+        for t in range(tokens):
+            for j in range(top_k):
+                ei = int(ids[t, j])
+                ref[t] += tw_c[t, j].double() * (
+                    a_c[t * top_k + j].double() @ w_ref[ei]
+                )
+    else:
+        a_c = (torch.randn(tokens, k, generator=gen) * 0.2).half()
+        tw = torch.empty(0, dtype=torch.float32, device=DEV)
+        out = torch.zeros(tokens * top_k, n, dtype=torch.float16, device=DEV)
+        ops.moe_nvfp4_gemm_rdna2(
+            a_c.to(DEV),
+            out,
+            q.to(DEV),
+            scales.to(DEV),
+            glob.to(DEV),
+            tw,
+            sorted_ids,
+            expert_ids,
+            ntpp,
+            top_k,
+            block_m,
+            False,
+            0,
+        )
+        ref = torch.zeros(tokens * top_k, n, dtype=torch.float64)
+        for t in range(tokens):
+            for j in range(top_k):
+                ei = int(ids[t, j])
+                ref[t * top_k + j] = a_c[t].double() @ w_ref[ei]
+    _check(
+        out.cpu().double(),
+        ref,
+        f"nvfp4_tail K={k} N={n} T={tokens} M={block_m} w2={is_w2}",
+    )
 
 
 def moe_align_for(ids: torch.Tensor, block_m: int):

@@ -250,6 +250,14 @@ class DFlashSpeculator(DraftModelSpeculator):
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
 
+    def _replay_fullgraph(
+        self,
+        batch_desc: Any,
+        num_speculative_tokens: int | None = None,
+    ) -> None:
+        assert self.query_cudagraph_manager is not None
+        self.query_cudagraph_manager.run_fullgraph(batch_desc)
+
     def _prepare_graph_forward(
         self, num_reqs: int, attn_metadata: dict[str, Any] | None
     ) -> None:
@@ -724,7 +732,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         if is_full_cudagraph:
             assert self.query_cudagraph_manager is not None
-            self.query_cudagraph_manager.run_fullgraph(batch_desc)
+            self._replay_fullgraph(batch_desc, num_speculative_tokens)
         else:
             draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
                 self.block_tables.slot_mappings[:, :num_tokens_padded],

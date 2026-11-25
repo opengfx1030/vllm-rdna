@@ -1386,6 +1386,14 @@ void inkling2_glue_msg_gate_mix(const torch::Tensor& h, const torch::Tensor& m,
                                 const std::optional<torch::Tensor>& counters,
                                 double norm_eps);
 
+void inkling2_glue_msg_gate_down_mix(
+    const torch::Tensor& h, const torch::Tensor& m, const torch::Tensor& wd,
+    const torch::Tensor& d, const torch::Tensor& wf, const torch::Tensor& wg,
+    const std::optional<torch::Tensor>& norm_w, const torch::Tensor& out,
+    const std::optional<torch::Tensor>& scratch,
+    const std::optional<torch::Tensor>& partials,
+    const std::optional<torch::Tensor>& counters, double eps, double norm_eps);
+
 void inkling2_glue_rms_norm(const torch::Tensor& x,
                             const std::optional<torch::Tensor>& x1,
                             const std::optional<torch::Tensor>& weight,

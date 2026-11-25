@@ -56,7 +56,7 @@ RECIPES = {
     "inkling2-mini-tp2": (
         2,
         18222,
-        720000,
+        760000,
         8,
         1024,
         (
@@ -187,7 +187,7 @@ def test_ports_by_tp_are_distinct():
     ("recipe", "max_len", "schedule"),
     [
         ("inkling2-mini-tp1-dspark", 125000, "[[1,1,7],[2,2,2],[3,16,0]]"),
-        ("inkling2-mini-tp2", 660000, "[[1,2,7],[3,8,0]]"),
+        ("inkling2-mini-tp2", 720000, "[[1,2,7],[3,8,0]]"),
         ("inkling2-mini-tp4", 1048576, "[[1,2,7],[3,8,0]]"),
     ],
 )
