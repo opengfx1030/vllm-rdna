@@ -48,9 +48,12 @@ bool rdna2_expert_cache_copy(const std::vector<torch::Tensor>& sources,
                              const std::vector<torch::Tensor>& destinations,
                              const std::vector<int64_t>& experts,
                              const std::vector<int64_t>& slots) {
-  constexpr size_t kPayloads = 6;
-  TORCH_CHECK(sources.size() == kPayloads && destinations.size() == kPayloads,
-              "expert cache copy requires exactly six payload tensors");
+  constexpr size_t kMaxPayloads = 8;
+  const size_t num_payloads = sources.size();
+  TORCH_CHECK(num_payloads > 0 && num_payloads <= kMaxPayloads &&
+                  destinations.size() == num_payloads,
+              "expert cache copy requires 1..", kMaxPayloads,
+              " matching payload tensors");
   TORCH_CHECK(experts.size() == slots.size(),
               "expert cache expert/slot counts must match");
   TORCH_CHECK(destinations[0].defined() && destinations[0].is_cuda(),
@@ -66,10 +69,10 @@ bool rdna2_expert_cache_copy(const std::vector<torch::Tensor>& sources,
   TORCH_CHECK(std::strncmp(properties->gcnArchName, "gfx103", 6) == 0,
               "expert cache native copy requires RDNA2 (gfx103x)");
 
-  std::array<size_t, kPayloads> row_bytes;
+  std::array<size_t, kMaxPayloads> row_bytes;
   int64_t expert_count = -1;
   int64_t capacity = -1;
-  for (size_t p = 0; p < kPayloads; ++p) {
+  for (size_t p = 0; p < num_payloads; ++p) {
     const auto& source = sources[p];
     const auto& destination = destinations[p];
     TORCH_CHECK(
@@ -109,15 +112,16 @@ bool rdna2_expert_cache_copy(const std::vector<torch::Tensor>& sources,
                 "expert cache destination slots must be unique");
     used_slots[slots[i]] = true;
   }
-  TORCH_CHECK(experts.size() <= std::numeric_limits<size_t>::max() / kPayloads,
-              "expert cache copy count overflow");
-  const size_t count = experts.size() * kPayloads;
+  TORCH_CHECK(
+      experts.size() <= std::numeric_limits<size_t>::max() / num_payloads,
+      "expert cache copy count overflow");
+  const size_t count = experts.size() * num_payloads;
   if (count == 0) return false;
   std::vector<void*> dsts(count), srcs(count);
   std::vector<size_t> sizes(count);
   for (size_t i = 0; i < experts.size(); ++i) {
-    for (size_t p = 0; p < kPayloads; ++p) {
-      const size_t j = i * kPayloads + p;
+    for (size_t p = 0; p < num_payloads; ++p) {
+      const size_t j = i * num_payloads + p;
       sizes[j] = row_bytes[p];
       srcs[j] = static_cast<char*>(sources[p].data_ptr()) +
                 static_cast<size_t>(experts[i]) * sizes[j];

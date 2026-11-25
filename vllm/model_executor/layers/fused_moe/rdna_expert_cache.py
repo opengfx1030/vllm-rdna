@@ -131,9 +131,17 @@ class PackedExpertCache:
         policy="lfu_lru",
         decay_interval=128,
         copy_mode="tensor",
+        payload_names=PAYLOAD_NAMES,
+        allocate_dummy_slot=True,
     ):
-        if set(host_payload) != set(PAYLOAD_NAMES):
-            raise ValueError("expert cache requires all six packed payload tensors")
+        self.payload_names = tuple(payload_names)
+        if not self.payload_names:
+            raise ValueError("expert cache requires at least one payload tensor")
+        if set(host_payload) != set(self.payload_names):
+            raise ValueError(
+                "expert cache host_payload keys must match payload_names "
+                f"({sorted(self.payload_names)})"
+            )
         self.device = torch.device(device)
         if copy_mode not in ("tensor", "native"):
             raise ValueError("expert_cache_copy must be tensor or native")
@@ -146,7 +154,7 @@ class PackedExpertCache:
                 raise RuntimeError(
                     "native expert copies require a rebuilt ROCm extension"
                 )
-        self.logical_num_experts = host_payload[PAYLOAD_NAMES[0]].shape[0]
+        self.logical_num_experts = host_payload[self.payload_names[0]].shape[0]
         self.slot_count = min(slot_count, self.logical_num_experts)
         # A cache that cannot hold every expert keeps one more, all-zero slot
         # past its own: a pass that maps an expert onto it still counts that
@@ -154,7 +162,9 @@ class PackedExpertCache:
         # its K slices by the number of experts a launch runs, so a demand split
         # over launches that each count all of it rounds like one full pass.
         self.dummy_slot = (
-            self.slot_count if self.slot_count < self.logical_num_experts else None
+            self.slot_count
+            if allocate_dummy_slot and self.slot_count < self.logical_num_experts
+            else None
         )
         self._absent = -1 if self.dummy_slot is None else self.dummy_slot
         self.policy = ExpertCachePolicy(
@@ -164,7 +174,7 @@ class PackedExpertCache:
         self.payload = {}
         self.k2_payload = {}
         rows = self.slot_count + (self.dummy_slot is not None)
-        for name in PAYLOAD_NAMES:
+        for name in self.payload_names:
             source = host_payload[name].detach()
             if source.device.type != "cpu" or not source.is_contiguous():
                 raise ValueError("expert host payload must be contiguous CPU storage")
@@ -229,8 +239,12 @@ class PackedExpertCache:
         self.expert_demands = 0
         self.expert_misses = 0
         self.committed_passes = 0
-        self._copy_sources = tuple(self.host_payload[name] for name in PAYLOAD_NAMES)
-        self._copy_destinations = tuple(self.payload[name] for name in PAYLOAD_NAMES)
+        self._copy_sources = tuple(
+            self.host_payload[name] for name in self.payload_names
+        )
+        self._copy_destinations = tuple(
+            self.payload[name] for name in self.payload_names
+        )
         self._expert_bytes = sum(
             tensor[0].numel() * tensor.element_size() for tensor in self._copy_sources
         )
@@ -335,7 +349,7 @@ class PackedExpertCache:
             self.copied_bytes += len(bindings) * self._expert_bytes
             return
         for expert, slot, _ in bindings:
-            for name in PAYLOAD_NAMES:
+            for name in self.payload_names:
                 source = self.host_payload[name][expert]
                 self.payload[name][slot].copy_(source, non_blocking=True)
                 self.copied_bytes += source.numel() * source.element_size()

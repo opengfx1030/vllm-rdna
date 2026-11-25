@@ -598,7 +598,7 @@ class Inkling2DecoderLayer(nn.Module):
         # ---- MoE (route, gemm1, swiglu, gemm2) + post-mlp short convolution
         max_q = 0 if conv_md is None else conv_md.max_query_len
         moe = self.tp.all_reduce(
-            self.mlp.forward_hip(hq, ws, v.moe_out, max_query_len=max_q)
+            self.mlp.forward_hip(hq, ws, v.moe_out, max_query_len=max_q, visit=visit)
         )
         next_n = n_blocks + int(self.is_block_boundary)
         out_c = v.mlp_c if mlp_c_out is None else mlp_c_out
@@ -1649,6 +1649,23 @@ class Inkling2LoopTextForCausalLM(nn.Module):
             sum(layer.qkv_wf.dtype == torch.float16 for layer in loop),
             len(loop),
         )
+        offloaded = [m for m in self._moe_modules if m.expert_cache is not None]
+        if offloaded:
+            gpu_bytes = sum(m.expert_cache.device_bytes for m in offloaded)
+            host_bytes = sum(m.expert_cache.host_bytes for m in offloaded)
+            sample = offloaded[0]
+            logger.info(
+                "Inkling-2 MoE expert offload ACTIVE: %d/%d layers, %d/%d GPU slots "
+                "(%.2f GiB GPU cache, %.2f GiB pinned host bank, copy=%s, policy=%s)",
+                len(offloaded),
+                len(self._moe_modules),
+                sample.expert_cache.slot_count,
+                sample.num_experts,
+                gpu_bytes / 2**30,
+                host_bytes / 2**30,
+                sample.offload_copy,
+                sample.offload_policy,
+            )
 
     # -- weights ---------------------------------------------------------
     def _map_name(self, name: str) -> str | None:

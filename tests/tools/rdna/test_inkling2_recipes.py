@@ -29,6 +29,13 @@ DROPPED = (
     "ADAPTIVE",
     "DSPARK",
     "DRAFT_VOCAB",
+    "EXPERT_SLOTS",
+    "EXPERT_CACHE_COPY",
+    "EXPERT_CACHE_POLICY",
+    "VLLM_INKLING2_MOE_OFFLOAD_SLOTS",
+    "VLLM_INKLING2_MOE_OFFLOAD_COPY",
+    "VLLM_INKLING2_MOE_OFFLOAD_POLICY",
+    "VLLM_INKLING2_MOE_OFFLOAD_DECAY",
     "PYTORCH_TUNABLEOP_ENABLED",
 )
 
@@ -239,3 +246,42 @@ def test_caller_overrides_win(venv, recipe):
     out2 = plan(venv, f"RECIPE={recipe}", "MAXLEN=90000", "SPEC_CONFIG=").stdout
     assert flag(out2, "--max-model-len", "90000")
     assert "--speculative-config" not in out2
+
+
+def test_tp1_offload_recipe_plan_and_switches(venv):
+    result = plan(venv, "RECIPE=inkling2-mini-tp1-offload")
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert flag(out, "--served-model-name", "inkling2-mini")
+    assert flag(out, "--port", "18221")
+    assert flag(out, "--tensor-parallel-size", "1")
+    assert flag(out, "--max-model-len", "65536")
+    assert flag(out, "--max-num-seqs", "8")
+    assert flag(out, "--max-num-batched-tokens", "512")
+    assert flag(out, "--gpu-memory-utilization", "0.90")
+    assert flag(out, "--compilation-config", '{"cudagraph_mode":"FULL_AND_PIECEWISE"}')
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_SLOTS='48'" in out
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_COPY='tensor'" in out
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_POLICY='lfu_lru'" in out
+    assert "export VLLM_KV_CACHE_MARGIN_FLOOR_MIB='1536'" in out
+    assert "--speculative-config" not in out
+
+    custom = plan(
+        venv,
+        "RECIPE=inkling2-mini-tp1-offload",
+        "EXPERT_SLOTS=32",
+        "EXPERT_CACHE_COPY=native",
+        "MAXLEN=450000",
+        "DSPARK=1",
+    )
+    assert custom.returncode == 0, custom.stderr
+    out_c = custom.stdout
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_SLOTS='32'" in out_c
+    assert "export VLLM_INKLING2_MOE_OFFLOAD_COPY='native'" in out_c
+    assert flag(out_c, "--max-model-len", "450000")
+    assert flag(
+        out_c,
+        "--speculative-config",
+        '{"method":"dspark","num_speculative_tokens":7,'
+        '"num_speculative_tokens_per_batch_size":[[1,2,2],[3,8,0]]}',
+    )

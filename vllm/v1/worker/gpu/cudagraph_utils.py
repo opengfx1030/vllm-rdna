@@ -210,11 +210,19 @@ class CudaGraphManager:
         ] = {}
         extra = vllm_config.additional_config
         mono = extra.get("rocm_mono_decode", {}) if isinstance(extra, dict) else {}
-        self.expert_cache_graphs = bool(
+        self._mono_expert_cache_graphs = bool(
             on_rdna_family()
             and vllm_config.kernel_config.monokernel
             and isinstance(mono, dict)
             and mono.get("expert_cache_slots", 0)
+        )
+        import vllm.envs as envs
+
+        inkling2_expert_cache = bool(
+            on_rdna_family() and envs.VLLM_INKLING2_MOE_OFFLOAD_SLOTS > 0
+        )
+        self.expert_cache_graphs = (
+            self._mono_expert_cache_graphs or inkling2_expert_cache
         )
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
         # The stream of the last capture; graphs replayed inside these ones (in
@@ -571,7 +579,7 @@ class CudaGraphManager:
                             ):
                                 forward_fn(CUDAGraphMode.NONE)
                                 get_offloader().join_after_forward()
-                        if self.expert_cache_graphs:
+                        if self._mono_expert_cache_graphs:
                             from vllm.models.qwen4_exp.amd.mono.rdna2.layout import (
                                 check_expert_cache_workspaces,
                             )
