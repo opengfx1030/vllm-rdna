@@ -1,9 +1,13 @@
 # Inkling-2-Mini HI2 runtime: CPU receipt
 
-Branch `feat/inkling2-hi2-runtime` (based on `origin/rdna_extras`, which carries the
-PR #195 Inkling-2-Mini code), 2026-11-24.  Every GPU was leased for the whole
-session, so this receipt records exactly what ran on CPU, with the real quantizer
-output as the input, and the commands that still need a GPU.
+Branch `feat/inkling2-hi2-runtime` (cut from `origin/rdna_extras` at `1fdcb3a66e`,
+which carries the merged Inkling-2-Mini runtime, `vllm/models/inkling2_loop/`),
+2026-11-24/25.  The CPU evidence
+below was produced without a GPU; the exploratory a2 runs of 2026-11-25 (kernel
+test, smoke + KL, bench, a long serving run) are recorded in their own section and
+are **not** the PR contract receipt.  The contract's gates, their exact commands,
+the a2 time each needs, and the gates that cannot be satisfied as written are in
+"PR contract" below.
 
 **Change class.** Python model/runtime wiring plus tools; **no csrc, CMake, setup or
 C++ change**.  The HI2 expert path calls the fork's existing RDNA2 ops
@@ -160,7 +164,9 @@ honestly: the served fp16-path top-100 number approximates the quantizer's float
 full-logit 0.0996 nats / top-1 93.0 %, within `--max-kl`, not for equality.  CPU
 tests cover the `None` at position 0 (the old parser raised) and an omitted
 interior position, and the JSON carries `skipped_share`, the returned top-k size
-(`topk_entries`, printed for the first window) and a truncation note.
+(`topk_entries`, printed for the first window) and a truncation note.  The fixed
+probe then ran on a2 at 04:10 and **passed**: 32 mixed windows x 2048, mean KL
+0.09340, top-1 0.93090, 0 skipped (see the exploratory table below).
 
 ### Verifier round (fix-first -> fixed)
 
@@ -232,23 +238,53 @@ Input `~/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5`, serve dir built by links at
 
 ### archdiff: empty by construction, and that is the finding
 
-`archdiff_report.py plan` compares the csrc sources of `origin/rdna_extras` and this
-branch and returns `"units": []` with a zero-byte `csrc.diff`: no translation unit
-changed, so there is nothing to compile or disassemble for any arch.  The full
-`BASE=origin/rdna_extras HEAD=feat/inkling2-hi2-runtime bash tools/rdna/archdiff.sh`
-therefore has no TU to build (it would print nothing to diff); it needs no GPU.  Any
-future change to `csrc/` on this branch must run it with all six arches.
+The contract compares the csrc sources of the base (`1fdcb3a66e`, the `rdna_extras`
+commit the branch was cut from) with the head.  The plan was run on **clean
+`git archive` trees** of both commits (`~/w4a8_runs/inkling-hi2-runtime/archdiff/
+{base,head}`, base label `1fdcb3a66e`, head label `aae486796f`):
+
+```bash
+$V tools/rdna/archdiff_report.py plan \
+  --base-tree ../archdiff/base --head-tree ../archdiff/head \
+  --base-label 1fdcb3a66e --head-label aae486796f \
+  --plan-out ../archdiff/plan/plan.json --diff-out ../archdiff/plan/source.diff
+# "empty"; rc=0; source.diff 0 bytes
+# plan.json: mode auto, changed_files [], units [], source_diff {}, tus_missing []
+```
+
+No translation unit changed, so `archdiff.sh` has nothing to compile or disassemble
+for any arch (`bash tools/rdna/archdiff.sh` would print nothing to diff) and needs
+no GPU.  Clean archives are used because a *configured* box tree also contains the
+generated paged-attention units (`csrc/rocm/attention_paged_attn_*.cu` +
+`.paged_attn_generated`, written at 02:59 by the 03:08 build): CMake takes its
+source list from that stamp, not from a glob, so they are not strays in the build,
+but a raw directory-to-directory plan would report them as head-only files.  Any
+future change to `csrc/` on this branch must run `archdiff.sh` with all six arches.
 
 ### pr_receipt scan and dry run
 
-The scan against `origin/rdna_extras` lists five added `tolist()` lines, all in
-`amd/hi2.py` at the tensor-parallel slice and reference-decode helpers (CPU paths:
+The scan against the cut base lists five added `tolist()` lines, all in `amd/hi2.py`
+at the tensor-parallel slice and reference-decode helpers (CPU paths:
 `_select_cols`, `dequantize_stored_rows`, `reference_moe`).  None is in the per-step
-serving path; the HI2 kernels receive precomputed index tensors.  The
-`DRY_RUN=1` receipt (run A/A on the same tree, because the base tree of a real A/B
-run must itself be built) exits 0 and prints the production plan: boots XA/XB exact,
-A1/B1 speed, 8 speed cells (1024:512:1/4/8, 16384:1024:1/4/8, 32768:2048:1/4), 2
-exactness cells, stall probe on.
+serving path; the HI2 kernels receive precomputed index tensors.  The `DRY_RUN=1`
+receipt with the **stock** recipe (base `../base-rdna_extras` vs a clean head
+archive; both need a built `_rocm_C`, hence the two warnings below) exits 0 and
+prints the production plan:
+
+```text
+pr_receipt: warning: BASE_TREE has no built vllm/_rocm_C*.so
+pr_receipt: warning: HEAD_TREE has no built vllm/_rocm_C*.so
+boots: XA:base:exact XB:head:exact A1:base:speed B1:head:speed B2:head:speed A2:base:speed
+speed cells: 1024:512:1 1024:512:4 1024:512:8 16384:1024:1 16384:1024:4 16384:1024:8 32768:2048:1 32768:2048:4
+exactness cells: 1024:128:1:4 16384:128:1:2
+quality: 1 (windows .../quality/windows.json, limit 64)
+stall probe: 1 (decoders 7, prefill 4096,16384, repeats 3)
+diff scan: 5 added lines to review (0 in the per-step path): tolist x 5
+```
+
+Six boots (2 exactness + 4 speed including the quality floor), the contract's full
+8-cell matrix, the two exactness cells, the quality collects (64 windows per domain)
+and the stall probe on every speed boot.
 
 ### Recipe assembly (CPU, no launch)
 
@@ -264,31 +300,257 @@ python -m vllm.entrypoints.cli.main serve --model <serve dir> \
   --enable-prefix-caching --language-model-only --limit-mm-per-prompt '{"image":0}'
 ```
 
-## What still needs a GPU (ordered; details in tools/inkling_hi2/README.md)
+### GPU facts already measured on a2 (exploratory; not the contract receipt)
 
-1. Build the head tree on the box (no csrc change: the existing `_rocm_C` of the
-   worktree is enough; this branch adds no compiled code).
-2. `pytest tests/models/inkling2_loop/test_hi2_kernel_gpu.py -m gpu` (5 tests; the
-   only correctness evidence for the grouped GEMMs; tolerances in the file).
-3. Boot with the recipe above; greedy smoke (`smoke.sh`), compare against the stock
-   model's greedy ids on the same prompts.
-4. KL probe on the quantizer's held-out windows (`kl_probe.py`,
-   `~/w4a8_runs/inkling-hi2/stage4/eval/holdout_ids.npz`, reference KL 0.0996 /
-   top-1 0.938): gate KL <= 0.15, top-1 >= 0.90.
-5. Bench cells (`bench.py`), quiet window, KV/peak memory; record in this doc.
-6. Only then vision and MTP/DSpark (the recipe is language-only, `MTP=0`).
-7. For a real `pr_receipt` A/B: build the base tree, then
-   `BASE_TREE=... HEAD_TREE=... VENV=... RECIPE=inkling2-hi2-tp2 MODEL=<serve dir>
-   GPUS=<leased HIP ids> bash tools/rdna/pr_receipt.sh` (exit 0: gates pass; speed
-   verdicts are reported, not gated).  The `DRY_RUN=1` output above is its plan.
+a2 = HIP 0,1 = PCI `d1,d4` (two V620).  Short windows freed up on 2026-11-25; these
+are single runs, **not** the contract gates, and the bench/smoke boots used the
+kit's config (`MAXLEN=8192 MAXBAT=256 SEQS=1 GMEM=0.45`, `DSPARK=0`), not the
+production recipes.
+
+| Fact | Artifact | Result |
+| --- | --- | --- |
+| Kernel vs fp64 reference, a2 03:19 | `~/w4a8_runs/inkling-hi2-runtime/kernel_test_a2.out` | **5/5 passed**: M=1 5.450e-4, M=8 7.402e-4, M=64 9.428e-4, TP=2 vs TP=1 5.044e-4, HIP path 5.435e-4 and alloc delta 0 B (4.94 s, after the `208230562b` device fix; the 03:12 run had failed in the float64 oracle) |
+| Smoke + KL, a2 04:03-04:10 | `.../serve_smoke_a2.out` | France probe: both servers answer Paris, first divergence at char 65 -> PASS; capsule repeat identical -> PASS; **KL PASS** on the 32 mixed windows x 2048 tokens: mean 0.09340, SEM 0.01716, top-1 0.93090, 0 skipped, 100/100 top entries, `RESULT measured window PASS` (max junction 64.0 C, KFD evictions +0) |
+| Bench, a2 04:11-04:14 | `.../bench_stock.json`, `.../bench_hi2.json` | stock load 9.03 GiB, KV 3.90 GiB/101,664 tok; HI2 load 6.87 GiB, KV 6.04 GiB/167,620 tok; prefill 2293.7 vs 1260.4 tok/s (0.549x); decode b=1 12.83 vs 23.52 ms/step (77.95 vs 42.52 tok/s), b=4 51.14 vs 93.99 ms/step (78.21 vs 42.56 tok/s; ratios 1.833x/1.838x); both windows valid |
+| Long serving run, a2 07:43-08:02 | `.../logs/eval-serve.log` | HI2 dir via the kit's serve.sh, `MAXLEN=32768 MAXBAT=2048 SEQS=4 GMEM=0.45`, workspace 0.60 GiB, four concurrent requests for ~19 min (60-72 tok/s generation), no engine error, clean SIGTERM shutdown (the `EngineDeadError` at 08:02:43 is the output handler after the deliberate stop) |
+
+The quantizer's float32 reference on the same 32 mixed windows
+(`stage4/eval/bpw3.5_mixed.json`, `student`): KL 0.099626 +/- 0.017838, top-1
+0.930191, PPL ratio 1.00951, expected acceptance 0.93365.  The served top-100 KL
+(0.09340) and top-1 (0.93090) are consistent with it; the served number is a top-k
+truncated fp16-path measurement and is compared within `--max-kl`, never for
+equality.  The 03:43 crash (`top_logprobs[0]` is `None`) was fixed in
+`aae486796f`; the 04:10 run is the fixed probe.
+
+## PR contract: change class, gates and the a2 run plan (CPU-only prep, 2026-11-25)
+
+### Base and head, and what "before" can serve
+
+- **Head**: `aae486796f` on `feat/inkling2-hi2-runtime` (23 commits, 23 files added
+    - 7 modified, 7327 insertions; `vllm/models/inkling2_loop/amd/{glue,loader,model,moe}.py`,
+  `tools/`, `docs/`, `tests/`; **no csrc/CMake/setup change**).
+- **Base**: `1fdcb3a66e` — the `rdna_extras` commit the branch was cut from (PR #208
+  merge).  `origin/rdna_extras` has since moved to `41ef6ba1e0` (#210 LoopCD + TP1
+  decode perf); **the branch must be rebased before merge**, and the contract base
+  stays the cut commit unless the rebase re-cuts it.
+- The **stock Inkling-2-Mini path is in the base**: `vllm/models/inkling2_loop/`,
+  the `Inkling2LoopForConditionalGeneration` registry entry and the
+  `inkling2-mini-tp{1,2,4}.env` recipes all exist at `1fdcb3a66e` (introduced by
+  `7eeb0da81b` and merged into `rdna_extras` before the cut; the draft PR #195 is
+  not needed to serve it).  The base tree boots `~/hfcache/inkling2-mini` with
+  `inkling2-mini-tp2.env`; that recipe differs from head only in a comment.  So
+  **base-vs-head gates on the stock model are definable and owed**.
+- The **HI2 path is not in the base**: base cannot load an `rdna_hint_flex` (HI2)
+  directory at all.  Therefore the base-vs-head token-exact, quality-floor and ABBA
+  gates are **not definable for the HI2 model**; the definable substitutes are below
+  and a reviewer must accept them.
+
+**Callers and platforms reached.** The HI2 branch is taken only when the model's
+`quantization_config.quant_method` is `rdna_hint_flex`:
+`loader.read_expert_formats()` then returns `"hi2"` per layer, the MoE is
+constructed with that format, and `moe.forward_hip` / the eager reference call
+`_forward_*_hi2`, which begin with `_require_gfx10x()`.  `glue.py` adds the HI2
+workspace fields only for that model and `model.py` wires the loader on the same
+config.  So: gfx1030 (run below), every other ROCm arch (the path refuses with a
+clear error; not run), CUDA (stock path not changed in csrc; not run), CPU (the
+pure-torch HI2 reference runs in the CPU tests).  The stock NVFP4 route through the
+same four files keeps its operations; the stock base-vs-head token-exact gate is
+what measures that it did not change numerically.
+
+### Change class (rows of `.github/CONTRIBUTING.md`)
+
+| Row | Evidence here |
+| --- | --- |
+| New model | a new checkpoint format/path (HI2 3.5 bpw) inside the existing Inkling-2-Mini model; full set owed **on that model** |
+| Shared Python code | `amd/{glue,loader,model,moe}.py` are reached by every platform that serves Inkling2Loop (CUDA, ROCm, CPU reference); CPU unit tests plus a gfx1030 receipt, callers/platforms listed |
+| Code gated to one arch | the HI2 expert dispatch calls `_require_gfx10x()` and raises on any other arch (both the eager and serving paths), so no non-gfx10x device reaches the gfx1030 kernels; the stock path never enters that branch; no csrc change, so `archdiff` is empty (below) |
+| Lossy feature (INT2/INT4 experts) | opt-in by model directory + `inkling2-hi2-tp2.env`; needs the quality gate + task-eval A/B, and **maintainer sign-off** for the recipe |
+| New/changed kernel | no new kernel, but a new dispatch of the existing grouped GEMMs: the fp64-reference kernel test is owed and ran on a2 (5/5) |
+
+### Gate table: exact command, a2 time, comparison
+
+Durations are estimates ([INFERENCE]) anchored on the measurements above (boot
+~1-3 min, 32 KL windows 5.5 min, the contract's own note that its longest speed cell
+is ~10 min; the script's plan is the 6-boot matrix printed above).
+
+| Gate | Command | a2 time | Compares |
+| --- | --- | --- | --- |
+| pre-commit + CPU tests | `pre-commit run --files $(git diff --name-only 1fdcb3a66e..HEAD)`; the 5-file pytest gate | 0 | done: all hooks pass; 71 passed, 5 skipped |
+| kernel vs reference | `HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 PYTHONPATH=$TREE HI2_TINY_DIR=$RT/tiny/hi2 $PY -m pytest tests/models/inkling2_loop/test_hi2_kernel_gpu.py -q -s -rA` (the box driver `kernel_test_a2.sh` adds the lease, PCI and 28-GiB gates) | ~1 min | HIP dispatch vs the fp64/dequant reference, M=1/8/64, TP=2 sums, zero allocation; ran 5/5 on a2 |
+| archdiff | `archdiff_report.py plan` on clean `git archive` trees (command in the archdiff section) | 0 GPU | csrc sources: `changed_files []`, `units []`, `src.diff` 0 bytes; `archdiff.sh` has no TU to build |
+| token-exact, stock model | `MODE=abba QUALITY=1 pr_receipt.sh` with `RECIPE=inkling2-mini-tp2 MODEL=$STOCK`; boots XA/XB | ~10 min | base vs head greedy hashes (1024:128 x4 prompts, 16384:128 x2) under `VLLM_RDNA2_MOE_DETERMINISTIC=1`, plus concurrent==solo (0 FAIL); INCONCLUSIVE if base does not repeat itself |
+| quality, stock model | same run, `QUALITY=1` (boots A1/A2/B1/B2) | ~20-40 min | head KL/top-1 vs the base-vs-base bootstrap floor; PPL rise <= 2 %; greedy probes; concurrency 0 FAIL |
+| speed ABBA, stock model | same run, `MODE=abba` | ~1.5-3 h | the 8 contract cells (1024:512 x c1/4/8, 16384:1024 x c1/4/8, 32768:2048 x c1/4), per request and aggregate; verdict by the ABBA rule, reported not gated |
+| overlap + stall | rides every speed boot (`STALL=1`) | +5-15 min | c=4/8 overlap rule and the hard stall gate (no starved decoder, tokens during every injected prefill) |
+| HI2 model full set | `BASE_TREE=$TREE HEAD_TREE=$TREE RECIPE=inkling2-hi2-tp2 MODEL=$HI2 MODE=abba QUALITY=1` (A/A) | ~2-4 h | the HI2 path against itself: token-exact A/A determinism, HI2 KL noise floor, HI2 speed (direction only, not a code claim), overlap/stall hard gates; **not** base-vs-head |
+| HI2 quality vs stock | `kl_probe.py` on mixed/wiki/pydocs + `quality_ab.py` collect on both servers + `compare --max-ppl-rel 0.02` | ~10-30 min | HI2 vs stock: KL/top-1 (measured 0.09340 / 0.93090 on mixed) and PPL ratio (reference 1.00951) |
+| task-eval A/B | `agentic_bench.py --hi2 $HOME/w4a8_runs/inkling-hi2/tree run --tasks gsm8k,toolcall --limit 120 --workers 8`, then `tfkld score --ref-results <stock.json>`; both servers up | ~30-90 min | accuracy and task-level logprob gap, stock vs HI2 (the harness the contract's row asks for) |
+
+Total for the whole PR: **~5-9 h of a2**, i.e. two windows, not one: the stock
+contract receipt (~2-4 h) and the HI2-model set (~2-4 h plus the task eval).
+
+### Gates that cannot be satisfied as written
+
+1. **Base-vs-head token-exact / quality-floor / ABBA for the HI2 model** — the base
+   cannot load the directory.  Substitutes: the fp64 kernel test, the HI2 A/A
+   receipt, the HI2-vs-stock KL/PPL gates and the task-eval A/B.  A reviewer has to
+   accept the substitution; the PR must label these cells as such.
+2. **Task-eval A/B and maintainer sign-off** — the harness exists (`agentic_bench.py`
+   over the HI2 checkout's `bench/` suite) but has not been run; the sign-off is a
+   human decision and cannot be produced by any command.
+3. **The other arches (gfx90a/gfx942/gfx950/gfx1100/gfx1200, CUDA, CPU serving)** —
+   no such hardware here.  The proof is indirect: no csrc change (archdiff `units
+   []`) and the HI2 branch behind `on_gfx10x()`; the stock path is exercised only on
+   gfx1030.  This is "not run", not a pass.
+4. **Kernel shape coverage** — the test covers M=1/8/64 and TP=1/2; the dispatcher
+   can send any per-step M up to `MAXBAT` (the dominant grouped-GEMM shapes are
+   covered, but "every shape the dispatcher sends" is not enumerated).  Cheap to
+   extend on one GPU: add 128/256/320 to the parametrization and rerun.
+5. **The exploratory bench is not the speed receipt** — it ran at `MAXLEN=8192
+   MAXBAT=256 SEQS=1 GMEM=0.45 DSPARK=0` with both servers resident; the contract
+   requires the production recipe (stock: DSpark on, `MAXLEN=720000`, `MAXBAT=1024`,
+   `SEQS=8`, `GMEM=0.92`; HI2: `MAXLEN=1048576`, `MAXBAT=320`, `SEQS=8`,
+   `GMEM=0.92`, MTP off).  Do not quote the 1.833x/0.549x numbers as the receipt.
+
+### Exact GPU sequence (lease -> gates -> release)
+
+The two-slot protocol applies (`AGENTS.md` 2414-2416): per-slot quiet dirs
+`~/w4a8_runs/lanes/quiet-a2`, a single `~/w4a8_runs/boot.lock` for boots, holders in
+`~/w4a8_runs/lanes/lease`, `MEASURE_LOCK=` empty.  `pr_receipt.sh` waits out other
+agents' quiet windows under `QUIET_DIR` and runs its measured cells inside its own
+window (`QUIET_WIN_MAX=240`, renewed per cell); it never takes the lease itself.
+
+```bash
+# 0) CPU prep: one build for both trees, markers (no GPU)
+TREE=$HOME/w4a8_runs/inkling-hi2-runtime/tree
+BASE=$HOME/w4a8_runs/inkling-hi2-runtime/base-rdna_extras   # 1fdcb3a66e
+RT=$HOME/w4a8_runs/inkling-hi2-runtime
+V=$HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340
+PY=$V/bin/python
+STOCK=$HOME/hfcache/inkling2-mini
+HI2=$RT/serve-bpw3.5
+mkdir -p "$RT/pr-receipt-stock" "$RT/pr-receipt-hi2" "$RT/logs"
+printf '%s\n' aae486796f15d239a65780cf18384e3c19b2fcc0 > "$TREE/.sha"
+printf '%s\n' 1fdcb3a66e82b1c0b9ebe3ce1da1e0b25fc3c4fa > "$BASE/.sha"
+# csrc is byte-identical (no csrc change); the only directory differences are the
+# generated paged-attn units + their stamp, which CMake consumes from the stamp.
+diff -qr "$BASE/csrc" "$TREE/csrc"
+bash "$TREE/tools/rdna/port_v031/attach_so.sh" "$TREE" "$BASE"
+
+# 1) stock-model contract gate (base vs head), one driver owns the a2 lease
+cd "$TREE"
+export OWNER=HI2InklingRuntime SLOT=a2 EXPECT_PCI_BUSES=d1,d4 \
+  LEASE_DIR=$HOME/w4a8_runs/lanes/lease \
+  QUIET_DIR=$HOME/w4a8_runs/lanes/quiet-a2 QUIET_OWN=$OWNER QUIET_SKIP=0 \
+  BOOT_LOCK=$HOME/w4a8_runs/boot.lock \
+  BASE_TREE=$BASE HEAD_TREE=$TREE BASE_VENV=$V HEAD_VENV=$V \
+  RECIPE=inkling2-mini-tp2 MODEL=$STOCK GPUS=0,1 MODE=abba QUALITY=1 STALL=1 \
+  CHANGE_CLASS="new model path (HI2 quantized Inkling-2-Mini) on shared Python; no csrc" \
+  REACHED="every platform that serves Inkling2Loop; the HI2 dispatch is on_gfx10x-gated; the stock NVFP4 path is unchanged" \
+  NOT_RUN="gfx90a, gfx942, gfx950, gfx1100, gfx1200; CUDA/CPU serving" \
+  OUT=$RT/pr-receipt-stock
+bash -c '
+  set -u
+  source tools/inkling_hi2/lease.sh
+  lease_acquire || exit 2              # no foreign holder, >=28 GiB free per GPU
+  trap lease_release EXIT TERM INT
+  bash tools/rdna/pr_receipt.sh        # 6 boots; exit 0 = token-exact+quality+overlap+stall pass
+'
+
+# 2) HI2-model full set, A/A on the head tree (base cannot load HI2)
+BASE_TREE=$TREE HEAD_TREE=$TREE RECIPE=inkling2-hi2-tp2 MODEL=$HI2 \
+  OUT=$RT/pr-receipt-hi2 \
+  bash -c 'source tools/inkling_hi2/lease.sh; lease_acquire || exit 2; trap lease_release EXIT TERM INT; bash tools/rdna/pr_receipt.sh'
+
+export RT STOCK HI2 PY
+# 3) HI2 vs stock: KL (wiki, pydocs), PPL and the task eval; the driver owns the lease
+bash -c '
+  set -u
+  source tools/inkling_hi2/lease.sh
+  lease_acquire || exit 2
+  trap lease_release EXIT TERM INT
+  MAXLEN=8192 MAXBAT=256 SEQS=1 GMEM=0.45 MODEL=$STOCK \
+    SERVER_PID_FILE=$RT/server-stock.pid PORT=18231 \
+    bash tools/inkling_hi2/serve.sh > $RT/logs/stock.log 2>&1 &
+  for i in $(seq 1 160); do curl -sf http://127.0.0.1:18231/health >/dev/null && break; sleep 15; done
+  STOCK_URL=http://127.0.0.1:18231 RUN_KL=1 KEEP=1 MODEL=$HI2 PORT=18230 \
+    SERVER_PID_FILE=$RT/server-hi2.pid \
+    MAXLEN=8192 MAXBAT=256 SEQS=1 GMEM=0.45 bash tools/inkling_hi2/smoke.sh
+  # the two extra held-out sets (17 windows each); keep the window and the lock fresh per probe
+  for set in wiki pydocs; do
+    touch $HOME/w4a8_runs/lanes/quiet-a2/inkling-hi2-kl
+    flock -n $HOME/w4a8_runs/boot.lock true || { echo "a boot started; stop and retry"; exit 1; }
+    $PY tools/inkling_hi2/kl_probe.py --hi2-url http://127.0.0.1:18230 \
+      --stock-url http://127.0.0.1:18231 --windows 17 --topk 100 --max-kl 0.15 \
+      --ids $HOME/w4a8_runs/inkling-hi2/stage4/calib/heldout_${set}_ids.npy \
+      --out $RT/kl_${set}.json
+    rm -f $HOME/w4a8_runs/lanes/quiet-a2/inkling-hi2-kl
+  done
+  $PY tools/rdna/port_v031/quality_ab.py collect --url http://127.0.0.1:18231 \
+    --model inkling2-mini --out $RT/ppl_stock.json
+  $PY tools/rdna/port_v031/quality_ab.py collect --url http://127.0.0.1:18230 \
+    --model inkling2-hi2 --out $RT/ppl_hi2.json
+  $PY tools/rdna/port_v031/quality_ab.py compare $RT/ppl_stock.json $RT/ppl_hi2.json --max-ppl-rel 0.02
+  AG=tools/rdna/port_v031/agentic_bench.py
+  $PY $AG --hi2 $HOME/w4a8_runs/inkling-hi2/tree run --url http://127.0.0.1:18231 \
+    --model inkling2-mini --tasks gsm8k,toolcall --limit 120 --workers 8 --out $RT/task_stock.json
+  $PY $AG --hi2 $HOME/w4a8_runs/inkling-hi2/tree run --url http://127.0.0.1:18230 \
+    --model inkling2-hi2 --tasks gsm8k,toolcall --limit 120 --workers 8 --out $RT/task_hi2.json
+  $PY $AG --hi2 $HOME/w4a8_runs/inkling-hi2/tree tfkld score --url http://127.0.0.1:18230 \
+    --model inkling2-hi2 --ref-results $RT/task_stock.json --out $RT/task_lp.json
+  kill $(cat $RT/server-hi2.pid $RT/server-stock.pid)
+'
+
+# 4) release: the driver traps remove the holder; verify no HI2InklingRuntime.a2 remains
+ls $HOME/w4a8_runs/lanes/lease
+```
+
+Every measured step keeps its own window: `smoke.sh`/`kl_probe.py` use
+`lanes/quiet-a2/inkling-hi2-smoke` (re-touched every 5 min, <=15 min) and re-check
+`flock -n boot.lock` before each cell; `pr_receipt.sh` uses
+`lanes/quiet-a2/$OWNER` and its own `QUIET_WIN_MAX=240` renewal.  A KFD
+`evicted_ms` jump or a thermal sample >= 95 C invalidates the window (both record
+in the JSONs/markdown and fail the run).
+
+## What still needs a GPU (ordered; commands in the PR-contract section)
+
+Already run on a2 (exploratory, table above): kernel test 5/5, the HI2 boot with
+FULL_AND_PIECEWISE, the greedy/capsule smoke, the 32-window KL (0.09340 / 0.93090),
+the bench cells and a 19-minute c=4 serving run.  Remaining, in order:
+
+1. CPU prep: base tree (`1fdcb3a66e`) with the head's attached `_rocm_C` and the
+   `.sha` markers (`attach_so.sh`; csrc is byte-identical, only the generated
+   paged-attn units + stamp differ).
+2. **Stock contract receipt** (base vs head, `inkling2-mini-tp2`, production recipe,
+   `MODE=abba QUALITY=1`): token-exact + quality + speed ABBA + overlap/stall.
+   Exit 0 is the gate; the speed verdicts are reported.  ~2-4 h.
+3. **HI2 model A/A receipt** (`inkling2-hi2-tp2`, production recipe, `MODE=abba
+   QUALITY=1`, the same tree twice): determinism, HI2 noise floor, HI2 speed and
+   overlap/stall.  ~2-4 h.
+4. **HI2 vs stock quality** on the remaining held-out sets
+   (`heldout_wiki_ids.npy`, `heldout_pydocs_ids.npy`; gates KL <= 0.15, top-1 >=
+   0.90) and `quality_ab.py compare --max-ppl-rel 0.02` (reference PPL ratio
+   1.00951); record PPL and the skipped share here.  ~10-20 min.
+5. **Task-eval A/B** (gsm8k, toolcall; `agentic_bench.py` + `tfkld score`) against
+   the stock server, plus the maintainer sign-off for `inkling2-hi2-tp2.env`.
+   ~30-90 min and a human decision.
+6. Kernel shape extension (M=128/256/320) if review wants the full dispatcher
+   range, then rerun the kernel test (~5 min).
+7. Vision and MTP/DSpark are outside the language-only recipe (`MTP=0`,
+   `--language-model-only`); a separate recipe/PR would need its own gates.
 
 ## Known limits of this receipt
 
-- No GPU run happened: kernel numerics, graph capture, real decode speed and the KL
-  of the 3.5 bpw directory are unmeasured; the 8.02-9.81 GiB per-rank figure is a
-  header census, not a measured `Model loading took`.
+- The a2 measurements are single exploratory runs at kit settings (`MAXLEN=8192
+  MAXBAT=256 SEQS=1 GMEM=0.45 DSPARK=0`, both servers resident), not the contract's
+  production-recipe receipt and not a speed claim; the KL is a top-k truncated
+  fp16-path measurement against a float32 full-logit reference.
 - The 5 GPU tests are skipped in the CPU gate; a green CPU run says nothing about
   the HIP kernels.
+- The HI2 model has no base-vs-head token-exact/quality/speed gate (the base cannot
+  load it); the substitutes are listed above and need reviewer acceptance.
+- Kernel coverage is M=1/8/64 with TP=1/2, not every per-step M the dispatcher can
+  send.
 - `pr_receipt_scan` signed off the reference-path `tolist` lines as non-per-step;
   it never gates, it only lists.
 
