@@ -60,6 +60,7 @@ from .state import (
 if TYPE_CHECKING:
     from .glue import Inkling2GlueWorkspace
     from .linear_pack import LMHeadPack
+    from .loopcd import LoopCDParams
 
 logger = init_logger(__name__)
 
@@ -665,6 +666,8 @@ class Inkling2Model(nn.Module):
         self.glue_ws: Inkling2GlueWorkspace | None = None
         self._msg_batch: fuse_chain.MessageBatch | None = None
         self._tap_slots: dict[int, int] = {}
+        self._ref_loopcd: Any = None
+        self._ref_weak_norm: torch.Tensor | None = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Text embedding rows with ``embed_norm`` applied (``[T, H]``, model dtype).
@@ -736,9 +739,17 @@ class Inkling2Model(nn.Module):
         pre_hidden, pre_blocks = hidden, block_states
         num_pre = pre_blocks.shape[1]
 
+        self._ref_weak_norm = None
+        ref_cd = self._ref_loopcd if cfg.loop_num_passes > 1 else None
+
         loop_layers = self.layers[ls:le]
         hidden, block_states = run(loop_layers, hidden, block_states, None, 0)
+        first_full_blocks, first_hidden = block_states, hidden
+        penult_full_blocks, penult_hidden = block_states, hidden
+        prev_blocks = block_states[:, num_pre + 1 :]
+        prev_hidden = hidden
         for visit in range(1, cfg.loop_num_passes):
+            penult_full_blocks, penult_hidden = block_states, hidden
             prev_blocks = block_states[:, num_pre + 1 :]
             prev_hidden = hidden
             hidden, block_states = pre_hidden, pre_blocks
@@ -749,6 +760,55 @@ class Inkling2Model(nn.Module):
                 lambda j, pb=prev_blocks, ph=prev_hidden: self.message_input(pb, ph, j),
                 visit,
             )
+
+        if ref_cd is not None and loop_layers:
+            if ref_cd.save_logits_weak:
+                wb_states, wh = (
+                    (first_full_blocks, first_hidden)
+                    if ref_cd.weak_pass == 0
+                    else (penult_full_blocks, penult_hidden)
+                )
+                self._ref_weak_norm = self.norm(self.final_input(wb_states, wh)[0])
+            if ref_cd.hidden_active:
+                from .loopcd import loopcd_blend_reference
+
+                T = hidden.shape[0]
+                if ref_cd.omega is not None:
+                    w = ref_cd.omega.reshape(-1).to(
+                        device=hidden.device, dtype=torch.float32
+                    )
+                    if w.numel() < T:
+                        w_pad = hidden.new_zeros(T, dtype=torch.float32)
+                        w_pad[: w.numel()] = w
+                        w = w_pad
+                else:
+                    w = hidden.new_full((T,), ref_cd.alpha, dtype=torch.float32)
+                if ref_cd.omega_blk is not None:
+                    wb = ref_cd.omega_blk.reshape(-1).to(
+                        device=hidden.device, dtype=torch.float32
+                    )
+                    if wb.numel() < T:
+                        wb_pad = hidden.new_zeros(T, dtype=torch.float32)
+                        wb_pad[: wb.numel()] = wb
+                        wb = wb_pad
+                elif ref_cd.blend_blocks:
+                    wb = w
+                else:
+                    wb = torch.zeros_like(w)
+                hidden, _, blended_sub = loopcd_blend_reference(
+                    hidden,
+                    None,
+                    prev_hidden,
+                    torch.zeros_like(prev_hidden),
+                    block_states[:, num_pre + 1 :],
+                    prev_blocks,
+                    w,
+                    wb,
+                )
+                if blended_sub is not None and blended_sub.shape[1] > 0:
+                    block_states = torch.cat(
+                        [block_states[:, : num_pre + 1], blended_sub], dim=1
+                    )
 
         hidden, block_states = run(self.layers[le:], hidden, block_states, None, 0)
         hidden = self.final_input(block_states, hidden)[0]
@@ -891,6 +951,48 @@ class Inkling2Model(nn.Module):
         loop_layers = self.layers[ls:le]
         coda_layers = self.layers[le:]
         passes = cfg.loop_num_passes
+        weak_visit = 0 if ws.loopcd_weak_pass == 0 else (passes - 2)
+
+        def _maybe_weak_readout(
+            blk_t: torch.Tensor,
+            n_blk: int,
+            wx0: torch.Tensor,
+            wx1: torch.Tensor | None,
+        ) -> None:
+            assert ws.loopcd_weak_h is not None
+            capturing = torch.cuda.is_current_stream_capturing()
+            if ws.loopcd_weak_h.shape[0] >= T:
+                if ws.loopcd_logits_active or capturing:
+                    ops.inkling2_glue_loopcd_readout(
+                        blk_t,
+                        n_blk,
+                        wx0,
+                        self._final_query,
+                        self._final_norm_w,
+                        ws.loopcd_weak_h[:T].unsqueeze(1),
+                        x1=wx1,
+                        gate_flag=ws.loopcd_logits_flag,
+                        eps=eps,
+                        norm_eps=eps,
+                    )
+                    ws.loopcd_weak_is_compact = False
+            elif ws.loopcd_logits_active and ws.loopcd_logits_indices is not None:
+                idx = ws.loopcd_logits_indices
+                m_rows = idx.shape[0]
+                ops.inkling2_glue_loopcd_readout(
+                    blk_t.index_select(0, idx)[:, :n_blk].contiguous(),
+                    n_blk,
+                    wx0.index_select(0, idx).contiguous(),
+                    self._final_query,
+                    self._final_norm_w,
+                    ws.loopcd_weak_h[:m_rows].unsqueeze(1),
+                    x1=(None if wx1 is None else wx1.index_select(0, idx).contiguous()),
+                    gate_flag=None,
+                    eps=eps,
+                    norm_eps=eps,
+                )
+                ws.loopcd_weak_is_compact = True
+
         x0, x1, n, pending = run(
             self.layers[:ls],
             v.hid,
@@ -915,6 +1017,9 @@ class Inkling2Model(nn.Module):
             defer_last=passes <= 1,
             last_mlp_out=v.prev_x1 if passes > 1 else None,
         )
+        if passes > 2 and loop_layers and weak_visit == 0:
+            _maybe_weak_readout(v.blk, n, x0, x1)
+        n_prev = 0
         for visit in range(1, passes):
             # the previous pass's block states and output feed this pass's messages;
             # this pass rewrites those buffers while it still reads them
@@ -925,6 +1030,8 @@ class Inkling2Model(nn.Module):
             if x1 is not v.prev_x1:
                 assert x1 is not None
                 copy(x1, v.prev_x1)
+            if loop_layers and visit == passes - 1 and (passes == 2 or weak_visit != 0):
+                _maybe_weak_readout(v.blk, n, v.prev_x0, v.prev_x1)
 
             batch = self._msg_batch
             if batch is not None and not batch.usable(T):
@@ -951,6 +1058,34 @@ class Inkling2Model(nn.Module):
                 fill,
                 defer_last=not more_passes,
                 last_mlp_out=v.prev_x1 if more_passes else None,
+            )
+        if (
+            passes > 1
+            and loop_layers
+            and (ws.loopcd_hidden_active or torch.cuda.is_current_stream_capturing())
+        ):
+            assert ws.loopcd_omega is not None and ws.loopcd_omega_blk is not None
+            if pending is not None:
+                conv_x, _cw, conv_owner, conv_md, _off = pending
+                static_conv_hip(
+                    loop_layers[-1].post_mlp_convolution,
+                    conv_x,
+                    v.mlp_c,
+                    conv_owner,
+                    conv_md,
+                    STREAM_MLP,
+                )
+                x1 = v.mlp_c
+                pending = None
+            ops.inkling2_glue_loopcd_blend(
+                x0,
+                v.prev_x0,
+                v.prev_x1,
+                ws.loopcd_omega[:T],
+                x1=x1,
+                blk=v.blk[:, num_pre + 1 : n] if n_prev > 0 else None,
+                prev_blk=v.prev_blk[:, :n_prev] if n_prev > 0 else None,
+                omega_blk=ws.loopcd_omega_blk[:T],
             )
         x0, x1, n, pending = run(
             coda_layers, x0, x1, n, 0, pending=pending, defer_last=True
@@ -1131,6 +1266,141 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         )
         self._head: LMHeadPack | None = None
         self._argmax_parts = 0
+        self._direct_loopcd_logits: Any = None
+        self._direct_stats_scratch: torch.Tensor | None = None
+
+    def get_model_state_cls(self):
+        from .loopcd import Inkling2ModelState
+
+        return Inkling2ModelState
+
+    def clear_loopcd(self) -> None:
+        """Disable any direct-harness LoopCD configuration on this model."""
+        self._direct_loopcd_logits = None
+        self.model._ref_loopcd = None
+        self.model._ref_weak_norm = None
+        ws = self.model.glue_ws
+        if ws is not None and ws.has_loop:
+            assert ws.loopcd_omega is not None
+            assert ws.loopcd_omega_blk is not None
+            assert ws.loopcd_logits_flag is not None
+            ws.loopcd_omega.zero_()
+            ws.loopcd_omega_blk.zero_()
+            ws.loopcd_logits_flag.zero_()
+            ws.loopcd_hidden_active = False
+            ws.loopcd_logits_active = False
+            ws.loopcd_weak_pass = -1
+            ws.loopcd_logits_indices = None
+            ws.loopcd_weak_is_compact = False
+
+    def set_loopcd(
+        self,
+        params: LoopCDParams | None = None,
+        *,
+        omega: torch.Tensor | None = None,
+        omega_blk: torch.Tensor | None = None,
+        logits_indices: torch.Tensor | None = None,
+        row_omega: torch.Tensor | None = None,
+        row_log_beta: torch.Tensor | None = None,
+        row_adaptive: torch.Tensor | None = None,
+    ) -> None:
+        """Configure LoopCD directly on ``lm`` for standalone tests and harnesses."""
+        from types import SimpleNamespace
+
+        from .loopcd import LoopCDParams as _LoopCDParams
+
+        if (
+            params is None
+            and omega is None
+            and omega_blk is None
+            and logits_indices is None
+            and row_omega is None
+            and row_log_beta is None
+            and row_adaptive is None
+        ):
+            self.clear_loopcd()
+            return
+
+        p = _LoopCDParams() if params is None else params
+        has_loop = self.config.loop_num_passes > 1
+        hidden_on = has_loop and (
+            omega is not None or (p.enabled and p.mode == "hidden")
+        )
+        logits_on = has_loop and (
+            row_omega is not None or (p.enabled and p.mode == "logits")
+        )
+
+        if not hidden_on and not logits_on:
+            self.clear_loopcd()
+            return
+
+        if logits_on:
+            self._direct_loopcd_logits = SimpleNamespace(
+                params=p,
+                logits_indices=logits_indices,
+                row_omega=row_omega,
+                row_log_beta=row_log_beta,
+                row_adaptive=row_adaptive,
+            )
+        else:
+            self._direct_loopcd_logits = None
+
+        if self.serving:
+            self.model._ref_loopcd = None
+            self.model._ref_weak_norm = None
+            ws = self.model.glue_ws
+            if ws is None:
+                raise RuntimeError(
+                    "Inkling-2 serving path used before load_weights() prepared it"
+                )
+            if ws.has_loop:
+                assert ws.loopcd_omega is not None
+                assert ws.loopcd_omega_blk is not None
+                assert ws.loopcd_logits_flag is not None
+                ws.loopcd_omega.zero_()
+                ws.loopcd_omega_blk.zero_()
+                if hidden_on:
+                    if omega is not None:
+                        flat_w = omega.reshape(-1)
+                        nw = min(flat_w.numel(), ws.loopcd_omega.numel())
+                        ws.loopcd_omega[:nw].copy_(
+                            flat_w[:nw].to(device=ws.device, dtype=torch.float32)
+                        )
+                        if omega_blk is not None:
+                            flat_wb = omega_blk.reshape(-1)
+                            nwb = min(flat_wb.numel(), ws.loopcd_omega_blk.numel())
+                            ws.loopcd_omega_blk[:nwb].copy_(
+                                flat_wb[:nwb].to(device=ws.device, dtype=torch.float32)
+                            )
+                        elif params is None or p.blend_blocks:
+                            ws.loopcd_omega_blk[:nw].copy_(ws.loopcd_omega[:nw])
+                    else:
+                        ws.loopcd_omega.fill_(p.alpha)
+                        if omega_blk is not None:
+                            flat_wb = omega_blk.reshape(-1)
+                            nwb = min(flat_wb.numel(), ws.loopcd_omega_blk.numel())
+                            ws.loopcd_omega_blk[:nwb].copy_(
+                                flat_wb[:nwb].to(device=ws.device, dtype=torch.float32)
+                            )
+                        elif p.blend_blocks:
+                            ws.loopcd_omega_blk.fill_(p.alpha)
+                ws.loopcd_hidden_active = hidden_on
+                ws.loopcd_logits_active = logits_on
+                ws.loopcd_logits_flag.fill_(1 if logits_on else 0)
+                ws.loopcd_weak_pass = p.weak_pass
+                ws.loopcd_logits_indices = logits_indices if logits_on else None
+                ws.loopcd_weak_is_compact = False
+        else:
+            self.model._ref_weak_norm = None
+            self.model._ref_loopcd = SimpleNamespace(
+                hidden_active=hidden_on,
+                alpha=p.alpha,
+                blend_blocks=True if params is None else p.blend_blocks,
+                omega=omega,
+                omega_blk=omega_blk,
+                weak_pass=p.weak_pass,
+                save_logits_weak=logits_on,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1178,8 +1448,8 @@ class Inkling2LoopTextForCausalLM(nn.Module):
         logits = F.linear(hidden_states, self.lm_head.weight).float()
         return torch.tanh(logits / self._softcap) * self._softcap
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        """Soft-capped fp32 logits ``[M, vocab]`` of the hidden states ``[M, H]``.
+    def _raw_compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Raw soft-capped fp32 logits ``[M, vocab]`` of ``hidden_states`` ``[M, H]``.
 
         Under tensor parallelism every rank computes the logits of its vocabulary shard
         and the shards are all-gathered, so each rank returns the full ``[M, vocab]``
@@ -1200,6 +1470,96 @@ class Inkling2LoopTextForCausalLM(nn.Module):
             block = self.tp.all_gather(self._shard_logits(hidden_states[lo:hi]))
             out[lo:hi] = block[..., :vocab]
         return out
+
+    def _apply_direct_loopcd_logits(
+        self,
+        hidden_states: torch.Tensor,
+        z_final: torch.Tensor,
+        direct: Any,
+    ) -> torch.Tensor:
+        from .loopcd import LOOPCD_MAX_WEAK_ROWS, loopcd_logits_reference
+
+        M = hidden_states.shape[0]
+        dev = z_final.device
+        idx = direct.logits_indices
+        if self.serving:
+            from vllm import _custom_ops as ops
+
+            ws = self.model.glue_ws
+            if ws is None or not ws.has_loop or ws.loopcd_weak_h is None:
+                return z_final
+            if ws.loopcd_weak_is_compact:
+                weak_h = ws.loopcd_weak_h[:M]
+            elif idx is not None and idx.shape[0] == M:
+                weak_h = ws.loopcd_weak_h.index_select(0, idx.to(device=dev))
+            else:
+                weak_h = ws.loopcd_weak_h[:M]
+        else:
+            ref_weak = self.model._ref_weak_norm
+            if ref_weak is None:
+                return z_final
+            if idx is not None and idx.shape[0] == M:
+                weak_h = ref_weak.index_select(0, idx.to(device=ref_weak.device))
+            else:
+                weak_h = ref_weak[:M]
+            weak_h = weak_h.to(dtype=hidden_states.dtype, device=hidden_states.device)
+
+        z_first = self._raw_compute_logits(weak_h)
+        p = direct.params
+        r_omega = (
+            direct.row_omega.reshape(-1)[:M]
+            .to(device=dev, dtype=torch.float32)
+            .contiguous()
+            if direct.row_omega is not None
+            else torch.full((M,), p.alpha, dtype=torch.float32, device=dev)
+        )
+        r_log_beta = (
+            direct.row_log_beta.reshape(-1)[:M]
+            .to(device=dev, dtype=torch.float32)
+            .contiguous()
+            if direct.row_log_beta is not None
+            else torch.full((M,), p.log_beta, dtype=torch.float32, device=dev)
+        )
+        r_adaptive = (
+            direct.row_adaptive.reshape(-1)[:M]
+            .to(device=dev, dtype=torch.int32)
+            .contiguous()
+            if direct.row_adaptive is not None
+            else torch.full((M,), 1 if p.adaptive else 0, dtype=torch.int32, device=dev)
+        )
+        if self.serving:
+            if (
+                self._direct_stats_scratch is None
+                or self._direct_stats_scratch.shape[0] < M
+                or self._direct_stats_scratch.device != dev
+            ):
+                self._direct_stats_scratch = torch.empty(
+                    (max(LOOPCD_MAX_WEAK_ROWS, M), 32, 2),
+                    dtype=torch.float32,
+                    device=dev,
+                )
+            z_final = z_final.contiguous()
+            z_first = z_first.contiguous()
+            ops.inkling2_loopcd_logits(
+                z_final,
+                z_first,
+                r_omega,
+                r_log_beta,
+                r_adaptive,
+                stats_scratch=self._direct_stats_scratch[:M],
+            )
+            return z_final
+        return loopcd_logits_reference(
+            z_final, z_first, r_omega, r_log_beta, r_adaptive
+        )
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        """Soft-capped fp32 logits ``[M, vocab]`` of the hidden states ``[M, H]``."""
+        z_final = self._raw_compute_logits(hidden_states)
+        direct = self._direct_loopcd_logits
+        if direct is None or hidden_states.shape[0] == 0:
+            return z_final
+        return self._apply_direct_loopcd_logits(hidden_states, z_final, direct)
 
     def greedy_token_ids(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """``argmax`` of the soft-capped logits of every row, int64 ``[M]`` (the first

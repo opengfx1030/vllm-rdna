@@ -3299,6 +3299,103 @@ def inkling2_glue_copy_states(src: torch.Tensor, dst: torch.Tensor) -> None:
     torch.ops._rocm_C.inkling2_glue_copy_states(src, dst)
 
 
+def inkling2_glue_loopcd_blend(
+    x0: torch.Tensor,
+    prev_x0: torch.Tensor,
+    prev_x1: torch.Tensor,
+    omega: torch.Tensor,
+    *,
+    x1: torch.Tensor | None = None,
+    blk: torch.Tensor | None = None,
+    prev_blk: torch.Tensor | None = None,
+    omega_blk: torch.Tensor | None = None,
+) -> None:
+    """In-place LoopCD hidden-state and block-state extrapolation on RDNA2.
+
+    Tokens with ``omega[t] == 0`` are an exact 0-ULP no-op (neither ``x0`` nor
+    ``x1`` is read or written).
+    """
+    torch.ops._rocm_C.inkling2_glue_loopcd_blend(
+        x0, x1, prev_x0, prev_x1, blk, prev_blk, omega, omega_blk
+    )
+
+
+def inkling2_glue_loopcd_readout(
+    blocks: torch.Tensor,
+    n_blocks: int,
+    x0: torch.Tensor,
+    query: torch.Tensor,
+    norm_w: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    x1: torch.Tensor | None = None,
+    gate_flag: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+) -> None:
+    """Skip-coda normalized ``Q=1`` ``attn_res`` readout for LoopCD-Logits."""
+    torch.ops._rocm_C.inkling2_glue_loopcd_readout(
+        blocks,
+        n_blocks,
+        x0,
+        x1,
+        query,
+        norm_w,
+        out,
+        gate_flag,
+        eps,
+        norm_eps,
+    )
+
+
+def inkling2_loopcd_prepare_hidden(
+    omega_out: torch.Tensor,
+    omega_blk_out: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefill_len: torch.Tensor,
+    req_alpha: torch.Tensor,
+    req_mode: torch.Tensor,
+    req_blend_blk: torch.Tensor,
+    num_tokens_padded: int,
+) -> None:
+    """Populate ``omega_out`` and ``omega_blk_out`` on GPU for LoopCD-Hidden."""
+    torch.ops._rocm_C.inkling2_loopcd_prepare_hidden(
+        omega_out,
+        omega_blk_out,
+        idx_mapping,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        req_alpha,
+        req_mode,
+        req_blend_blk,
+        num_tokens_padded,
+    )
+
+
+def inkling2_loopcd_logits(
+    z_final: torch.Tensor,
+    z_first: torch.Tensor,
+    omega: torch.Tensor,
+    log_beta: torch.Tensor,
+    adaptive: torch.Tensor,
+    *,
+    stats_scratch: torch.Tensor | None = None,
+) -> None:
+    """Fused 2-pass contrastive logits update in place for LoopCD-Logits."""
+    if stats_scratch is None:
+        stats_scratch = torch.empty(
+            (z_final.shape[0], 32, 2),
+            dtype=torch.float32,
+            device=z_final.device,
+        )
+    torch.ops._rocm_C.inkling2_loopcd_logits(
+        z_final, z_first, omega, log_beta, adaptive, stats_scratch
+    )
+
+
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna2"):
 
     @register_fake("_rocm_C::moe_mxfp4_gemm_rdna2")
@@ -7374,3 +7471,65 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_glue_s
     @register_fake("_rocm_C::inkling2_glue_copy_states")
     def _inkling2_glue_copy_states_fake(src: torch.Tensor, dst: torch.Tensor) -> None:
         return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_glue_loopcd_blend"):
+
+        @register_fake("_rocm_C::inkling2_glue_loopcd_blend")
+        def _inkling2_glue_loopcd_blend_fake(
+            x0: torch.Tensor,
+            x1: torch.Tensor | None,
+            prev_x0: torch.Tensor,
+            prev_x1: torch.Tensor,
+            blk: torch.Tensor | None,
+            prev_blk: torch.Tensor | None,
+            omega: torch.Tensor,
+            omega_blk: torch.Tensor | None,
+        ) -> None:
+            return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_glue_loopcd_readout"):
+
+        @register_fake("_rocm_C::inkling2_glue_loopcd_readout")
+        def _inkling2_glue_loopcd_readout_fake(
+            blocks: torch.Tensor,
+            n_blocks: int,
+            x0: torch.Tensor,
+            x1: torch.Tensor | None,
+            query: torch.Tensor,
+            norm_w: torch.Tensor,
+            out: torch.Tensor,
+            gate_flag: torch.Tensor | None,
+            eps: float,
+            norm_eps: float,
+        ) -> None:
+            return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_loopcd_prepare_hidden"):
+
+        @register_fake("_rocm_C::inkling2_loopcd_prepare_hidden")
+        def _inkling2_loopcd_prepare_hidden_fake(
+            omega_out: torch.Tensor,
+            omega_blk_out: torch.Tensor,
+            idx_mapping: torch.Tensor,
+            query_start_loc: torch.Tensor,
+            seq_lens: torch.Tensor,
+            prefill_len: torch.Tensor,
+            req_alpha: torch.Tensor,
+            req_mode: torch.Tensor,
+            req_blend_blk: torch.Tensor,
+            num_tokens_padded: int,
+        ) -> None:
+            return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_loopcd_logits"):
+
+        @register_fake("_rocm_C::inkling2_loopcd_logits")
+        def _inkling2_loopcd_logits_fake(
+            z_final: torch.Tensor,
+            z_first: torch.Tensor,
+            omega: torch.Tensor,
+            log_beta: torch.Tensor,
+            adaptive: torch.Tensor,
+            stats_scratch: torch.Tensor,
+        ) -> None:
+            return

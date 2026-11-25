@@ -1888,6 +1888,289 @@ __global__ void __launch_bounds__(kRouteSmallThreads)
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// LoopCD (arXiv:2610.02185): hidden-state blend, gated readout, metadata prep,
+// and 2-pass contrastive logits
+// ---------------------------------------------------------------------------
+struct LoopcdBlendArgs {
+  float* x0;
+  int64_t x0_t;
+  float* x1;
+  int64_t x1_t;
+  const float* px0;
+  int64_t px0_t;
+  const float* px1;
+  int64_t px1_t;
+  float* blk;
+  int64_t b_t, b_p;
+  const float* pblk;
+  int64_t pb_t, pb_p;
+  const float* omega;
+  const float* omega_blk;
+  int P, H;
+};
+
+template <int DUMMY = 0>
+__global__ void __launch_bounds__(256)
+    loopcd_blend_kernel(const LoopcdBlendArgs a) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  const int64_t t = blockIdx.x;
+  const int slot = blockIdx.y;
+  if (slot == 0) {
+    const float w = a.omega[t];
+    if (w == 0.0f) return;
+    for (int i = threadIdx.x; i < (a.H >> 2); i += 256) {
+      float4 hf = load4(a.x0 + t * a.x0_t + 4 * i);
+      if (a.x1 != nullptr) {
+        const float4 qf = load4(a.x1 + t * a.x1_t + 4 * i);
+        hf = make_float4(hf.x + qf.x, hf.y + qf.y, hf.z + qf.z, hf.w + qf.w);
+      }
+      float4 hp = load4(a.px0 + t * a.px0_t + 4 * i);
+      const float4 qp = load4(a.px1 + t * a.px1_t + 4 * i);
+      hp = make_float4(hp.x + qp.x, hp.y + qp.y, hp.z + qp.z, hp.w + qp.w);
+      const float4 out =
+          make_float4(fmaf(w, hf.x - hp.x, hf.x), fmaf(w, hf.y - hp.y, hf.y),
+                      fmaf(w, hf.z - hp.z, hf.z), fmaf(w, hf.w - hp.w, hf.w));
+      store4(a.x0 + t * a.x0_t + 4 * i, out);
+      if (a.x1 != nullptr) {
+        store4(a.x1 + t * a.x1_t + 4 * i, make_float4(0.f, 0.f, 0.f, 0.f));
+      }
+    }
+  } else {
+    const int p = slot - 1;
+    if (p < 0 || p >= a.P) return;
+    const float wb = (a.omega_blk != nullptr) ? a.omega_blk[t] : a.omega[t];
+    if (wb == 0.0f) return;
+    for (int i = threadIdx.x; i < (a.H >> 2); i += 256) {
+      const float4 bf = load4(a.blk + t * a.b_t + (int64_t)p * a.b_p + 4 * i);
+      const float4 bp =
+          load4(a.pblk + t * a.pb_t + (int64_t)p * a.pb_p + 4 * i);
+      store4(a.blk + t * a.b_t + (int64_t)p * a.b_p + 4 * i,
+             make_float4(
+                 fmaf(wb, bf.x - bp.x, bf.x), fmaf(wb, bf.y - bp.y, bf.y),
+                 fmaf(wb, bf.z - bp.z, bf.z), fmaf(wb, bf.w - bp.w, bf.w)));
+    }
+  }
+#endif
+}
+
+template <int ITER>
+__global__ void __launch_bounds__(256)
+    loopcd_readout_kernel(const AttnResArgs a, const int32_t* gate) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  if (gate != nullptr && gate[0] == 0) return;
+  attn_res_body<1, ITER, true>(a);
+#endif
+}
+
+struct LoopcdPrepHiddenArgs {
+  float* omega_out;
+  float* omega_blk_out;
+  const void* idx;
+  const int32_t* qsl;
+  const int32_t* seq_lens;
+  const int32_t* prefill_len;
+  const float* req_alpha;
+  const int32_t* req_mode;
+  const int32_t* req_blend_blk;
+  int num_reqs;
+  int max_reqs;
+  int num_tokens_padded;
+  int ids_i64;
+};
+
+template <int DUMMY = 0>
+__global__ void __launch_bounds__(256)
+    loopcd_prepare_hidden_kernel(const LoopcdPrepHiddenArgs a) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  const int r = blockIdx.x;
+  if (r < a.num_reqs) {
+    const int qs = a.qsl[r];
+    const int qe = a.qsl[r + 1];
+    const int qlen = qe - qs;
+    const int64_t s = a.ids_i64
+                          ? reinterpret_cast<const int64_t*>(a.idx)[r]
+                          : (int64_t)reinterpret_cast<const int32_t*>(a.idx)[r];
+    if (s < 0 || s >= a.max_reqs) {
+      for (int k = threadIdx.x; k < qlen; k += 256) {
+        const int t = qs + k;
+        if (t >= 0 && t < a.num_tokens_padded) {
+          a.omega_out[t] = 0.0f;
+          a.omega_blk_out[t] = 0.0f;
+        }
+      }
+      return;
+    }
+    const int slen = a.seq_lens[r];
+    const int plen = a.prefill_len[s];
+    const float alpha = (a.req_mode[s] == 1) ? a.req_alpha[s] : 0.0f;
+    const bool bflag = a.req_blend_blk[s] != 0;
+    for (int k = threadIdx.x; k < qlen; k += 256) {
+      const int t = qs + k;
+      if (t >= 0 && t < a.num_tokens_padded) {
+        const int pos = (slen - qlen) + k;
+        const float w = (pos < plen - 1) ? 0.0f : alpha;
+        a.omega_out[t] = w;
+        a.omega_blk_out[t] = bflag ? w : 0.0f;
+      }
+    }
+  } else {
+    int end = (a.num_reqs > 0) ? a.qsl[a.num_reqs] : 0;
+    if (end < 0) end = 0;
+    for (int t = end + (int)threadIdx.x; t < a.num_tokens_padded; t += 256) {
+      a.omega_out[t] = 0.0f;
+      a.omega_blk_out[t] = 0.0f;
+    }
+  }
+#endif
+}
+
+struct LoopcdLogitsArgs {
+  float* zf;
+  int64_t zf_s;
+  const float* zw;
+  int64_t zw_s;
+  const float* omega;
+  const float* log_beta;
+  const void* adap;
+  float* stats;
+  int V, S;
+  int adap_bool;
+};
+
+template <int DUMMY = 0>
+__global__ void __launch_bounds__(256)
+    loopcd_logits_stats_kernel(const LoopcdLogitsArgs a) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  const int s = blockIdx.x;
+  const int64_t b = blockIdx.y;
+  if (a.omega[b] == 0.0f) return;
+
+  __shared__ float s_m[8];
+  __shared__ float s_l[8];
+
+  const int tid = threadIdx.x;
+  const int lane = tid & (kWave - 1);
+  const int wave = tid / kWave;
+  const float* zf_row = a.zf + b * a.zf_s;
+  const bool aligned = (reinterpret_cast<uintptr_t>(zf_row) & 15u) == 0u;
+
+  float m_loc = -INFINITY;
+  float l_loc = 0.0f;
+  auto upd = [&](float x) {
+    if (x > m_loc) {
+      l_loc = (m_loc > -INFINITY ? l_loc * expf(m_loc - x) : 0.0f) + 1.0f;
+      m_loc = x;
+    } else if (x > -INFINITY) {
+      l_loc += expf(x - m_loc);
+    }
+  };
+
+  if (aligned) {
+    const int V4 = a.V >> 2;
+    for (int v4 = s * 256 + tid; v4 < V4; v4 += a.S * 256) {
+      const float4 q = load4(zf_row + 4 * v4);
+      upd(q.x);
+      upd(q.y);
+      upd(q.z);
+      upd(q.w);
+    }
+    if (s == 0 && tid < (a.V & 3)) {
+      upd(zf_row[(a.V & ~3) + tid]);
+    }
+  } else {
+    for (int v = s * 256 + tid; v < a.V; v += a.S * 256) {
+      upd(zf_row[v]);
+    }
+  }
+
+  const float m_w = wave_max(m_loc);
+  const float l_w = wave_sum((m_loc > -INFINITY && m_w > -INFINITY)
+                                 ? l_loc * expf(m_loc - m_w)
+                                 : 0.0f);
+  if (lane == 0) {
+    s_m[wave] = m_w;
+    s_l[wave] = l_w;
+  }
+  __syncthreads();
+
+  if (wave == 0) {
+    const float mw = (lane < 8) ? s_m[lane] : -INFINITY;
+    const float lw = (lane < 8) ? s_l[lane] : 0.0f;
+    const float m_cta = wave_max(mw);
+    const float l_cta = wave_sum(
+        (mw > -INFINITY && m_cta > -INFINITY) ? lw * expf(mw - m_cta) : 0.0f);
+    if (lane == 0) {
+      float* dst = a.stats + (b * 32 + s) * 2;
+      dst[0] = m_cta;
+      dst[1] = l_cta;
+    }
+  }
+#endif
+}
+
+template <int DUMMY = 0>
+__global__ void __launch_bounds__(256)
+    loopcd_logits_apply_kernel(const LoopcdLogitsArgs a) {
+#if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
+  const int s = blockIdx.x;
+  const int64_t b = blockIdx.y;
+  const float w0 = a.omega[b];
+  if (w0 == 0.0f) return;
+
+  const int tid = threadIdx.x;
+  const int lane = tid & (kWave - 1);
+  float ms = -INFINITY;
+  float ls = 0.0f;
+  if (lane < a.S) {
+    const float* st = a.stats + (b * 32 + lane) * 2;
+    ms = st[0];
+    ls = st[1];
+  }
+  const float m_b = wave_max(ms);
+  if (!(m_b > -INFINITY)) return;
+  const float denom = wave_sum((ms > -INFINITY) ? ls * expf(ms - m_b) : 0.0f);
+
+  const bool adap = a.adap_bool
+                        ? reinterpret_cast<const bool*>(a.adap)[b]
+                        : (reinterpret_cast<const int32_t*>(a.adap)[b] != 0);
+  const float p_max = (denom > 0.0f) ? (1.0f / denom) : 1.0f;
+  const float wb = adap ? (w0 * fmaxf(0.0f, 1.0f - p_max)) : w0;
+  const float cutoff = m_b + a.log_beta[b];
+
+  float* zf_row = a.zf + b * a.zf_s;
+  const float* zw_row = a.zw + b * a.zw_s;
+  const bool aligned = ((reinterpret_cast<uintptr_t>(zf_row) |
+                         reinterpret_cast<uintptr_t>(zw_row)) &
+                        15u) == 0u;
+
+  auto apply1 = [&](float zf, float zw) -> float {
+    return (zf >= cutoff && zf > -INFINITY)
+               ? ((isfinite(zf) && isfinite(zw)) ? fmaf(wb, zf - zw, zf) : zf)
+               : -INFINITY;
+  };
+
+  if (aligned) {
+    const int V4 = a.V >> 2;
+    for (int v4 = s * 256 + tid; v4 < V4; v4 += a.S * 256) {
+      const float4 qf = load4(zf_row + 4 * v4);
+      const float4 qw = load4(zw_row + 4 * v4);
+      store4(zf_row + 4 * v4,
+             make_float4(apply1(qf.x, qw.x), apply1(qf.y, qw.y),
+                         apply1(qf.z, qw.z), apply1(qf.w, qw.w)));
+    }
+    if (s == 0 && tid < (a.V & 3)) {
+      const int v = (a.V & ~3) + tid;
+      zf_row[v] = apply1(zf_row[v], zw_row[v]);
+    }
+  } else {
+    for (int v = s * 256 + tid; v < a.V; v += a.S * 256) {
+      zf_row[v] = apply1(zf_row[v], zw_row[v]);
+    }
+  }
+#endif
+}
+
 }  // namespace inkling2_glue
 
 // ===========================================================================
@@ -3055,4 +3338,327 @@ void inkling2_glue_moe_route(
     launch_route<__half>(tb, grid, shmem, a, stream);
   else
     launch_route<float>(tb, grid, shmem, a, stream);
+}
+
+// ---------------------------------------------------------------------------
+// inkling2_glue_loopcd_blend
+// ---------------------------------------------------------------------------
+void inkling2_glue_loopcd_blend(const torch::Tensor& x0,
+                                const std::optional<torch::Tensor>& x1,
+                                const torch::Tensor& prev_x0,
+                                const torch::Tensor& prev_x1,
+                                const std::optional<torch::Tensor>& blk,
+                                const std::optional<torch::Tensor>& prev_blk,
+                                const torch::Tensor& omega,
+                                const std::optional<torch::Tensor>& omega_blk) {
+  const char* who = "inkling2_glue_loopcd_blend";
+  check_gpu(x0, who, "x0");
+  check_gpu(prev_x0, who, "prev_x0");
+  check_gpu(prev_x1, who, "prev_x1");
+  check_gpu(omega, who, "omega");
+  check_dtype(x0, who, "x0", at::kFloat);
+  check_dtype(prev_x0, who, "prev_x0", at::kFloat);
+  check_dtype(prev_x1, who, "prev_x1", at::kFloat);
+  check_dtype(omega, who, "omega", at::kFloat);
+  TORCH_CHECK(x0.dim() == 2, who, ": x0 must be [T, H]");
+  const int64_t T = x0.size(0), H = x0.size(1);
+  TORCH_CHECK(H % 4 == 0, who, ": hidden size must be a multiple of 4");
+  TORCH_CHECK(
+      prev_x0.dim() == 2 && prev_x0.size(0) == T && prev_x0.size(1) == H, who,
+      ": prev_x0 must be [T, H]");
+  TORCH_CHECK(
+      prev_x1.dim() == 2 && prev_x1.size(0) == T && prev_x1.size(1) == H, who,
+      ": prev_x1 must be [T, H]");
+  check_vec_rows(x0, who, "x0", 4);
+  check_vec_rows(prev_x0, who, "prev_x0", 4);
+  check_vec_rows(prev_x1, who, "prev_x1", 4);
+  TORCH_CHECK(omega.dim() == 1 && omega.is_contiguous() && omega.numel() >= T,
+              who, ": omega must be 1-D contiguous with numel() >= T");
+
+  LoopcdBlendArgs a{};
+  a.x0 = x0.data_ptr<float>();
+  a.x0_t = x0.stride(0);
+  a.px0 = prev_x0.data_ptr<float>();
+  a.px0_t = prev_x0.stride(0);
+  a.px1 = prev_x1.data_ptr<float>();
+  a.px1_t = prev_x1.stride(0);
+  a.omega = omega.data_ptr<float>();
+  a.H = (int)H;
+
+  if (x1.has_value() && x1->defined()) {
+    check_gpu(*x1, who, "x1");
+    check_dtype(*x1, who, "x1", at::kFloat);
+    TORCH_CHECK(x1->dim() == 2 && x1->size(0) == T && x1->size(1) == H, who,
+                ": x1 must be [T, H]");
+    check_vec_rows(*x1, who, "x1", 4);
+    a.x1 = x1->data_ptr<float>();
+    a.x1_t = x1->stride(0);
+  }
+
+  int64_t P = 0;
+  if (blk.has_value() && blk->defined()) {
+    check_gpu(*blk, who, "blk");
+    check_dtype(*blk, who, "blk", at::kFloat);
+    if (blk->dim() >= 2 && blk->size(1) > 0) {
+      TORCH_CHECK(blk->dim() == 3 && blk->size(0) == T && blk->size(2) == H,
+                  who, ": blk must be [T, P, H]");
+      P = blk->size(1);
+      check_vec_rows(*blk, who, "blk", 4);
+      TORCH_CHECK(prev_blk.has_value() && prev_blk->defined(), who,
+                  ": prev_blk must be defined when blk has P > 0");
+      check_gpu(*prev_blk, who, "prev_blk");
+      check_dtype(*prev_blk, who, "prev_blk", at::kFloat);
+      TORCH_CHECK(prev_blk->dim() == 3 && prev_blk->size(0) == T &&
+                      prev_blk->size(1) >= P && prev_blk->size(2) == H,
+                  who, ": prev_blk must be [T, >= P, H]");
+      check_vec_rows(*prev_blk, who, "prev_blk", 4);
+      a.blk = blk->data_ptr<float>();
+      a.b_t = blk->stride(0);
+      a.b_p = blk->stride(1);
+      a.pblk = prev_blk->data_ptr<float>();
+      a.pb_t = prev_blk->stride(0);
+      a.pb_p = prev_blk->stride(1);
+    } else {
+      TORCH_CHECK(blk->numel() == 0, who, ": blk must be [T, P, H]");
+    }
+  }
+  a.P = (int)P;
+
+  if (omega_blk.has_value() && omega_blk->defined()) {
+    check_gpu(*omega_blk, who, "omega_blk");
+    check_dtype(*omega_blk, who, "omega_blk", at::kFloat);
+    TORCH_CHECK(omega_blk->dim() == 1 && omega_blk->is_contiguous() &&
+                    omega_blk->numel() >= T,
+                who, ": omega_blk must be 1-D contiguous with numel() >= T");
+    a.omega_blk = omega_blk->data_ptr<float>();
+  }
+
+  const at::cuda::OptionalCUDAGuard guard(device_of(x0));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (T == 0) return;
+  inkling2_glue::loopcd_blend_kernel<0>
+      <<<dim3((unsigned)T, (unsigned)(1 + P)), dim3(256), 0, stream>>>(a);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// ---------------------------------------------------------------------------
+// inkling2_glue_loopcd_readout
+// ---------------------------------------------------------------------------
+void inkling2_glue_loopcd_readout(const torch::Tensor& blocks, int64_t n_blocks,
+                                  const torch::Tensor& x0,
+                                  const std::optional<torch::Tensor>& x1,
+                                  const torch::Tensor& query,
+                                  const torch::Tensor& norm_w,
+                                  const torch::Tensor& out,
+                                  const std::optional<torch::Tensor>& gate_flag,
+                                  double eps, double norm_eps) {
+  const char* who = "inkling2_glue_loopcd_readout";
+  check_gpu(x0, who, "x0");
+  TORCH_CHECK(x0.dim() == 2, who, ": x0 must be [T, H]");
+  const int64_t T = x0.size(0), H = x0.size(1);
+  check_dtype(x0, who, "x0", at::kFloat);
+  check_vec_rows(x0, who, "x0", 4);
+  check_gpu(query, who, "query");
+  TORCH_CHECK(query.dim() == 2 && query.size(0) == 1, who,
+              ": query must be [1, H] (Q == 1)");
+  check_gpu(norm_w, who, "norm_w");
+
+  AttnResArgs a{};
+  bool norm = false;
+  const std::optional<at::Tensor> opt_norm_w(norm_w);
+  fill_attn_res_common(a, who, blocks, n_blocks, T, H, 1, std::nullopt,
+                       std::nullopt, query, opt_norm_w, out, std::nullopt, eps,
+                       norm_eps, norm);
+  TORCH_CHECK(norm, who, ": norm_w must be defined");
+  a.x0 = x0.data_ptr<float>();
+  a.x0_t = x0.stride(0);
+  if (x1.has_value() && x1->defined()) {
+    check_gpu(*x1, who, "x1");
+    check_dtype(*x1, who, "x1", at::kFloat);
+    TORCH_CHECK(x1->dim() == 2 && x1->size(0) == T && x1->size(1) == H, who,
+                ": x1 must be [T, H]");
+    check_vec_rows(*x1, who, "x1", 4);
+    a.x1 = x1->data_ptr<float>();
+    a.x1_t = x1->stride(0);
+  }
+  const int32_t* gate = nullptr;
+  if (gate_flag.has_value() && gate_flag->defined()) {
+    check_gpu(*gate_flag, who, "gate_flag");
+    check_dtype(*gate_flag, who, "gate_flag", at::kInt);
+    TORCH_CHECK(gate_flag->numel() >= 1, who,
+                ": gate_flag must have numel() >= 1");
+    gate = gate_flag->data_ptr<int32_t>();
+  }
+
+  const at::cuda::OptionalCUDAGuard guard(device_of(x0));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (T == 0) return;
+  int iter, block;
+  row_launch_shape(H, who, iter, block);
+#define I2G_LRO(IT)                                               \
+  case IT:                                                        \
+    inkling2_glue::loopcd_readout_kernel<IT>                      \
+        <<<dim3((unsigned)T), dim3(block), 0, stream>>>(a, gate); \
+    break
+  switch (iter) {
+    I2G_LRO(1);
+    I2G_LRO(2);
+    I2G_LRO(3);
+    I2G_LRO(4);
+    default:
+      TORCH_CHECK(false, "inkling2_glue_loopcd_readout: bad iter ", iter);
+  }
+#undef I2G_LRO
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// ---------------------------------------------------------------------------
+// inkling2_loopcd_prepare_hidden
+// ---------------------------------------------------------------------------
+void inkling2_loopcd_prepare_hidden(
+    const torch::Tensor& omega_out, const torch::Tensor& omega_blk_out,
+    const torch::Tensor& idx_mapping, const torch::Tensor& query_start_loc,
+    const torch::Tensor& seq_lens, const torch::Tensor& prefill_len,
+    const torch::Tensor& req_alpha, const torch::Tensor& req_mode,
+    const torch::Tensor& req_blend_blk, int64_t num_tokens_padded) {
+  const char* who = "inkling2_loopcd_prepare_hidden";
+  const std::pair<const at::Tensor*, const char*> on_gpu[] = {
+      {&omega_out, "omega_out"},        {&omega_blk_out, "omega_blk_out"},
+      {&idx_mapping, "idx_mapping"},    {&query_start_loc, "query_start_loc"},
+      {&seq_lens, "seq_lens"},          {&prefill_len, "prefill_len"},
+      {&req_alpha, "req_alpha"},        {&req_mode, "req_mode"},
+      {&req_blend_blk, "req_blend_blk"}};
+  for (const auto& p : on_gpu) check_gpu(*p.first, who, p.second);
+
+  check_dtype(omega_out, who, "omega_out", at::kFloat);
+  check_dtype(omega_blk_out, who, "omega_blk_out", at::kFloat);
+  TORCH_CHECK(idx_mapping.dim() == 1 && idx_mapping.is_contiguous() &&
+                  (idx_mapping.scalar_type() == at::kInt ||
+                   idx_mapping.scalar_type() == at::kLong),
+              who, ": idx_mapping must be 1-D contiguous int32 or int64");
+  const int64_t num_reqs = idx_mapping.size(0);
+  check_dtype(query_start_loc, who, "query_start_loc", at::kInt);
+  check_dtype(seq_lens, who, "seq_lens", at::kInt);
+  check_dtype(prefill_len, who, "prefill_len", at::kInt);
+  check_dtype(req_alpha, who, "req_alpha", at::kFloat);
+  check_dtype(req_mode, who, "req_mode", at::kInt);
+  check_dtype(req_blend_blk, who, "req_blend_blk", at::kInt);
+
+  TORCH_CHECK(query_start_loc.dim() == 1 && query_start_loc.is_contiguous() &&
+                  query_start_loc.numel() >= num_reqs + 1,
+              who, ": query_start_loc must be 1-D contiguous [>= num_reqs+1]");
+  TORCH_CHECK(seq_lens.dim() == 1 && seq_lens.is_contiguous() &&
+                  seq_lens.numel() >= num_reqs,
+              who, ": seq_lens must be 1-D contiguous [>= num_reqs]");
+  TORCH_CHECK(prefill_len.dim() == 1 && prefill_len.is_contiguous() &&
+                  req_alpha.dim() == 1 && req_alpha.is_contiguous() &&
+                  req_mode.dim() == 1 && req_mode.is_contiguous() &&
+                  req_blend_blk.dim() == 1 && req_blend_blk.is_contiguous(),
+              who, ": request state tables must be 1-D contiguous");
+  const int64_t max_reqs = std::min<int64_t>(
+      std::min<int64_t>(prefill_len.numel(), req_alpha.numel()),
+      std::min<int64_t>(req_mode.numel(), req_blend_blk.numel()));
+  TORCH_CHECK(omega_out.dim() == 1 && omega_out.is_contiguous() &&
+                  omega_blk_out.dim() == 1 && omega_blk_out.is_contiguous(),
+              who, ": omega_out and omega_blk_out must be 1-D contiguous");
+  if (num_tokens_padded <= 0) return;
+  TORCH_CHECK(omega_out.numel() >= num_tokens_padded &&
+                  omega_blk_out.numel() >= num_tokens_padded,
+              who, ": omega outputs must have numel() >= num_tokens_padded");
+
+  LoopcdPrepHiddenArgs a{};
+  a.omega_out = omega_out.data_ptr<float>();
+  a.omega_blk_out = omega_blk_out.data_ptr<float>();
+  a.idx = idx_mapping.data_ptr();
+  a.qsl = query_start_loc.data_ptr<int32_t>();
+  a.seq_lens = seq_lens.data_ptr<int32_t>();
+  a.prefill_len = prefill_len.data_ptr<int32_t>();
+  a.req_alpha = req_alpha.data_ptr<float>();
+  a.req_mode = req_mode.data_ptr<int32_t>();
+  a.req_blend_blk = req_blend_blk.data_ptr<int32_t>();
+  a.num_reqs = (int)num_reqs;
+  a.max_reqs = (int)max_reqs;
+  a.num_tokens_padded = (int)num_tokens_padded;
+  a.ids_i64 = idx_mapping.scalar_type() == at::kLong ? 1 : 0;
+
+  const at::cuda::OptionalCUDAGuard guard(device_of(omega_out));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  inkling2_glue::loopcd_prepare_hidden_kernel<0>
+      <<<dim3((unsigned)(num_reqs + 1)), dim3(256), 0, stream>>>(a);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// ---------------------------------------------------------------------------
+// inkling2_loopcd_logits
+// ---------------------------------------------------------------------------
+void inkling2_loopcd_logits(const torch::Tensor& z_final,
+                            const torch::Tensor& z_first,
+                            const torch::Tensor& omega,
+                            const torch::Tensor& log_beta,
+                            const torch::Tensor& adaptive,
+                            const torch::Tensor& stats_scratch) {
+  const char* who = "inkling2_loopcd_logits";
+  check_gpu(z_final, who, "z_final");
+  check_gpu(z_first, who, "z_first");
+  check_gpu(omega, who, "omega");
+  check_gpu(log_beta, who, "log_beta");
+  check_gpu(adaptive, who, "adaptive");
+  check_gpu(stats_scratch, who, "stats_scratch");
+
+  check_dtype(z_final, who, "z_final", at::kFloat);
+  check_dtype(z_first, who, "z_first", at::kFloat);
+  check_dtype(omega, who, "omega", at::kFloat);
+  check_dtype(log_beta, who, "log_beta", at::kFloat);
+  TORCH_CHECK(
+      adaptive.scalar_type() == at::kInt || adaptive.scalar_type() == at::kBool,
+      who, ": adaptive must be int32 or bool");
+  check_dtype(stats_scratch, who, "stats_scratch", at::kFloat);
+
+  TORCH_CHECK(z_final.dim() == 2 && z_first.dim() == 2 &&
+                  z_first.sizes() == z_final.sizes(),
+              who, ": z_final and z_first must be [B, V] of one shape");
+  const int64_t B = z_final.size(0), V = z_final.size(1);
+  TORCH_CHECK(z_final.stride(1) == 1 && z_first.stride(1) == 1, who,
+              ": z_final and z_first must have unit stride on V");
+  TORCH_CHECK(B <= 1 || z_final.stride(0) >= V, who,
+              ": z_final row stride must be >= V");
+  TORCH_CHECK(omega.dim() == 1 && omega.is_contiguous() && omega.numel() >= B,
+              who, ": omega must be 1-D contiguous [>= B]");
+  TORCH_CHECK(
+      log_beta.dim() == 1 && log_beta.is_contiguous() && log_beta.numel() >= B,
+      who, ": log_beta must be 1-D contiguous [>= B]");
+  TORCH_CHECK(
+      adaptive.dim() == 1 && adaptive.is_contiguous() && adaptive.numel() >= B,
+      who, ": adaptive must be 1-D contiguous [>= B]");
+  TORCH_CHECK(
+      stats_scratch.is_contiguous() && stats_scratch.numel() >= B * 32 * 2, who,
+      ": stats_scratch must be contiguous fp32 [>= B*32*2]");
+
+  const at::cuda::OptionalCUDAGuard guard(device_of(z_final));
+  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (B == 0 || V == 0) return;
+
+  int S = std::clamp<int>((int)(72 / std::max<int64_t>(B, 1)), 1, 32);
+  S = std::min<int>(S, (int)((V + 255) / 256));
+  S = std::max<int>(S, 1);
+
+  LoopcdLogitsArgs a{};
+  a.zf = z_final.data_ptr<float>();
+  a.zf_s = z_final.stride(0);
+  a.zw = z_first.data_ptr<float>();
+  a.zw_s = z_first.stride(0);
+  a.omega = omega.data_ptr<float>();
+  a.log_beta = log_beta.data_ptr<float>();
+  a.adap = adaptive.data_ptr();
+  a.stats = stats_scratch.data_ptr<float>();
+  a.V = (int)V;
+  a.S = S;
+  a.adap_bool = adaptive.scalar_type() == at::kBool ? 1 : 0;
+
+  const dim3 grid((unsigned)S, (unsigned)B);
+  const dim3 block(256);
+  inkling2_glue::loopcd_logits_stats_kernel<0><<<grid, block, 0, stream>>>(a);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  inkling2_glue::loopcd_logits_apply_kernel<0><<<grid, block, 0, stream>>>(a);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

@@ -80,6 +80,7 @@ tests/models/inkling2_loop/test_serving_path_cpu.py  # fork-only Inkling-2 nativ
 tests/models/inkling2_loop/test_serving_path_gpu.py  # fork-only Inkling-2 native HIP serving path vs its torch reference path on gfx1030 (layer-by-layer teacher forced, paged scenarios, prefix cache, no-allocation forward); skipped off-GPU, not in CI
 tests/models/inkling2_loop/test_serving_path_graph_gpu.py  # fork-only Inkling-2 FULL HIP-graph capture/replay of the native forward vs the eager step on gfx1030 (padded batches with poisoned padding, frozen split-K, fp16-CAS noise bound); skipped off-GPU, not in CI
 tests/models/inkling2_loop/test_loader.py  # fork-only Inkling-2 expert-format loader, CPU unit test; not in CI
+tests/models/inkling2_loop/test_loopcd.py  # fork-only Inkling-2 LoopCD (arXiv:2610.02185) CPU/GPU unit, prefix-cache and HIP-graph tests; not in CI
 tests/models/inkling2_loop/test_moe.py  # fork-only Inkling-2 NVFP4/MXFP8 MoE vs fp32 reference; GPU cases need gfx1030 and the moe_*_rdna2 ops, not in CI
 tests/models/inkling2_loop/test_moe_prefill_bm_gpu.py  # fork-only Inkling-2 prefill expert kernels at the model level on gfx1030 (tiny router-stable checkpoints, kernels off / on / W4A8, op call counters prove which path ran); skipped off-GPU, not in CI
 tests/models/inkling2_loop/test_moe_prefill_flags.py  # fork-only Inkling-2 prefill expert kernel switches (defaults, rollback flag, token gate, K eligibility), CPU unit test; not in CI
