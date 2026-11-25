@@ -753,7 +753,7 @@ $HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python -m pytest \
   tests/models/inkling2_loop/test_hi2_slots.py \
   tests/models/inkling2_loop/test_hi2_vision_mtp.py \
   tests/models/inkling2_loop/test_hi2_final_driver.py -q
-# 84 passed, 10 skipped (the GPU tests), 15 warnings in 256.32s (head 1bcce0c81e)
+# 88 passed, 10 skipped (the GPU tests), 15 warnings in 212.21s (head 5d36945e5c)
 ```
 
 `test_hi2_final_driver.py` is hermetic (stub tools; no GPU, no /tmp): dry-run
@@ -783,6 +783,7 @@ alive, no request pending, and the free gate the owner recorded at acquisition
 (`<owner>.<slot>.gate`) to be >= 28 GiB; it writes no request/holder and its
 release is a no-op, so a child cannot drop the run's lease.  A foreign or stale
 holder falls back to the normal refuse/queue path.  A request written by the
-same process no longer queues behind itself.  CPU proof: five lease tests (own
-holder, foreign refusal, release no-op, self-request, plus the driver tests on
-the fake sysfs) and three new mutants, all killed.
+same process no longer queues behind itself.  CPU proof: four lease tests (own holder,
+foreign refusal, release no-op, self-request) plus the five driver tests on the
+fake sysfs; box gate 88 passed, 10 skipped (212.21 s) and mutants 8/8 killed
+(incl. unconditional inherit, release-deletes-holder and self-queue).
