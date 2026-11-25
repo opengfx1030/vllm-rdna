@@ -15,8 +15,11 @@ changed; the pure-torch reference and the loader run everywhere torch is availab
 Files added by this change set: `vllm/models/inkling2_loop/amd/{hi2,loader}.py`
 changes plus `hi2.py` decoding/reference, `amd/moe.py` HI2 experts
 (`_forward_chunk_hi2`, `forward_reference`, `_forward_hip_hi2`), `amd/glue.py`
-(`hi2=True` workspace), `amd/model.py` loader wiring, three test modules, and the
-tools below.
+(`hi2=True` workspace), `amd/model.py` loader wiring, three test modules (the
+launcher module is `test_hi2_slots.py`, 32 tests), and the tools below
+(`tools/inkling_hi2/lease.sh` and `quiet_touch.py` carry the lease and the quiet
+touch; `mutants_launchers.py` is the 13-mutant battery; `gpu_temps.py` gained the
+watcher flags; the recipe pins a2 by PCI bus).
 
 ## What ran on CPU (all on the box, `par1-cs25`, no lease)
 

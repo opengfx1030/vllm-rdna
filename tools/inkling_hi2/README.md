@@ -179,6 +179,9 @@ the log.
    TP=1 output (5e-2); `forward_hip` matches the eager kernel and allocates **0**
    bytes after warm-up. Expected: 3 passed (this file's gate), e.g.
    `HI2 M=1: rel err 3e-3`. A `5e-2` breach is a numerics finding, not a flake.
+   The gate needs the tree's `_rocm_C` built with the four Inkling/HI2 ops **and**
+   the venv's `_moe_C` (`moe_align_block_size`); without either the file skips
+   (a skip is not a pass). The build of 2026-11-25 (5e2c740de3) has both.
 
 2. **Stock reference server** (same lease, TP=2, language-only, 8192 context) so the
    probes have a baseline:
