@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 # Headroom left after sizing from measured memory, beyond the measured transient
 # peak, for what the measurement does not show: the caching allocator's
 # rounding, fragmentation the sizing steps do not reproduce, real steps
@@ -60,16 +61,27 @@ logger = init_logger(__name__)
 # while their encoder or sampler transients are not. Measured on GB200: the
 # first prefill of an 8B model needed over 25% beyond its allocated peak before
 # the allocator could serve it, and adversarial workloads reached up to 45%.
+def _rocm_cdna_margin() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx10x, on_rdna
+
+    return not (on_gfx10x() or on_rdna())
+
+
 # ROCr also maps kernel scratch outside the allocator when a kernel first needs
-# it, so ROCm keeps a larger floor.
-KV_CACHE_MARGIN_FLOOR_BYTES = (3 if current_platform.is_rocm() else 1) << 30
+# it, so CDNA ROCm (e.g. 288 GiB MI355) keeps a 3 GiB floor / 1 GiB non-torch
+# reserve. RDNA2/RDNA3 (16-32 GiB) uses the standard 1 GiB floor / 512 MiB
+# non-torch reserve so 16-32 GiB cards do not lose 2 GiB of KV cache by default.
+_USE_CDNA_ROCM_MARGIN = _rocm_cdna_margin()
+KV_CACHE_MARGIN_FLOOR_BYTES = (3 if _USE_CDNA_ROCM_MARGIN else 1) << 30
 KV_CACHE_MARGIN_FRACTION = 0.75
 # Part of the margin kept for allocations outside torch's caching allocator
 # (kernel scratch, NCCL/RCCL buffers, lazily loaded code objects); the
 # allocator is capped to leave it free. The rest absorbs torch's fragmentation,
 # which scales with the transient where these do not: serving grew them by at
 # most 0.17 GiB on MI355 and not at all on GB200.
-KV_CACHE_NON_TORCH_RESERVE_BYTES = (2 if current_platform.is_rocm() else 1) << 29
+KV_CACHE_NON_TORCH_RESERVE_BYTES = (2 if _USE_CDNA_ROCM_MARGIN else 1) << 29
 # Share of the headroom warmup leaves uncommitted, on top of the profiled
 # activation peak, for transients the profiling run does not exercise.
 KV_CACHE_WARMUP_RESERVE_FRACTION = 0.1
@@ -701,11 +713,16 @@ def measure_kv_cache_blocks(
     num_blocks = kv_cache.blocks_within(kv_cache_bytes)
     # Torch may grow into what stays free once the cache is extended, less the
     # memory kept for multimodal IPC and for allocations outside torch.
+    # Clamp the non-torch reserve to the configured margin floor so an explicit
+    # low VLLM_KV_CACHE_MARGIN_FLOOR_MIB never caps torch below its transient.
+    non_torch_reserve = min(
+        KV_CACHE_NON_TORCH_RESERVE_BYTES, kv_cache_margin_floor_bytes()
+    )
     left_free = (
         free_memory
         - (kv_cache.physical_bytes_for(num_blocks) - kv_cache.physical_bytes)
         - (available - kv_cache_bytes)
-        - KV_CACHE_NON_TORCH_RESERVE_BYTES
+        - non_torch_reserve
     )
     torch_memory_limit = torch.accelerator.memory_reserved(device) + max(left_free, 0)
     kv_cache.set_torch_memory_limit(torch_memory_limit)
