@@ -4,13 +4,18 @@
 
 """Junction temperature of the leased GPUs, one CSV row every PERIOD seconds.
 
-Log only: nothing reads it to decide anything during a run; ``analyze.py
-report`` prints the mean and the maximum per arm. HIP ordinal ``i`` is the i-th
-GPU node of the KFD topology (node ids in numeric order, ``simd_count`` > 0);
-that node's ``drm_render_minor`` names the render node whose hwmon has the
-sensor labelled ``junction`` (millidegrees C).
+Watcher by default: on any sample >= ``--max-c`` (95 C) or a ``--mean-seconds``
+(5 s) mean >= ``--mean-c`` (90 C) it prints the breach, optionally SIGTERMs
+``--kill-pid`` (the server tree) and exits 3; otherwise it only appends the CSV
+(``analyze.py report`` still reads it).  The probes are the hwmon ``junction``
+labels of the leased render nodes; nothing opens a GPU.
+
+HIP ordinal ``i`` is the i-th GPU node of the KFD topology (node ids in numeric
+order, ``simd_count`` > 0); that node's ``drm_render_minor`` names the render node
+whose hwmon has the sensor labelled ``junction`` (millidegrees C).
 
   gpu_temps.py --gpus 2,3,4,5 --out temps.csv [--period 15] [--count N]
+               [--kill-pid PID] [--max-c 95] [--mean-c 90] [--mean-seconds 5]
 
 Columns: ``time`` (ISO, local), ``epoch``, then ``hip<N>`` per GPU (blank while
 its sensor cannot be read; the sensors are looked up again then).
@@ -18,6 +23,8 @@ its sensor cannot be read; the sensors are looked up again then).
 
 import argparse
 import csv
+import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -74,6 +81,33 @@ def sensors(
     }
 
 
+def breach(
+    history: list[tuple[float, list[float | None]]],
+    gpus: list[int],
+    max_c: float,
+    mean_c: float,
+    mean_ready: bool,
+) -> list[tuple[int, float, str, float]]:
+    """``(hip, value, kind, threshold)`` for each GPU over a threshold.
+
+    ``kind`` is ``sample`` (>= max_c) or ``mean`` (the mean over the history,
+    which the caller trims to the mean window; only once that window is covered,
+    ``mean_ready``).  The sample rule wins.
+    """
+    hits = []
+    for index, gpu in enumerate(gpus):
+        values = [temps[index] for _, temps in history if temps[index] is not None]
+        if not values:
+            continue
+        peak = max(values)
+        mean = sum(values) / len(values)
+        if peak >= max_c:
+            hits.append((gpu, peak, "sample", max_c))
+        elif mean_ready and mean >= mean_c:
+            hits.append((gpu, mean, "mean", mean_c))
+    return hits
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--gpus", required=True, help="HIP ordinals, comma separated")
@@ -82,11 +116,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--count", type=int, default=0, help="rows to write, 0 = no end")
     ap.add_argument("--kfd-nodes", type=Path, default=KFD_NODES)
     ap.add_argument("--drm", type=Path, default=DRM)
+    ap.add_argument(
+        "--kill-pid", type=int, default=None, help="SIGTERM this pid on a breach"
+    )
+    ap.add_argument("--max-c", type=float, default=95.0, help="any sample at/above")
+    ap.add_argument("--mean-c", type=float, default=90.0, help="window mean at/above")
+    ap.add_argument("--mean-seconds", type=float, default=5.0)
     args = ap.parse_args(argv)
     gpus = [int(g) for g in args.gpus.split(",")]
     paths = sensors(gpus, args.kfd_nodes, args.drm)
     fresh = not args.out.exists() or args.out.stat().st_size == 0
     rows = 0
+    window = max(args.mean_seconds, args.period)
+    history: list[tuple[float, list[float | None]]] = []
     with open(args.out, "a", newline="") as f:
         out = csv.writer(f)
         if fresh:
@@ -104,6 +146,30 @@ def main(argv: list[str] | None = None) -> int:
             )
             f.flush()
             rows += 1
+            history.append((now, temps))
+            history = [(t, v) for t, v in history if now - t <= window]
+            mean_ready = (
+                args.period >= args.mean_seconds
+                or len(history) * args.period >= args.mean_seconds
+            )
+            hits = breach(history, gpus, args.max_c, args.mean_c, mean_ready)
+            if hits:
+                for gpu, value, kind, threshold in hits:
+                    print(
+                        f"gpu_temps: hip{gpu} {value:.1f} C {kind} >= {threshold:g} C "
+                        "-> INVALID",
+                        file=sys.stderr,
+                    )
+                if args.kill_pid:
+                    try:
+                        os.kill(args.kill_pid, signal.SIGTERM)
+                        print(
+                            f"gpu_temps: SIGTERM {args.kill_pid} after the breach",
+                            file=sys.stderr,
+                        )
+                    except ProcessLookupError:
+                        pass
+                return 3
             if args.count and rows >= args.count:
                 return 0
             if any(t is None for t in temps):

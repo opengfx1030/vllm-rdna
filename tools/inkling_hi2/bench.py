@@ -18,11 +18,13 @@ Cells (all greedy, ``ignore_eos``):
 * memory: the engine log lines ("Model loading took ... GiB", "GPU KV cache size",
   "Available KV cache memory", graph capture) and the served ``max_model_len``.
 
-Every window is journaled: GPU junction temperatures (``gpu_temps.py``, a sample
-at 95 C invalidates it) and, with ``--server-pid`` (the server's tree root; serve.sh
-writes it to ``SERVER_PID_FILE``), the vLLM tree's KFD eviction counters.  An
-invalid window is recorded, printed and exits 3: the numbers are then not a pass.
-``--baseline bench.json`` prints a cell as a ratio of a stock result.
+Every window is journaled: GPU junction temperatures (``gpu_temps.py`` in watcher
+mode: any sample >= 95 C or a 5 s mean >= 90 C kills the server tree and exits 3)
+and the vLLM tree's KFD eviction counters (``--server-pid``, the server's tree
+root; serve.sh writes it to ``SERVER_PID_FILE``).  A missing temperature sample,
+a tripped watcher, no ``--server-pid``, no vLLM KFD context or an eviction makes
+the window INVALID: it is recorded, printed and exits 3, so the numbers are never
+a pass.  ``--baseline bench.json`` prints a cell as a ratio of a stock result.
 """
 
 from __future__ import annotations
@@ -43,8 +45,12 @@ import regex as re
 import slot  # tools/inkling_hi2/slot.py, next to this script
 
 TREE = Path(__file__).resolve().parents[2]
-TEMPS_TOOL = TREE / "tools/rdna/mono/w4a8/gpu_temps.py"
-KFD_TOOL = TREE / "tools/rdna/port_v031/kfd_evictions.py"
+TEMPS_TOOL = Path(
+    os.environ.get("TEMPS_TOOL", TREE / "tools/rdna/mono/w4a8/gpu_temps.py")
+)
+KFD_TOOL = Path(
+    os.environ.get("KFD_TOOL", TREE / "tools/rdna/port_v031/kfd_evictions.py")
+)
 RUN_DIR = Path.home() / "w4a8_runs/inkling-hi2-runtime"
 
 PARAGRAPH = (
@@ -155,6 +161,31 @@ def temps_peak(path: Path) -> float | None:
     return peak
 
 
+def window_record(
+    peak: float | None,
+    evictions: str | None,
+    sampled: bool,
+) -> dict:
+    """Validity of a measured window; no eviction evidence is never a pass."""
+    reasons: list[str] = []
+    if peak is None:
+        reasons.append("no temperature samples")
+    elif peak >= 95:
+        reasons.append(f"junction {peak:.1f} C >= 95 C")
+    if not sampled:
+        reasons.append("evictions not sampled (pass --server-pid)")
+    elif not evictions or "no vLLM workers" in evictions:
+        reasons.append("no vLLM worker KFD context")
+    elif "INVALID" in evictions:
+        reasons.append("KFD evicted the model")
+    return {
+        "max_junction_c": peak,
+        "evictions": evictions,
+        "valid": not reasons,
+        "reasons": reasons,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--url", required=True)
@@ -169,7 +200,10 @@ def main() -> int:
         "--server-pid",
         type=int,
         default=None,
-        help="vLLM tree root (serve.sh SERVER_PID_FILE) for the KFD eviction check",
+        help=(
+            "vLLM tree root (serve.sh SERVER_PID_FILE); required for a valid "
+            "window (KFD eviction check)"
+        ),
     )
     ap.add_argument("--run-dir", default=str(RUN_DIR), help="where the window CSVs go")
     args = ap.parse_args()
@@ -180,6 +214,13 @@ def main() -> int:
         slot.check_declared(slot_name, hip, buses)
     except slot.SlotError as exc:
         print(f"bench: {exc}", file=sys.stderr)
+        return 2
+    if slot_name != "a2":
+        print(
+            "bench: TP=2 belongs on a2 (HIP 0,1; PCI d1 d4); "
+            f"{slot_name} is the TP4 lease",
+            file=sys.stderr,
+        )
         return 2
 
     info = models(args.url)
@@ -200,21 +241,22 @@ def main() -> int:
     logs.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     temps_csv = logs / f"temps-bench-{args.label}-{stamp}.csv"
+    temps_cmd = [
+        sys.executable,
+        str(TEMPS_TOOL),
+        "--gpus",
+        hip,
+        "--period",
+        "5",
+        "--count",
+        "0",
+        "--out",
+        str(temps_csv),
+    ]
+    if args.server_pid:
+        temps_cmd += ["--kill-pid", str(args.server_pid)]
     temps = subprocess.Popen(
-        [
-            sys.executable,
-            str(TEMPS_TOOL),
-            "--gpus",
-            hip,
-            "--period",
-            "5",
-            "--count",
-            "0",
-            "--out",
-            str(temps_csv),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        temps_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     evict_before = logs / f"evict-bench-{args.label}-{stamp}.json"
     if args.server_pid:
@@ -230,33 +272,30 @@ def main() -> int:
             text=True,
             check=False,
         )
+    cells: list[dict] = []
+    premature: int | None = None
     try:
-        cells = [prefill(args.url, name, args.prefill_tokens)]
+        cells.append(prefill(args.url, name, args.prefill_tokens))
         for batch in (int(b) for b in args.batches.split(",") if b):
+            if temps.poll() is not None:
+                premature = temps.returncode
+                break
             cells.append(decode(args.url, name, batch, args.decode_tokens))
     finally:
-        temps.terminate()
-        try:
-            temps.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            temps.kill()
+        if temps.poll() is None:
+            temps.terminate()
+            try:
+                temps.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                temps.kill()
+                temps.wait()
+        else:
+            premature = temps.returncode
     result["cells"] = cells
     for cell in cells:
         print("BENCH " + json.dumps(cell))
 
-    window = {
-        "temps_csv": str(temps_csv),
-        "max_junction_c": temps_peak(temps_csv),
-        "evictions": None,
-        "valid": True,
-        "reasons": [],
-    }
-    if window["max_junction_c"] is None:
-        window["valid"] = False
-        window["reasons"].append("no temperature samples")
-    elif window["max_junction_c"] >= 95:
-        window["valid"] = False
-        window["reasons"].append(f"junction {window['max_junction_c']:.1f} C >= 95 C")
+    since = None
     if args.server_pid:
         since = subprocess.run(
             [
@@ -270,12 +309,12 @@ def main() -> int:
             text=True,
             check=False,
         ).stdout.strip()
-        window["evictions"] = since
-        if "INVALID" in since:
-            window["valid"] = False
-            window["reasons"].append("KFD evicted the model")
-    else:
-        window["reasons"].append("evictions not sampled (pass --server-pid)")
+    window = window_record(temps_peak(temps_csv), since, bool(args.server_pid))
+    window["temps_csv"] = str(temps_csv)
+    window["watcher_exit"] = premature
+    if premature is not None:
+        window["valid"] = False
+        window["reasons"].append(f"temperature watcher exited {premature}")
     result["window"] = window
     print("BENCH window " + json.dumps(window))
     if args.out:

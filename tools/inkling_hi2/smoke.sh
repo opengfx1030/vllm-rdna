@@ -19,16 +19,19 @@
 # window runs) and waits for the cross-slot boot lock; MEASURE_LOCK stays empty
 # (cross-slot lock off).  Another owner's holder in LEASE_DIR refuses the run.
 #
-# The window also journals GPU junction temperatures (gpu_temps.py, aborts when a
-# sample reaches 95 C) and the vLLM tree's KFD eviction counters (kfd_evictions.py;
-# an evicted model is an INVALID window, never a pass).
+# The window also journals junction temperatures (gpu_temps.py in watcher mode:
+# any sample >= 95 C or a 5 s mean >= 90 C kills the server tree and exits 3; the
+# window is INVALID) and the vLLM tree's KFD eviction counters (kfd_evictions.py;
+# no workers/KFD context is INVALID, never a pass).
 #
 # Optional: STOCK_URL=http://127.0.0.1:18231 (a stock-model server), RUN_KL=1,
 #           IDS=$HOME/w4a8_runs/inkling-hi2/stage4/calib/heldout_mixed_ids.npy,
 #           WINDOWS=32, KEEP=1 (leave the server up), MAXLEN/MAXBAT/SEQS/EAGER,
-#           OWNER=HI2Inkling, LEASE_DIR=~/w4a8_runs/lanes/lease,
+#           OWNER=HI2InklingRuntime, LEASE_DIR=~/w4a8_runs/lanes/lease,
 #           READY_SECONDS=2400 (boot), BOOT_TIMEOUT_SECONDS=900 and
-#           CELL_TIMEOUT=900 (s per measured probe; a longer one is split).
+#           CELL_TIMEOUT=900 (s per measured probe; a longer one is split),
+#           TEMPS_TOOL / KFD_TOOL (defaults: this tree's tools; tests point them
+#           at stubs).
 set -euo pipefail
 
 : "${MODEL:?MODEL must point at the HI2 output directory}"
@@ -55,11 +58,16 @@ fi
 HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$slot_hip}
 EXPECT_PCI_BUSES=${EXPECT_PCI_BUSES:-$slot_buses}
 export SLOT HIP_VISIBLE_DEVICES EXPECT_PCI_BUSES
-OWNER=${OWNER:-HI2Inkling}
+OWNER=${OWNER:-HI2InklingRuntime}
 LEASE_DIR=${LEASE_DIR:-$HOME/w4a8_runs/lanes/lease}
 MEASURE_LOCK=${MEASURE_LOCK:-}
 export MEASURE_LOCK
 TREE=${TREE:-$(cd "$HERE/../.." && pwd)}
+TEMPS_TOOL=${TEMPS_TOOL:-$TREE/tools/rdna/mono/w4a8/gpu_temps.py}
+KFD_TOOL=${KFD_TOOL:-$TREE/tools/rdna/port_v031/kfd_evictions.py}
+EVICT_TRIES=${EVICT_TRIES:-12}
+EVICT_POLL_SECONDS=${EVICT_POLL_SECONDS:-5}
+QUIET_TOUCH=${QUIET_TOUCH:-python3}
 PORT=${PORT:-18230}
 URL="http://127.0.0.1:$PORT"
 RUN_DIR=${RUN_DIR:-$HOME/w4a8_runs/inkling-hi2-runtime}
@@ -88,29 +96,19 @@ check_devices() {
 # confirmed and before the quiet/lock wait.  serve.sh checks before its boot and
 # measure_begin() re-checks before each measured cell.
 
-# Another owner's holder file for this slot means the slot is not ours to boot.
-lease_check() {
-    [[ -d $LEASE_DIR ]] || return 0
-    local holder other=0
-    for holder in "$LEASE_DIR"/*."$SLOT"; do
-        [[ -e $holder ]] || continue
-        [[ $(basename "$holder") == "$OWNER.$SLOT" ]] && continue
-        echo "smoke.sh: $(basename "$holder") holds the $SLOT lease; not booting (OWNER=$OWNER)" >&2
-        other=1
-    done
-    if ((other)); then
-        echo "smoke.sh: inspect/clear it per $LEASE_DIR/README.md; do not delete another agent's file" >&2
-        return 1
-    fi
-}
-lease_check
+# Another holder for this slot means the slot is not ours to boot; the boot of
+# serve.sh acquires/writes our own holder (HI2InklingRuntime.a2).
+. "$HERE/lease.sh"
+lease_refuse_foreign "smoke.sh" || exit 1
 touch_quiet() {
     mkdir -p "$QUIET_DIR"
     touch "$QUIET_FILE"
 }
 # Keep the touch fresh for a measured window (<= 15 min; one touch per 5 min).
+# quiet_touch.py sleeps in-process, so killing it cannot leave a stray sleep.
 start_quiet_watchdog() {
-    (for _ in 1 2 3; do sleep 300; touch "$QUIET_FILE"; done) &
+    "$QUIET_TOUCH" "$HERE/quiet_touch.py" --file "$QUIET_FILE" \
+        --interval 300 --count 3 &
     QUIET_WATCHDOG=$!
 }
 stop_quiet_watchdog() {
@@ -134,20 +132,25 @@ measure_begin() {
     check_devices
     wait_boot_lock
 }
-# Junction-temperature journal of the sku's cards (sysfs only; no GPU context).
+# Junction-temperature watcher (sysfs only; no GPU context): any sample >= 95 C
+# or a 5 s mean >= 90 C kills the server tree and exits 3, and the window is
+# INVALID.  The CSV is parsed at the end as the second, independent check.
 sample_temps_start() {
     TEMPS=$RUN_DIR/logs/temps-$(date +%Y%m%d-%H%M%S).csv
-    "$VENV/bin/python" "$TREE/tools/rdna/mono/w4a8/gpu_temps.py" \
-        --gpus "$HIP_VISIBLE_DEVICES" --period 5 --count 0 --out "$TEMPS" &
+    local kill_pid=${SERVER_PID:-$SERVER}
+    "$VENV/bin/python" "$TEMPS_TOOL" \
+        --gpus "$HIP_VISIBLE_DEVICES" --period 5 --count 0 --out "$TEMPS" \
+        --kill-pid "$kill_pid" &
     TEMPS_PID=$!
-    echo "smoke.sh: junction temperatures -> $TEMPS"
+    echo "smoke.sh: junction temperatures -> $TEMPS (watcher kills $kill_pid on a breach)"
 }
 sample_temps_stop() {
     [[ -n ${TEMPS_PID:-} ]] || return 0
-    kill "$TEMPS_PID" 2>/dev/null || true
-    wait "$TEMPS_PID" 2>/dev/null || true
+    local pid=$TEMPS_PID rc
+    kill "$pid" 2>/dev/null || true
+    if wait "$pid"; then rc=0; else rc=$?; fi
     TEMPS_PID=
-    python3 - "$TEMPS" <<'PY'
+    python3 - "$TEMPS" "$rc" <<'PY'
 import csv, sys
 peak = None
 with open(sys.argv[1], newline="") as f:
@@ -157,32 +160,43 @@ with open(sys.argv[1], newline="") as f:
         for cell in row[2:]:
             if cell:
                 peak = max(peak or float(cell), float(cell))
-if peak is not None:
-    print(f"smoke.sh: max junction {peak:.1f} C ({sys.argv[1]})")
-sys.exit(1 if peak is not None and peak >= 95 else 0)
+shown = "n/a" if peak is None else f"{peak:.1f}"
+print(f"smoke.sh: max junction {shown} C ({sys.argv[1]})")
+if peak is None:
+    sys.exit(1)  # no temperature evidence is not a pass
+if sys.argv[2] not in ("0", "143", "130"):  # 3/1 = the watcher tripped
+    sys.exit(1)
+sys.exit(1 if peak >= 95 else 0)
 PY
 }
-# KFD evictions of the vLLM tree: an evicted window is INVALID, never a pass.
+# KFD evictions of the vLLM tree: no workers/KFD context or a jump is INVALID.
 snapshot_evictions_start() {
     EVICT_BEFORE=
-    [[ -n ${SERVER_PID:-} ]] || return 0
-    for _ in $(seq 1 12); do
-        if "$VENV/bin/python" "$TREE/tools/rdna/port_v031/kfd_evictions.py" "$SERVER_PID" 2>/dev/null |
+    EVICT_MISSING=0
+    if [[ -z ${SERVER_PID:-} ]]; then
+        EVICT_MISSING=1
+        echo "smoke.sh: no server pid for the KFD eviction check; the window is INVALID" >&2
+        return 1
+    fi
+    for _ in $(seq 1 "$EVICT_TRIES"); do
+        if "$VENV/bin/python" "$KFD_TOOL" "$SERVER_PID" 2>/dev/null |
             "$VENV/bin/python" -c 'import json,sys; sys.exit(0 if json.load(sys.stdin) else 1)'; then
             EVICT_BEFORE=$RUN_DIR/logs/evict-before-$(date +%Y%m%d-%H%M%S).json
-            "$VENV/bin/python" "$TREE/tools/rdna/port_v031/kfd_evictions.py" "$SERVER_PID" --save "$EVICT_BEFORE"
+            "$VENV/bin/python" "$KFD_TOOL" "$SERVER_PID" --save "$EVICT_BEFORE"
             return 0
         fi
-        sleep 5
+        sleep "$EVICT_POLL_SECONDS"
     done
-    echo "smoke.sh: no vLLM KFD context; eviction check skipped" >&2
+    EVICT_MISSING=1
+    echo "smoke.sh: no vLLM KFD context under pid $SERVER_PID; the window is INVALID" >&2
+    return 1
 }
 evictions_ok() {
-    [[ -n ${EVICT_BEFORE:-} ]] || return 0
+    [[ -n ${EVICT_BEFORE:-} ]] || return 1
     local line
-    line=$("$VENV/bin/python" "$TREE/tools/rdna/port_v031/kfd_evictions.py" "$SERVER_PID" --since "$EVICT_BEFORE")
+    line=$("$VENV/bin/python" "$KFD_TOOL" "$SERVER_PID" --since "$EVICT_BEFORE")
     echo "smoke.sh: $line"
-    [[ $line != *INVALID* ]]
+    [[ $line != *INVALID* && $line != *"no vLLM workers"* ]]
 }
 
 rm -f "$QUIET_FILE"  # a stale marker of a crashed smoke would block our own boot
@@ -217,7 +231,7 @@ curl -sf "$URL/health" >/dev/null || {
     exit 1
 }
 SERVER_PID=$(cat "$SERVER_PID_FILE" 2>/dev/null || true)
-snapshot_evictions_start
+snapshot_evictions_start || true
 
 # The measured window starts here: touch the slot's quiet file, wait for the
 # boot lock, and re-check before each cell (AGENTS.md, two-slot note).
@@ -282,13 +296,16 @@ if [[ -n ${STOCK_URL:-} ]]; then
 fi
 
 # The measured window is only valid on a cool, undisturbed slot: temps and KFD
-# evictions are checked last so a hot/evicted run can never print PASS.
+# evictions are checked last so a hot/evicted/unsampled run can never print PASS.
 window_ok=1
 if ! sample_temps_stop; then
-    echo "smoke.sh: a junction sample reached 95 C; the window is INVALID" >&2
+    echo "smoke.sh: the temperature watcher tripped (>= 95 C or >= 90 C mean) or there are no samples; the window is INVALID" >&2
     window_ok=0
 fi
-if ! evictions_ok; then
+if [[ ${EVICT_MISSING:-0} == 1 ]]; then
+    echo "smoke.sh: no KFD worker context was found; the window is INVALID" >&2
+    window_ok=0
+elif ! evictions_ok; then
     echo "smoke.sh: KFD evicted the model during the window; the window is INVALID" >&2
     window_ok=0
 fi

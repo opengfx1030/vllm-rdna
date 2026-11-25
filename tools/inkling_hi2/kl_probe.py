@@ -154,6 +154,13 @@ def main() -> int:
     except slot.SlotError as exc:
         print(f"kl_probe: {exc}", file=sys.stderr)
         return 2
+    if slot_name != "a2":
+        print(
+            f"kl_probe: TP=2 belongs on a2 (HIP 0,1; PCI d1 d4); "
+            f"{slot_name} is the TP4 lease",
+            file=sys.stderr,
+        )
+        return 2
 
     windows = np.load(args.ids)
     if windows.ndim != 2:

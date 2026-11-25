@@ -22,10 +22,11 @@ tools below.
 
 | Step | Command (abbreviated) | Exit | Result |
 | --- | --- | --- | --- |
-| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 48 passed, 5 skipped (the 5 GPU tests) |
+| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 65 passed, 5 skipped (the 5 GPU tests) |
 | Pre-fix check | the same gate on the 5 new regression tests, old product files | 1 | 5 failed, 16 deselected (the tests can fail) |
-| Kit pre-fix | the new `test_hi2_slots.py` inside a scratch copy of `git archive f34d6cf6bc tools/` (old kit and recipes) | 1 | 11 failed, 4 passed (the protocol tests can fail) |
+| Kit pre-fix | the new `test_hi2_slots.py` inside a scratch copy of `git archive f34d6cf6bc tools/` (old kit and recipes) | 1 | 27 failed, 5 passed (the protocol tests can fail) |
 | Mutants | `python tools/inkling_hi2/mutants.py --tree <scratch copy>` | 0 | baseline 27 passed; all 21 killed: the 20-mutant battery on the pre-B4 tree plus the changed `hi2_uneven_rows_check_off` and the new `moe_w2_reduce_rows_as_tokens` on the final tree |
+| Launcher mutants | `python tools/inkling_hi2/mutants_launchers.py` | 0 | baseline 11 passed; all 13 killed (lease gate/owner/VRAM, boot-lock release, the pre-launch and post-/health device checks, the server env filters, the temperature threshold, the missing-eviction window, the b4 client refusal, the bench evidence) |
 | Real-dir load | `python tools/inkling_hi2/check_real_dir.py --model <bpw3.5> --stock <stock>` | 0 | 1125 text tensors loaded, 0 missing parameters, lm_head == stock |
 | TP suite | `pytest tests/models/inkling2_loop/test_tensor_parallel.py -q` with the workaround below | 0 | 156 passed |
 | Serve dir | `bash tools/inkling_hi2/prep_serve_dir.sh <quantizer out> <serve dir>` | 0 | 15 symlinks + MTP; source untouched |
@@ -36,15 +37,15 @@ tools below.
 | Recipe assembly | `PRINT=1 serve_rdna.sh RECIPE=inkling2-hi2-tp2 MODEL=...` | 0 | command below |
 
 The CPU gate is the six-layer HI2 test set: format declaration/name map/TP slice
-(`test_hi2_loader.py`, 23), the slot/HIP->PCI gate and launcher protocol
-(`test_hi2_slots.py`, 15 on a fake visible-device table plus script checks), the
-legacy loader (`test_loader.py`, 6), the kernel tests
-collected and skipped off a GPU (5), and the reference against the quantizer's own
-`hi2.format.dequantize` on a tiny HI2 export of the quantizer's fixture (4, fp16
-exact).  `test_hi2_reference.py` needs the quantizer on `PYTHONPATH`
-(`HI2_SRC=$HOME/w4a8_runs/inkling-hi2/tree`) and reuses its fixture with
-`INKLING2_TINY_OUT`; without the quantizer the 4 tests skip (do not read a skip as a
-pass).
+(`test_hi2_loader.py`, 23), the slot/HIP->PCI gate, the lease carrier and the
+launcher protocol (`test_hi2_slots.py`, 32, on a fake visible-device table, a fake
+torch and a stub HTTP server plus script checks), the legacy loader
+(`test_loader.py`, 6), the kernel tests collected and skipped off a GPU (5), and the
+reference against the quantizer's own `hi2.format.dequantize` on a tiny HI2 export of
+the quantizer's fixture (4, fp16 exact).  `test_hi2_reference.py` needs the quantizer
+on `PYTHONPATH` (`HI2_SRC=$HOME/w4a8_runs/inkling-hi2/tree`) and reuses its fixture
+with `INKLING2_TINY_OUT`; without the quantizer the 4 tests skip (do not read a skip
+as a pass).
 
 ### GPU kit on the six-V620 two-slot box (2026-11-24)
 
@@ -68,12 +69,13 @@ its quiet file every 5 min (<= 15 min) and journals junction temperatures
 (non-zero exit), never a pass.  `bench.py --server-pid` samples the same two
 signals and records them in its JSON.
 
-Kit protocol round (P1-P3), each covered by `test_hi2_slots.py` (11 of its 15 tests
-fail on `f34d6cf6bc`):
+Kit protocol round (P1-P3), each covered by the then-15-test `test_hi2_slots.py`
+(11 of those 15 fail on `f34d6cf6bc`; the module now has 32, see P4-P7 below):
 
-1. **P1 lease holder.** `OWNER` defaults to `HI2Inkling`; a different
-   `<holder>.a2` in `~/w4a8_runs/lanes/lease` refuses `serve.sh`/`smoke.sh` with
-   the holder's name, instead of silently double-booting the slot.
+1. **P1 lease holder.** `OWNER` defaults to `HI2InklingRuntime` (was
+   `HI2Inkling`); any other `<holder>.a2` in `~/w4a8_runs/lanes/lease` refuses
+   `serve.sh`/`smoke.sh` with the holder's name, instead of silently double-booting
+   the slot.
 2. **P2 device check.** The checker no longer pops the visibility variables (that
    made it resolve the *physical* six cards while the server saw two); it runs with
    `HIP_VISIBLE_DEVICES` as the only filter and refuses an environment that still
@@ -91,6 +93,38 @@ fail on `f34d6cf6bc`):
    the server child.  `smoke.sh` re-touches quiet every 5 min and fails the
    measured window on a hot or evicted GPU; `bench.py` records the same and exits 3
    on an invalid window.
+
+### Launcher carrier round (P4-P7, 2026-11-24)
+
+1. **P4 lease carrier (`tools/inkling_hi2/lease.sh`, new).** `lease_acquire` types
+   `<slot>.request` (release trap armed before it), waits until no foreign holder
+   exists and the least-free leased card has 28 GiB (`LEASE_WAIT_SECONDS=1800`),
+   then writes `$OWNER.$SLOT`; the trap removes it on EXIT/TERM.  A foreign holder
+   or an older requester in the queue is refused with the name; `serve.sh` writes
+   the request, `smoke.sh` only checks the holder.
+2. **P5 boot lock through readiness.** `BOOT_LOCK` is taken with `flock -w 900`
+   before the launch and released only after `/health`; the later cleanup no longer
+   touches a closed fd.  The quiet directory is re-checked under the lock;
+   `smoke.sh` re-checks the lock (non-blocking) before each measured cell and
+   re-touches the quiet file.
+3. **P6 window validity.** The temperature watcher's mean rule is armed only when
+   the samples span the mean window (a 5 s mean never fires on one sample); the
+   peak rule is unconditional; the smoke parses both the profile CSV and the
+   watcher CSV; a missing pre-window KFD context or any eviction is `INVALID`;
+   `bench.py` requires `--server-pid` for a valid window and exits 3 on `INVALID`;
+   `kl_probe` refuses b4.
+4. **P7 device litmus.** `serve.sh` checks the devices three times -- before the
+   quiet wait, immediately before the launch, and after `/health` (the live server
+   must still see the leased cards; a mismatch kills it and the boot fails) -- and
+   `smoke.sh` checks once before `serve.sh` and once per cell.  The child sees
+   `HIP_VISIBLE_DEVICES` only; the HTTP clients refuse b4 and record the slot.  The
+   recipe pins the a2 pair by PCI bus (`PCI_BUSES="d1 d4"`).
+
+The 32 protocol tests cover these; the launcher mutant battery kills 13/13
+(`mutants_launchers.py`), and 27 of the 32 fail on the pre-round kit
+(`f34d6cf6bc`).  Residual: no CPU test can prove the real `/sys/class/drm` VRAM
+coresidency or the real `flock`/quiet timing on the box; they run only against
+tmpfs paths and the fake torch.
 
 ### Verifier round (fix-first -> fixed)
 

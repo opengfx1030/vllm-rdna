@@ -14,8 +14,12 @@
 #           and is refused), HIP_VISIBLE_DEVICES / EXPECT_PCI_BUSES (both default
 #           from SLOT, must be given together: resolved HIP -> PCI with exactly the
 #           server's environment before the boot and refused on a mismatch or a
-#           non-V620), OWNER=HI2Inkling (this work's lane holder; another holder
-#           file for the slot refuses the boot), LEASE_DIR=~/w4a8_runs/lanes/lease,
+#           non-V620), OWNER=HI2InklingRuntime (this kit writes its own holder;
+#           a different holder for the slot refuses the boot - the default now
+#           refuses while another job holds HI2Inkling.a2), LEASE_DIR,
+#           DRM_SYSFS=/sys/class/drm and LEASE_FREE_GIB=28 (then the holder is
+#           written only when no other holder exists and every slot GPU has
+#           >= 28 GiB free; the release trap is armed before a2.request),
 #           TREE (default: this worktree), PORT=18230, MAXLEN=8192, MAXBAT=256,
 #           SEQS=1, EAGER=0, GMEM=0.92, WAIT_QUIET=1 (wait out the slot's quiet
 #           windows), BOOT_LOCK=~/w4a8_runs/boot.lock, QUIET_DIR (default:
@@ -59,7 +63,7 @@ fi
 HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$slot_hip}
 EXPECT_PCI_BUSES=${EXPECT_PCI_BUSES:-$slot_buses}
 export SLOT HIP_VISIBLE_DEVICES EXPECT_PCI_BUSES
-OWNER=${OWNER:-HI2Inkling}
+OWNER=${OWNER:-HI2InklingRuntime}
 LEASE_DIR=${LEASE_DIR:-$HOME/w4a8_runs/lanes/lease}
 MEASURE_LOCK=${MEASURE_LOCK:-}
 export MEASURE_LOCK
@@ -88,7 +92,8 @@ fi
 
 # Resolve the declared HIP indexes to their live PCI buses and refuse a moved
 # enumeration or a non-V620 (AGENTS.md, "Two-slot box operation 2026-11-15").
-# Called once now (fail fast) and once immediately before the launch.
+# Called before the quiet wait (fail fast), immediately before the launch, and
+# once the server answers /health (the live process must see the same cards).
 check_devices() {
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
         HIP_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES" \
@@ -101,23 +106,13 @@ check_devices() {
 # filter this kit sets, and the check below runs with exactly the server's env.
 unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
 
-# Another owner's holder file for this slot means somebody else has it leased.
-# request/release per the lease README; never delete another agent's file.
-lease_check() {
-    [[ -d $LEASE_DIR ]] || return 0
-    local holder other=0
-    for holder in "$LEASE_DIR"/*."$SLOT"; do
-        [[ -e $holder ]] || continue
-        [[ $(basename "$holder") == "$OWNER.$SLOT" ]] && continue
-        echo "serve.sh: $(basename "$holder") holds the $SLOT lease; not booting (OWNER=$OWNER)" >&2
-        other=1
-    done
-    if ((other)); then
-        echo "serve.sh: inspect/clear it per $LEASE_DIR/README.md; do not delete another agent's file" >&2
-        return 1
-    fi
-}
-lease_check
+# Lease (AGENTS.md / lanes/lease/README.md): refuse a foreign holder, write
+# a2.request with the release trap armed, wait for no other holder and >= 28 GiB
+# free on every slot GPU (sysfs only), then write our holder.  cleanup() below
+# releases it; the combined trap replaces lease_acquire's early-exit trap.
+. "$HERE/lease.sh"
+lease_acquire
+
 # The slot is ours per the holder; resolve HIP -> PCI now (fail fast before the
 # quiet wait) and again under the boot lock before the launch.
 check_devices
@@ -169,6 +164,7 @@ SERVER=$!
 cleanup() {
     local pid=${SERVER:-}
     [[ -n $pid ]] && kill "$pid" 2>/dev/null || true
+    lease_release
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT
@@ -195,6 +191,15 @@ if ((!ready)); then
     wait "$SERVER" 2>/dev/null || true
     exit 1
 fi
+
+# The live server must still see exactly the leased cards once it is up (the
+# launcher could have re-exec'ed with another filter); a mismatch kills it.
+check_devices || {
+    echo "serve.sh: the device check after /health failed; killing the server" >&2
+    kill "$SERVER" 2>/dev/null || true
+    wait "$SERVER" 2>/dev/null || true
+    exit 1
+}
 
 echo "serve.sh: READY http://127.0.0.1:$PORT/health"
 wait "$SERVER"

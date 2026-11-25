@@ -43,31 +43,46 @@ env pair against the same table, recording the slot in their JSON.
 As of 2026-11-24 the user approved both a2 cards (HIP 0,1) for this work; the
 AGENTS.md table above is authoritative (a2 = HIP 0,1 / PCI `d1 d4`, b4 = HIP
 2,3,4,5 / TP4). An earlier note in this file that read those numbers the other way
-is superseded. The holder file is `HI2Inkling.a2`.
+is superseded. This kit's holder is `HI2InklingRuntime.a2`; an older
+`HI2Inkling.a2` is read as a foreign holder.
 
 Every GPU command carries `HIP_VISIBLE_DEVICES=<leased HIP list>` on its own command
 line; CPU-only commands use
 `env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= <cmd>`.
 Leases live in `~/w4a8_runs/lanes/lease/README.md` (holder files `<owner>.a2` /
 `<owner>.b4`, requests, release trap; kill the holder's `sleep` on release). This
-work's holder is `HI2Inkling.a2` (`OWNER`, default `HI2Inkling`). `serve.sh` and
-`smoke.sh` refuse to boot when another `<holder>.a2` file exists: inspect and clear
-it per the lease README, never delete another agent's file.
+work's holder is `HI2InklingRuntime.a2` (`OWNER`, default `HI2InklingRuntime`); the
+older `HI2Inkling` name is read only as a foreign holder. `serve.sh` writes the typed
+request first, then the holder, and waits for 28 GiB free; with a foreign holder it
+writes a request and exits (never deletes the file). `smoke.sh` still requires this
+kit's holder. Both look at the fair queue (an older `.request`) before the boot and
+at the slot's quiet file before every measured cell.
 
-Boot protocol (AGENTS.md, two-slot note): a booter waits until no quiet file in its
-slot is newer than 6 min, takes `flock ~/w4a8_runs/boot.lock`, re-checks the quiet
-files *under* the lock, and holds the lock until the server answers `/health`
-(`READY_SECONDS=1800`), then releases it and keeps serving. `smoke.sh` delegates
-that boot carrier to `serve.sh` (it never takes the boot lock for the whole serve)
-and re-checks the lock per measured cell. A measured window touches
-`~/w4a8_runs/lanes/quiet-a2/inkling-hi2-smoke`, is re-touched every 5 min for up to
-15 min while it runs, waits until the slot is quiet for 6 min, then re-checks the
-boot lock before each cell; `MEASURE_LOCK=` is empty (one slot cannot block the
-other). The window journals junction temperatures (`gpu_temps.py`; a 95 C sample
-aborts it) and the vLLM tree's KFD evictions (`kfd_evictions.py`; `serve.sh` writes
-`SERVER_PID_FILE`, `bench.py --server-pid` samples the same tree). A hot or evicted
-window prints `INVALID`, exits non-zero and is rerun — never counted. No measured
-window while a `docker buildx build` runs.
+Protocol the scripts enforce (and the CPU tests check, see section 1):
+
+* **Lease**: request -> holder -> VRAM threshold (28 GiB) -> trap release; a foreign
+  holder, a requester ahead in the queue, or a live holder is refused. The lease
+  README in `~/w4a8_runs/lanes/` is authoritative; this session's approval is
+  recorded in `~/w4a8_runs/inkling-hi2-runtime/STATUS.md` with the exact commands
+  (a2 = HIP 0,1 = PCI `d1 d4`).
+* **Quiet**: `~/w4a8_runs/lanes/quiet-a2/inkling-hi2-smoke`, touched every 5 min for
+  up to 15 min; the boot waits until no file in the slot is newer than 6 min, then
+  re-checks *under* the lock. A >15 min window is split or restarted; it is never
+  silently shortened.
+* **boot.lock**: `flock -w 900`; held from just before torch/GPU until `/health`
+  (`READY_SECONDS=1800`), then released while the server keeps serving. `smoke.sh`
+  re-checks it (non-blocking) before each measured cell.
+* **Litmus**: the device check runs three times -- before the quiet wait, before
+  the launch and after `/health` -- and once per cell in `smoke.sh`; the child
+  server sees `HIP_VISIBLE_DEVICES` only (ROCR/CUDA filters cleared), exactly the
+  leased cards (V620, expected buses). The HTTP clients refuse `b4` and record the
+  slot in their JSON.
+* **Valid window**: junction temps sampled by `gpu_temps.py` (a 95 C sample aborts;
+  a 90 C mean fails once the mean window is armed); a window with no pre-window KFD
+  evictions or with any eviction during it (`kfd_evictions.py` against
+  `SERVER_PID_FILE`) prints `INVALID` and exits non-zero. `bench.py` requires
+  `--server-pid`.
+* No measured window while a `docker buildx build` runs.
 
 ## 1. Preconditions (CPU only, no lease)
 
@@ -79,11 +94,11 @@ V=$HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python
 cd $TREE && env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
     PYTHONPATH=$TREE $V -c "import vllm._custom_ops, vllm.models.inkling2_loop.amd.moe"
 
-# CPU gates: loader (23), the slot/HIP->PCI gate (15), quantizer reference on the
-# tiny HI2 directory (4; the fixture is built by the quantizer's own pipeline,
-# ~3.7 min), legacy loader (6), plus the GPU kernel tests collected-and-skipped on
-# CPU (5). H is the quantizer tree; it provides the `hi2` package the reference
-# test imports.
+# CPU gates: loader (23), the launcher/lease/window protocol (31), quantizer
+# reference on the tiny HI2 directory (4; the fixture is built by the quantizer's
+# own pipeline, ~3.7 min), legacy loader (6), plus the GPU kernel tests collected
+# and skipped on CPU (5). H is the quantizer tree; it provides the `hi2` package
+# the reference test imports.
 H=$HOME/w4a8_runs/inkling-hi2/tree
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
 PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
@@ -92,16 +107,24 @@ PYTHONPATH=$H:$TREE:$HOME/w4a8_runs/pydeps/tfm-main $V -m pytest \
   tests/models/inkling2_loop/test_loader.py \
   tests/models/inkling2_loop/test_hi2_kernel_gpu.py \
   tests/models/inkling2_loop/test_hi2_reference.py -q
-# 48 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
+# 65 passed, 5 skipped once the fixture is cached; INKLING2_TINY_OUT=<dir>
 # reuses the <dir>/stock + <dir>/hi2 pair built below instead of rebuilding it.
-# The slot test needs no torch: it fakes the visible-device table and reads the
-# launcher scripts.
+# The launcher test (32) needs no torch: it fakes the visible-device table (a fake
+# torch under a fake venv), the stub HTTP server and the scripts, and covers the
+# lease (request, holder, VRAM wait, trap release, foreign/live/queued refusals),
+# quiet + boot.lock order, the three device checks, the b4 refusal, both thermal
+# and both KFD window outcomes, and the cells (greedy capsule + bench).
 
 # mutant battery: the loader / name map / TP slice / reference tests must kill
 # every mutant (21; exit 0). Use a scratch copy of the tree, not the checkout.
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
 PYTHONPATH=$H:$HOME/w4a8_runs/pydeps/tfm-main INKLING2_TINY_OUT=$HOME/w4a8_runs/inkling-hi2-runtime/tiny \
 $V $TREE/tools/inkling_hi2/mutants.py --tree <scratch copy>
+
+# launcher mutant battery: must kill 13/13 (exit 0, ~5 min). It copies tools/ and
+# the launcher test into its own scratch dir; no PYTHONPATH or fixture needed.
+env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
+$V $TREE/tools/inkling_hi2/mutants_launchers.py
 
 # the real quantizer output, loaded on CPU (the first-boot proxy): no GPU
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
@@ -132,6 +155,15 @@ line; `serve.sh`/`smoke.sh` resolve the pair to the live PCI buses before the bo
 and before the measured cells and refuse a moved or foreign device. Every step
 prints a `RESULT ... PASS` or a numeric record; stop at the first failure and keep
 the log.
+
+0. **Take the a2 lease.** `serve.sh` types `a2.request` (trap armed first), waits
+   until no other `<owner>.a2` holder exists and both cards have 28 GiB free
+   (`LEASE_WAIT_SECONDS=1800`), then writes `HI2InklingRuntime.a2`. It exits non-zero
+   on a busy `boot.lock` (retry after the other boot) or a foreign holder (inspect
+   `ls ~/w4a8_runs/lanes/lease/`; never delete another agent's file). Check the box
+   with `$V tools/rdna/port_v031/kfd_evictions.py` and
+   `$V tools/rdna/mono/w4a8/gpu_temps.py --count 1` before starting; a boot must not
+   run while another slot boots or a `docker buildx build` runs.
 
 1. **Kernel unit test** (no server). `HI2_TINY_DIR` set to the fixture's `hi2/`:
 
@@ -185,14 +217,18 @@ the log.
    bash $TREE/tools/inkling_hi2/smoke.sh
    ```
 
-   Verifies: `/v1/models` name and context; the greedy chat answer names Paris
-   (`RESULT greedy PASS`); the greedy prefix comparison against the stock server
-   prints the first-divergence length (3.5 bpw top-1 is 93 %, so short prefixes, not
-   full streams, are expected). The smoke re-touches `lanes/quiet-a2/inkling-hi2-smoke`
-   every 5 min, checks the boot lock before each probe, and ends with
+   Verifies: the smoke takes its own lease route through `serve.sh` (request,
+   holder `HI2InklingRuntime.a2`, 28 GiB wait, quiet wait, boot lock until
+   `/health`; stop the step-3 server first, the default port is the same); the
+   pre-launch device check and a per-cell check see only the leased V620s;
+   `/v1/models` name and context; the greedy capsule (`RESULT greedy PASS`) and the
+   greedy prefix comparison against the stock server prints the first-divergence
+   length (3.5 bpw top-1 is 93 %, so short prefixes, not full streams, are
+   expected). The smoke re-touches `lanes/quiet-a2/inkling-hi2-smoke` every 5 min,
+   re-checks the boot lock before each probe, and ends with
    `RESULT measured window PASS` (or `INVALID` plus exit 1) from the junction
    temperatures and the KFD eviction counters; `$RUN_DIR/logs/temps-*.csv` and the
-   serve log keep the evidence.
+   serve log keep the evidence. It refuses b4 and a foreign holder.
 
 5. **KL vs stock on the quantizer's held-out windows** (mixed set, first 32 of 96,
    2048 tokens each; the same windows the published 0.0996 nats were measured on):
@@ -223,10 +259,12 @@ the log.
    ```bash
    HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
    python3 $TREE/tools/inkling_hi2/bench.py --url http://127.0.0.1:18231 \
+     --server-pid $(cat ~/w4a8_runs/inkling-hi2-runtime/server-stock.pid) \
      --label stock --log ~/w4a8_runs/inkling-hi2-runtime/logs/stock.log \
      --out ~/w4a8_runs/inkling-hi2-runtime/bench_stock.json
    HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
    python3 $TREE/tools/inkling_hi2/bench.py --url http://127.0.0.1:18230 \
+     --server-pid $(cat ~/w4a8_runs/inkling-hi2-runtime/server-hi2.pid) \
      --label hi2 --log ~/w4a8_runs/inkling-hi2-runtime/logs/serve.log \
      --baseline ~/w4a8_runs/inkling-hi2-runtime/bench_stock.json \
      --out ~/w4a8_runs/inkling-hi2-runtime/bench_hi2.json
@@ -234,11 +272,11 @@ the log.
 
    Verifies: prefill prompt-tokens/s, decode wall per step at batch 1 and 4, and the
    engine's model-load/KV/workspace lines, plus the window record (max junction
-   temperature, KFD evictions). Pass `--server-pid $(cat
-   ~/w4a8_runs/inkling-hi2-runtime/server-hi2.pid)` to the HI2 run so an evicted
-   window is detected; without it the window is marked unsampled. An `INVALID`
-   window (exit 3) is rerun, never recorded. No pass/fail on the numbers: record the
-   ratios. Known
+   temperature, KFD evictions). `--server-pid` is required for a valid window: it
+   locates the serve process's KFD context (evictions before/after) and lets the
+   temperature watcher kill the server on a hot sample. Without it the window is
+   unsampled and the run exits 3. An `INVALID` window (exit 3) is rerun, never
+   recorded. No pass/fail on the numbers: record the ratios. Known
    expectation [inference]: the block-64 HI2 GEMM pads an 8-pair decode to 64 rows,
    so batch-1 decode can be slower than the stock NVFP4 kernel; the memory cell must
    show the HI2 weights smaller. A decode step slower than ~10x stock is a finding.

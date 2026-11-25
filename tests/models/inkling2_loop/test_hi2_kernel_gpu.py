@@ -32,13 +32,14 @@ from vllm.models.inkling2_loop.configs import Inkling2LoopTextConfig
 
 _ROOT = Path(__file__).resolve().parents[3]
 
-_HI2_OPS = (
+_ROCM_OPS = (
     "rdna_hint_flex_moe_transform_rdna2",
     "rdna_hint_flex_moe_gemm_rdna2",
     "inkling2_glue_swiglu",
     "inkling2_glue_moe_route",
-    "moe_align_block_size",
 )
+# The token sorter lives in the fork's MoE extension, not in _rocm_C.
+_MOE_OPS = ("moe_align_block_size",)
 _TINY = os.environ.get("HI2_TINY_DIR")
 
 
@@ -48,11 +49,17 @@ def _gpu_ready() -> bool:
     if not _TINY or not (Path(_TINY) / "model.safetensors.index.json").exists():
         return False
     try:
-        import vllm._custom_ops  # noqa: F401  (loads _rocm_C)
+        import vllm._custom_ops  # noqa: F401  (loads _rocm_C; _moe_C via the MoE layer)
     except Exception:
         return False
     rocm = getattr(torch.ops, "_rocm_C", None)
-    return rocm is not None and all(hasattr(rocm, n) for n in _HI2_OPS)
+    moe_ops = getattr(torch.ops, "_moe_C", None)
+    return (
+        rocm is not None
+        and moe_ops is not None
+        and all(hasattr(rocm, n) for n in _ROCM_OPS)
+        and all(hasattr(moe_ops, n) for n in _MOE_OPS)
+    )
 
 
 pytestmark = pytest.mark.skipif(
