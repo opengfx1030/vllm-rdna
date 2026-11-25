@@ -1698,6 +1698,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_INKLING2_MOE_OFFLOAD_DECAY": lambda: int(
         os.getenv("VLLM_INKLING2_MOE_OFFLOAD_DECAY", "128") or "128"
     ),
+    "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH": lambda: (
+        os.getenv("VLLM_INKLING2_MOE_OFFLOAD_PREFETCH", "1").strip() not in ("", "0")
+    ),
+    "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_TOPK": lambda: int(
+        os.getenv("VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_TOPK", "4") or "4"
+    ),
+    "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX": lambda: int(
+        os.getenv("VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX", "4") or "4"
+    ),
     # Enable parallel decode top-16 selection for the MiniMax-M3.1 NVFP4
     # indexer on ROCm gfx950 (MI355X). Set to 1 to enable; disabled by default.
     # Uses runtime shape metadata for mixed batches. FP8 indexers (including

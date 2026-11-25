@@ -64,6 +64,7 @@ __all__ = [
     "Inkling2LoopSparseMoeBlock",
     "Inkling2LoopTopKRouter",
     "moe_offload_config",
+    "moe_offload_prefetch_config",
     "repack_mxfp8",
     "repack_nvfp4",
     "softcapped_swiglu",
@@ -115,6 +116,31 @@ def moe_offload_config(
     if decay <= 0:
         raise ValueError(f"VLLM_INKLING2_MOE_OFFLOAD_DECAY must be > 0, got {decay}")
     return slots, copy_mode, policy, decay
+
+
+def moe_offload_prefetch_config(env: Any = None) -> tuple[bool, int, int]:
+    """Read Inkling-2 MoE layer-ahead async prefetch settings from the environment.
+
+    Returns ``(enabled, topk_limit, max_experts)``.  ``topk_limit == 0`` uses
+    all routed top-k experts per token; ``max_experts`` caps the number of
+    missing experts queued onto ``copy_stream`` per layer visit.
+    """
+    src = os.environ if env is None else env
+    raw_en = src.get("VLLM_INKLING2_MOE_OFFLOAD_PREFETCH", "1").strip()
+    enabled = raw_en not in ("", "0")
+    raw_topk = src.get("VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_TOPK", "4").strip()
+    topk_limit = int(raw_topk) if raw_topk else 4
+    if topk_limit < 0:
+        raise ValueError(
+            f"VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_TOPK must be >= 0, got {topk_limit}"
+        )
+    raw_max = src.get("VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX", "4").strip()
+    max_experts = int(raw_max) if raw_max else 4
+    if max_experts <= 0:
+        raise ValueError(
+            f"VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX must be > 0, got {max_experts}"
+        )
+    return enabled, topk_limit, max_experts
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +815,9 @@ class Inkling2LoopMoE(_ExpertsKernel):
         offload_copy: str | None = None,
         offload_policy: str | None = None,
         offload_decay: int | None = None,
+        offload_prefetch: bool | None = None,
+        offload_prefetch_topk: int | None = None,
+        offload_prefetch_max: int | None = None,
     ) -> None:
         if quant_format not in ("nvfp4", "mxfp8"):
             raise ValueError(f"unsupported quant_format {quant_format!r}")
@@ -799,10 +828,22 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 f"tensor parallel size {tp_size}"
             )
         env_slots, env_copy, env_policy, env_decay = moe_offload_config()
+        env_pref, env_pref_topk, env_pref_max = moe_offload_prefetch_config()
         self.offload_slots = env_slots if offload_slots is None else int(offload_slots)
         self.offload_copy = env_copy if offload_copy is None else offload_copy
         self.offload_policy = env_policy if offload_policy is None else offload_policy
         self.offload_decay = env_decay if offload_decay is None else int(offload_decay)
+        self.offload_prefetch = (
+            env_pref if offload_prefetch is None else bool(offload_prefetch)
+        )
+        self.offload_prefetch_topk = (
+            env_pref_topk
+            if offload_prefetch_topk is None
+            else int(offload_prefetch_topk)
+        )
+        self.offload_prefetch_max = (
+            env_pref_max if offload_prefetch_max is None else int(offload_prefetch_max)
+        )
         if self.offload_slots < 0:
             raise ValueError(f"offload_slots must be >= 0, got {self.offload_slots}")
         if self.offload_slots > 0:
@@ -1077,6 +1118,9 @@ class Inkling2LoopMoE(_ExpertsKernel):
             "committed_passes": cache.committed_passes,
             "native_copy_calls": cache.native_copy_calls,
             "batch_copy_calls": cache.batch_copy_calls,
+            "prefetch_calls": cache.prefetch_calls,
+            "prefetch_experts": cache.prefetch_experts,
+            "prefetch_hits": cache.prefetch_hits,
             "host_bytes": cache.host_bytes,
             "device_bytes": cache.device_bytes,
             "visit_demands": tuple(self._visit_demands),
@@ -1301,6 +1345,7 @@ class Inkling2LoopMoE(_ExpertsKernel):
         out_all: torch.Tensor,
         max_query_len: int = 0,
         visit: int = 0,
+        next_mlp: Inkling2LoopMoE | None = None,
     ) -> torch.Tensor:
         """Router, expert GEMMs and swiglu on the HIP kernels (no allocation).
 
@@ -1311,7 +1356,9 @@ class Inkling2LoopMoE(_ExpertsKernel):
         routed row) and the chunk's output, the GEMMs accumulate into them.
         """
         if self.expert_cache is not None:
-            return _forward_hip_offload(self, x16, ws, out_all, max_query_len, visit)
+            return _forward_hip_offload(
+                self, x16, ws, out_all, max_query_len, visit, next_mlp
+            )
 
         from vllm import _custom_ops as ops
 
@@ -1424,6 +1471,7 @@ def _forward_hip_offload(
     out_all: torch.Tensor,
     max_query_len: int,
     visit: int,
+    next_mlp: Inkling2LoopMoE | None = None,
 ) -> torch.Tensor:
     """Offloaded MoE execution outside stream capture (breakable HIP graphs).
 
@@ -1432,6 +1480,13 @@ def _forward_hip_offload(
     overflow transparently), uploads misses via ``PackedExpertCache.ensure()``,
     remaps ``expert_ids`` / ``cta_info`` to GPU cache slots, and invokes the
     unchanged NVFP4/MXFP8 decode and prefill GEMM kernels into ``out_all``.
+
+    When ``mlp.offload_prefetch`` is enabled and ``next_mlp`` has an offloaded
+    ``expert_cache``, speculatively routes ``next_mlp`` on the current layer's
+    MoE input ``x`` (piggybacked onto the same ``route_event`` sync with zero
+    extra host waits) and queues its predicted misses onto ``copy_stream``
+    immediately after launching this layer's GEMMs so H2D DMA overlaps this
+    layer's MoE compute and the next layer's attention block.
     """
     from vllm import _custom_ops as ops
 
@@ -1442,6 +1497,12 @@ def _forward_hip_offload(
     scale = mlp.gate.routed_scaling_factor
     bias = mlp.gate.e_score_correction_bias
     visit_bucket = 0 if visit <= 0 else 1
+    do_prefetch = (
+        mlp.offload_prefetch
+        and next_mlp is not None
+        and next_mlp.expert_cache is not None
+        and hasattr(next_mlp, "router_w")
+    )
 
     for s in range(0, T, step):
         e = min(s + step, T)
@@ -1457,6 +1518,29 @@ def _forward_hip_offload(
         m = ws.moe_views(tc, bm)
         x = x16 if tc == T else x16[s:e]
         out = out_all if tc == T else out_all[s:e]
+
+        host_pref_ids: torch.Tensor | None = None
+        if do_prefetch and e == T and not prefill and tc <= _FUSE_SWIGLU_MAX_TOKENS:
+            assert next_mlp is not None
+            ops.inkling2_glue_moe_route(
+                x,
+                next_mlp.router_w,
+                next_mlp.gate.e_score_correction_bias,
+                m.logits,
+                m.topk_w,
+                m.topk_ids,
+                m.sorted_ids,
+                m.expert_ids,
+                ws.post_pad,
+                ws.route_counters,
+                bm,
+                next_mlp.gate.routed_scaling_factor,
+                zero1=None,
+                zero2=None,
+            )
+            host_pref_ids = ws.offload_prefetch_scratch(tc)
+            host_pref_ids.copy_(m.topk_ids, non_blocking=True)
+
         ops.inkling2_glue_moe_route(
             x,
             mlp.router_w,
@@ -1584,4 +1668,15 @@ def _forward_hip_offload(
                 cache.release(lease)
         mlp._visit_demands[visit_bucket] += cache.expert_demands - demands_before
         mlp._visit_misses[visit_bucket] += cache.expert_misses - misses_before
+        if host_pref_ids is not None:
+            assert next_mlp is not None and next_mlp.expert_cache is not None
+            k_pre = mlp.offload_prefetch_topk
+            pref_slice = host_pref_ids[:, :k_pre] if 0 < k_pre < K else host_pref_ids
+            # Rank-major order prioritizes top-1/top-2 predicted experts if capped.
+            pref_ids = pref_slice.t().reshape(-1).tolist()
+            next_mlp.expert_cache.prefetch(
+                pref_ids,
+                copy_stream=ws.offload_copy_stream(),
+                max_experts=mlp.offload_prefetch_max,
+            )
     return out_all

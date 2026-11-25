@@ -224,7 +224,9 @@ class Inkling2GlueWorkspace:
         # Reusable pinned host buffer + event for MoE expert offload route readback
         # (allocated lazily only when an offloaded MoE layer actually uses it).
         self._offload_host_ids: torch.Tensor | None = None
+        self._offload_prefetch_host_ids: torch.Tensor | None = None
         self._offload_route_event: torch.cuda.Event | None = None
+        self._offload_copy_stream: torch.cuda.Stream | None = None
 
         # attention: the fused input projections write into per-segment buffers shared
         # by every layer; the output / o_proj buffers and the split-K workspace too
@@ -318,6 +320,24 @@ class Inkling2GlueWorkspace:
             if pin:
                 self._offload_route_event = torch.cuda.Event()
         return self._offload_host_ids[:tc], self._offload_route_event
+
+    def offload_prefetch_scratch(self, tc: int) -> torch.Tensor:
+        """Reusable pinned ``[tc, K]`` int32 host buffer for next-layer
+        speculative router readback (allocated lazily on first use)."""
+        if self._offload_prefetch_host_ids is None:
+            pin = self.device.type == "cuda"
+            self._offload_prefetch_host_ids = torch.empty(
+                self.moe_chunk, self.K, dtype=torch.int32, device="cpu", pin_memory=pin
+            )
+        return self._offload_prefetch_host_ids[:tc]
+
+    def offload_copy_stream(self) -> torch.cuda.Stream | None:
+        """Shared non-blocking copy stream for layer-ahead MoE expert prefetching."""
+        if self.device.type != "cuda":
+            return None
+        if self._offload_copy_stream is None:
+            self._offload_copy_stream = torch.cuda.Stream(self.device)
+        return self._offload_copy_stream
 
     def ensure_taps(self, count: int) -> None:
         """Allocate ``count`` partial-block taps and the final-output tap (once)."""

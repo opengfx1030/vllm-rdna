@@ -15,6 +15,7 @@ from vllm.models.inkling2_loop.amd.moe import (
     _NVFP4_PAYLOAD_NAMES,
     Inkling2LoopMoE,
     moe_offload_config,
+    moe_offload_prefetch_config,
 )
 
 
@@ -107,6 +108,21 @@ def test_moe_offload_config_defaults_and_validation():
         moe_offload_config({"VLLM_INKLING2_MOE_OFFLOAD_POLICY": "fifo"})
     with pytest.raises(ValueError, match="> 0"):
         moe_offload_config({"VLLM_INKLING2_MOE_OFFLOAD_DECAY": "0"})
+
+
+def test_moe_offload_prefetch_config_defaults_and_validation():
+    assert moe_offload_prefetch_config({}) == (True, 4, 4)
+    assert moe_offload_prefetch_config(
+        {
+            "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH": "0",
+            "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_TOPK": "6",
+            "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX": "8",
+        }
+    ) == (False, 6, 8)
+    with pytest.raises(ValueError, match=">= 0"):
+        moe_offload_prefetch_config({"VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_TOPK": "-1"})
+    with pytest.raises(ValueError, match="> 0"):
+        moe_offload_prefetch_config({"VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX": "0"})
 
 
 def test_tp_gt_1_guard_raises():
@@ -331,5 +347,112 @@ def test_gpu_forward_hip_decode_prefill_and_breakable_graph_parity(fmt, copy_mod
         res.forward_hip(x_new, ws, out_ref)
         assert torch.allclose(out_static, out_ref, atol=1e-3, rtol=1e-3), (
             f"graph replay {fmt}/{copy_mode} step={step}: max diff "
+            f"{(out_static - out_ref).abs().max().item()}"
+        )
+
+
+@pytest.mark.skipif(not _is_gfx103x(), reason="requires gfx103x HIP GPU")
+@pytest.mark.parametrize("copy_mode", ["tensor", "native"])
+def test_gpu_layer_ahead_prefetch_forward_hip_and_graph_parity(copy_mode):
+    """Two chained offloaded MoE layers with async layer-ahead prefetching
+    match resident forward_hip() across decode, prefill overflow, and
+    BreakableCUDAGraphCapture replay."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.models.inkling2_loop.amd.glue import Inkling2GlueWorkspace
+    from vllm.models.inkling2_loop.configs import Inkling2LoopTextConfig
+
+    cfg = Inkling2LoopTextConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=128,
+        swa_num_attention_heads=4,
+        swa_num_key_value_heads=2,
+        swa_head_dim=128,
+        n_routed_experts=16,
+        num_experts_per_tok=4,
+        loop_layer_index_start=0,
+        loop_layer_index_end=2,
+        loop_num_passes=2,
+        n_layers_per_attn_res_block=1,
+        loop_gate_rank=16,
+    )
+    with torch.device("cuda"):
+        res0 = Inkling2LoopMoE(cfg, "nvfp4", offload_slots=0)
+        res1 = Inkling2LoopMoE(cfg, "nvfp4", offload_slots=0)
+        off0 = Inkling2LoopMoE(
+            cfg, "nvfp4", offload_slots=6, offload_copy=copy_mode, offload_prefetch=True
+        )
+        off1 = Inkling2LoopMoE(
+            cfg, "nvfp4", offload_slots=6, offload_copy=copy_mode, offload_prefetch=True
+        )
+
+    for res, off, seed in ((res0, off0, 11), (res1, off1, 22)):
+        group = _fill_moe_weights(res, seed=seed)
+        off.gate.weight.data.copy_(res.gate.weight.data)
+        off.gate.e_score_correction_bias.data.copy_(
+            res.gate.e_score_correction_bias.data
+        )
+        off.load_expert_group(group)
+        res.process_weights_after_loading()
+        off.process_weights_after_loading()
+        res.prepare_hip()
+        off.prepare_hip()
+
+    ws = Inkling2GlueWorkspace(cfg, max_tokens=256, device="cuda", tp_size=1)
+    gen = torch.Generator(device="cuda").manual_seed(33)
+
+    for num_tokens in (1, 4, 160):
+        x = torch.randn(
+            num_tokens,
+            cfg.hidden_size,
+            generator=gen,
+            device="cuda",
+            dtype=torch.float16,
+        )
+        mid_res, out_res = torch.empty_like(x), torch.empty_like(x)
+        mid_off, out_off = torch.empty_like(x), torch.empty_like(x)
+        res0.forward_hip(x, ws, mid_res)
+        res1.forward_hip(mid_res, ws, out_res)
+        off0.forward_hip(x, ws, mid_off, visit=0, next_mlp=off1)
+        off1.forward_hip(mid_off, ws, out_off, visit=0, next_mlp=None)
+        assert torch.allclose(out_res, out_off, atol=1e-3, rtol=1e-3), (
+            f"prefetch {copy_mode} T={num_tokens}: max diff "
+            f"{(out_res - out_off).abs().max().item()}"
+        )
+
+    stats1 = off1.offload_stats()
+    assert stats1 is not None
+    assert stats1["prefetch_calls"] > 0
+    assert stats1["prefetch_experts"] > 0
+
+    # BreakableCUDAGraphCapture with chained prefetch
+    x_static = torch.randn(
+        2, cfg.hidden_size, generator=gen, device="cuda", dtype=torch.float16
+    )
+    mid_static = torch.empty_like(x_static)
+    out_static = torch.empty_like(x_static)
+    capture_stream = torch.cuda.Stream()
+    torch.accelerator.synchronize()
+    with torch.cuda.stream(capture_stream), BreakableCUDAGraphCapture() as cap:
+        off0.forward_hip(x_static, ws, mid_static, visit=1, next_mlp=off1)
+        off1.forward_hip(mid_static, ws, out_static, visit=1, next_mlp=None)
+    torch.accelerator.synchronize()
+    assert len(cap.segments) >= 2
+
+    for step in range(3):
+        x_new = torch.randn(
+            2, cfg.hidden_size, generator=gen, device="cuda", dtype=torch.float16
+        )
+        x_static.copy_(x_new)
+        cap.replay()
+        mid_ref, out_ref = torch.empty_like(x_new), torch.empty_like(x_new)
+        res0.forward_hip(x_new, ws, mid_ref)
+        res1.forward_hip(mid_ref, ws, out_ref)
+        assert torch.allclose(out_static, out_ref, atol=1e-3, rtol=1e-3), (
+            f"prefetch graph replay {copy_mode} step={step}: max diff "
             f"{(out_static - out_ref).abs().max().item()}"
         )
