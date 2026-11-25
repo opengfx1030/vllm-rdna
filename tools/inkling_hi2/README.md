@@ -185,8 +185,9 @@ bash $TREE/tools/inkling_hi2/validate_final_a2.sh   # prints the pid and the tai
 
 Step order (all requested checks; grouped to keep the pair boot alive):
 `kernel` (own lease window + tiny fixture) -> `serve_dir` (prep + validate +
-check_real on CPU) -> `smoke` (stock resident, HI2 boots itself) -> `kl` (mixed
-gated at 0.15, long 8k/16k recorded) -> `eval` (two labels on the a2 tree) ->
+check_real on CPU) -> `smoke` (self-contained: its own stock + its own HI2, both
+stopped before it returns) -> `kl` (the first step on the run pair; mixed gated
+at 0.15, long 8k/16k recorded) -> `eval` (two labels on the a2 tree) ->
 `vision` -> `bench` -> `dspark` (spec pair: 16384, GMEM 0.45 each) -> `boot720`
 (single HI2, 720000, GMEM 0.92; `/v1/models` must report 720000).  `bench` runs
 last inside the pair boot and has TWO arms: the pair arm (both servers resident
@@ -198,13 +199,20 @@ recorded in `steps/bench.json` with their flags; the card quotes the solo arm
 `dspark`/`boot720` is deliberate: a 720k KV failure must not discard the vision
 evidence.  Everything that shares the stock+HI2 pair runs under that one boot
 (VISION=1, 32768, GMEM 0.45 each); all boots go through `serve.sh` (28 GiB lease
-gate, quiet windows, boot.lock, HIP->PCI litmus).  ~4 h (5 h budget).
+gate, quiet windows, boot.lock, HIP->PCI litmus).  After smoke the driver boots
+one fresh stock+HI2 pair with its own pidfiles; every step that talks to the
+pair starts with a health gate (`require_pair`): a dead port restarts the pair
+once, and if it still does not come up the step fails as `pair-unhealthy`
+instead of dying on a closed port mid-probe.  ~4 h (5 h budget).
 Useful knobs: `DRY_RUN=1` (assemble and dry-run every GPU argv on CPU, no
 lease), `ONLY=smoke,kl`, `RESUME=1` (default), `BOOT_WAIT`, `CTX`,
 `GMEM_PAIR`, `KL_MIXED_WINDOWS`, `TAG`.  `DETACH=0` for a foreground/tmux run.
 CPU proof: `tests/models/inkling2_loop/test_hi2_final_driver.py` (stubs, no GPU,
-no /tmp) and `tools/inkling_hi2/mutants_final.py` (kills the disk-guard-off,
-failed-step-not-fatal, resume-ignored and dry-run-skips-tools mutants).
+no /tmp; includes the pair health gate: dead pair -> one restart -> pass, and
+restart-fails -> clean pair-unhealthy + no traceback) and
+`tools/inkling_hi2/mutants_final.py` (kills the disk-guard-off,
+failed-step-not-fatal, resume-ignored, dry-run-skips-tools, pair-gate-skipped,
+pair-retried-twice and pair-unhealthy-ignored mutants).
 
 ## 2. Ordered GPU checklist
 

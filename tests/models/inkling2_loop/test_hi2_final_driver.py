@@ -504,3 +504,123 @@ def test_bench_pair_then_solo_arm(kit):
     finally:
         for proc in servers:
             proc.kill()
+
+
+FAKE_KL_PROBE = """#!/usr/bin/env python3
+import argparse
+import json
+import os
+import urllib.request
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--hi2-url", required=True)
+ap.add_argument("--stock-url", required=True)
+ap.add_argument("--ids", required=True)
+ap.add_argument("--windows", required=True)
+ap.add_argument("--topk", type=int, default=100)
+ap.add_argument("--max-kl", type=float)
+ap.add_argument("--min-top1", type=float)
+ap.add_argument("--reference-eval")
+ap.add_argument("--out", required=True)
+a = ap.parse_args()
+for url in (a.hi2_url, a.stock_url):
+    urllib.request.urlopen(url + "/health", timeout=5)  # raises when the pair is dead
+calls = os.environ["CALLS"] + "/kl"
+with open(calls, "a") as f:
+    f.write(
+        json.dumps({"hi2": a.hi2_url, "stock": a.stock_url, "windows": a.windows})
+        + "\\n"
+    )
+with open(a.out, "w") as f:
+    json.dump({"mean_kl": 0.1, "top1": 0.93, "windows": int(a.windows)}, f)
+"""
+
+DEAD_SERVE = """#!/usr/bin/env bash
+if [[ ${PRINT:-0} == 1 ]]; then
+    echo "DRY MODEL=$MODEL MAXLEN=$MAXLEN DSPARK=$DSPARK VISION=$VISION"
+    exit 0
+fi
+exit 0
+"""
+
+
+def _free_ports() -> None:
+    for port in (18230, 18231):
+        probe = socket.socket()
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            pytest.skip(f"port {port} is busy")
+        finally:
+            probe.close()
+
+
+def _kl_ids(kit: dict) -> dict:
+    mixed = kit["kit"] / "heldout_mixed_ids.npy"
+    mixed.write_bytes(b"ids")
+    long_dir = kit["kit"] / "long"
+    long_dir.mkdir()
+    for n in (8192, 16384):
+        (long_dir / f"heldout_long_context__en__{n}_ids.npy").write_bytes(b"ids")
+    return {
+        "KL_MIXED": mixed,
+        "KL_MIXED_WINDOWS": "2",
+        "KL_LONG_DIR": long_dir,
+        "KL_LONG_WINDOWS": "1",
+        "KL_REF_MIXED": kit["kit"] / "ref-mixed.json",
+        "KLPROBE": kit["kit"] / "fake_kl_probe.py",
+    }
+
+
+def test_pair_restarted_once_after_smoke_tears_it_down(kit):
+    """A dead pair before kl is restarted once and the step runs.
+
+    This is the card1 failure: smoke's teardown killed the pair and the KL
+    probe then died on a closed port.  The gate must detect the dead pair,
+    boot one fresh pair, and only then let the client run.
+    """
+    _free_ports()
+    kl = _kl_ids(kit)
+    (kit["kit"] / "fake_kl_probe.py").write_text(FAKE_KL_PROBE)
+    serve = kit["kit"] / "fake_serve.sh"
+    _stub(
+        serve,
+        FAKE_SERVE.replace("{python}", sys.executable).replace(
+            "{FAKE_KIT}", str(kit["kit"])
+        ),
+    )
+    (kit["kit"] / "fake_health.py").write_text(FAKE_HEALTH)
+    r = run(kit, "pair-restart", ONLY="kl", SERVE=str(serve), **kl)
+    assert r.returncode == 0, r.stdout + r.stderr
+    status = (rt(kit, "pair-restart") / "STATUS.log").read_text()
+    assert "pair unhealthy before kl" in status
+    assert "restarting the pair once" in status
+    assert "pair restarted for kl" in status
+    assert status.count("boot stock on port 18231") == 1, status
+    assert status.count("boot hi2 on port 18230") == 1, status
+    calls = [
+        json.loads(line) for line in (kit["calls"] / "kl").read_text().splitlines()
+    ]
+    assert len(calls) == 3, calls
+    assert all(c["hi2"] == "http://127.0.0.1:18230" for c in calls), calls
+    assert all(c["stock"] == "http://127.0.0.1:18231" for c in calls), calls
+    assert (rt(kit, "pair-restart") / "steps" / "kl.pass").exists()
+
+
+def test_pair_unhealthy_fails_cleanly_without_traceback(kit):
+    """When the restart also fails the step fails as pair-unhealthy, once."""
+    _free_ports()
+    kl = _kl_ids(kit)
+    (kit["kit"] / "fake_kl_probe.py").write_text(FAKE_KL_PROBE)
+    serve = kit["kit"] / "dead_serve.sh"
+    _stub(serve, DEAD_SERVE)
+    r = run(kit, "pair-dead", ONLY="kl", SERVE=str(serve), **kl)
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "pair-dead") / "STATUS.log").read_text()
+    assert "pair unhealthy before kl" in status
+    assert "pair-unhealthy" in status
+    assert status.count("boot stock on port 18231") == 1, status
+    log = (rt(kit, "pair-dead") / "steps" / "kl.log").read_text()
+    assert "Traceback" not in log, log
+    assert not (kit["calls"] / "kl").exists()

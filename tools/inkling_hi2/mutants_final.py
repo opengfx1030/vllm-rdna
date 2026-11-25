@@ -27,7 +27,8 @@ REPO = Path(__file__).resolve().parents[2]
 TEST = "tests/models/inkling2_loop/test_hi2_final_driver.py"
 SUBSET = (
     "dry_run or disk_guard or resume or first_failure or bench or "
-    "lease_inherit or own_request"
+    "lease_inherit or own_request or pair_restarted_once or "
+    "pair_unhealthy_fails_cleanly"
 )
 
 # (name, [(file, old, new), ...], pytest -k of the tests that must fail)
@@ -109,6 +110,45 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
             )
         ],
         "own_request",
+    ),
+    (
+        "pair_health_gate_ignored",
+        [
+            (
+                "validate_final_a2.sh",
+                "    if pair_health; then\n        return 0\n    fi",
+                "    return 0",
+            )
+        ],
+        "pair_restarted_once",
+    ),
+    (
+        "pair_restart_retried",
+        [
+            (
+                "validate_final_a2.sh",
+                "    if restart_pair; then",
+                "    if { restart_pair || restart_pair; }; then",
+            )
+        ],
+        "pair_unhealthy_fails_cleanly",
+    ),
+    (
+        "pair_unhealthy_ignored",
+        [
+            (
+                "validate_final_a2.sh",
+                (
+                    '    log "pair-unhealthy: $step cannot run; the pair did not '
+                    'come back after one restart (see $RUN/logs)"\n    return 1'
+                ),
+                (
+                    '    log "pair-unhealthy: $step cannot run; the pair did not '
+                    'come back after one restart (see $RUN/logs)"'
+                ),
+            )
+        ],
+        "pair_unhealthy_fails_cleanly",
     ),
     (
         "bench_solo_flags_wrong",

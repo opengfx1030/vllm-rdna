@@ -787,3 +787,34 @@ same process no longer queues behind itself.  CPU proof: four lease tests (own h
 foreign refusal, release no-op, self-request) plus the five driver tests on the
 fake sysfs; box gate 88 passed, 10 skipped (212.21 s) and mutants 8/8 killed
 (incl. unconditional inherit, release-deletes-holder and self-queue).
+
+### 2026-11-25 fix: pair health gate (card1 smoke teardown killed the pair)
+
+The card1 smoke PASSed, then `kl` failed in 5 s on a closed port: `smoke.sh`
+stops its own HI2 (18230) when it exits, the driver's `ensure_pair` saw both
+ports still answering during the teardown window, returned without booting, and
+the KL client hit the dead server (`URLError` traceback).  Two changes:
+
+- `smoke` is self-contained: the driver boots its own `smoke_stock` on 18231,
+  `smoke.sh` boots/stops its own `smoke-hi2` on 18230, and both are stopped
+  (health-waited) before the step returns.  Nothing the next steps use is booted
+  by smoke.
+- `kl`, `eval`, `vision` and the `bench` pair arm start with `require_pair`: both
+  ports healthy, or one restart of a fresh pair (`restart_pair`: stop our
+  stock/hi2/smoke leftovers, boot stock 18231 + HI2 18230 with the driver's own
+  pidfiles, inherit mode, health-waited).  If the pair still is not healthy the
+  step fails as `pair-unhealthy` before any Python client runs, so the step log
+  has no traceback.  Every leftover of ours is stopped at teardown (`stop_all`
+  covers `smoke_stock`/`smoke-hi2`).
+
+CPU proof (box, CPU-only): `test_hi2_final_driver.py` **11 passed** (189 s),
+including `test_pair_restarted_once_after_smoke_tears_it_down` (dead pair ->
+one restart -> the probe runs against both health-checked URLs) and
+`test_pair_unhealthy_fails_cleanly_without_traceback` (restart fails -> exit 1,
+`pair-unhealthy`, no `Traceback`, the probe is never called).
+`tools/inkling_hi2/mutants_final.py`: baseline 11 passed, **11/11 killed**
+(the three new: gate ignored, restart twice, pair-unhealthy ignored), 393 s.
+`ruff check` and `ruff format --check` clean on the two Python files.  The real
+GPU steps (smoke, kl, eval, vision, bench, dspark, boot720) remain unmeasured:
+a2/b4 are still leased by other jobs; the ordered checklist is unchanged in
+`tools/inkling_hi2/README.md`.

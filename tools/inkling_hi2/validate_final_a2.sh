@@ -368,18 +368,35 @@ stop_server() {
     rm -f "$pidfile"
 }
 
-ensure_stock() {
-    health 18231 && return 0
+pair_health() { health 18231 && health 18230; }
+
+# Boot one fresh run pair (stock 18231 + HI2 18230) with the driver's own
+# pidfiles; every leftover of ours on those ports is stopped first.
+restart_pair() {
+    stop_server stock 18231
     stop_server hi2 18230
-    boot_server stock 18231 "$STOCK" "$CTX" "$MAXBAT" 0 1 "$GMEM_PAIR" ||
-        die "stock boot failed (see $RUN/logs/serve-stock.log)"
+    stop_server smoke_stock 18231
+    stop_server smoke-hi2 18230
+    boot_server stock 18231 "$STOCK" "$CTX" "$MAXBAT" 0 1 "$GMEM_PAIR" || return 1
+    boot_server hi2 18230 "$SERVE_DIR" "$CTX" "$MAXBAT" 0 1 "$GMEM_PAIR" || return 1
+    pair_health
 }
 
-ensure_pair() {
-    ensure_stock
-    health 18230 && return 0
-    boot_server hi2 18230 "$SERVE_DIR" "$CTX" "$MAXBAT" 0 1 "$GMEM_PAIR" ||
-        die "HI2 boot failed (see $RUN/logs/serve-hi2.log)"
+# Every step that talks to the pair starts here: if a port is dead, restart the
+# pair once; if it still is not healthy, fail the step as pair-unhealthy before
+# any Python client runs (no traceback in the step log).
+require_pair() { # step name
+    local step=$1
+    if pair_health; then
+        return 0
+    fi
+    log "pair unhealthy before $step (18231/18230 down); restarting the pair once"
+    if restart_pair; then
+        log "pair restarted for $step"
+        return 0
+    fi
+    log "pair-unhealthy: $step cannot run; the pair did not come back after one restart (see $RUN/logs)"
+    return 1
 }
 
 # --- preflight: CPU checks and the dry-run of every GPU argv ----------------
@@ -493,25 +510,36 @@ s_serve_dir() {
     num "dense" "${dense##*: }"
 }
 
-# --- step 3: smoke (stock resident, smoke boots its own HI2) ---------------
+# --- step 3: smoke (self-contained: its own stock + its own HI2) -----------
+# smoke.sh stops what it started, so it must never share a port with the run
+# pair: its stock is booted here as smoke_stock, smoke.sh boots/stops its own
+# HI2 as smoke-hi2, and both are stopped before the step returns.  The run pair
+# is booted fresh by the next require_pair.
 s_smoke() {
-    ensure_stock
+    boot_server smoke_stock 18231 "$STOCK" "$CTX" "$MAXBAT" 0 1 "$GMEM_PAIR" || {
+        log "smoke stock boot failed (see $RUN/logs/serve-smoke_stock.log)"
+        return 1
+    }
+    local rc=0
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
         MODEL="$SERVE_DIR" SLOT="$SLOT" HIP_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES" \
         EXPECT_PCI_BUSES="$EXPECT_PCI_BUSES" VENV="$VENV" \
         OWNER="$OWNER" LEASE_DIR="$LEASE_DIR" QUIET_DIR="$QUIET_DIR" \
         BOOT_LOCK="$BOOT_LOCK" LEASE_INHERIT=1 \
         STOCK_URL=http://127.0.0.1:18231 STOCK_KL=0 \
-        SERVER_PID_FILE="$RUN/pids/smoke.pid" GMEM="$GMEM_PAIR" \
-        MAXLEN="$CTX" MAXBAT="$MAXBAT" SEQS="$SEQS" WAIT_QUIET=1 \
-        bash "$SMOKE" || return 1
-    grep -q "RESULT measured window PASS" "$RUN/steps/smoke.log" || return 1
+        SERVER_PID_FILE="$RUN/pids/smoke-hi2.pid" PIDS_DIR="$RUN/pids" \
+        GMEM="$GMEM_PAIR" MAXLEN="$CTX" MAXBAT="$MAXBAT" SEQS="$SEQS" WAIT_QUIET=1 \
+        bash "$SMOKE" || rc=$?
+    grep -q "RESULT measured window PASS" "$RUN/steps/smoke.log" || rc=1
+    stop_server smoke_stock 18231
+    stop_server smoke-hi2 18230
+    ((rc == 0)) || return 1
     num "window" PASS
 }
 
 # --- step 4: served KL (mixed + long 8k/16k) -------------------------------
 s_kl() {
-    ensure_pair
+    require_pair kl || return 1
     local spec ids windows gate ref
     for spec in mixed long8k long16k; do
         case $spec in
@@ -575,7 +603,7 @@ PY
 s_bench() {
     local decode=${BENCH_DECODE_TOKENS:-128}
     local flags="gmem=$GMEM_PAIR maxlen=$CTX maxbat=$MAXBAT seqs=$SEQS decode_tokens=$decode"
-    ensure_pair
+    require_pair bench || return 1
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
         "$V" "$BENCH" --url http://127.0.0.1:18231 \
         --server-pid "$(cat "$RUN/pids/stock.pid")" \
@@ -611,7 +639,7 @@ s_bench() {
 
 # --- step 6: task eval (main 245 + agentic-probe + vision) -----------------
 s_eval() {
-    ensure_pair
+    require_pair eval || return 1
     local R=$RUN/eval
     mkdir -p "$R"
     run_one() { # url label set out
@@ -642,7 +670,7 @@ s_eval() {
 
 # --- step 7: vision probe (pair, VISION=1) ---------------------------------
 s_vision() {
-    ensure_pair
+    require_pair vision || return 1
     local images=$RUN/images
     "$V" "$VISION_PROBE" --make-images "$images" || return 1
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
