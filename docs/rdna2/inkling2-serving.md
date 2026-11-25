@@ -91,6 +91,53 @@ capture included): TP=1 44 s, TP=2 64 s, TP=4 59 s [measured, `serve_one.sh`].
 | `VLLM_INKLING2_PREFILL_BM` | 1 (code default, not set by the recipes) | `0` | the fp16 `v_dot2` 32-row expert kernels for the MoE chunks of at least `VLLM_INKLING2_PREFILL_BM_MIN_TOKENS` tokens; `0` restores the shipped decode-shaped kernels (A/B and rollback) | 1,000-token prefill 873 - 883 ms -> 487 ms at TP=1 [measured, `inkling2-moe-prefill-bm.md`]; decode and graphs untouched |
 | `VLLM_INKLING2_PREFILL_INT8` | 0 | `1` | **experimental**: W4A8 int8 kernel for the NVFP4 layers (quantises the activations: a quality change, off by default) | 487.6 -> 452.5 ms at 1,000 tokens; NLL 0.0574 against the shipped path's own 0.0477 floor [measured] |
 | `VLLM_INKLING2_PREFILL_BM_MIN_TOKENS` | 128 | any | the chunk size from which the 32-row expert kernels run; smaller chunks, decode and every graph step keep the shipped kernels | NVFP4 breaks even at ~48 tokens, MXFP8 at ~128 [measured] |
+| `LOOPCD_ALPHA`, `LOOPCD_MODE`, `LOOPCD_ADAPTIVE`, `LOOPCD_BETA`, `LOOPCD_BLEND_BLOCKS`, `LOOPCD_WEAK_PASS` | `0.0` (off), `hidden`, `0`, `0.1`, `1`, `-1` | per-request `vllm_xargs` or `LOOPCD_ALPHA>0` | training-free LoopCD contrastive decoding (`arXiv:2610.02185`); no separate recipe needed, works with prefix caching and DSpark | `hidden` (`alpha=0.35`): `+0.14%` latency (`+25 µs/tok`), `0 B` extra residual VRAM, `+5 pp` Math+Code; `logits` adaptive (`alpha=0.25`): `+10–13%` `b=1` latency, `+15 pp` Math+Code ([measured](../explore/loopcd-2610.02185/README.md)) |
+
+### LoopCD (per-request and server-wide contrastive decoding)
+
+Every Inkling-2 recipe supports **LoopCD (`arXiv:2610.02185`)** out of the box without a separate recipe or graph recapture. Requests with different `loopcd_*` settings can mix in the same batch while sharing prompt prefix caches (non-terminal prompt tokens are always masked to `alpha = 0`).
+
+Pass `vllm_xargs` on any `/v1/chat/completions` request:
+
+```bash
+# LoopCD-Hidden: almost free (+0.14% at b=1, +5 pp Math+Code, Pareto-better with DSpark)
+curl -s http://127.0.0.1:18221/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "inkling2-mini",
+  "messages": [{"role": "user", "content": "Solve: ..."}],
+  "max_tokens": 2048,
+  "temperature": 0.0,
+  "vllm_xargs": {
+    "loopcd_mode": "hidden",
+    "loopcd_alpha": 0.35,
+    "loopcd_blend_blocks": true
+  }
+}'
+
+# LoopCD-Logits (adaptive): largest reasoning/coding gain (+15 pp Math+Code, shorter chains)
+curl -s http://127.0.0.1:18221/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "inkling2-mini",
+  "messages": [{"role": "user", "content": "Solve: ..."}],
+  "max_tokens": 2048,
+  "temperature": 0.0,
+  "vllm_xargs": {
+    "loopcd_mode": "logits",
+    "loopcd_alpha": 0.25,
+    "loopcd_adaptive": true,
+    "loopcd_beta": 0.1,
+    "loopcd_weak_pass": -1
+  }
+}'
+```
+
+To set a server-wide default (still overridable per request via `vllm_xargs`), append `LOOPCD_*` switches to `serve_rdna.sh`:
+
+```bash
+bash tools/rdna/serve_rdna.sh RECIPE=inkling2-mini-tp1-dspark MODEL=/path/to/inkling2-mini \
+  VENV=/path/to/venv HIP_VISIBLE_DEVICES=2 ADAPTIVE=1 DRAFT_VOCAB=/path/to/32k.npy \
+  LOOPCD_MODE=hidden LOOPCD_ALPHA=0.35
+```
+
+Full architecture, kernel microbenchmarks, and Math+Code eval receipts: [`docs/explore/loopcd-2610.02185/README.md`](../explore/loopcd-2610.02185/README.md).
 
 The default capture grid for this architecture is decode graphs for every request count from 1
 to min(16, `SEQS`) and mixed / prefill graphs for 1, 2, 4, 8, 16, 24 and 32 tokens; a step with

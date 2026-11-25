@@ -65,7 +65,37 @@ sp_logits = SamplingParams(
 )
 ```
 
-For OpenAI-compatible `/v1/chat/completions` requests, pass the same keys inside `"vllm_xargs"`.
+For OpenAI-compatible `/v1/chat/completions` requests on any running Inkling-2 recipe (no separate recipe required), pass the same keys inside `"vllm_xargs"`:
+
+```bash
+# LoopCD-Hidden (+0.14% latency, +5 pp Math+Code, Pareto-better with DSpark)
+curl -s http://127.0.0.1:18221/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "inkling2-mini",
+  "messages": [{"role": "user", "content": "Solve: ..."}],
+  "max_tokens": 2048,
+  "temperature": 0.0,
+  "vllm_xargs": {
+    "loopcd_mode": "hidden",
+    "loopcd_alpha": 0.35,
+    "loopcd_blend_blocks": true
+  }
+}'
+
+# LoopCD-Logits adaptive (+15 pp Math+Code, shorter chains)
+curl -s http://127.0.0.1:18221/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "inkling2-mini",
+  "messages": [{"role": "user", "content": "Solve: ..."}],
+  "max_tokens": 2048,
+  "temperature": 0.0,
+  "vllm_xargs": {
+    "loopcd_mode": "logits",
+    "loopcd_alpha": 0.25,
+    "loopcd_adaptive": true,
+    "loopcd_beta": 0.1,
+    "loopcd_weak_pass": -1
+  }
+}'
+```
 
 ### 2.2 Server Environment Defaults & `serve_rdna.sh` Recipe Switches
 
