@@ -1,16 +1,21 @@
 # Inkling-2-Mini HI2 runtime: CPU receipt
 
 Branch `feat/inkling2-hi2-runtime` (cut from `origin/rdna_extras` at `1fdcb3a66e`,
-which carries the merged Inkling-2-Mini runtime, `vllm/models/inkling2_loop/`),
-2026-11-24/25.  The CPU evidence
+which carries the merged Inkling-2-Mini runtime, `vllm/models/inkling2_loop/`, and
+**merged up to `41ef6ba1e0` in `bae1b21db0`** on 2026-11-25), 2026-11-24/25.  From
+the merge the PR base is `41ef6ba1e0`, so every "base" below is that commit; the
+branch's csrc is byte-identical to it (the merge brought the base's 5-TU csrc delta
+into the branch history, and the box `_rocm_C` was rebuilt from the merged tree).
+The CPU evidence
 below was produced without a GPU; the exploratory a2 runs of 2026-11-25 (kernel
 test, smoke + KL, bench, a long serving run) are recorded in their own section and
 are **not** the PR contract receipt.  The contract's gates, their exact commands,
 the a2 time each needs, and the gates that cannot be satisfied as written are in
 "PR contract" below.
 
-**Change class.** Python model/runtime wiring plus tools; **no csrc, CMake, setup or
-C++ change**.  The HI2 expert path calls the fork's existing RDNA2 ops
+**Change class.** Python model/runtime wiring plus tools; against the merged base
+`41ef6ba1e0` there is **no csrc, CMake, setup or C++ change**.  The HI2 expert
+path calls the fork's existing RDNA2 ops
 (`rdna_hint_flex_moe_transform_rdna2`, `rdna_hint_flex_moe_gemm_rdna2`,
 `inkling2_glue_swiglu`); the arch gates and launches are the ops' own (gfx1030 only,
 current stream).  The CUDA / CDNA / CPU paths are untouched because no compiled code
@@ -38,8 +43,8 @@ watcher flags; the recipe pins a2 by PCI bus).
 | TP suite | `pytest tests/models/inkling2_loop/test_tensor_parallel.py -q` with the workaround below | 0 | 156 passed |
 | Serve dir | `bash tools/inkling_hi2/prep_serve_dir.sh <quantizer out> <serve dir>` | 0 | 15 symlinks + MTP; source untouched |
 | Validate dir | `python tools/inkling_hi2/validate_dir.py --model <serve dir>` | 0 | VALID (see census below) |
-| archdiff | `archdiff_report.py plan --base-tree base-rdna_extras --head-tree tree` | 0 | `units: []`, `csrc.diff` 0 bytes |
-| Diff scan | `pr_receipt_scan.py base-rdna_extras tree` | 0 | 5 added `tolist` lines, all CPU reference; 0 per-step, 0 csrc |
+| archdiff | `archdiff_report.py plan` on clean archives of `41ef6ba1e0` (base) and `bae1b21db0` (head, the merge) | 0 | `empty`: `changed_files []`, `units []`, `source.diff` 0 bytes |
+| Diff scan | `pr_receipt_scan.py base-rdna_extras tree` (base `41ef6ba1e0`, head = the merged tree) | 0 | 5 added `tolist` lines, all CPU reference; 0 per-step, 0 C findings (the 24 generated paged-attn units are head-only files) |
 | Receipt dry run | `DRY_RUN=1 BASE_TREE=HEAD_TREE=tree pr_receipt.sh ... RECIPE=inkling2-hi2-tp2` | 0 | 4 boots, 8 speed cells, 2 exactness cells, quality 0 |
 | Recipe assembly | `PRINT=1 serve_rdna.sh RECIPE=inkling2-hi2-tp2 MODEL=...` | 0 | command below |
 
@@ -238,16 +243,18 @@ Input `~/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5`, serve dir built by links at
 
 ### archdiff: empty by construction, and that is the finding
 
-The contract compares the csrc sources of the base (`1fdcb3a66e`, the `rdna_extras`
-commit the branch was cut from) with the head.  The plan was run on **clean
-`git archive` trees** of both commits (`~/w4a8_runs/inkling-hi2-runtime/archdiff/
-{base,head}`, base label `1fdcb3a66e`, head label `aae486796f`):
+The contract compares the csrc sources of the base (`41ef6ba1e0`, the merged
+`rdna_extras` commit; the branch was cut at `1fdcb3a66e` and merged up to the new
+base in `bae1b21db0`) with the head.  The plan was re-run after the merge on
+**clean `git archive` trees** of both commits
+(`~/w4a8_runs/inkling-hi2-runtime/archdiff2/{base41,headbae}`, base label
+`41ef6ba1e0`, head label `bae1b21db0`):
 
 ```bash
 $V tools/rdna/archdiff_report.py plan \
-  --base-tree ../archdiff/base --head-tree ../archdiff/head \
-  --base-label 1fdcb3a66e --head-label aae486796f \
-  --plan-out ../archdiff/plan/plan.json --diff-out ../archdiff/plan/source.diff
+  --base-tree ../archdiff2/base41 --head-tree ../archdiff2/headbae \
+  --base-label 41ef6ba1e0 --head-label bae1b21db0 \
+  --plan-out ../archdiff2/plan/plan.json --diff-out ../archdiff2/plan/source.diff
 # "empty"; rc=0; source.diff 0 bytes
 # plan.json: mode auto, changed_files [], units [], source_diff {}, tus_missing []
 ```
@@ -305,7 +312,10 @@ python -m vllm.entrypoints.cli.main serve --model <serve dir> \
 a2 = HIP 0,1 = PCI `d1,d4` (two V620).  Short windows freed up on 2026-11-25; these
 are single runs, **not** the contract gates, and the bench/smoke boots used the
 kit's config (`MAXLEN=8192 MAXBAT=256 SEQS=1 GMEM=0.45`, `DSPARK=0`), not the
-production recipes.
+production recipes.  All of them were measured on the **pre-merge** branch (tree
+tip `aae486796f`/`43a19980d2`, csrc cut `1fdcb3a66e`); after the merge
+(`bae1b21db0`, csrc `41ef6ba1e0`) the HI2 kernels are unchanged (`archdiff units
+[]`), but no number here has been re-measured on the merged tree.
 
 | Fact | Artifact | Result |
 | --- | --- | --- |
@@ -326,16 +336,29 @@ equality.  The 03:43 crash (`top_logprobs[0]` is `None`) was fixed in
 
 ### Base and head, and what "before" can serve
 
-- **Head**: `aae486796f` on `feat/inkling2-hi2-runtime` (23 commits, 23 files added
-    - 7 modified, 7327 insertions; `vllm/models/inkling2_loop/amd/{glue,loader,model,moe}.py`,
-  `tools/`, `docs/`, `tests/`; **no csrc/CMake/setup change**).
-- **Base**: `1fdcb3a66e` — the `rdna_extras` commit the branch was cut from (PR #208
-  merge).  `origin/rdna_extras` has since moved to `41ef6ba1e0` (#210 LoopCD + TP1
-  decode perf); **the branch must be rebased before merge**, and the contract base
-  stays the cut commit unless the rebase re-cuts it.
+- **Head**: `bae1b21db0`, the merge of `41ef6ba1e0` into the branch tip
+  `43a19980d2` (26 commits on top of the base).  Against the base
+  (`41ef6ba1e0..HEAD`) the change set is 23 files added + 7 modified —
+  `vllm/models/inkling2_loop/amd/{glue,loader,model,moe}.py`, `tools/`, `docs/`,
+  `tests/` — and **no csrc/CMake/setup change**; the csrc in the branch history
+  comes from the base through the merge.
+- **Base**: `41ef6ba1e0` (`origin/rdna_extras` as of 2026-11-25, PR #210 LoopCD +
+  TP1 decode perf).  The branch was **merged** (not rebased) up to it in
+  `bae1b21db0`; the PR base is now `41ef6ba1e0` and this contract's base with it.
+  The three merge conflicts were resolution-only: the glue workspace constructor
+  keeps both the HI2 flag and the LoopCD tap dtype, `_prepare_serving` passes both
+  keywords, and the test-tethering allowlist keeps both test sets.  The merged
+  tree's delta against `41ef6ba1e0` in `amd/{glue,loader,model,moe}.py` is still
+  only the HI2 additions (1148+/7-, no deletion of the merged code).
+  `41ef6ba1e0` is the first `rdna_extras` commit that changes `csrc` in this
+  branch's history (5 TUs: `inkling2_attn/dspark/glue`, `moe_lowp_dot2`,
+  `torch_bindings.cpp`), so the box `_rocm_C` was rebuilt from the merged tree
+  (~10 min CPU under `build.lock`) and copied over the tree's; the a2 numbers in
+  this receipt were measured on the **pre-merge** tree and stay exploratory.
 - The **stock Inkling-2-Mini path is in the base**: `vllm/models/inkling2_loop/`,
   the `Inkling2LoopForConditionalGeneration` registry entry and the
-  `inkling2-mini-tp{1,2,4}.env` recipes all exist at `1fdcb3a66e` (introduced by
+  `inkling2-mini-tp{1,2,4}.env` recipes all exist at `41ef6ba1e0` (as at the cut
+  `1fdcb3a66e`; introduced by
   `7eeb0da81b` and merged into `rdna_extras` before the cut; the draft PR #195 is
   not needed to serve it).  The base tree has `~/hfcache/inkling2-mini` with
   `inkling2-mini-tp2.env` (the stock-path boot is the receipt's XA boot and has not
@@ -364,7 +387,7 @@ what measures that it did not change numerically.
 | --- | --- |
 | New model | a new checkpoint format/path (HI2 3.5 bpw) inside the existing Inkling-2-Mini model; full set owed **on that model** |
 | Shared Python code | `amd/{glue,loader,model,moe}.py` are reached by every platform that serves Inkling2Loop (CUDA, ROCm, CPU reference); CPU unit tests plus a gfx1030 receipt, callers/platforms listed |
-| Code gated to one arch | the HI2 expert dispatch calls `_require_gfx10x()` and raises on any other arch (both the eager and serving paths), so no non-gfx10x device reaches the gfx1030 kernels; the stock path never enters that branch; no csrc change, so `archdiff` is empty (below) |
+| Code gated to one arch | the HI2 expert dispatch calls `_require_gfx10x()` and raises on any other arch (both the eager and serving paths), so no non-gfx10x device reaches the gfx1030 kernels; the stock path never enters that branch; no csrc change against the merged base (`41ef6ba1e0`), so `archdiff` is empty (below) |
 | Lossy feature (INT2/INT4 experts) | opt-in by model directory + `inkling2-hi2-tp2.env`; needs the quality gate + task-eval A/B, and **maintainer sign-off** for the recipe |
 | New/changed kernel | no new kernel, but a new dispatch of the existing grouped GEMMs: the fp64-reference kernel test is owed and ran on a2 (5/5) |
 
@@ -400,9 +423,10 @@ contract receipt (~2-4 h) and the HI2-model set (~2-4 h plus the task eval).
    over the HI2 checkout's `bench/` suite) but has not been run; the sign-off is a
    human decision and cannot be produced by any command.
 3. **The other arches (gfx90a/gfx942/gfx950/gfx1100/gfx1200, CUDA, CPU serving)** —
-   no such hardware here.  The proof is indirect: no csrc change (archdiff `units
-   []`) and the HI2 branch behind `on_gfx10x()`; the stock path is exercised only on
-   gfx1030.  This is "not run", not a pass.
+   no such hardware here.  The proof is indirect: no csrc change against the
+   merged base (`41ef6ba1e0..HEAD`; archdiff `units []`) and the HI2 branch behind
+   `on_gfx10x()`; the stock path is exercised only on gfx1030.  This is "not run",
+   not a pass.
 4. **Kernel shape coverage** — the test covers M=1/8/64 and TP=1/2; the dispatcher
    can send any per-step M up to `MAXBAT` (the dominant grouped-GEMM shapes are
    covered, but "every shape the dispatcher sends" is not enumerated).  Cheap to
@@ -424,17 +448,19 @@ window (`QUIET_WIN_MAX=240`, renewed per cell); it never takes the lease itself.
 ```bash
 # 0) CPU prep: one build for both trees, markers (no GPU)
 TREE=$HOME/w4a8_runs/inkling-hi2-runtime/tree
-BASE=$HOME/w4a8_runs/inkling-hi2-runtime/base-rdna_extras   # 1fdcb3a66e
+BASE=$HOME/w4a8_runs/inkling-hi2-runtime/base-rdna_extras   # 41ef6ba1e0
 RT=$HOME/w4a8_runs/inkling-hi2-runtime
 V=$HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340
 PY=$V/bin/python
 STOCK=$HOME/hfcache/inkling2-mini
 HI2=$RT/serve-bpw3.5
 mkdir -p "$RT/pr-receipt-stock" "$RT/pr-receipt-hi2" "$RT/logs"
-printf '%s\n' aae486796f15d239a65780cf18384e3c19b2fcc0 > "$TREE/.sha"
-printf '%s\n' 1fdcb3a66e82b1c0b9ebe3ce1da1e0b25fc3c4fa > "$BASE/.sha"
-# csrc is byte-identical (no csrc change); the only directory differences are the
-# generated paged-attn units + their stamp, which CMake consumes from the stamp.
+printf '%s\n' bae1b21db05f550733e600a10ff14b03bfc7dafe > "$TREE/.sha"
+printf '%s\n' 41ef6ba1e066571a3346c6f7d1f6c38419fb9c29 > "$BASE/.sha"
+# csrc is byte-identical to the merged base `41ef6ba1e0` (the branch's delta
+# against it is Python-only); the only directory differences are the generated
+# paged-attn units + their stamp, which CMake consumes from the stamp.  The
+# attached `_rocm_C` is the one rebuilt from the merged tree's csrc.
 diff -qr "$BASE/csrc" "$TREE/csrc"
 bash "$TREE/tools/rdna/port_v031/attach_so.sh" "$TREE" "$BASE"
 
@@ -519,9 +545,9 @@ Already run on a2 (exploratory, table above): kernel test 5/5, the HI2 boot with
 FULL_AND_PIECEWISE, the greedy/capsule smoke, the 32-window KL (0.09340 / 0.93090),
 the bench cells and a 19-minute c=4 serving run.  Remaining, in order:
 
-1. CPU prep: base tree (`1fdcb3a66e`) with the head's attached `_rocm_C` and the
-   `.sha` markers (`attach_so.sh`; csrc is byte-identical, only the generated
-   paged-attn units + stamp differ).
+1. CPU prep: base tree (`41ef6ba1e0`, the merged base) with the attached `_rocm_C`
+   rebuilt from the merge (csrc is byte-identical to the base) and the `.sha`
+   markers (`attach_so.sh`; only the generated paged-attn units + stamp differ).
 2. **Stock contract receipt** (base vs head, `inkling2-mini-tp2`, production recipe,
    `MODE=abba QUALITY=1`): token-exact + quality + speed ABBA + overlap/stall.
    Exit 0 is the gate; the speed verdicts are reported.  ~2-4 h.
@@ -546,6 +572,9 @@ the bench cells and a 19-minute c=4 serving run.  Remaining, in order:
   MAXBAT=256 SEQS=1 GMEM=0.45 DSPARK=0`, both servers resident), not the contract's
   production-recipe receipt and not a speed claim; the KL is a top-k truncated
   fp16-path measurement against a float32 full-logit reference.
+- They predate the merge to `41ef6ba1e0` (`bae1b21db0`): the HI2 kernels' sources are
+  unchanged (`archdiff units []`) and the branch's csrc equals the base's, but the
+  merged tree has not been booted.
 - The 5 GPU tests are skipped in the CPU gate; a green CPU run says nothing about
   the HIP kernels.
 - The HI2 model has no base-vs-head token-exact/quality/speed gate (the base cannot

@@ -2,7 +2,8 @@
 
 Status: survey + design (2026-11-24). Branch `feat/inkling2-hi2-runtime`, based on
 `rdna_extras` `1fdcb3a66e` (PR #195 is an ancestor; the Inkling-2-Mini port is already
-merged there). Target: load and run the quantizer's production 3.5 bpw output
+merged there); the worktree was later merged up to `41ef6ba1e0` (`bae1b21db0`) which
+is the PR base now. Target: load and run the quantizer's production 3.5 bpw output
 (`~/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5`, 13.7 GiB) on 2 × V620 (gfx1030),
 TP=2, language model first, vision and MTP after.
 
