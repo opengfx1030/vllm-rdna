@@ -14,9 +14,11 @@ position addressed in a small ring per cache block instead of one slot per token
   one-slot-per-token layout needed ``N / 4``) and every completed block ends with
   the raw inputs of its last ``k - 1`` tokens, which is what a prefix-cache hit on
   that block resumes from;
-* ``S = k - 1 + num_speculative_tokens``: a verify step stores the rows of all
-  its draft tokens, and the rows of the accepted prefix stay intact when the rest
-  is rejected because rows are addressed by position.
+* ``S = k + max_scheduled_drafts`` (``k`` without speculative decoding): a verify
+  step of up to ``1 + K`` tokens reads ``k - 1`` history rows from the cache while
+  writing ``1 + K`` disjoint rows concurrently across CTAs (``(k - 1) + (1 + K) =
+  k + K``), and the rows of any accepted prefix stay intact when later drafts are
+  rejected because rows are addressed by position.
 
 The conv ops (``csrc/rocm/inkling2_attn_rdna2.cu``) read the history of a chunk
 before they write the state, so a hit must not read a block that another request
@@ -34,6 +36,7 @@ from vllm.config import VllmConfig
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import KVCacheSpec, SlidingWindowSpec
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
@@ -41,11 +44,31 @@ if TYPE_CHECKING:
 
 
 def conv_ring_rows(vllm_config: VllmConfig, kernel_size: int) -> int:
-    """Ring rows per cache block: the ``k - 1`` history rows of a chunk plus the
-    rows of the draft tokens a verify step may reject."""
+    """Ring rows per cache block: ``k`` without speculative decoding, or
+    ``k + max_scheduled_drafts`` when speculative decoding is active.
+
+    Reading ``k - 1`` prior positions from the cache while up to ``1 + K`` tokens
+    of a verify chunk write their own ``pos % ring`` concurrently across CTAs
+    requires ``(k - 1) + (1 + K) = k + K`` distinct ring rows, which also keeps
+    every accepted history tap intact when up to ``K`` drafts are rejected.
+    """
     spec = vllm_config.speculative_config
-    drafts = (getattr(spec, "num_speculative_tokens", None) or 0) if spec else 0
-    return kernel_size - 1 + drafts
+    drafted = (getattr(spec, "num_speculative_tokens", None) or 0) if spec else 0
+    if drafted <= 0:
+        return kernel_size
+    schedule = getattr(spec, "num_speculative_tokens_per_batch_size", None)
+    if schedule:
+        sched_cfg = getattr(vllm_config, "scheduler_config", None)
+        max_seqs = getattr(sched_cfg, "max_num_seqs", None) or max(
+            int(entry[1]) for entry in schedule
+        )
+        lookup = build_dynamic_sd_schedule_lookup(
+            schedule,
+            vllm_max_batch_size=max_seqs,
+            vllm_num_speculative_tokens=drafted,
+        )
+        drafted = max(lookup[1:], default=0)
+    return kernel_size + drafted
 
 
 @dataclass(frozen=True, kw_only=True)

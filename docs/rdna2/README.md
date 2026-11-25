@@ -8,7 +8,7 @@ Operator-facing entry points live outside this directory:
 
 - [`docs/rdna/serving.md`](../rdna/serving.md): launcher, recipes and what each recipe key does.
 - [`docs/rdna/monokernel/`](../rdna/monokernel/README.md): the Flash-Next MonoKernel.
-- [`docs/explore/`](../explore/kv-int4-fp16-scales/README.md): exploration notes that have not become a shipped feature.
+- [`docs/explore/`](../explore/kv-int4-fp16-scales/README.md): exploration notes that have not become a shipped feature (including queued [`loopcd-2610.02185`](../explore/loopcd-2610.02185/README.md) contrastive decoding for `Inkling2Loop`).
 
 Each entry carries a kind:
 

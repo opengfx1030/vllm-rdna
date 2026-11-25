@@ -420,9 +420,12 @@ class Inkling2Attention(nn.Module):
         named = dict(zip(self._attn_in.names, outs))
         k_off = conv_owner.stream_ranges[STREAM_K][0]
         v_off = conv_owner.stream_ranges[STREAM_V][0]
-        # one token per request: the op writes the state itself; a chunk of several
-        # tokens (prefill, verify) writes it after its history was read
-        write_state = conv_writes_in_op(conv_md)
+        # decode and short verify chunks (``q <= ring - (k - 1)``) write the conv
+        # state inside the op without read/write overlap; longer prefill / piecewise
+        # chunks write it after their history was read
+        write_state = conv_writes_in_op(
+            conv_md, conv_owner.ring_rows, conv_owner.kernel_size
+        )
         ops.inkling2_kv_prep(
             named["k"],
             named["v"],
@@ -463,20 +466,34 @@ class Inkling2Attention(nn.Module):
         return o_out
 
 
-def conv_writes_in_op(md: Inkling2Metadata) -> bool:
-    """Whether the conv ops write the state themselves: with one token per request
-    every history row they read belongs to an earlier step, so reading and writing
-    in one thread is race free; for longer chunks the writes of a chunk could
-    overwrite history rows its later tokens still read, so ``inkling2_conv_state_write``
-    runs after the conv.
+_FUSED_MAX_QUERY_LEN = 8
+_FUSED_MAX_KEYS = 1024
+_TILE_SKIP_DECODE = 2
 
-    This is the only place that decides it: the choice is a launch constant frozen into
-    a CUDA graph.  A FULL graph replays batches of the query length it was captured with
-    (``md`` is the capture-time metadata: 1 for decode, ``1 + k`` for verification).  A
-    PIECEWISE graph replays any mixed / prefill batch whatever dummy batch it was
-    captured with, so it always takes the separate write (which is also correct for
-    single tokens)."""
-    return md.max_query_len == 1 and not _tracing_piecewise_graph()
+
+def conv_writes_in_op(
+    md: Inkling2Metadata,
+    ring_rows: int = 4,
+    kernel_size: int = 4,
+) -> bool:
+    """Whether the conv ops write the state themselves.
+
+    In a request chunk ``[qs, qe)`` of ``q = qe - qs`` tokens starting at position
+    ``p0``, in-chunk history taps come directly from the immutable input tensor ``x``
+    and ``m.cache`` is read only at ``{p0 - (k - 1), ..., p0 - 1}`` while
+    ``write_state`` writes ``{p0, ..., p0 + q - 1}`` into ``pos % ring``.  Those ring
+    slots are strictly disjoint across all CTAs whenever ``q <= ring - (k - 1)`` (and
+    for ``q == 1`` a single thread per channel reads before writing even with
+    ``ring == k - 1``).
+
+    A FULL graph replays batches of the uniform query length it was captured with
+    (1 for decode, ``1 + K`` for speculative verification, where ``ring == k + K_max``
+    gives ``ring - (k - 1) == 1 + K_max >= q``).  A PIECEWISE graph replays any mixed /
+    prefill batch whatever dummy batch it was captured with, so it always takes the
+    separate write.
+    """
+    max_in_op = max(1, ring_rows - (kernel_size - 1))
+    return not _tracing_piecewise_graph() and md.max_query_len <= max_in_op
 
 
 def _tracing_piecewise_graph() -> bool:
@@ -484,6 +501,62 @@ def _tracing_piecewise_graph() -> bool:
         is_forward_context_available()
         and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
     )
+
+
+def _is_uniform_multi_query(md: Inkling2Metadata) -> bool:
+    """Whether ``md`` has ``max_query_len >= 2`` and no ``q_len == 1`` requests."""
+    if md.max_query_len <= 1:
+        return False
+    if (
+        is_forward_context_available()
+        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+    ):
+        return True
+    return md.num_reqs > 0 and md.num_actual_tokens == md.num_reqs * md.max_query_len
+
+
+def attention_splits_hip(
+    num_reqs: int,
+    num_kv_heads: int,
+    window: int,
+    max_seq_len: int,
+    max_query_len: int,
+    *,
+    uniform_multi_q: bool = False,
+) -> tuple[int, int, int | None]:
+    """Serving split policy ``(splits_decode, splits_tile, tile_impl)`` for
+    ``attend_hip``.
+
+    * Short-key decode / verify (``1 <= max_query_len <= 8`` with
+      ``0 < window <= 1024`` or ``max_seq_len <= 1024``, while
+      ``VLLM_INKLING2_DECODE_FUSED`` is enabled): returns ``(0, 0, None)`` so
+      ``inkling2_attention`` runs one GQA fused launch
+      ``grid(nkv, max_query_len, R)`` with no tile or combine launch.
+    * Uniform ``max_query_len >= 2`` batches on the tile path (long-context full
+      attention verify, uniform prefill chunks): skips the dead ``i2_decode_*``
+      launch via ``_TILE_SKIP_DECODE`` and allocates no decode partial rows.
+    """
+    from vllm import _custom_ops as ops
+
+    mode = ops._INKLING2_DECODE_FUSED
+    short_keys = (0 < window <= _FUSED_MAX_KEYS) or (max_seq_len <= _FUSED_MAX_KEYS)
+    if (
+        mode not in ("", "0", "nh")
+        and 1 <= max_query_len <= _FUSED_MAX_QUERY_LEN
+        and short_keys
+    ):
+        return 0, 0, None
+
+    splits_decode, splits_tile = ops.inkling2_attention_splits(
+        num_reqs, num_kv_heads, window, max_seq_len, max_query_len
+    )
+    if uniform_multi_q and max_query_len > 1:
+        small_sliding = window > 0 and max_query_len <= 32
+        base_tile = (
+            0 if ops._INKLING2_PREFILL_ATTN_TILE in ("", "0") or small_sliding else 1
+        )
+        return 1, splits_tile, base_tile | _TILE_SKIP_DECODE
+    return splits_decode, splits_tile, None
 
 
 @eager_break_during_piecewise_capture
@@ -511,16 +584,26 @@ def attend_hip(
     from vllm import _custom_ops as ops
 
     kv_md = live_metadata(kv_owner.prefix, captured_md)
+    uniform_multi_q = _is_uniform_multi_query(kv_md)
     key = (layer.num_kv_heads, layer._window)
     splits = kv_md.splits.get(key)
     if splits is None:
-        splits = kv_md.splits[key] = ops.inkling2_attention_splits(
+        sd, st, _ = attention_splits_hip(
             kv_md.num_reqs,
             layer.num_kv_heads,
             layer._window,
             kv_md.max_seq_len,
             kv_md.max_query_len,
+            uniform_multi_q=uniform_multi_q,
         )
+        splits = kv_md.splits[key] = (sd, st)
+    tile_impl: int | None = None
+    if splits != (0, 0) and uniform_multi_q:
+        small_sliding = layer._window > 0 and kv_md.max_query_len <= 32
+        base_tile = (
+            0 if ops._INKLING2_PREFILL_ATTN_TILE in ("", "0") or small_sliding else 1
+        )
+        tile_impl = base_tile | _TILE_SKIP_DECODE
     ops.inkling2_attention(
         named["q"],
         named["rel"],
@@ -546,6 +629,7 @@ def attend_hip(
         kv_md.max_query_len,
         splits[0],
         splits[1],
+        tile_impl=tile_impl,
     )
 
 
@@ -564,15 +648,15 @@ def static_conv_hip(
     fp16 state rounded.
 
     The first ``k - 1`` tokens of a request chunk read their history from the conv
-    state, so a chunk of several tokens writes its inputs after the conv has run
-    (``inkling2_conv_state_write``); a batch of single tokens lets the conv write
-    its own input.  A prefix-cache hit never reads a block that the same step
-    completes: ``Inkling2ConvStateManager`` defers such a request.
+    state, while in-chunk history comes from ``x``; chunks with ``q <= ring - (k - 1)``
+    write their inputs inside the conv op, and longer chunks run
+    ``inkling2_conv_state_write`` afterwards.  A prefix-cache hit never reads a block
+    that the same step completes: ``Inkling2ConvStateManager`` defers such a request.
     """
     from vllm import _custom_ops as ops
 
     offset = owner.stream_ranges[stream][0]
-    write_state = conv_writes_in_op(md)
+    write_state = conv_writes_in_op(md, owner.ring_rows, owner.kernel_size)
     ops.inkling2_sconv_static(
         x,
         conv.conv1d.weight,

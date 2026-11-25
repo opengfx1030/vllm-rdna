@@ -18,7 +18,9 @@ from vllm.v1.worker.gpu.sample.logprob import (
     compute_topk_scores,
 )
 
-CHUNK_SIZE = 1024
+# Cap per-chunk fp32 logits size on RDNA2 (128 x 200k vocab = 98 MiB vs 782 MiB
+# at 1024 rows during run_kv_cache_sizing_warmup, reclaiming ~0.67 GiB KV).
+CHUNK_SIZE = 128 if on_rdna2_hip() else 1024
 # Cap rows x k per torch.topk call, whose workspace grows with both (~5.5 GiB
 # for 1024 rows at a 152k vocab). Only splits chunks when k is very large.
 TOPK_MAX_ELEMENTS = 64 << 20

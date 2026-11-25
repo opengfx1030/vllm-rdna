@@ -10,9 +10,10 @@ must not import the speculator, which is resolved by name on the GPU worker only
 * ``{"adaptive_k": {}}`` makes the scheduler pick the number of drafts every step
   verifies from the running acceptance of the batch
   (``vllm/v1/spec_decode/dynamic/adaptive.py``); the batch-size schedule
-  (``num_speculative_tokens_per_batch_size``) bounds it.  The dict may override the
-  step cost model (``StepCostModel`` fields) and the estimator (``AdaptiveSpecTokens``
-  fields).
+  (``num_speculative_tokens_per_batch_size``, e.g. ``[[1, 1, 7], [2, 2, 2],
+  [3, 16, 0]]`` on TP=1 and ``[[1, 2, 7], [3, 8, 0]]`` on TP=2 / TP=4) bounds it.
+  The dict may override the step cost model (``StepCostModel`` fields) and the
+  estimator (``AdaptiveSpecTokens`` fields).
 * ``{"draft_vocab": "ids.npy"}`` restricts the greedy draft to the token ids listed
   in an offline file (``tools/rdna/inkling2/draft_vocab.py``): its LM-head sweep and
   folded-head rows shrink in proportion, at a small cost in acceptance.

@@ -80,8 +80,8 @@ port on purpose: only one runs on a given set of cards at a time.
 | `flashnext-pp3-mtp2` | Flash-Next AWQ-W4A16 | 1 x 3 | 3 | 18097 | 262144 | 4 | MTP=2 | partition 17,17,14, needs the W4A16 drafter checkpoint |
 | `flashnext-tp4pp2-mtp2` | Flash-Next AWQ-W4A16 | 4 x 2 (EP4) | 8 | 18099 | 262144 | 8 | MTP=2 | `PCI_BUSES` of the eight-card reference box |
 | `flashnext-tp8-mtp2` | Flash-Next AWQ-W4A16 | 8 x 1 (EP8) | 8 | 18098 | 262144 | 8 | MTP=2 | `PCI_BUSES` of the eight-card reference box |
-| `inkling2-mini-tp1` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 180000 | 16 | none | `ATTN=none`, one image per prompt, `prompt-tokens-details`, no TunableOp |
-| `inkling2-mini-tp1-dspark` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 115000 | 16 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | sources `inkling2-mini-tp1`; `ADAPTIVE=1` + optional `DRAFT_VOCAB` built in |
+| `inkling2-mini-tp1` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 194000 | 16 | none | `ATTN=none`, one image per prompt, `prompt-tokens-details`, no TunableOp |
+| `inkling2-mini-tp1-dspark` | Inkling-2-Mini | 1 x 1 | 1 | 18221 | 135000 | 16 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | sources `inkling2-mini-tp1`; `ADAPTIVE=1` (`MAXLEN=125000`) + optional `DRAFT_VOCAB` built in |
 | `inkling2-mini-tp2` | Inkling-2-Mini | 2 x 1 | 2 | 18222 | 720000 | 8 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | one-shot HIP all-reduce, `MAXBAT=1024`; `ADAPTIVE=1` / `DRAFT_VOCAB`, `DSPARK=0` for 1M ctx |
 | `inkling2-mini-tp4` | Inkling-2-Mini | 4 x 1 | 4 | 18223 | 1048576 | 8 | DSpark, 7 drafted, 2 verified (`b<=2`), off at `b>=3` | one-shot HIP all-reduce, 4096-tok prefill, full 1M ctx fits; `ADAPTIVE=1` / `DRAFT_VOCAB` / `DSPARK=0` |
 

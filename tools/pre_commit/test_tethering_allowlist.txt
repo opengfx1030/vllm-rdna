@@ -84,6 +84,7 @@ tests/models/inkling2_loop/test_hi2_loader.py  # fork-only HI2 Inkling checkpoin
 tests/models/inkling2_loop/test_hi2_reference.py  # fork-only HI2 Inkling decode + routed MoE vs the quantizer on its tiny output (3.7 min CPU fixture); not in CI
 tests/models/inkling2_loop/test_hi2_slots.py  # fork-only HI2 kit slot / HIP->PCI gate (a2/b4 table, fake six-V620 table), CPU unit test; not in CI
 tests/models/inkling2_loop/test_hi2_kernel_gpu.py  # fork-only HI2 Inkling grouped expert GEMMs vs the fp32 reference on gfx1030, tiny HI2 dir from HI2_TINY_DIR; skipped off-GPU, not in CI
+tests/models/inkling2_loop/test_loopcd.py  # fork-only Inkling-2 LoopCD (arXiv:2610.02185) CPU/GPU unit, prefix-cache and HIP-graph tests; not in CI
 tests/models/inkling2_loop/test_moe.py  # fork-only Inkling-2 NVFP4/MXFP8 MoE vs fp32 reference; GPU cases need gfx1030 and the moe_*_rdna2 ops, not in CI
 tests/models/inkling2_loop/test_moe_prefill_bm_gpu.py  # fork-only Inkling-2 prefill expert kernels at the model level on gfx1030 (tiny router-stable checkpoints, kernels off / on / W4A8, op call counters prove which path ran); skipped off-GPU, not in CI
 tests/models/inkling2_loop/test_moe_prefill_flags.py  # fork-only Inkling-2 prefill expert kernel switches (defaults, rollback flag, token gate, K eligibility), CPU unit test; not in CI
