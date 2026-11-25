@@ -56,7 +56,12 @@ older `HI2Inkling` name is read only as a foreign holder. `serve.sh` writes the 
 request first, then the holder, and waits for 28 GiB free; with a foreign holder it
 writes a request and exits (never deletes the file). `smoke.sh` still requires this
 kit's holder. Both look at the fair queue (an older `.request`) before the boot and
-at the slot's quiet file before every measured cell.
+at the slot's quiet file before every measured cell. Nested boots started by the
+one-shot driver pass `LEASE_INHERIT=1`: they reuse the driver's live holder only
+when it is ours, alive and the free gate it recorded at acquisition is >= 28 GiB;
+they write no request and never release the holder (the driver does, once). A
+foreign holder (or a missing/stale one) still refuses/queues as above, and a
+request written by the same process no longer queues behind itself.
 
 Protocol the scripts enforce (and the CPU tests check, see section 1):
 

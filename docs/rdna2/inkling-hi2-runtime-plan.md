@@ -366,3 +366,18 @@ first session parked, and the reason neither needs a format change:
   assignments were passed after `nohup`/`setsid`, so every real boot would have
   ignored SLOT/HIP/PORT/GMEM; they are now before the launcher, and a boot whose
   serve.sh exits before /health fails in <=10 s instead of waiting 30 min.
+
+* **2026-11-25 (nested lease deadlock, real a2 failure).**  The first real card
+  run failed at `smoke`: every boot under the driver called `lease_acquire`
+  again, and once its own request was on the slot (the same `$$` retrying after
+  a VRAM-gate iteration) the verifier's "our own request is live -> queue" rule
+  queued it behind itself for 1800 s.  Fix: the driver takes ONE lease after the
+  kernel step and every boot inherits it (`LEASE_INHERIT=1`): inherit only when
+  the holder is ours+alive, no request is queued, and the free gate recorded in
+  `<owner>.<slot>.gate` at acquisition is >= 28 GiB; foreign/stale holders fall
+  back to the normal refuse/queue path; inherit release is a no-op so a child
+  cannot delete the run's holder.  The same-process request no longer queues
+  behind itself (a different pid of our owner still does).  CPU tests cover
+  own-holder inheritance, foreign refusal, no-op release and the self-request;
+  three mutants (foreign bypass, release-deletes-holder, self-queue) are killed
+  by them.

@@ -27,6 +27,9 @@
 #           DRM_SYSFS=/sys/class/drm and LEASE_FREE_GIB=28 (then the holder is
 #           written only when no other holder exists and every slot GPU has
 #           >= 28 GiB free; the release trap is armed before a2.request),
+#           LEASE_INHERIT=1 (started by the one-shot driver: inherit its live
+#           holder for this slot instead of writing a nested request/holder;
+#           a foreign holder still refuses, and release never deletes it),
 #           TREE (default: this worktree), RECIPE=inkling2-mini-tp2, PORT=18230,
 #           VISION_IMAGES=1 (the per-prompt image cap when VISION=1),
 #           MAXLEN (default 8192; 720000 when DSPARK=1), MAXBAT (default 256;

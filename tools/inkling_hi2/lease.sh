@@ -27,6 +27,13 @@ LEASE_POLL_SECONDS=${LEASE_POLL_SECONDS:-30}
 LEASE_WAIT_SECONDS=${LEASE_WAIT_SECONDS:-1800}
 LEASE_REQUEST=${LEASE_REQUEST:-}
 LEASE_HOLDER_CREATED=${LEASE_HOLDER_CREATED:-}
+# Inherit mode: a parent that already holds this slot's lease (the one-shot
+# driver) lets its child boots skip request/holder creation and release.  The
+# holder must be ours, its pid alive, and the free gate recorded by the owner
+# at acquisition time must be >= LEASE_FREE_GIB (a queued request does not
+# interrupt the holder's own nested boots; the requester waits for our release).
+LEASE_INHERIT=${LEASE_INHERIT:-0}
+LEASE_INHERIT_ACTIVE=${LEASE_INHERIT_ACTIVE:-0}
 
 lease_holders() {
     local f
@@ -95,15 +102,36 @@ lease_pid_alive() {
 # Remove our request (only while it is still ours) and our holder (only if this
 # process wrote it).
 lease_release() {
+    if [[ $LEASE_INHERIT_ACTIVE == 1 ]]; then
+        # Never delete the owner's holder: the outer driver releases it.
+        LEASE_REQUEST=
+        LEASE_HOLDER_CREATED=
+        return 0
+    fi
     if [[ -n $LEASE_REQUEST ]] &&
         [[ $(lease_line_owner "$LEASE_REQUEST") == "$OWNER" ]]; then
         rm -f "$LEASE_REQUEST"
     fi
     if [[ -n $LEASE_HOLDER_CREATED ]]; then
-        rm -f "$LEASE_DIR/$OWNER.$SLOT"
+        rm -f "$LEASE_DIR/$OWNER.$SLOT" "$LEASE_DIR/$OWNER.$SLOT.gate"
     fi
     LEASE_REQUEST=
     LEASE_HOLDER_CREATED=
+}
+
+# True when the outer owner's live holder and acquisition-time free gate make
+# this child boot safe to run without its own request/holder.
+lease_inherit_check() {
+    local holder="$LEASE_DIR/$OWNER.$SLOT" gate free
+    [[ -e $holder ]] || return 1
+    [[ $(lease_line_owner "$holder") == "$OWNER" ]] || return 1
+    lease_pid_alive "$holder" || return 1
+    gate=$(cat "$LEASE_DIR/$OWNER.$SLOT.gate" 2>/dev/null) || gate=
+    [[ -n $gate ]] || return 1
+    free=$gate
+    ((free >= LEASE_FREE_GIB * 1024)) || return 1
+    echo "lease: inheriting our $OWNER.$SLOT (gate ${free} MiB free per GPU at acquisition)"
+    return 0
 }
 
 lease_refuse_foreign() {
@@ -122,6 +150,10 @@ lease_refuse_foreign() {
 # alive and the GPUs still show LEASE_FREE_GIB free; a stale one is dropped.
 lease_acquire() {
     local f free want deadline req_owner request_blocked own_holder
+    if [[ $LEASE_INHERIT == 1 ]] && lease_inherit_check; then
+        LEASE_INHERIT_ACTIVE=1
+        return 0
+    fi
     lease_refuse_foreign "serve.sh" || return 1
     mkdir -p "$LEASE_DIR"
     # Armed before the request is written; serve.sh later replaces both traps
@@ -139,8 +171,12 @@ lease_acquire() {
                 request_blocked=1
                 echo "lease: $SLOT.request belongs to $req_owner; queueing (${LEASE_POLL_SECONDS} s)" >&2
             elif lease_pid_alive "$LEASE_DIR/$SLOT.request"; then
-                request_blocked=1
-                echo "lease: our own $SLOT.request is live (pid $(lease_line_pid "$LEASE_DIR/$SLOT.request")); queueing (${LEASE_POLL_SECONDS} s)" >&2
+                if [[ $(lease_line_pid "$LEASE_DIR/$SLOT.request") == "$$" ]]; then
+                    : # our own request from an earlier iteration: wait on the gate
+                else
+                    request_blocked=1
+                    echo "lease: our own $SLOT.request is live (pid $(lease_line_pid "$LEASE_DIR/$SLOT.request")); queueing (${LEASE_POLL_SECONDS} s)" >&2
+                fi
             else
                 rm -f "$LEASE_DIR/$SLOT.request"
             fi
@@ -168,6 +204,7 @@ lease_acquire() {
                     echo "lease: reusing our holder $OWNER.$SLOT (${free} MiB free per GPU)"
                 else
                     printf '%s pid %s since %s\n' "$OWNER" "$$" "$(date -Is)" >"$LEASE_DIR/$OWNER.$SLOT"
+                    printf '%s\n' "$free" >"$LEASE_DIR/$OWNER.$SLOT.gate"
                     LEASE_HOLDER_CREATED=1
                     echo "lease: took $OWNER.$SLOT (${free} MiB free per GPU)"
                 fi

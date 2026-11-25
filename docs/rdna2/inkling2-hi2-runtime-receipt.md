@@ -769,3 +769,20 @@ bench flags); the bench test drives the pair and solo arms against fake health
 servers, a fake bench and a fake serve and asserts the three calls with
 `--decode-tokens 128`.  Every GPU
 number and the 720k boot remain unmeasured because all GPUs were leased.
+
+### 2026-11-25 fix: nested lease deadlock (a2 card run failed at smoke)
+
+The first real run of the driver failed at `smoke` after 31 min: the driver's
+kernel window and then every boot under it acquired the a2 lease; a boot that
+had written its own `a2.request` and then had to wait on the VRAM gate queued
+behind that same request (`our own a2.request is live (pid ...); queueing`)
+until the 1800 s timeout.  The fix keeps one lease for the whole run: after the
+kernel step the driver calls `lease_acquire` once, and every boot it starts gets
+`LEASE_INHERIT=1`.  Inherit mode requires the slot holder to be ours, its pid
+alive, no request pending, and the free gate the owner recorded at acquisition
+(`<owner>.<slot>.gate`) to be >= 28 GiB; it writes no request/holder and its
+release is a no-op, so a child cannot drop the run's lease.  A foreign or stale
+holder falls back to the normal refuse/queue path.  A request written by the
+same process no longer queues behind itself.  CPU proof: five lease tests (own
+holder, foreign refusal, release no-op, self-request, plus the driver tests on
+the fake sysfs) and three new mutants, all killed.

@@ -15,8 +15,12 @@
 # ran.  Every boot goes through serve.sh (lease request/holder, 28 GiB gate, the
 # slot's quiet windows, the cross-slot boot.lock, the HIP->PCI litmus); the
 # kernel test runs in its own lease window with the same quiet/boot-lock rule
-# (it has no server to carry the lease).  All GPU commands are dry-run (argv only,
-# CPU, no lease) before the first lease is taken.
+# (it has no server to carry the lease).  After it, the driver takes ONE lease for
+# the whole run and every boot it starts inherits it (LEASE_INHERIT=1: the boot
+# verifies the holder is ours+alive and the acquisition-time 28 GiB gate, writes
+# no nested request, and never releases it); a foreign holder still refuses.
+# All GPU commands are dry-run (argv only, CPU, no lease) before the first lease
+# is taken.
 #
 # Results: $RUN (default ~/w4a8_runs/inkling-hi2-runtime/final/<UTC tag>):
 #   STATUS.log  -- timestamped BEGIN/SKIP/PASS/FAIL lines
@@ -161,6 +165,20 @@ check_disk() {
     log "disk guard: $((free_kib / 1024 / 1024)) GiB free under $RT (>= $MIN_FREE_GIB GiB)"
 }
 
+# One lease for the whole run: the kernel step above took and released its own
+# window; every boot from here inherits this holder (LEASE_INHERIT=1) instead of
+# taking a nested request, which would deadlock behind itself.
+lease_begin() {
+    export SLOT OWNER LEASE_DIR EXPECT_PCI_BUSES HIP_VISIBLE_DEVICES
+    # shellcheck source=tools/inkling_hi2/lease.sh
+    . "$HERE/lease.sh"
+    lease_acquire || die "outer lease acquire failed"
+    trap 'stop_all; lease_release' EXIT
+    trap 'stop_all; lease_release; exit 130' TERM INT
+    LEASE_INHERIT=1
+    log "outer lease held for the run: $OWNER.$SLOT (boots inherit it)"
+}
+
 # --- per-step bookkeeping ---------------------------------------------------
 STEP_NUMS=()
 num() { STEP_NUMS+=("$1=$2"); }
@@ -291,7 +309,7 @@ boot_env() { # name port model maxlen maxbat dspark vision gmem
         "EXPECT_PCI_BUSES=$EXPECT_PCI_BUSES" "VENV=$VENV" "MODEL=$model" \
         "SERVER_PID_FILE=$RUN/pids/$name.pid" "PORT=$port" "MAXLEN=$maxlen" \
         "MAXBAT=$maxbat" "SEQS=$SEQS" "GMEM=$gmem" "DSPARK=$dspark" \
-        "VISION=$vision" "WAIT_QUIET=1"
+        "VISION=$vision" "WAIT_QUIET=1" "LEASE_INHERIT=1"
 }
 
 dry_serve() { # label name port model maxlen maxbat dspark vision gmem
@@ -417,6 +435,8 @@ s_kernel() {
         export SLOT OWNER LEASE_DIR QUIET_DIR BOOT_LOCK EXPECT_PCI_BUSES
         export HIP_VISIBLE_DEVICES
         unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
+        export LEASE_INHERIT=0
+        unset LEASE_INHERIT_ACTIVE
         # shellcheck source=tools/inkling_hi2/lease.sh
         . "$HERE/lease.sh"
         lease_acquire
@@ -479,6 +499,8 @@ s_smoke() {
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
         MODEL="$SERVE_DIR" SLOT="$SLOT" HIP_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES" \
         EXPECT_PCI_BUSES="$EXPECT_PCI_BUSES" VENV="$VENV" \
+        OWNER="$OWNER" LEASE_DIR="$LEASE_DIR" QUIET_DIR="$QUIET_DIR" \
+        BOOT_LOCK="$BOOT_LOCK" LEASE_INHERIT=1 \
         STOCK_URL=http://127.0.0.1:18231 STOCK_KL=0 \
         SERVER_PID_FILE="$RUN/pids/smoke.pid" GMEM="$GMEM_PAIR" \
         MAXLEN="$CTX" MAXBAT="$MAXBAT" SEQS="$SEQS" WAIT_QUIET=1 \
@@ -693,6 +715,7 @@ if [[ $DRY_RUN == 1 ]]; then
 fi
 
 run_step kernel s_kernel
+lease_begin
 run_step serve_dir s_serve_dir
 run_step smoke s_smoke
 run_step kl s_kl
@@ -703,6 +726,8 @@ run_step dspark s_dspark
 run_step boot720 s_boot720
 
 stop_all
+lease_release
 trap - EXIT
+trap - TERM INT
 summary "PASS"
 log "DONE: $RUN/summary.md"

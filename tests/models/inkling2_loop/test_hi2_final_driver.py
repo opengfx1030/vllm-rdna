@@ -25,6 +25,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 DRIVER = ROOT / "tools" / "inkling_hi2" / "validate_final_a2.sh"
+LEASE_SH = ROOT / "tools" / "inkling_hi2" / "lease.sh"
 
 pytestmark = pytest.mark.skipif(not DRIVER.is_file(), reason="driver missing")
 
@@ -43,6 +44,8 @@ def make_kit(base: Path) -> dict:
     kit = base / "kit"
     kit.mkdir()
     shutil.copy(DRIVER, kit / "validate_final_a2.sh")
+    shutil.copy(LEASE_SH, kit / "lease.sh")
+    shutil.copy(ROOT / "tools" / "inkling_hi2" / "slot.py", kit / "slot.py")
     _stub(
         kit / "serve.sh",
         'echo "DRY MODEL=$MODEL MAXLEN=$MAXLEN DSPARK=$DSPARK VISION=$VISION"; '
@@ -86,6 +89,8 @@ def make_kit(base: Path) -> dict:
     os.symlink(sys.executable, venv / "bin" / "python")
     for d in ("quantizer", "deps", "rt"):
         (kit / d).mkdir()
+    _drm_tree(kit)
+    shim = _date_shim(kit)
     return {
         "driver": kit / "validate_final_a2.sh",
         "kit": kit,
@@ -95,12 +100,13 @@ def make_kit(base: Path) -> dict:
         "evaltree": evaltree,
         "venv": venv,
         "calls": kit / "calls",
+        "shim": shim,
     }
 
 
 def run(k: dict, tag: str, **extra) -> subprocess.CompletedProcess:
     env = {
-        "PATH": os.environ["PATH"],
+        "PATH": str(k["shim"]) + os.pathsep + os.environ["PATH"],
         "HOME": os.environ.get("HOME", "/"),
         "V": sys.executable,
         "VENV": str(k["venv"]),
@@ -124,6 +130,9 @@ def run(k: dict, tag: str, **extra) -> subprocess.CompletedProcess:
         "VALIDATE": str(k["kit"] / "validate.py"),
         "CHECK_REAL": str(k["kit"] / "check.py"),
         "LEASE_DIR": str(k["kit"] / "lease"),
+        "DRM_SYSFS": str(k["kit"] / "drm"),
+        "LEASE_POLL_SECONDS": "1",
+        "LEASE_WAIT_SECONDS": "5",
         "QUIET_DIR": str(k["kit"] / "quiet"),
         "BOOT_LOCK": str(k["kit"] / "boot.lock"),
         "OWNER": "HI2InklingRuntime",
@@ -217,6 +226,156 @@ def test_first_failure_stops_and_is_recorded(kit):
     assert not (rt(kit, "fail") / "steps" / "kl.pass").exists()
     status = (rt(kit, "fail") / "STATUS.log").read_text()
     assert "FAIL serve_dir" in status
+
+
+def _drm_tree(base: Path) -> Path:
+    """A sysfs-shaped DRM tree with two idle 32 GiB cards (d1, d4)."""
+    drm = base / "drm"
+    for i, bus in enumerate(("d1", "d4")):
+        target = base / f"0000:{bus}:00.0"
+        target.mkdir()
+        (target / "mem_info_vram_used").write_text("0")
+        (target / "mem_info_vram_total").write_text(str(32 * 1024**3))
+        (drm / f"card{i}").mkdir(parents=True)
+        (drm / f"card{i}" / "device").symlink_to(target, target_is_directory=True)
+    return drm
+
+
+def _date_shim(base: Path) -> Path:
+    """A `date` that accepts the Linux `-Is` form the lease uses (macOS does not)."""
+    shim = base / "shim"
+    shim.mkdir(exist_ok=True)
+    (shim / "date").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *-I*) echo 2026-11-25T00:00:00Z ;;\n"
+        '  *) exec /bin/date "$@" ;;\n'
+        "esac\n"
+    )
+    (shim / "date").chmod(0o755)
+    return shim
+
+
+def lease_run(tmp_path: Path, script: str, inherit: int = 1):
+    lease_dir = tmp_path / "lease"
+    lease_dir.mkdir(exist_ok=True)
+    shim = _date_shim(tmp_path)
+    env = {
+        "PATH": str(shim) + os.pathsep + os.environ["PATH"],
+        "HOME": os.environ.get("HOME", "/"),
+        "OWNER": "HI2InklingRuntime",
+        "SLOT": "a2",
+        "LEASE_DIR": str(lease_dir),
+        "EXPECT_PCI_BUSES": "d1,d4",
+        "DRM_SYSFS": str(_drm_tree(tmp_path)),
+        "LEASE_FREE_GIB": "28",
+        "LEASE_POLL_SECONDS": "1",
+        "LEASE_WAIT_SECONDS": "5",
+        "LEASE_INHERIT": str(inherit),
+        "LEASE_SH": str(LEASE_SH),
+    }
+    r = subprocess.run(
+        ["bash", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return r, lease_dir
+
+
+def _own_holder(lease_dir: Path, pid: int, gate: str | None = "32768") -> None:
+    (lease_dir / "HI2InklingRuntime.a2").write_text(
+        f"HI2InklingRuntime pid {pid} since test\n"
+    )
+    if gate is not None:
+        (lease_dir / "HI2InklingRuntime.a2.gate").write_text(gate + "\n")
+
+
+def test_lease_inherit_own_holder_skips_queue(tmp_path):
+    lease_dir = tmp_path / "lease"
+    lease_dir.mkdir()
+    _own_holder(lease_dir, os.getpid())
+    r = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -euo pipefail\n. "$LEASE_SH"\nlease_acquire\necho INHERITED\n',
+        ],
+        env={
+            "PATH": str(_date_shim(tmp_path)) + os.pathsep + os.environ["PATH"],
+            "HOME": os.environ.get("HOME", "/"),
+            "OWNER": "HI2InklingRuntime",
+            "SLOT": "a2",
+            "LEASE_DIR": str(lease_dir),
+            "EXPECT_PCI_BUSES": "d1,d4",
+            "DRM_SYSFS": str(_drm_tree(tmp_path)),
+            "LEASE_FREE_GIB": "28",
+            "LEASE_POLL_SECONDS": "1",
+            "LEASE_WAIT_SECONDS": "5",
+            "LEASE_INHERIT": "1",
+            "LEASE_SH": str(LEASE_SH),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "INHERITED" in r.stdout, r.stderr
+    assert "inheriting our HI2InklingRuntime.a2" in r.stdout, r.stdout
+    assert not (lease_dir / "a2.request").exists()
+    assert (lease_dir / "HI2InklingRuntime.a2").exists()
+
+
+def test_lease_inherit_foreign_holder_refuses(tmp_path):
+    lease_dir = tmp_path / "lease"
+    lease_dir.mkdir()
+    (lease_dir / "OtherAgent.a2").write_text(
+        f"OtherAgent pid {os.getpid()} since test\n"
+    )
+    (lease_dir / "OtherAgent.a2.gate").write_text("32768\n")
+    # The gate that a *bypassed* inherit check would read; it must still not
+    # let a foreign holder through.
+    (lease_dir / "HI2InklingRuntime.a2.gate").write_text("32768\n")
+    r, _ = lease_run(
+        tmp_path,
+        'mkdir -p "$LEASE_DIR"\n'
+        '. "$LEASE_SH"\n'
+        "if lease_acquire; then echo ACQ; else echo REFUSED; fi\n",
+        inherit=1,
+    )
+    assert "REFUSED" in r.stdout, r.stdout + r.stderr
+    assert "holds the a2 lease" in r.stderr, r.stderr
+
+
+def test_lease_release_inherit_keeps_owner_holder(tmp_path):
+    lease_dir = tmp_path / "lease"
+    lease_dir.mkdir()
+    _own_holder(lease_dir, os.getpid())
+    r, _ = lease_run(
+        tmp_path,
+        'mkdir -p "$LEASE_DIR"\n'
+        '. "$LEASE_SH"\n'
+        "lease_acquire\nlease_release\necho DONE\n",
+        inherit=1,
+    )
+    assert "DONE" in r.stdout, r.stderr
+    assert (lease_dir / "HI2InklingRuntime.a2").exists()
+    assert (lease_dir / "HI2InklingRuntime.a2.gate").exists()
+
+
+def test_lease_own_request_does_not_self_queue(tmp_path):
+    r, lease_dir = lease_run(
+        tmp_path,
+        'mkdir -p "$LEASE_DIR"\n'
+        '. "$LEASE_SH"\n'
+        'printf \'%s pid %s since t\\n\' "$OWNER" "$$">"$LEASE_DIR/$SLOT.request"\n'
+        "lease_acquire\ntrap - EXIT\necho ACQUIRED\n",
+        inherit=0,
+    )
+    assert "ACQUIRED" in r.stdout, r.stderr
+    assert "queueing" not in r.stdout + r.stderr, r.stdout + r.stderr
+    assert (lease_dir / "HI2InklingRuntime.a2").exists()
+    assert not (lease_dir / "a2.request").exists()
 
 
 FAKE_HEALTH = """

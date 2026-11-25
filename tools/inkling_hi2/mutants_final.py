@@ -25,7 +25,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 TEST = "tests/models/inkling2_loop/test_hi2_final_driver.py"
-SUBSET = "dry_run or disk_guard or resume or first_failure or bench"
+SUBSET = (
+    "dry_run or disk_guard or resume or first_failure or bench or "
+    "lease_inherit or own_request"
+)
 
 # (name, [(file, old, new), ...], pytest -k of the tests that must fail)
 MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
@@ -61,6 +64,51 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
             )
         ],
         "resume",
+    ),
+    (
+        "inherit_unconditional",
+        [
+            (
+                "lease.sh",
+                "if [[ $LEASE_INHERIT == 1 ]] && lease_inherit_check; then",
+                "if [[ $LEASE_INHERIT == 1 ]]; then",
+            )
+        ],
+        "lease_inherit_foreign",
+    ),
+    (
+        "inherit_release_removes_holder",
+        [
+            (
+                "lease.sh",
+                (
+                    "        # Never delete the owner's holder: the outer "
+                    "driver releases it.\n"
+                    "        LEASE_REQUEST=\n"
+                    "        LEASE_HOLDER_CREATED=\n"
+                    "        return 0"
+                ),
+                (
+                    "        # Never delete the owner's holder: the outer "
+                    "driver releases it.\n"
+                    "        LEASE_REQUEST=\n"
+                    '        rm -f "$LEASE_DIR/$OWNER.$SLOT"\n'
+                    "        return 0"
+                ),
+            )
+        ],
+        "lease_release_inherit",
+    ),
+    (
+        "own_request_self_queues",
+        [
+            (
+                "lease.sh",
+                'if [[ $(lease_line_pid "$LEASE_DIR/$SLOT.request") == "$$" ]]; then',
+                "if false; then",
+            )
+        ],
+        "own_request",
     ),
     (
         "bench_solo_flags_wrong",
