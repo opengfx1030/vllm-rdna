@@ -25,6 +25,7 @@ Upstream's rules (the pointer above and `AGENTS.md`) still apply. The fork's cod
 | Default path, numerics should not change | token-exact gate + speed receipt |
 | Default path, numerics change | quality gate + speed receipt |
 | Lossy feature (int8 activations, int4 KV, ...) | opt-in only; quality gate + task-eval A/B; turning it on in a recipe needs the task-eval A/B and maintainer sign-off |
+| Contrastive / quality-enhancing decoding (e.g. LoopCD) | opt-in only; `alpha = 0` / disabled path `0-ULP` bit-identical to baseline; prefix-cache invariance; programmatic Math + Code task-eval A/B; concurrency + stall probes; DSpark/MTP acceptance rate when applicable |
 | New model | full set on that model; if shared code changed, also on the existing recipes it reaches |
 | Touches speculative decoding / drafter / verify | also run the MTP recipe and report acceptance length |
 
@@ -44,6 +45,18 @@ Both parts must pass.
 - Fixed: the perplexity rise is at most 2 % (`tools/rdna/port_v031/quality_ab.py --max-ppl-rel 0.02`), the concurrency probe has 0 FAIL, and the greedy probes pass.
 
 These boots use the recipe's production configuration, so that the floor measures the run-to-run noise of the configuration you ship.
+
+### Contrastive / quality-enhancing decoding modes (e.g. LoopCD)
+
+Opt-in decoding modes that intentionally alter output logits to improve reasoning quality must satisfy:
+
+- **Zero-regression when off**: the `alpha = 0` / disabled path must be `0-ULP` bit-identical to baseline (no numerical drift when off).
+- **Opt-in switches and prefix-cache invariance**: gated behind per-request (`SamplingParams.extra_args`), environment, or recipe switches; mixing enabled and disabled requests must preserve prefix-cache invariance and pass `concurrency_probe.py` (0 FAIL) and `stall_probe.py`.
+- **Programmatic Math + Code task-eval A/B**: run a reproducible, programmatically verified Math + Code suite (e.g. `tools/rdna/inkling2/eval_loopcd.py` — 20-problem math + Python coding suite with exact answer / unit-test verification) comparing baseline against enabled arms, reporting:
+    - per-domain pass rates (Math, Code, Total) and net `+gain / -loss` regressions vs baseline,
+    - mean output tokens and truncation count,
+    - decode latency overhead, and
+    - speculative acceptance rate (`tok/step`) under DSpark / MTP when applicable.
 
 ### Concurrency, async and stalls
 

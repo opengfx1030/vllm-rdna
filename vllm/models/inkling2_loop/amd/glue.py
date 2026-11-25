@@ -24,6 +24,7 @@ import torch
 from vllm import _custom_ops as ops
 
 from ..configs import Inkling2LoopTextConfig
+from .loopcd import LOOPCD_MAX_WEAK_ROWS
 
 #: tokens per MoE router / expert-GEMM call (bounds the ``[M * top_k, 2I]`` scratch and
 #: the ``T * K <= 8192`` limit of ``inkling2_glue_moe_route``)
@@ -177,9 +178,24 @@ class Inkling2GlueWorkspace:
             )
             sizes16["d"] = 3 * T * R
             self.gate_counters = torch.zeros(3 * T, **i32)  # zero ONCE
+            self.loopcd_omega: torch.Tensor | None = torch.zeros(T, **f32)
+            self.loopcd_omega_blk: torch.Tensor | None = torch.zeros(T, **f32)
+            self.loopcd_logits_flag: torch.Tensor | None = torch.zeros(1, **i32)
+            self.loopcd_weak_h: torch.Tensor | None = torch.zeros(
+                LOOPCD_MAX_WEAK_ROWS, H, **f16
+            )
         else:
             self.prev_blk = None
             self.gate_counters = None
+            self.loopcd_omega = None
+            self.loopcd_omega_blk = None
+            self.loopcd_logits_flag = None
+            self.loopcd_weak_h = None
+        self.loopcd_hidden_active: bool = False
+        self.loopcd_logits_active: bool = False
+        self.loopcd_weak_pass: int = -1
+        self.loopcd_logits_indices: torch.Tensor | None = None
+        self.loopcd_weak_is_compact: bool = False
         self.f32 = {k: torch.empty(n, **f32) for k, n in sizes.items()}
         self.f16 = {k: torch.empty(n, **f16) for k, n in sizes16.items()}
 
@@ -237,6 +253,10 @@ class Inkling2GlueWorkspace:
             self.blk,
             self.prev_blk,
             self.gate_counters,
+            self.loopcd_omega,
+            self.loopcd_omega_blk,
+            self.loopcd_logits_flag,
+            self.loopcd_weak_h,
             self.sorted_ids,
             self.expert_ids,
             self.topk_ids,
