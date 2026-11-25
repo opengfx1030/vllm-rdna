@@ -753,13 +753,14 @@ $HOME/Apps/vllm/venv-7.14.0_0.34.0-rebase-1e1cac5340/bin/python -m pytest \
   tests/models/inkling2_loop/test_hi2_slots.py \
   tests/models/inkling2_loop/test_hi2_vision_mtp.py \
   tests/models/inkling2_loop/test_hi2_final_driver.py -q
-# 83 passed, 10 skipped (the GPU tests), 15 warnings in 223.49s (head 39656c2a3d)
+# 84 passed, 10 skipped (the GPU tests), 15 warnings in 256.32s (head 1bcce0c81e)
 ```
 
 `test_hi2_final_driver.py` is hermetic (stub tools; no GPU, no /tmp): dry-run
 takes no lease, the disk guard stops before any dry-run, a PASSed step is skipped
 on resume, and the first failure writes `| serve_dir | FAIL |` and stops.
 A real `DRY_RUN=1` on the box against the 3.5 bpw directory passed in 30 s
+(and again as `dryrun-2` after the bench/boot changes, RC=0)
 (RC=0, no lease): the kernel-test collection, all five serve argvs, the four
 probes' --help and the eval CLI --help ran on CPU; results under
 `final/dryrun-1/`.  `tools/inkling_hi2/mutants_final.py` killed **5/5** mutants (disk guard off,
