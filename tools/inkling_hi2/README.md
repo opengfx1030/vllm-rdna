@@ -178,18 +178,22 @@ MODEL=$HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5
 bash $TREE/tools/inkling_hi2/validate_final_a2.sh   # prints the pid and the tail command
 ```
 
-Step order (the requested order, with the vision probe grouped into the pair
-boot so it cannot be lost to a later 720k boot failure): `kernel` (its own
-lease window + tiny fixture) -> `serve_dir` (prep + validate + check_real on
-CPU) -> `smoke` (stock resident, HI2 boots itself) -> `kl` (mixed gated at 0.15,
-long 8k/16k recorded) -> `bench` (perf, both servers) -> `eval` (two labels on
-the a2 tree) -> `vision` -> `dspark` (spec pair: 16384, GMEM 0.45 each) ->
-`boot720` (single HI2, 720000, GMEM 0.92; `/v1/models` must report 720000).
-`vision` before `dspark` is the only order change and is deliberate: a 720k KV
-failure must not discard the vision evidence.  Everything that shares the
-stock+HI2 pair runs under that one boot (VISION=1, 32768, GMEM 0.45 each); all
-boots go through `serve.sh` (28 GiB lease gate, quiet windows, boot.lock,
-HIP->PCI litmus).  The estimates in the header: ~4 h (5 h budget).
+Step order (all requested checks; grouped to keep the pair boot alive):
+`kernel` (own lease window + tiny fixture) -> `serve_dir` (prep + validate +
+check_real on CPU) -> `smoke` (stock resident, HI2 boots itself) -> `kl` (mixed
+gated at 0.15, long 8k/16k recorded) -> `eval` (two labels on the a2 tree) ->
+`vision` -> `bench` -> `dspark` (spec pair: 16384, GMEM 0.45 each) -> `boot720`
+(single HI2, 720000, GMEM 0.92; `/v1/models` must report 720000).  `bench` runs
+last inside the pair boot and has TWO arms: the pair arm (both servers resident
+at GMEM 0.45, the conservative number) and then a SOLO arm: stock is stopped and
+HI2 is booted alone at GMEM 0.92 with the recipe's MAXBAT/MAXLEN.  Both arms use
+`--decode-tokens 128` (less prefill contamination of a decode step) and both are
+recorded in `steps/bench.json` with their flags; the card quotes the solo arm
+(production runs one server) and footnotes the pair ratios.  `vision` before
+`dspark`/`boot720` is deliberate: a 720k KV failure must not discard the vision
+evidence.  Everything that shares the stock+HI2 pair runs under that one boot
+(VISION=1, 32768, GMEM 0.45 each); all boots go through `serve.sh` (28 GiB lease
+gate, quiet windows, boot.lock, HIP->PCI litmus).  ~4 h (5 h budget).
 Useful knobs: `DRY_RUN=1` (assemble and dry-run every GPU argv on CPU, no
 lease), `ONLY=smoke,kl`, `RESUME=1` (default), `BOOT_WAIT`, `CTX`,
 `GMEM_PAIR`, `KL_MIXED_WINDOWS`, `TAG`.  `DETACH=0` for a foreground/tmux run.

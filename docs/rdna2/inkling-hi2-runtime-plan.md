@@ -351,3 +351,18 @@ first session parked, and the reason neither needs a format change:
   stubbed cases: dry-run needs no lease, disk guard, resume skip, stop-on-fail)
   and `mutants_final.py` (four mutants).  `DRY_RUN=1` assembles and dry-runs every
   GPU argv on CPU without touching the lease, so the card is ready for a slot.
+
+* **2026-11-25 (bench pair + solo arms).**  `bench` moved after `vision` (both
+  share the stock+HI2 pair boot) and now has two arms: the pair arm (both
+  servers resident, GMEM 0.45 each, the conservative number) and a solo arm
+  (stock stopped, HI2 alone at GMEM 0.92 with the recipe's MAXBAT/MAXLEN).  Both
+  use `--decode-tokens 128`; `steps/bench.json` records both arms' flags, the
+  three result paths and the derived ratios (`pair_prefill=...`,
+  `solo_prefill_tps=...`, `solo_decode_b4_vs_pair=...`).  The card quotes the
+  solo arm.  The CPU test drives both arms against fake health servers, a fake
+  bench and a fake serve, and asserts three bench calls (stock, hi2, hi2-solo)
+  with `--decode-tokens 128`; one mutant records the pair GMEM on the solo arm
+  and is killed by that test.  This also caught a real boot bug: the env
+  assignments were passed after `nohup`/`setsid`, so every real boot would have
+  ignored SLOT/HIP/PORT/GMEM; they are now before the launcher, and a boot whose
+  serve.sh exits before /health fails in <=10 s instead of waiting 30 min.

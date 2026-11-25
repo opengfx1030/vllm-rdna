@@ -25,7 +25,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 TEST = "tests/models/inkling2_loop/test_hi2_final_driver.py"
-SUBSET = "dry_run or disk_guard or resume or first_failure"
+SUBSET = "dry_run or disk_guard or resume or first_failure or bench"
 
 # (name, [(file, old, new), ...], pytest -k of the tests that must fail)
 MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
@@ -61,6 +61,23 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
             )
         ],
         "resume",
+    ),
+    (
+        "bench_solo_flags_wrong",
+        [
+            (
+                "validate_final_a2.sh",
+                (
+                    'num "solo_flags" "gmem=$GMEM_SINGLE maxlen=$CTX '
+                    'maxbat=$MAXBAT seqs=$SEQS decode_tokens=$decode"'
+                ),
+                (
+                    'num "solo_flags" "gmem=$GMEM_PAIR maxlen=$CTX '
+                    'maxbat=$MAXBAT seqs=$SEQS decode_tokens=$decode"'
+                ),
+            )
+        ],
+        "bench",
     ),
     (
         "dry_run_skips_tool_help",

@@ -762,6 +762,9 @@ on resume, and the first failure writes `| serve_dir | FAIL |` and stops.
 A real `DRY_RUN=1` on the box against the 3.5 bpw directory passed in 30 s
 (RC=0, no lease): the kernel-test collection, all five serve argvs, the four
 probes' --help and the eval CLI --help ran on CPU; results under
-`final/dryrun-1/`.  `tools/inkling_hi2/mutants_final.py` killed **4/4** mutants (disk guard off,
-failed step not fatal, resume ignored, dry-run skips the tool help).  Every GPU
+`final/dryrun-1/`.  `tools/inkling_hi2/mutants_final.py` killed **5/5** mutants (disk guard off,
+failed step not fatal, resume ignored, dry-run skips the tool help, wrong solo
+bench flags); the bench test drives the pair and solo arms against fake health
+servers, a fake bench and a fake serve and asserts the three calls with
+`--decode-tokens 128`.  Every GPU
 number and the 720k boot remain unmeasured because all GPUs were leased.

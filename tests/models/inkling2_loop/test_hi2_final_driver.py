@@ -10,11 +10,15 @@ logic itself: the dry-run pass (no lease), the disk-free guard, resumability
 No GPU, no torch, no /tmp: everything lives under pytest's tmp_path.
 """
 
+import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -130,6 +134,7 @@ def run(k: dict, tag: str, **extra) -> subprocess.CompletedProcess:
         "TAG": tag,
         "NOTES": "pytest",
         "DETACH": "0",
+        "SETSID": "",
         "MIN_FREE_GIB": "0",
         "CALLS": str(k["calls"]),
     }
@@ -212,3 +217,131 @@ def test_first_failure_stops_and_is_recorded(kit):
     assert not (rt(kit, "fail") / "steps" / "kl.pass").exists()
     status = (rt(kit, "fail") / "STATUS.log").read_text()
     assert "FAIL serve_dir" in status
+
+
+FAKE_HEALTH = """
+import http.server, os, sys
+
+port = int(sys.argv[1])
+pidfile = sys.argv[2] if len(sys.argv) > 2 else None
+if pidfile:
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+"""
+
+FAKE_BENCH = """
+import argparse, json, os
+
+ap = argparse.ArgumentParser()
+for flag in ("--url", "--server-pid", "--label", "--log", "--baseline", "--out"):
+    ap.add_argument(flag)
+ap.add_argument("--decode-tokens", type=int, default=32)
+a = ap.parse_args()
+with open(os.path.join(os.environ["CALLS"], "bench"), "a") as f:
+    f.write(json.dumps(vars(a)) + "\\n")
+tps, b1, b4 = {
+    "stock": (2000.0, 10.0, 12.0),
+    "hi2": (1100.0, 18.0, 22.0),
+}.get(a.label, (1500.0, 15.0, 18.0))
+cells = [
+    {"cell": "prefill", "batch": 1, "prompt_tokens_per_s": tps},
+    {"cell": "decode", "batch": 1, "ms_per_step": b1},
+    {"cell": "decode", "batch": 4, "ms_per_step": b4},
+]
+with open(a.out, "w") as f:
+    json.dump({"label": a.label, "max_model_len": 32768, "cells": cells,
+               "decode_tokens": a.decode_tokens}, f)
+"""
+
+FAKE_SERVE = """#!/usr/bin/env bash
+if [[ ${PRINT:-0} == 1 ]]; then
+    echo "DRY MODEL=$MODEL MAXLEN=$MAXLEN DSPARK=$DSPARK VISION=$VISION"
+    exit 0
+fi
+exec {python} "{FAKE_KIT}/fake_health.py" "$PORT" "$SERVER_PID_FILE"
+"""
+
+
+def test_bench_pair_then_solo_arm(kit):
+    """The bench step runs the pair arm, then a solo HI2 arm at GMEM 0.92."""
+    for port in (18230, 18231):
+        probe = socket.socket()
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            pytest.skip(f"port {port} is busy")
+        finally:
+            probe.close()
+    run_dir = kit["kit"] / "rt" / "bench"
+    (run_dir / "pids").mkdir(parents=True)
+    (kit["kit"] / "fake_health.py").write_text(FAKE_HEALTH)
+    (kit["kit"] / "bench.py").write_text(FAKE_BENCH)
+    serve = kit["kit"] / "fake_serve.sh"
+    body = FAKE_SERVE.replace("{python}", sys.executable).replace(
+        "{FAKE_KIT}", str(kit["kit"])
+    )
+    _stub(serve, body)
+    servers = []
+    for name, port in (("stock", 18231), ("hi2", 18230)):
+        servers.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(kit["kit"] / "fake_health.py"),
+                    str(port),
+                    str(run_dir / "pids" / f"{name}.pid"),
+                ]
+            )
+        )
+    try:
+        deadline = time.time() + 15
+        for port in (18230, 18231):
+            while True:
+                try:
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                    break
+                except OSError:
+                    if time.time() > deadline:
+                        pytest.skip("fake health server did not start")
+                    time.sleep(0.1)
+        r = run(
+            kit,
+            "bench",
+            ONLY="bench",
+            BENCH=str(kit["kit"] / "bench.py"),
+            SERVE=str(serve),
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        numbers = json.loads((run_dir / "steps" / "bench.json").read_text())["numbers"]
+        assert numbers["decode_tokens"] == "128"
+        assert "gmem=0.45" in numbers["pair_flags"]
+        assert "gmem=0.92" in numbers["solo_flags"]
+        ratios = numbers["ratios"]
+        assert "pair_prefill=0.550" in ratios, ratios
+        assert "solo_prefill_tps=1500.0" in ratios, ratios
+        calls = [
+            json.loads(line)
+            for line in (kit["calls"] / "bench").read_text().splitlines()
+        ]
+        assert [c["label"] for c in calls] == ["stock", "hi2", "hi2-solo"], calls
+        assert all(c["decode_tokens"] == 128 for c in calls), calls
+        assert calls[-1]["url"] == "http://127.0.0.1:18230"
+        assert not (run_dir / "pids" / "solo.pid").exists()
+    finally:
+        for proc in servers:
+            proc.kill()

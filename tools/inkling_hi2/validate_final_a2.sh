@@ -33,16 +33,19 @@
 #   3 smoke       stock resident, smoke.sh boots its own HI2 (two-server caps)
 #   4 kl          stock+HI2 pair: mixed 32 windows + long 8k/16k (8 each,
 #                 max_model_len 32768); mixed gated at 0.15, long recorded
-#   5 bench       pair: bench.py stock then HI2
-#   6 eval        pair: task eval main 245 + agentic-probe + vision, labels
+#   5 eval        pair: task eval main 245 + agentic-probe + vision, labels
 #                 stock, stock2, hi2, then compare (eval tree at EVAL_TREE)
-#   7 vision      pair (VISION=1): vision_probe.py + its 4-way mixed batch
+#   6 vision      pair (VISION=1): vision_probe.py + its 4-way mixed batch
+#   7 bench       pair arm (GMEM 0.45 each) then a SOLO arm: stock/HI2 stopped,
+#                 HI2 alone at GMEM 0.92 with the recipe's MAXBAT/MAXLEN; both
+#                 arms use --decode-tokens 128 and both are recorded in the
+#                 step JSON with their flags (the card quotes the solo arm)
 #   8 dspark      HI2 spec+plain pair (16384): mtp_probe.py (identity, per-
 #                 position acceptance, c=1/c=2 speed, no-draft region at 3)
 #   9 boot720     single HI2 DSPARK=1, 720000 context (GMEM=0.92) + health
 #
 # Estimated a2 wall time: about 4 h, budget 5 h (do not start with < 5 h free):
-# CPU/preflight 15 min; kernel 3; smoke 6; KL 25-35; bench 10-15; task eval
+# CPU/preflight 15 min; kernel 3; smoke 6; KL 25-35; bench 12-18; task eval
 # 70-90 (main 245 items at 4 workers: stock ~10 min, HI2 ~15 min; agentic and
 # vision sets and the three compares on top); vision probe 6; DSpark 12; 720k
 # boot 8; boots/loads ~25; lease/quiet waits and retries on top of that.
@@ -115,6 +118,7 @@ SEQS=${SEQS:-4}
 
 MIN_FREE_GIB=${MIN_FREE_GIB:-30}
 DETACH=${DETACH:-1}
+SETSID=${SETSID-setsid}
 RESUME=${RESUME:-1}
 DRY_RUN=${DRY_RUN:-0}
 ONLY=${ONLY:-}
@@ -123,7 +127,7 @@ RUN=${RUN:-$RT/final/$TAG}
 BOOT_WAIT=${BOOT_WAIT:-1800}
 QUIET_WAIT=${QUIET_WAIT:-1800}
 
-STEPS=(kernel serve_dir smoke kl bench eval vision dspark boot720)
+STEPS=(kernel serve_dir smoke kl eval vision bench dspark boot720)
 IFS=, read -r -a _only <<<"$ONLY"
 want() {
     [[ -z ${ONLY//,/} ]] && return 0
@@ -223,10 +227,11 @@ for name, status, seconds, numbers in rows:
     lines.append(f"| {name} | {status} | {seconds} | {numbers} |")
 lines += [
     "",
-    "Boots were grouped: steps 3-7 share the stock+HI2 pair (VISION=1, 32768",
-    "context, GMEM 0.45 each); step 8 uses the HI2 spec/plain pair (16384);",
-    "step 9 is a single HI2 boot at 720000 (GMEM 0.92).  Every boot goes",
-    "through serve.sh (lease 28 GiB gate, quiet windows, boot.lock, HIP->PCI",
+    "Boots were grouped: smoke/kl/eval/vision share the stock+HI2 pair (32768",
+    "context, GMEM 0.45 each) and the bench step's pair arm uses it too; the",
+    "bench solo arm then boots HI2 alone (GMEM 0.92); dspark uses 16384;",
+    "boot720 is a single HI2 boot at 720000.  Every boot goes through",
+    "serve.sh (lease 28 GiB gate, quiet windows, boot.lock, HIP->PCI",
     "litmus).  Per-step logs and JSON are next to this file.",
     "",
 ]
@@ -311,13 +316,19 @@ boot_server() { # name port model maxlen maxbat dspark vision gmem
         die "port $port answers /health but $name.pid is not ours; refusing to touch a foreign server"
     fi
     log "boot $name on port $port"
-    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES setsid nohup \
-        "${envs[@]}" bash "$SERVE" >"$RUN/logs/serve-$name.log" 2>&1 < /dev/null &
-    local i
+    local -a launch=()
+    [[ -n ${SETSID-setsid} ]] && launch=("${SETSID-setsid}")
+    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES "${envs[@]}" "${launch[@]}" nohup \
+        bash "$SERVE" >"$RUN/logs/serve-$name.log" 2>&1 < /dev/null &
+    local boot_pid=$! i
     for ((i = 0; i < BOOT_WAIT / 10; i++)); do
         health "$port" && return 0
         if [[ -f $RUN/pids/$name.pid ]] && ! kill -0 "$(cat "$RUN/pids/$name.pid")" 2>/dev/null; then
             log "boot $name: its pid file is stale; see $RUN/logs/serve-$name.log"
+            return 1
+        fi
+        if ! kill -0 "$boot_pid" 2>/dev/null; then
+            log "boot $name: serve.sh exited before /health; see $RUN/logs/serve-$name.log"
             return 1
         fi
         sleep 10
@@ -497,22 +508,83 @@ s_kl() {
     done
 }
 
-# --- step 5: bench cells ----------------------------------------------------
+# --- step 7: bench cells, pair arm then a solo arm -------------------------
+# The pair arm is the conservative number (two servers resident, GMEM 0.45
+# each); the solo arm is the production shape (one HI2 server, GMEM 0.92) and
+# is the number the card quotes.  Both use --decode-tokens 128 so a decode step
+# is less contaminated by the prefill of the same request.
+bench_extract() { # pair_stock pair_hi2 solo
+    "$V" - "$RUN/steps/bench-pair-stock.json" "$RUN/steps/bench-pair-hi2.json" \
+        "$RUN/steps/bench-solo.json" <<'PY'
+import json
+import sys
+
+stock, pair, solo = (json.load(open(path)) for path in sys.argv[1:4])
+
+
+def cell(run, kind, batch=1):
+    for c in run["cells"]:
+        if c["cell"] == kind and c.get("batch", 1) == batch:
+            return c
+    raise SystemExit(f"missing {kind} b={batch} in {run.get('label')}")
+
+
+p0, p1 = cell(stock, "prefill"), cell(pair, "prefill")
+d1, d4 = cell(pair, "decode", 1), cell(pair, "decode", 4)
+s0, s1, s4 = cell(solo, "prefill"), cell(solo, "decode", 1), cell(solo, "decode", 4)
+print(
+    "pair_prefill=%.3f pair_decode_b1=%.3f pair_decode_b4=%.3f "
+    "solo_prefill_tps=%.1f solo_ms_b1=%.1f solo_ms_b4=%.1f "
+    "solo_prefill_vs_pair=%.3f solo_decode_b4_vs_pair=%.3f"
+    % (
+        p1["prompt_tokens_per_s"] / p0["prompt_tokens_per_s"],
+        d1["ms_per_step"] / cell(stock, "decode", 1)["ms_per_step"],
+        d4["ms_per_step"] / cell(stock, "decode", 4)["ms_per_step"],
+        s0["prompt_tokens_per_s"],
+        s1["ms_per_step"],
+        s4["ms_per_step"],
+        s0["prompt_tokens_per_s"] / p1["prompt_tokens_per_s"],
+        s4["ms_per_step"] / d4["ms_per_step"],
+    )
+)
+PY
+}
+
 s_bench() {
+    local decode=${BENCH_DECODE_TOKENS:-128}
+    local flags="gmem=$GMEM_PAIR maxlen=$CTX maxbat=$MAXBAT seqs=$SEQS decode_tokens=$decode"
     ensure_pair
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
         "$V" "$BENCH" --url http://127.0.0.1:18231 \
         --server-pid "$(cat "$RUN/pids/stock.pid")" \
         --label stock --log "$RUN/logs/serve-stock.log" \
-        --out "$RUN/steps/bench-stock.json" || return 1
+        --decode-tokens "$decode" --out "$RUN/steps/bench-pair-stock.json" || return 1
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
         "$V" "$BENCH" --url http://127.0.0.1:18230 \
         --server-pid "$(cat "$RUN/pids/hi2.pid")" \
         --label hi2 --log "$RUN/logs/serve-hi2.log" \
-        --baseline "$RUN/steps/bench-stock.json" \
-        --out "$RUN/steps/bench-hi2.json" || return 1
-    num "stock" "$RUN/steps/bench-stock.json"
-    num "hi2" "$RUN/steps/bench-hi2.json"
+        --decode-tokens "$decode" \
+        --baseline "$RUN/steps/bench-pair-stock.json" \
+        --out "$RUN/steps/bench-pair-hi2.json" || return 1
+    num "decode_tokens" "$decode"
+    num "pair_flags" "$flags"
+    num "pair_stock" "$RUN/steps/bench-pair-stock.json"
+    num "pair_hi2" "$RUN/steps/bench-pair-hi2.json"
+    log "pair arm done; stopping the pair for the solo arm"
+
+    stop_server stock 18231
+    stop_server hi2 18230
+    boot_server solo 18230 "$SERVE_DIR" "$CTX" "$MAXBAT" 0 0 "$GMEM_SINGLE" ||
+        { log "solo boot failed (see $RUN/logs/serve-solo.log)"; return 1; }
+    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
+        "$V" "$BENCH" --url http://127.0.0.1:18230 \
+        --server-pid "$(cat "$RUN/pids/solo.pid")" \
+        --label hi2-solo --log "$RUN/logs/serve-solo.log" \
+        --decode-tokens "$decode" --out "$RUN/steps/bench-solo.json" || return 1
+    num "solo_flags" "gmem=$GMEM_SINGLE maxlen=$CTX maxbat=$MAXBAT seqs=$SEQS decode_tokens=$decode"
+    num "solo_hi2" "$RUN/steps/bench-solo.json"
+    num "ratios" "$(bench_extract)"
+    stop_server solo 18230
 }
 
 # --- step 6: task eval (main 245 + agentic-probe + vision) -----------------
@@ -624,9 +696,9 @@ run_step kernel s_kernel
 run_step serve_dir s_serve_dir
 run_step smoke s_smoke
 run_step kl s_kl
-run_step bench s_bench
 run_step eval s_eval
 run_step vision s_vision
+run_step bench s_bench
 run_step dspark s_dspark
 run_step boot720 s_boot720
 
