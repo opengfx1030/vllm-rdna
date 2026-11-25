@@ -25,7 +25,7 @@ Files added by this change set: `vllm/models/inkling2_loop/amd/{hi2,loader}.py`
 changes plus `hi2.py` decoding/reference, `amd/moe.py` HI2 experts
 (`_forward_chunk_hi2`, `forward_reference`, `_forward_hip_hi2`), `amd/glue.py`
 (`hi2=True` workspace), `amd/model.py` loader wiring, three test modules (the
-launcher module is `test_hi2_slots.py`, 37 tests), and the tools below
+launcher module is `test_hi2_slots.py`, 40 tests), and the tools below
 (`tools/inkling_hi2/lease.sh` and `quiet_touch.py` carry the lease and the quiet
 touch; `mutants_launchers.py` is the 13-mutant battery; `gpu_temps.py` gained the
 watcher flags; the recipe pins a2 by PCI bus).
@@ -34,11 +34,11 @@ watcher flags; the recipe pins a2 by PCI bus).
 
 | Step | Command (abbreviated) | Exit | Result |
 | --- | --- | --- | --- |
-| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 71 passed, 5 skipped (the 5 GPU tests) |
+| CPU gate | `pytest test_hi2_loader.py test_hi2_slots.py test_loader.py test_hi2_kernel_gpu.py test_hi2_reference.py -q` | 0 | 74 passed, 5 skipped (the 5 GPU tests; 119.5 s on the post-fix tree) |
 | Pre-fix check | the same gate on the 5 new regression tests, old product files | 1 | 5 failed, 16 deselected (the tests can fail) |
 | Kit pre-fix | the new `test_hi2_slots.py` inside a scratch copy of `git archive f34d6cf6bc tools/` (old kit and recipes) | 1 | 32 failed, 5 passed (the protocol and KL tests can fail) |
 | Mutants | `python tools/inkling_hi2/mutants.py --tree <scratch copy>` | 0 | baseline 27 passed; all 21 killed: the 20-mutant battery on the pre-B4 tree plus the changed `hi2_uneven_rows_check_off` and the new `moe_w2_reduce_rows_as_tokens` on the final tree |
-| Launcher mutants | `python tools/inkling_hi2/mutants_launchers.py` | 0 | baseline 11 passed; all 13 killed (lease gate/owner/VRAM, boot-lock release, the pre-launch and post-/health device checks, the server env filters, the temperature threshold, the missing-eviction window, the b4 client refusal, the bench evidence) |
+| Launcher mutants | `python tools/inkling_hi2/mutants_launchers.py` | 0 | baseline 15 passed; all 16 killed (lease gate/owner/VRAM, the foreign-request queue, the stale-holder drop and the live-holder VRAM re-check, boot-lock release, the pre-launch and post-/health device checks, the server env filters, the temperature threshold, the missing-eviction window, the b4 client refusal, the bench evidence) |
 | Real-dir load | `python tools/inkling_hi2/check_real_dir.py --model <bpw3.5> --stock <stock>` | 0 | 1125 text tensors loaded, 0 missing parameters, lm_head == stock |
 | TP suite | `pytest tests/models/inkling2_loop/test_tensor_parallel.py -q` with the workaround below | 0 | 156 passed |
 | Serve dir | `bash tools/inkling_hi2/prep_serve_dir.sh <quantizer out> <serve dir>` | 0 | 15 symlinks + MTP; source untouched |
@@ -50,8 +50,8 @@ watcher flags; the recipe pins a2 by PCI bus).
 
 Everything above was re-run on the **merged** tree (`bae1b21db0` / docs commit
 `ad17998e4e`, csrc = `41ef6ba1e0`, rebuilt `_rocm_C` md5 `3da91a1a5350`): CPU gate
-71 passed / 5 skipped (92.9 s), `mutants.py` 21/21 killed, `mutants_launchers.py`
-13/13 killed, `check_real_dir.py` PASS (1125 tensors, 0 missing, 480 expert
+74 passed / 5 skipped (119.5 s), `mutants.py` 21/21 killed, `mutants_launchers.py`
+16/16 killed, `check_real_dir.py` PASS (1125 tensors, 0 missing, 480 expert
 buffers, 643 dense tensors bit-equal to stock), the stock-recipe `DRY_RUN=1`
 receipt rc 0 with **identical base/head launch plans** and the six boots / 8 speed
 cells / quality / stall plan, archdiff `empty` against `41ef6ba1e0`, and the scan's
@@ -60,7 +60,7 @@ before the merge and were not re-run.
 
 The CPU gate is the six-layer HI2 test set: format declaration/name map/TP slice
 (`test_hi2_loader.py`, 23), the slot/HIP->PCI gate, the lease carrier and the
-launcher protocol (`test_hi2_slots.py`, 37, on a fake visible-device table, a fake
+launcher protocol (`test_hi2_slots.py`, 40, on a fake visible-device table, a fake
 torch and a stub HTTP server plus script checks), the legacy loader
 (`test_loader.py`, 6), the kernel tests collected and skipped off a GPU (5), and the
 reference against the quantizer's own `hi2.format.dequantize` on a tiny HI2 export of
@@ -142,7 +142,7 @@ Kit protocol round (P1-P3), each covered by the then-15-test `test_hi2_slots.py`
    `HIP_VISIBLE_DEVICES` only; the HTTP clients refuse b4 and record the slot.  The
    recipe pins the a2 pair by PCI bus (`PCI_BUSES="d1 d4"`).
 
-The 37 tests in the module cover these (35 protocol/launcher plus 2 for the KL
+The 40 tests in the module cover these (38 protocol/launcher plus 2 for the KL
 parser); the launcher mutant battery kills 13/13 (`mutants_launchers.py`), and 32
 of the 37 fail on the pre-round kit (`f34d6cf6bc`), including both KL tests (the old
 probe raises `AttributeError` on the `None` at position 0 and has no
@@ -341,6 +341,33 @@ The quantizer's float32 reference on the same 32 mixed windows
 truncated fp16-path measurement and is compared within `--max-kl`, never for
 equality.  The 03:43 crash (`top_logprobs[0]` is `None`) was fixed in
 `aae486796f`; the 04:10 run is the fixed probe.
+
+### Lease queue and stub-server fixes (2026-11-25, CPU only)
+
+The kit verifier's last items, fixed with regressions:
+
+- `lease.sh` never overwrites another owner's `a2.request`: the shared request
+  file (lane README) is written only when absent or when it is ours and stale;
+  a foreign request is queued behind, up to `LEASE_WAIT_SECONDS`.  The release
+  trap removes the request only while it is still ours.
+- An own holder is reused only while its recorded pid is alive **and** the
+  >= 28 GiB free-memory check still passes; a dead-pid holder is dropped with a
+  message and the normal wait applies.  (Before: an own holder returned success
+  before the memory check, and a stale holder blocked a fresh acquire.)
+- `test_hi2_slots.py` no longer leaks stub servers: the module overrides
+  `tmp_path` with a per-test scratch dir under `$HI2_TEST_BASE` (default
+  `~/.cache/inkling2-hi2-tests`, never /tmp), and both `DryKit.stop()` and a
+  session fixture kill any `stub_http.py` this kit wrote.  The 15 stubs leaked
+  by the Nov-24 runs under `/tmp/pytest-of-chenco_adm/...` were killed; a run
+  now leaves 0.
+- `mutants_launchers.py` grows to 16 (three lease mutants; the VRAM mutant
+  follows the new expression): all 16 killed, `mutants.py` 21/21.
+- README steps 2/3 and `tools/rdna/recipes/inkling2-hi2-tp2.env` state that the
+  two-server layout needs `GMEM=0.45` per boot (0.92 is the single-server
+  default); without the caps the second boot stays under 28 GiB free.
+- The three new tests fail on the pre-fix lease (`3 failed, 37 deselected,
+  121 s`, `subprocess.TimeoutExpired` per case); the slot module is now 40
+  passed and the five-file gate 74 passed / 5 skipped (119.5 s).
 
 ## PR contract: change class, gates and the a2 run plan (CPU-only prep, 2026-11-25)
 

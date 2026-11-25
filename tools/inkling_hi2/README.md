@@ -158,9 +158,12 @@ and before the measured cells and refuse a moved or foreign device. Every step
 prints a `RESULT ... PASS` or a numeric record; stop at the first failure and keep
 the log.
 
-0. **Take the a2 lease.** `serve.sh` types `a2.request` (trap armed first), waits
-   until no other `<owner>.a2` holder exists and both cards have 28 GiB free
-   (`LEASE_WAIT_SECONDS=1800`), then writes `HI2InklingRuntime.a2`. It exits non-zero
+0. **Take the a2 lease.** `serve.sh` queues on `a2.request` (trap armed first;
+   another owner's request is never overwritten — it waits for that file to go,
+   up to `LEASE_WAIT_SECONDS=1800`), waits until no other `<owner>.a2` holder
+   exists and both cards have 28 GiB free, and reuses its own holder only while
+   the holder's recorded pid is alive and the free-memory check still passes (a
+   stale holder is dropped), then writes `HI2InklingRuntime.a2`. It exits non-zero
    on a busy `boot.lock` (retry after the other boot) or a foreign holder (inspect
    `ls ~/w4a8_runs/lanes/lease/`; never delete another agent's file). Check the box
    with `$V tools/rdna/port_v031/kfd_evictions.py` and
@@ -193,6 +196,7 @@ the log.
    HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4 \
    SERVER_PID_FILE=$HOME/w4a8_runs/inkling-hi2-runtime/server-stock.pid \
    VENV=$(dirname $(dirname $V)) PORT=18231 MAXLEN=8192 MAXBAT=256 SEQS=1 \
+   GMEM=0.45 \
    bash $TREE/tools/inkling_hi2/serve.sh > ~/w4a8_runs/inkling-hi2-runtime/logs/stock.log 2>&1 &
    ```
 
@@ -200,9 +204,16 @@ the log.
    the loader changes). Wait for `/health`; record "Model loading took" and the
    `max_model_len=8192`.
 
+   **Two-server layout:** steps 2-5 keep the stock and the HI2 server resident at
+   the same time, so each must cap its KV cache with `GMEM=0.45` (~13.5 GiB of
+   the 30 GiB per card; `0.92` is the kit's single-server default). Without the
+   caps the second boot never sees 28 GiB free per card, and its lease wait times
+   out after `LEASE_WAIT_SECONDS`.
+
 3. **HI2 server**: same command with `MODEL=$HOME/w4a8_runs/inkling-hi2/stage4/runs/bpw3.5`,
    `PORT=18230`, `SERVER_PID_FILE=$HOME/w4a8_runs/inkling-hi2-runtime/server-hi2.pid`
-   and log `logs/serve.log`; the env pair stays
+   and `GMEM=0.45` (both servers stay resident; see the step-2 note), log
+   `logs/serve.log`; the env pair stays
    `SLOT=a2 HIP_VISIBLE_DEVICES=0,1 EXPECT_PCI_BUSES=d1,d4`. Verifies: all 24 layers
    find their `gate_up`/`down` stacks (`HI2 expert groups incomplete` and
    `unmapped ... tensor` must NOT appear); the engine reports the model memory
