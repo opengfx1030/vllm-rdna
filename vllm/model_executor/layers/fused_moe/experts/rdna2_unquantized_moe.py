@@ -176,6 +176,60 @@ class Rdna2UnquantizedExperts(mk.FusedMoEExpertsModular):
         n_dim = self.adjust_N_for_activation(N, activation)
         assert w1.shape[1] == N and w1.shape[2] == K and N == 2 * n_dim
 
+        # Pair-blocked HIP GEMV re-reads each expert once per token-slot (fast
+        # for decode M <= 32, slow at prefill M >= 64). Route large prefill
+        # batches to the pure HIP grouped FP16 v_dot2 kernel (zero Triton).
+        if (
+            num_tokens >= 64
+            and K % 32 == 0
+            and n_dim % 32 == 0
+            and hasattr(torch.ops._rocm_C, "moe_gemm_unquantized_prefill_rdna2")
+        ):
+            from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+                moe_align_block_size,
+            )
+
+            sorted_ids, expert_ids, ntp = moe_align_block_size(
+                topk_ids,
+                16,
+                global_num_experts,
+                expert_map,
+                ignore_invalid_experts=True,
+            )
+            num_pairs = num_tokens * top_k
+            gate_up = _resize_cache(workspace2, (num_pairs, N))
+            act = _resize_cache(workspace13, (num_pairs, n_dim))
+            empty_w = topk_weights.new_empty(0)
+            torch.ops._rocm_C.moe_gemm_unquantized_prefill_rdna2(
+                hidden_states,
+                w1,
+                sorted_ids,
+                expert_ids,
+                ntp,
+                gate_up,
+                num_pairs,
+                top_k,
+                False,
+                empty_w,
+            )
+            torch.ops._C.silu_and_mul(act, gate_up)
+            slot_out = _resize_cache(workspace2, (num_tokens, top_k, K))
+            mul_weight = not apply_router_weight_on_input
+            torch.ops._rocm_C.moe_gemm_unquantized_prefill_rdna2(
+                act,
+                w2,
+                sorted_ids,
+                expert_ids,
+                ntp,
+                slot_out.reshape(num_pairs, K),
+                num_pairs,
+                1,
+                mul_weight,
+                topk_weights.reshape(-1) if mul_weight else empty_w,
+            )
+            ops.moe_sum(slot_out, output, topk_ids, expert_map)
+            return
+
         act = _resize_cache(workspace13, (num_tokens * top_k, n_dim))
         # Per-(token, top-k) down result, rounded once to fp16, then reduced in
         # fp32 by the same `moe_sum` the Triton path uses.

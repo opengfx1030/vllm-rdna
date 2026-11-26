@@ -99,6 +99,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int hc_count) -> Tensor");
   rocm_ops.impl("rdna_hc_up_gate_mix", torch::kCUDA, &rdna_hc_up_gate_mix);
   #ifdef VLLM_ROCM_GFX1030
+  // Native W8A8 sdot4 dense prefill GEMM (M >= 64, per-channel int8 weights).
+  rocm_ops.def(
+      "gemm_w8a8_i8_rdna2(Tensor x, Tensor w_i8, Tensor w_scale, Tensor? bias, "
+      "int design=-1) -> Tensor");
+  rocm_ops.impl("gemm_w8a8_i8_rdna2", torch::kCUDA, &gemm_w8a8_i8_rdna2);
+  rocm_ops.def(
+      "rdna_hc_up_gate_mix_prefill_i8(Tensor dai, Tensor w_up_i8, "
+      "Tensor w_up_scale, Tensor xn, int lora_rank, int hc_count) -> Tensor");
+  rocm_ops.impl("rdna_hc_up_gate_mix_prefill_i8", torch::kCUDA,
+                &rdna_hc_up_gate_mix_prefill_i8);
   // HC prefill (M > 8): fused silu/up/sigmoid/mix, optional split-K down.
   rocm_ops.def(
       "rdna_hc_up_gate_mix_prefill(Tensor dai, Tensor w_up, Tensor xn, "
@@ -1385,6 +1395,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor(b!) out, int topk, int N, int K) -> ()");
   rocm_ops.impl("moe_down_unquantized_rdna2", torch::kCUDA,
                 &moe_down_unquantized_rdna2);
+  rocm_ops.def(
+      "moe_gemm_unquantized_prefill_rdna2(Tensor x, Tensor w, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, Tensor! out, int num_pairs, "
+      "int input_div_topk, bool mul_topk_weight, Tensor topk_weights) -> ()");
+  rocm_ops.impl("moe_gemm_unquantized_prefill_rdna2", torch::kCUDA,
+                &moe_gemm_unquantized_prefill_rdna2);
 
   // v1 worker input-batch kernels (HIP ports of the input_batch.py Triton
   // kernels).

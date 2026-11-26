@@ -26,6 +26,41 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 _DECODE_MAX = 8
+# Native W8A8 sdot4 dense prefill GEMM (csrc/rocm/gemm_w8a8_i8_rdna2.cu).
+# Opt-in via VLLM_RDNA_DENSE_W8A8_PREFILL=1 for M >= _W8A8_PREFILL_MIN.
+_W8A8_PREFILL_MIN = int(os.environ.get("VLLM_RDNA_DENSE_W8A8_MIN_ROWS", "64") or 64)
+_W8A8_PREFILL_EN = os.environ.get("VLLM_RDNA_DENSE_W8A8_PREFILL", "0") == "1"
+_HC_W8A8_DOWN_EN = os.environ.get("VLLM_RDNA_HC_W8A8_DOWN", "0") == "1"
+_HC_W8A8_UP_EN = os.environ.get("VLLM_RDNA_HC_W8A8_UP", "0") == "1"
+_W8A8_PREFILL_AVAIL: bool | None = None
+
+
+def _w8a8_op_available() -> bool:
+    global _W8A8_PREFILL_AVAIL
+    if _W8A8_PREFILL_AVAIL is None:
+        import vllm._custom_ops  # noqa: F401
+        from vllm.platforms.rocm import on_gfx10x
+
+        _W8A8_PREFILL_AVAIL = on_gfx10x() and hasattr(
+            torch.ops._rocm_C, "gemm_w8a8_i8_rdna2"
+        )
+        logger.info(
+            "rdna_dense_gemm W8A8 sdot4 prefill: %s",
+            "active" if _W8A8_PREFILL_AVAIL else "unavailable",
+        )
+    return _W8A8_PREFILL_AVAIL
+
+
+def _w8a8_prefill_ok(x: torch.Tensor, weight_i8: torch.Tensor) -> bool:
+    if not _W8A8_PREFILL_EN:
+        return False
+    return (
+        _w8a8_op_available()
+        and x.dtype == torch.float16
+        and _ntok(x) >= _W8A8_PREFILL_MIN
+        and x.size(-1) % 64 == 0
+        and weight_i8.dtype == torch.int8
+    )
 # Shared-expert fused kernels cover MTP verify batches (fp16 weights). 8 keeps
 # the torch path above the exact-MT range; 0 turns the fused kernels off.
 _SE_DECODE_MAX = int(os.environ.get("VLLM_RDNA_SE_DECODE_MAX", "32") or 0)
@@ -56,6 +91,12 @@ def _rdna_dense_gemm(
 
         x2 = x.reshape(-1, x.size(-1)).contiguous()
         out = ops.gemv_i8_rdna2(x2, weight_i8, scale, bias)
+        return out.reshape(*x.shape[:-1], weight_i8.shape[0])
+    if _w8a8_prefill_ok(x, weight_i8):
+        from vllm import _custom_ops as ops
+
+        x2 = x.reshape(-1, x.size(-1)).contiguous()
+        out = ops.gemm_w8a8_i8_rdna2(x2, weight_i8, scale, bias)
         return out.reshape(*x.shape[:-1], weight_i8.shape[0])
     from vllm.model_executor.layers.rdna_dense_int8 import is_released, linear_released
 
@@ -106,6 +147,62 @@ def _rdna_hc_mix(
     # prefill / fallback: the original op sequence
     from vllm.model_executor.layers.rdna_dense_int8 import weight_for_gemm
     from vllm.models.qwen4_exp.amd.ops.hc import hc_gate_mix, hc_silu
+
+    if (
+        _HC_W8A8_DOWN_EN
+        and w_down_i8 is not None
+        and s_down is not None
+        and _w8a8_op_available()
+        and xn.dtype == torch.float16
+        and n >= _W8A8_PREFILL_MIN
+        and xn.size(-1) % 64 == 0
+        and w_down_i8.dtype == torch.int8
+    ):
+        from vllm import _custom_ops as ops
+
+        dai = ops.gemm_w8a8_i8_rdna2(xn, w_down_i8, s_down, None)
+        if (
+            _HC_W8A8_UP_EN
+            and w_up_i8 is not None
+            and s_up is not None
+            and hasattr(torch.ops._rocm_C, "rdna_hc_up_gate_mix_prefill_i8")
+            and hc_count == 4
+            and xn.is_contiguous()
+            and lora_rank % 64 == 0
+            and w_up_i8.shape[1] == lora_rank
+            and w_up_i8.shape[0] == xn.shape[1]
+            and xn.shape[1] % (32 * hc_count) == 0
+        ):
+            block_input = ops.rdna_hc_up_gate_mix_prefill_i8(
+                dai, w_up_i8, s_up, xn, lora_rank, hc_count
+            )
+        else:
+            w_up = weight_for_gemm(w_up, w_up_i8, s_up)
+            if (
+                _HC_PREFILL_FUSED
+                and _hc_fused_available()
+                and hc_count == 4
+                and xn.dtype == torch.float16
+                and xn.dim() == 2
+                and xn.is_contiguous()
+                and w_up.dtype == torch.float16
+                and w_up.is_contiguous()
+                and lora_rank % 32 == 0
+                and w_up.shape[1] == lora_rank
+                and w_up.shape[0] == xn.shape[1]
+                and xn.shape[1] % (32 * hc_count) == 0
+            ):
+                block_input = ops.rdna_hc_up_gate_mix_prefill(
+                    dai, w_up, xn, lora_rank, hc_count
+                )
+            else:
+                lora = hc_silu(dai[:, :lora_rank].contiguous(), hc_count)
+                gate = _linear_padded_m(lora, w_up)
+                block_input = hc_gate_mix(xn, gate, hc_count)
+        inj = dai[
+            :, lora_rank : lora_rank + _hc_inj_cols(w_down_i8, lora_rank, hc_count)
+        ]
+        return block_input, inj.contiguous()
 
     w_down = weight_for_gemm(w_down, w_down_i8, s_down)
     w_up = weight_for_gemm(w_up, w_up_i8, s_up)
@@ -256,6 +353,21 @@ def _rdna_shared_expert(
         else:
             act, gate = ops.rdna_se_gate_up_silu(x, a, sa, w_gate)
         return ops.rdna_se_down_gated(act, b, sb, gate)
+    if (
+        w1_i8 is not None
+        and w2_i8 is not None
+        and s1 is not None
+        and s2 is not None
+        and _w8a8_prefill_ok(x, w1_i8)
+        and w2_i8.size(-1) % 64 == 0
+    ):
+        from vllm import _custom_ops as ops
+
+        gu = ops.gemm_w8a8_i8_rdna2(x, w1_i8, s1, None)
+        half = gu.shape[-1] // 2
+        act = (F.silu(gu[..., :half]) * gu[..., half:]).contiguous()
+        out = ops.gemm_w8a8_i8_rdna2(act, w2_i8, s2, None)
+        return torch.sigmoid(F.linear(x, w_gate.reshape(1, -1))) * out
     from vllm.model_executor.layers.rdna_dense_int8 import weight_for_gemm
 
     w1 = weight_for_gemm(w1, w1_i8, s1)

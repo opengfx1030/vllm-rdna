@@ -1484,9 +1484,10 @@ __global__ void __launch_bounds__(QSA_MAX_THREADS)
           block_table[table_row + min(logical_page, page_table_width - 1)];
       valid = (physical_page >= 0) && (physical_page < num_cache_blocks);
     }
-    s_off[i] = valid ? (int32_t)((int64_t)physical_page * stride_cache_block +
-                                 (int64_t)page_offset * stride_cache_token +
-                                 (int64_t)kv_head * stride_cache_head)
+    s_off[i] = valid ? (int32_t)(((int64_t)physical_page * stride_cache_block +
+                                  (int64_t)page_offset * stride_cache_token +
+                                  (int64_t)kv_head * stride_cache_head) >>
+                                 3)
                      : -1;
   }
   __syncthreads();
@@ -1507,12 +1508,14 @@ __global__ void __launch_bounds__(QSA_MAX_THREADS)
         const int32_t off0 = offs[2 * m];
         const int32_t off1 = offs[2 * m + 1];
         if (off0 >= 0) {
-          a = *reinterpret_cast<const uint4*>(k_cache + off0 + 8 * j);
-          c = *reinterpret_cast<const uint4*>(v_cache + off0 + 8 * j);
+          const int64_t base0 = ((int64_t)off0 << 3) + 8 * j;
+          a = *reinterpret_cast<const uint4*>(k_cache + base0);
+          c = *reinterpret_cast<const uint4*>(v_cache + base0);
         }
         if (off1 >= 0) {
-          b = *reinterpret_cast<const uint4*>(k_cache + off1 + 8 * j);
-          d = *reinterpret_cast<const uint4*>(v_cache + off1 + 8 * j);
+          const int64_t base1 = ((int64_t)off1 << 3) + 8 * j;
+          b = *reinterpret_cast<const uint4*>(k_cache + base1);
+          d = *reinterpret_cast<const uint4*>(v_cache + base1);
         }
       }
       rk0[r] = a;
@@ -1914,13 +1917,17 @@ static torch::Tensor qsa_sparse_paged_attention_rdna2_impl(
                              (k_cache.size(1) - 1) * k_cache.stride(1) +
                              (k_cache.size(2) - 1) * k_cache.stride(2) +
                              head_dim;
+    // s_off stores offsets in units of 8 fp16 elements (16-byte uint4 vectors),
+    // which vec8 already guarantees, supporting KV pools up to 34.36 GiB/rank.
     pipe_ok = qsa_env_int("VLLM_RDNA_QSA_PIPE", 1) != 0 && vec8 &&
               head_dim == QSA_PIPE_HD && block_n == QSA_PIPE_BLOCK_N &&
               (group_size == 4 || group_size == 6 || group_size == 8) &&
               k_cache.stride(0) == v_cache.stride(0) &&
               k_cache.stride(1) == v_cache.stride(1) &&
               k_cache.stride(2) == v_cache.stride(2) &&
-              max_elem < (int64_t)INT_MAX;
+              (k_cache.stride(0) % 8 == 0) && (k_cache.stride(1) % 8 == 0) &&
+              (k_cache.stride(2) % 8 == 0) &&
+              (max_elem >> 3) < (int64_t)INT_MAX;
   }
 
   const at::cuda::OptionalCUDAGuard guard(q.device());

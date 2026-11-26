@@ -1758,6 +1758,37 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "gemm_w8a8_i8_rdna2"
+):
+
+    @register_fake("_rocm_C::gemm_w8a8_i8_rdna2")
+    def _gemm_w8a8_i8_rdna2_fake(
+        x: torch.Tensor,
+        w_i8: torch.Tensor,
+        w_scale: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        design: int = -1,
+    ) -> torch.Tensor:
+        return x.new_empty((x.shape[0], w_i8.shape[0]))
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "rdna_hc_up_gate_mix_prefill_i8"
+):
+
+    @register_fake("_rocm_C::rdna_hc_up_gate_mix_prefill_i8")
+    def _rdna_hc_up_gate_mix_prefill_i8_fake(
+        dai: torch.Tensor,
+        w_up_i8: torch.Tensor,
+        w_up_scale: torch.Tensor,
+        xn: torch.Tensor,
+        lora_rank: int,
+        hc_count: int,
+    ) -> torch.Tensor:
+        return xn.new_empty((dai.shape[0], xn.shape[1] // hc_count))
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
     torch.ops._rocm_C, "rdna_hint_flex_gemv2_rdna2"
 ):
 
@@ -5235,6 +5266,31 @@ def gemv_i8_rdna2(
 ) -> torch.Tensor:
     """gfx1030 int8 weight-only skinny GEMM, M <= 8."""
     return torch.ops._rocm_C.gemv_i8_rdna2(x, w, scale, bias)
+
+
+def gemm_w8a8_i8_rdna2(
+    x: torch.Tensor,
+    w_i8: torch.Tensor,
+    w_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    design: int = -1,
+) -> torch.Tensor:
+    """gfx1030 native W8A8 sdot4 dense prefill GEMM (per-channel int8 w)."""
+    return torch.ops._rocm_C.gemm_w8a8_i8_rdna2(x, w_i8, w_scale, bias, design)
+
+
+def rdna_hc_up_gate_mix_prefill_i8(
+    dai: torch.Tensor,
+    w_up_i8: torch.Tensor,
+    w_up_scale: torch.Tensor,
+    xn: torch.Tensor,
+    lora_rank: int,
+    hc_count: int,
+) -> torch.Tensor:
+    """gfx1030 native W8A8 sdot4 HC up-GEMM + sigmoid + gated mean."""
+    return torch.ops._rocm_C.rdna_hc_up_gate_mix_prefill_i8(
+        dai, w_up_i8, w_up_scale, xn, lora_rank, hc_count
+    )
 
 
 def rdna_gemv_act(
