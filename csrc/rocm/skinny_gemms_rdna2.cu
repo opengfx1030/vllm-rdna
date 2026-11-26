@@ -392,15 +392,16 @@ __global__ void __launch_bounds__(WAVES * 32)
   float acc[MT];
 #pragma unroll
   for (int m = 0; m < MT; m++) acc[m] = 0.f;
-  for (int i = lane; i < K16; i += 32 * 4) {
-    uint4 wq[4];
+  constexpr int UNROLL = (MT > 8) ? 1 : 4;
+  for (int i = lane; i < K16; i += 32 * UNROLL) {
+    uint4 wq[UNROLL];
 #pragma unroll
-    for (int u = 0; u < 4; u++) {
+    for (int u = 0; u < UNROLL; u++) {
       const int idx = i + 32 * u;
       wq[u] = (idx < K16) ? wrow[idx] : make_uint4(0, 0, 0, 0);
     }
 #pragma unroll
-    for (int u = 0; u < 4; u++) {
+    for (int u = 0; u < UNROLL; u++) {
       const int idx = i + 32 * u;
       if (idx < K16) {
         const int32_t* q = reinterpret_cast<const int32_t*>(&wq[u]);
