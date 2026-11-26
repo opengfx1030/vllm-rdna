@@ -17,7 +17,10 @@
 #                       (verdicts come from the recipe's production mode).
 # MODE=ab               base, head (default); MODE=abba: base, head, head, base on
 #                       fresh boots, which is what a speed claim needs.
-# EXACT=1               token-exact gate (default); 0 skips it.
+# EXACT=1               token-exact gate (default); keep enabled even for
+#                       numerics-change or known-lossy features (with FAIL_FAST=0
+#                       QUALITY=1) to measure token divergence; 0 is only for
+#                       re-running speed cells after exactness is already recorded.
 # QUALITY=1             adds the quality gate (default 0).
 # STALL=1               stall probe on every speed boot (default; 0 skips it): the
 #                       hard gate (no starved decoder) and the relative metrics.
@@ -43,7 +46,9 @@
 #                       when that tree exists, else ./pr-receipt/...); PORT=18780;
 #                       OWNER names the quiet window file (default $USER).
 # DRY_RUN=1             check the inputs, print the launch plans and the boots, stop.
-# FAIL_FAST=1           stop after a failed or inconclusive token-exact gate.
+# FAIL_FAST=1           stop after a failed or inconclusive token-exact gate; 0
+#                       continues into quality/speed boots after recording token
+#                       divergence (use for numerics-change and known-lossy features).
 #
 # Boots (a fresh server each, one at a time):
 #   exact  base, head  VLLM_RDNA2_MOE_DETERMINISTIC=1: greedy hashes, concurrency probe
