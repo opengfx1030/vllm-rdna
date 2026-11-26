@@ -201,8 +201,74 @@ struct RowI8 {
                                            const half* __restrict__ x, int K,
                                            int lane, float (&a0)[MT],
                                            float (&a1)[MT], int M = MT) const {
-    dot<MT, GUARD>(x, K, lane, a0, M);
-    o.template dot<MT, GUARD>(x, K, lane, a1, M);
+    if constexpr (MT > 8) {
+      dot<MT, GUARD>(x, K, lane, a0, M);
+      o.template dot<MT, GUARD>(x, K, lane, a1, M);
+      return;
+    }
+    const int K16 = K / 16;
+    const uint4* w0 = reinterpret_cast<const uint4*>(w);
+    const uint4* w1 = reinterpret_cast<const uint4*>(o.w);
+    const uint4* xr = reinterpret_cast<const uint4*>(x);
+    for (int i = lane; i < K16; i += 32 * 2) {
+      uint4 q0[2], q1[2];
+#pragma unroll
+      for (int u = 0; u < 2; u++) {
+        const int idx = i + 32 * u;
+        q0[u] = (idx < K16) ? w0[idx] : make_uint4(0, 0, 0, 0);
+        q1[u] = (idx < K16) ? w1[idx] : make_uint4(0, 0, 0, 0);
+      }
+#pragma unroll
+      for (int u = 0; u < 2; u++) {
+        const int idx = i + 32 * u;
+        if (idx < K16) {
+          const int32_t* p0 = reinterpret_cast<const int32_t*>(&q0[u]);
+          const int32_t* p1 = reinterpret_cast<const int32_t*>(&q1[u]);
+          half2 wh0[8], wh1[8];
+#pragma unroll
+          for (int j = 0; j < 4; j++) {
+            const int32_t v0 = p0[j], v1 = p1[j];
+            wh0[2 * j] = __floats2half2_rn((float)(int8_t)(v0 & 0xff),
+                                           (float)(int8_t)((v0 >> 8) & 0xff));
+            wh0[2 * j + 1] =
+                __floats2half2_rn((float)(int8_t)((v0 >> 16) & 0xff),
+                                  (float)(int8_t)((v0 >> 24) & 0xff));
+            wh1[2 * j] = __floats2half2_rn((float)(int8_t)(v1 & 0xff),
+                                           (float)(int8_t)((v1 >> 8) & 0xff));
+            wh1[2 * j + 1] =
+                __floats2half2_rn((float)(int8_t)((v1 >> 16) & 0xff),
+                                  (float)(int8_t)((v1 >> 24) & 0xff));
+          }
+#pragma unroll
+          for (int m = 0; m < MT; m++) {
+            if (GUARD && m >= M) continue;
+            const uint4 xa = xr[((size_t)m * K16 + idx) * 2];
+            const uint4 xb = xr[((size_t)m * K16 + idx) * 2 + 1];
+            const half2* h0 = reinterpret_cast<const half2*>(&xa);
+            const half2* h1 = reinterpret_cast<const half2*>(&xb);
+            float p = a0[m], q = a1[m];
+            p = __builtin_amdgcn_fdot2(wh0[0], h0[0], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[0], h0[0], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[1], h0[1], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[1], h0[1], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[2], h0[2], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[2], h0[2], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[3], h0[3], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[3], h0[3], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[4], h1[0], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[4], h1[0], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[5], h1[1], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[5], h1[1], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[6], h1[2], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[6], h1[2], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[7], h1[3], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[7], h1[3], q, false);
+            a0[m] = p;
+            a1[m] = q;
+          }
+        }
+      }
+    }
   }
   __device__ __forceinline__ float scale() const { return s; }
 };
