@@ -547,5 +547,7 @@ def test_the_driver_boots_two_plain_servers_and_runs_720k_first():
     assert "STEPS=(kernel serve_dir smoke kl eval vision bench boot720 dspark)" in text
     assert text.count('boot_server plain16k 18231 "$SERVE_DIR"') == 2
     assert "--floor-json" in text and "--stock-only" in text
+    # the probe's JSON must not collide with the step summary's
+    assert '--json "$RUN/steps/dspark-probe.json"' in text
     assert "run_step boot720 s_boot720\nrun_step dspark s_dspark" in text
     assert 'dry_serve "stock dspark" stockspec 18231 "$STOCK"' in text

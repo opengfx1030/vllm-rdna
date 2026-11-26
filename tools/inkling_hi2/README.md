@@ -354,7 +354,8 @@ the log.
    probe: greedy outputs token-identical with and without DSpark on the 8
    code/chat/agentic prompts (`choice.token_ids`, falling back to the server
    `/tokenize`), OR within the plain-vs-plain floor recorded per prompt
-   (`greedy_within_floor[...]`, `floor_diff_max`, `spec_diff_max`), deterministic
+   (`greedy_within_floor[...]`, `floor_diff_max`, `spec_diff_max` in
+   `steps/dspark-probe.json`, deterministic
    on repeat, clean non-empty text; a mean acceptance length and per-position
    acceptance rates from the log (record them); decode tokens/s at c=1
    (spec vs plain) and c=2; at `--drop-batch 3`, after a 10 s idle settle,
