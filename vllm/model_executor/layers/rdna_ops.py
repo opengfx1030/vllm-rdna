@@ -26,6 +26,10 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 _DECODE_MAX = 8
+# Extended int8 decode GEMV/HC/SE row cap (M = 1..32, covering c=4..8 capture
+# sizes M=12, 24 without dequantizing weight_i8 to fp16 + rocBLAS).
+_DECODE_I8_MAX = int(os.environ.get("VLLM_RDNA_DECODE_I8_MAX", "32") or 8)
+_HC_I8_MAX = int(os.environ.get("VLLM_RDNA_HC_I8_MAX", "16") or 8)
 # Native W8A8 sdot4 dense prefill GEMM (csrc/rocm/gemm_w8a8_i8_rdna2.cu).
 # Opt-in via VLLM_RDNA_DENSE_W8A8_PREFILL=1 for M >= _W8A8_PREFILL_MIN.
 _W8A8_PREFILL_MIN = int(os.environ.get("VLLM_RDNA_DENSE_W8A8_MIN_ROWS", "64") or 64)
@@ -88,7 +92,7 @@ def _rdna_dense_gemm(
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
     n = _ntok(x)
-    if 0 < n <= _DECODE_MAX and x.dtype == torch.float16:
+    if 0 < n <= _DECODE_I8_MAX and x.dtype == torch.float16:
         from vllm import _custom_ops as ops
 
         x2 = x.reshape(-1, x.size(-1)).contiguous()
@@ -137,7 +141,8 @@ def _rdna_hc_mix(
     have to copy (and which it specializes on the trace-time stride of).
     """
     n = _ntok(xn)
-    if 0 < n <= _DECODE_MAX and xn.dtype == torch.float16 and xn.is_contiguous():
+    hc_max = _HC_I8_MAX if w_down_i8 is not None else _DECODE_MAX
+    if 0 < n <= hc_max and xn.dtype == torch.float16 and xn.is_contiguous():
         from vllm import _custom_ops as ops
 
         wd, sd = (w_down_i8, s_down) if w_down_i8 is not None else (w_down, None)
@@ -329,8 +334,9 @@ def _rdna_shared_expert(
 ) -> torch.Tensor:
     """Per-rank partial of sigmoid(w_gate.x) * down(silu(gate)*up); caller reduces."""
     n = _ntok(x)
+    se_max = _DECODE_I8_MAX if w1_i8 is not None else _SE_DECODE_MAX
     if (
-        0 < n <= (_DECODE_MAX if w1_i8 is not None else _SE_DECODE_MAX)
+        0 < n <= se_max
         and x.dtype == torch.float16
         and x.dim() == 2
         and x.is_contiguous()
