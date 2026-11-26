@@ -856,3 +856,21 @@ rejection, served-model resolution, exact 404 URL).  `mutants_final.py`: baselin
 vision_probe_accepts_a_path_base`: both KILLED.  `ruff check`/`format --check`
 clean.  GPU steps still unmeasured; the a2 slot was free after Main's repro and
 the resume (`RESUME=1`) runs vision -> bench -> dspark -> boot720.
+
+### 2026-11-25 fix: mtp_probe 404 (card1 dspark FAIL)
+
+`mtp_probe.py` had the same `"model": "default"` defect as the vision probe, so
+the dspark step failed at 201 s with HTTP 404.  `complete()` now posts the id
+resolved (and cached) from each base's `/v1/models`, so the spec server, the
+plain server, the 3-request no-drop region and both speed cells use it; the
+probe refuses a base with a path, prints base+id+POST URL at startup, and names
+the URL and body in a 404.  `grep -rn '"model": "default"' tools/inkling_hi2`
+now matches only the mutant definition.  The 720k greedy request lives in the
+driver and already used the reported id.
+
+CPU proof (box): `test_hi2_vision_mtp.py` **22 passed** (8.7 s, incl. served-model
+resolution, path-base rejection and the exact 404 URL for `mtp_probe.complete`);
+kit mutants `mtp_probe_posts_default_model`, `mtp_probe_accepts_a_path_base`,
+`vision_probe_posts_default_model`, `vision_probe_accepts_a_path_base`: all
+**KILLED**; ruff check/format clean.  GPU unchanged: a resumed run executes
+dspark -> boot720.

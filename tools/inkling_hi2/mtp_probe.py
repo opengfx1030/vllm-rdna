@@ -32,6 +32,7 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,41 @@ SPEC_METRICS = (
 )
 
 
+def base_url(raw: str) -> str:
+    """The server base without a path: http://host:port, never .../v1."""
+    parsed = urllib.parse.urlsplit(raw.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"{raw!r}: not an http(s) base URL")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError(
+            f"{raw!r}: give the server base without a path (got {parsed.path!r}); "
+            "the probe appends /v1/chat/completions itself"
+        )
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+_SERVED: dict[str, str] = {}
+
+
+def served_model(base: str, timeout: float = 30.0) -> str:
+    """The id /v1/models reports; vLLM answers 404 for any other model name."""
+    if base in _SERVED:
+        return _SERVED[base]
+    url = f"{base}/v1/models"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"GET {url}: HTTP {e.code} {e.read()[:200]!r}") from e
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        raise RuntimeError(f"GET {url}: {e}") from e
+    models = body.get("data") or []
+    if not models:
+        raise RuntimeError(f"GET {url}: no served model")
+    _SERVED[base] = str(models[0]["id"])
+    return _SERVED[base]
+
+
 def _http_json(url: str, payload: dict | None, timeout: float):
     data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -91,9 +127,13 @@ def _http_json(url: str, payload: dict | None, timeout: float):
         headers={"Content-Type": "application/json"} if data else {},
         method="POST" if data else "GET",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-        body = resp.read()
-        return resp.status, (json.loads(body) if body else None)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            body = resp.read()
+            return resp.status, (json.loads(body) if body else None)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"{req.get_method()} {url}: HTTP {e.code}: {detail}") from e
 
 
 def health(base: str, timeout: float = 5.0) -> bool:
@@ -114,7 +154,7 @@ def complete(
     top_p: float = 1.0,
 ) -> dict:
     payload = {
-        "model": "default",
+        "model": served_model(base, timeout),
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -230,8 +270,12 @@ def main() -> int:
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
-    spec = args.spec_url.rstrip("/")
-    plain = args.plain_url.rstrip("/") if args.plain_url else None
+    try:
+        spec = base_url(args.spec_url)
+        plain = base_url(args.plain_url) if args.plain_url else None
+    except ValueError as e:
+        print(f"mtp_probe: {e}", file=sys.stderr)
+        return 2
     report = Report()
 
     if not health(spec):
@@ -240,6 +284,17 @@ def main() -> int:
     if plain and not health(plain):
         print(f"mtp_probe: {plain} is not serving (/health)", file=sys.stderr)
         return 3
+    try:
+        spec_model = served_model(spec, args.timeout)
+        plain_model = served_model(plain, args.timeout) if plain else None
+    except RuntimeError as e:
+        print(f"mtp_probe: {e}", file=sys.stderr)
+        return 3
+    print(f"mtp_probe: spec {spec} serves {spec_model!r}")
+    print(f"mtp_probe: POST {spec}/v1/chat/completions model={spec_model!r}")
+    if plain:
+        print(f"mtp_probe: plain {plain} serves {plain_model!r}")
+        print(f"mtp_probe: POST {plain}/v1/chat/completions model={plain_model!r}")
 
     log_pos = 0
     if args.log:

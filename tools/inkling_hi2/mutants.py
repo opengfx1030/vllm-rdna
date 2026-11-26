@@ -236,6 +236,30 @@ MUTANTS = [
             )
         ],
     ),
+    (
+        "mtp_probe_posts_default_model",
+        "tools/inkling_hi2/mtp_probe.py",
+        '        "model": served_model(base, timeout),',
+        '        "model": "default",',
+        [
+            (
+                "tests/models/inkling2_loop/test_hi2_vision_mtp.py::"
+                "test_mtp_complete_posts_the_served_model"
+            )
+        ],
+    ),
+    (
+        "mtp_probe_accepts_a_path_base",
+        "tools/inkling_hi2/mtp_probe.py",
+        '    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:',
+        "    if False:",
+        [
+            (
+                "tests/models/inkling2_loop/test_hi2_vision_mtp.py::"
+                "test_mtp_base_url_rejects_a_path"
+            )
+        ],
+    ),
 ]
 
 _BASELINE = [

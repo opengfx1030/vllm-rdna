@@ -379,3 +379,27 @@ def test_a_404_names_the_exact_url(tmp_path, vision_stub):
     with pytest.raises(RuntimeError) as e:
         vision_probe.describe(vision_stub, "default", image, 8, 5.0)
     assert "POST " + vision_stub + "/v1/chat/completions: HTTP 404" in str(e.value)
+
+
+def test_mtp_complete_posts_the_served_model(vision_stub):
+    mtp_probe._SERVED.clear()
+    got = mtp_probe.complete(vision_stub, "hello", 8, 5.0)
+    assert got["text"] == "a red square"
+    last = _VisionStub.posts[-1]
+    assert last["path"] == "/v1/chat/completions"
+    assert last["payload"]["model"] == "inkling2-hi2"
+    mtp_probe._SERVED.clear()
+
+
+def test_mtp_base_url_rejects_a_path():
+    with pytest.raises(ValueError, match="without a path"):
+        mtp_probe.base_url("http://127.0.0.1:18230/v1")
+
+
+def test_mtp_404_names_the_url_and_model(vision_stub):
+    mtp_probe._SERVED.clear()
+    _VisionStub.fail_post = True
+    with pytest.raises(RuntimeError) as e:
+        mtp_probe.complete(vision_stub, "hello", 8, 5.0)
+    assert "POST " + vision_stub + "/v1/chat/completions: HTTP 404" in str(e.value)
+    mtp_probe._SERVED.clear()
