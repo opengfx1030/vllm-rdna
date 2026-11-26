@@ -30,6 +30,7 @@ import concurrent.futures as futures
 import contextlib
 import json
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -237,6 +238,18 @@ def no_draft_verdict(before: float, after: float) -> dict:
     return {"delta": delta, "ok": delta == 0}
 
 
+def settled_drafts(base: str, settle: float = 0.2, tries: int = 3) -> float:
+    """The drafts counter after it stopped moving (leftover work drained)."""
+    last = metric(base, "vllm:spec_decode_num_drafts_total")
+    for _ in range(tries):
+        time.sleep(settle)
+        now = metric(base, "vllm:spec_decode_num_drafts_total")
+        if now == last:
+            return now
+        last = now
+    return last
+
+
 def metric(base: str, name: str, timeout: float = 10.0) -> float:
     """Sum one Prometheus counter over all its label sets (0 if absent)."""
     try:
@@ -407,6 +420,11 @@ def main() -> int:
         help="the stock spec server's stdout log (per-position acceptance)",
     )
     ap.add_argument(
+        "--record-only",
+        action="store_true",
+        help="phase 1 of the floor: record the plain outputs, gate nothing",
+    )
+    ap.add_argument(
         "--stock-only",
         action="store_true",
         help="measure the stock DSPARK=1 reference only and exit",
@@ -545,12 +563,14 @@ def main() -> int:
             report.numbers[f"spec_first_diff[{p['name']}]"] = sd["first"]
             if fd is not None:
                 report.numbers[f"floor_diff[{p['name']}]"] = fd["count"]
-                report.check(
-                    f"greedy_within_floor[{p['name']}]",
-                    verdict["ok"],
-                    f"spec_diff={sd['count']} floor={fd['count']} first={sd['first']}",
-                )
-            else:
+                if not args.record_only:
+                    report.check(
+                        f"greedy_within_floor[{p['name']}]",
+                        verdict["ok"],
+                        f"spec_diff={sd['count']} floor={fd['count']} "
+                        f"first={sd['first']}",
+                    )
+            elif not args.record_only:
                 report.check(
                     f"greedy_identical[{p['name']}]",
                     verdict["ok"],
@@ -615,7 +635,7 @@ def main() -> int:
 
     # 5. the configured no-draft region: drafts must stop and requests succeed.
     #    The counters are read only after the earlier cells have drained.
-    if args.drop_batch > 1:
+    if args.drop_batch > 1 and not args.record_only:
         if args.settle_seconds:
             print(
                 f"mtp_probe: settling {args.settle_seconds:g}s before the "
@@ -623,11 +643,13 @@ def main() -> int:
                 flush=True,
             )
             time.sleep(args.settle_seconds)
-        window_before = metric(spec, "vllm:spec_decode_num_drafts_total")
+        window_before = settled_drafts(spec, max(args.settle_seconds, 0.2))
         n = args.drop_batch
         prompts = [PROMPTS[i % len(PROMPTS)]["prompt"] for i in range(n)]
+        start = threading.Barrier(n)
 
         def run_long(prompt: str) -> dict:
+            start.wait(timeout=args.timeout)
             return complete(spec, prompt, min(args.max_tokens, 48), args.timeout)
 
         with futures.ThreadPoolExecutor(max_workers=n) as pool:

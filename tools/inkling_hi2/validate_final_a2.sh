@@ -828,9 +828,20 @@ s_dspark() {
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
         "$V" "$MTP_PROBE" --spec-url http://127.0.0.1:18230 \
         --plain-url http://127.0.0.1:18231 --log "$RUN/logs/serve-dspark.log" \
-        --drop-batch 3 --settle-seconds "${MTP_SETTLE:-10}" \
+        --drop-batch 3 --settle-seconds "${MTP_SETTLE:-10}" --record-only \
         --json "$RUN/steps/dspark-1.json" || return 1
     stop_server plain16k 18231
+    # stock DSPARK=1 reference (same 8 prompts), before the gated phase: its
+    # numbers must survive a floor/no-draft finding in phase 2
+    boot_server stockspec 18231 "$STOCK" "$CTX_DSPARK" "$MAXBAT" 1 0 "$GMEM_PAIR" ||
+        { log "stock DSPARK boot failed (see $RUN/logs/serve-stockspec.log)"; return 1; }
+    require_spec_config "$RUN/logs/serve-stockspec.log" on stockspec || return 1
+    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
+        "$V" "$MTP_PROBE" --stock-only --stock-spec-url http://127.0.0.1:18231 \
+        --stock-log "$RUN/logs/serve-stockspec.log" \
+        --json "$RUN/steps/dspark-stock.json" || return 1
+    num "stock_dspark" "$("$V" -c "import json;n=json.load(open('$RUN/steps/dspark-stock.json'))['numbers'];print('accept_len=%s accept_rate=%s drafts=%s' % (n.get('stock_mean_acceptance_length'), n.get('stock_acceptance_rate'), n.get('stock_drafts')))")"
+    stop_server stockspec 18231
     # plain boot #2: the floor (plain vs plain) and spec vs plain2
     boot_server plain16k 18231 "$SERVE_DIR" "$CTX_DSPARK" "$MAXBAT" 0 0 "$GMEM_PAIR" ||
         { log "plain boot #2 failed (see $RUN/logs/serve-plain16k.log)"; return 1; }
@@ -843,16 +854,6 @@ s_dspark() {
         --json "$RUN/steps/dspark.json" || return 1
     num "dspark" "$("$V" -c "import json;n=json.load(open('$RUN/steps/dspark.json'))['numbers'];print('accept_len=%s accept_rate=%s speedup_c1=%s drafts_delta_b3=%s floor_max=%s spec_diff_max=%s' % (n.get('mean_acceptance_length'), n.get('acceptance_rate'), n.get('speedup_c1'), n.get('drafts_delta_at_batch'), n.get('floor_diff_max'), n.get('spec_diff_max')))")"
     stop_server plain16k 18231
-    # stock DSPARK=1 reference (same 8 prompts): the card's acceptance baseline
-    boot_server stockspec 18231 "$STOCK" "$CTX_DSPARK" "$MAXBAT" 1 0 "$GMEM_PAIR" ||
-        { log "stock DSPARK boot failed (see $RUN/logs/serve-stockspec.log)"; return 1; }
-    require_spec_config "$RUN/logs/serve-stockspec.log" on stockspec || return 1
-    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
-        "$V" "$MTP_PROBE" --stock-only --stock-spec-url http://127.0.0.1:18231 \
-        --stock-log "$RUN/logs/serve-stockspec.log" \
-        --json "$RUN/steps/dspark-stock.json" || return 1
-    num "stock_dspark" "$("$V" -c "import json;n=json.load(open('$RUN/steps/dspark-stock.json'))['numbers'];print('accept_len=%s accept_rate=%s drafts=%s' % (n.get('stock_mean_acceptance_length'), n.get('stock_acceptance_rate'), n.get('stock_drafts')))")"
-    stop_server stockspec 18231
     stop_server dspark 18230
 }
 

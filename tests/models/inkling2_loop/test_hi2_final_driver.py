@@ -908,6 +908,7 @@ ap.add_argument("--settle-seconds", type=float, default=10.0)
 ap.add_argument("--stock-spec-url")
 ap.add_argument("--stock-log")
 ap.add_argument("--stock-only", action="store_true")
+ap.add_argument("--record-only", action="store_true")
 ap.add_argument("--drop-batch", type=int, default=0)
 ap.add_argument("--json", required=True)
 ap.add_argument("--max-tokens", type=int, default=96)
@@ -995,17 +996,17 @@ def test_dspark_step_passes_with_the_speculator_loaded(kit):
     calls = [
         json.loads(line) for line in (kit["calls"] / "mtp").read_text().splitlines()
     ]
-    # plain boot #1, plain boot #2 (the floor), then the stock reference
+    # plain boot #1 (record), the stock reference, then plain #2 (the floor)
     assert calls == [
         {
             "spec": "http://127.0.0.1:18230",
             "plain": "http://127.0.0.1:18231",
         },
+        {"spec": None, "plain": None},
         {
             "spec": "http://127.0.0.1:18230",
             "plain": "http://127.0.0.1:18231",
         },
-        {"spec": None, "plain": None},
     ], calls
     numbers = json.loads((rt(kit, "dsp-ok") / "steps" / "dspark.json").read_text())[
         "numbers"

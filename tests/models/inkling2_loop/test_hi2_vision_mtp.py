@@ -312,9 +312,30 @@ class _VisionStub(BaseHTTPRequestHandler):
     fail_post = False
     with_token_ids = True
     reject_token_ids = False
+    drafts = 0
+    accepted = 0
+    draft_tokens = 0
     posts: list = []
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path == "/health":
+            self._send({"status": "ok"})
+            return
+        if self.path == "/metrics":
+            body = (
+                f'vllm:spec_decode_num_drafts_total{{engine="0"}} {type(self).drafts}\n'
+                f'vllm:spec_decode_num_accepted_tokens_total{{engine="0"}} '
+                f"{type(self).accepted}\n"
+                f'vllm:spec_decode_num_draft_tokens_total{{engine="0"}} '
+                f"{type(self).draft_tokens}\n"
+            )
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path != "/v1/models":
             self.send_error(404)
             return
@@ -333,6 +354,9 @@ class _VisionStub(BaseHTTPRequestHandler):
         if payload.get("return_token_ids") and type(self).reject_token_ids:
             self.send_error(400)
             return
+        type(self).drafts += 7
+        type(self).accepted += 7
+        type(self).draft_tokens += 14
         choice: dict = {"message": {"content": "a red square"}, "finish_reason": "stop"}
         if type(self).with_token_ids and payload.get("return_token_ids"):
             choice["token_ids"] = [11, 12]
@@ -356,6 +380,9 @@ def vision_stub():
     _VisionStub.fail_post = False
     _VisionStub.with_token_ids = True
     _VisionStub.reject_token_ids = False
+    _VisionStub.drafts = 0
+    _VisionStub.accepted = 0
+    _VisionStub.draft_tokens = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _VisionStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -454,13 +481,44 @@ def test_the_no_draft_verdict_uses_the_window_delta():
     assert v["delta"] == 3 and not v["ok"]
 
 
+def test_record_only_records_outputs_without_the_no_draft_gate(
+    vision_stub, tmp_path, monkeypatch
+):
+    mtp_probe._SERVED.clear()
+    _VisionStub.drafts = 0
+    out = tmp_path / "probe.json"
+    argv = [
+        "mtp_probe",
+        "--spec-url",
+        vision_stub,
+        "--plain-url",
+        vision_stub,
+        "--drop-batch",
+        "3",
+        "--settle-seconds",
+        "0",
+        "--max-tokens",
+        "4",
+        "--json",
+        str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", argv + ["--record-only"])
+    assert mtp_probe.main() == 0
+    recorded = json.loads(out.read_text())
+    assert sorted(recorded["outputs"]["plain"]) == sorted(
+        p["name"] for p in mtp_probe.PROMPTS
+    )
+    # the same movement of the drafts counter is a finding without the flag
+    monkeypatch.setattr(sys, "argv", argv)
+    assert mtp_probe.main() == 1
+    mtp_probe._SERVED.clear()
+
+
 def test_the_no_draft_window_settles_before_reading_the_counter():
     text = (KIT / "mtp_probe.py").read_text()
     sleep_at = text.index("time.sleep(args.settle_seconds)")
-    read_at = text.index(
-        'window_before = metric(spec, "vllm:spec_decode_num_drafts_total")'
-    )
-    assert sleep_at < read_at
+    settled_at = text.index("window_before = settled_drafts(")
+    assert sleep_at < settled_at
 
 
 def test_mtp_complete_falls_back_to_the_server_tokenizer(vision_stub):
