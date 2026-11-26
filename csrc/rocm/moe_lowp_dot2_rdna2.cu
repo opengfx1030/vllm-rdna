@@ -362,6 +362,7 @@ void launch_moe_nvfp4_cfg(
           expert_ids, num_tokens_post_padded, size_m, size_n, size_k, top_k,
           expert_weight_stride, expert_scales_stride, mul_topk_weight,
           output_topk, gate_cap, up_cap);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 template <typename T, int BLOCK_SIZE_M>
@@ -384,8 +385,8 @@ void launch_moe_nvfp4(
     }
     if (variant == 0) {
       // Exact K-split (BK=192) for single-token decode when K is a multiple of
-      // 192 but not 256 (e.g. w2 K=1152 TP1 / K=576 TP2), eliminating the
-      // half-empty K-tail CTA (144 CTAs = 2/CU on 72-CU V620, 0 VGPR spill).
+      // 192 but not 256 (w2 K=1152 TP1 / K=576 TP2), eliminating the
+      // half-empty K-tail CTA; at num_token_blocks > 8 (T >= 2), BK=256 wins.
       if constexpr (BLOCK_SIZE_M == 1) {
         if (num_token_blocks <= 8 && (size_k % 192 == 0) &&
             (size_k % 256 != 0)) {
@@ -603,7 +604,8 @@ __device__ __forceinline__ float dot2_8_regs(const half2 (&dq)[4],
 }
 
 // One thread per 32 K elements of one N row: 8 words per column, 1 scale byte.
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, int BLOCK_SIZE_M, int TX = THREADS_X,
+          int BK = BLOCK_KN_SIZE>
 __global__ void moe_gemm_mxfp8_kernel_rdna2(
     const T* __restrict__ a, T* __restrict__ c,
     const uint32_t* __restrict__ b_q_weight,  // [E, K/8, N]
@@ -616,11 +618,12 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
     const int expert_weight_stride, const int expert_scales_stride,
     const bool mul_topk_weight, const int output_topk, const float gate_cap,
     const float up_cap) {
+  static_assert(BK % 32 == 0, "BK must be a multiple of 32");
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
-  const int offset_n = blockIdx.y * BLOCK_KN_SIZE * 4;
-  const int offset_k = blockIdx.z * BLOCK_KN_SIZE;
-  const int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
+  const int offset_n = blockIdx.y * TX * 4;
+  const int offset_k = blockIdx.z * BK;
+  const int end_k = min(offset_k + BK, size_k);
   const int n = offset_n + t * 4;
 
   if (token_block * BLOCK_SIZE_M >= num_tokens_post_padded[0]) return;
@@ -633,12 +636,11 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
       b_scales + (int64_t)expert_id * expert_scales_stride;
 
   // 16-byte aligned: the activations of a group are read as one uint4 per row
-  __shared__
-      __attribute__((aligned(16))) T block_a[BLOCK_SIZE_M][BLOCK_KN_SIZE + 8];
+  __shared__ __attribute__((aligned(16))) T block_a[BLOCK_SIZE_M][BK + 8];
   const int offset_m_base = token_block * BLOCK_SIZE_M;
-  load_activations<T, BLOCK_SIZE_M>(a, block_a, sorted_token_ids, offset_m_base,
-                                    offset_k, end_k, t, size_m, size_k, top_k,
-                                    gate_cap, up_cap);
+  load_activations<T, BLOCK_SIZE_M, TX, BK>(
+      a, block_a, sorted_token_ids, offset_m_base, offset_k, end_k, t, size_m,
+      size_k, top_k, gate_cap, up_cap);
   __syncthreads();
   if (n >= size_n) return;
 
@@ -703,7 +705,8 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
 
 namespace lowp_dot2 {
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, int BLOCK_SIZE_M, int TX = THREADS_X,
+          int BK = BLOCK_KN_SIZE>
 __global__ void moe_gemm_mxfp8_kernel_rdna2(
     const T*, T*, const uint32_t*, const uint8_t*, const float*, const int32_t*,
     const int32_t*, const int32_t*, const int, const int, const int, const int,
@@ -716,6 +719,27 @@ __global__ void moe_gemm_mxfp8_kernel_rdna2(
 // ---------------------------------------------------------------------------
 // MXFP8 launcher and entry point
 // ---------------------------------------------------------------------------
+template <typename T, int BLOCK_SIZE_M, int TX = THREADS_X,
+          int BK = BLOCK_KN_SIZE>
+void launch_moe_mxfp8_cfg(
+    const T* a, T* c, const uint32_t* b_q_weight, const uint8_t* b_scales,
+    const float* topk_weights, const int32_t* sorted_token_ids,
+    const int32_t* expert_ids, const int32_t* num_tokens_post_padded,
+    int num_token_blocks, int size_m, int size_n, int size_k, int top_k,
+    int expert_weight_stride, int expert_scales_stride, bool mul_topk_weight,
+    int output_topk, float gate_cap, float up_cap, hipStream_t stream) {
+  dim3 block(TX);
+  dim3 grid(num_token_blocks, (size_n + TX * 4 - 1) / (TX * 4),
+            (size_k + BK - 1) / BK);
+  lowp_dot2::moe_gemm_mxfp8_kernel_rdna2<T, BLOCK_SIZE_M, TX, BK>
+      <<<grid, block, 0, stream>>>(
+          a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, size_m, size_n, size_k, top_k,
+          expert_weight_stride, expert_scales_stride, mul_topk_weight,
+          output_topk, gate_cap, up_cap);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 template <typename T, int BLOCK_SIZE_M>
 void launch_moe_mxfp8(
     const T* a, T* c, const uint32_t* b_q_weight, const uint8_t* b_scales,
@@ -724,16 +748,21 @@ void launch_moe_mxfp8(
     int num_token_blocks, int size_m, int size_n, int size_k, int top_k,
     int expert_weight_stride, int expert_scales_stride, bool mul_topk_weight,
     int output_topk, float gate_cap, float up_cap, hipStream_t stream) {
-  dim3 block(THREADS_X);
-  dim3 grid(num_token_blocks,
-            (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
-            (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
-  lowp_dot2::moe_gemm_mxfp8_kernel_rdna2<T, BLOCK_SIZE_M>
-      <<<grid, block, 0, stream>>>(
+  if constexpr (BLOCK_SIZE_M == 1) {
+    if (num_token_blocks <= 8 && (size_k % 192 == 0) && (size_k % 256 != 0)) {
+      launch_moe_mxfp8_cfg<T, 1, 256, 192>(
           a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids,
-          expert_ids, num_tokens_post_padded, size_m, size_n, size_k, top_k,
-          expert_weight_stride, expert_scales_stride, mul_topk_weight,
-          output_topk, gate_cap, up_cap);
+          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+          size_k, top_k, expert_weight_stride, expert_scales_stride,
+          mul_topk_weight, output_topk, gate_cap, up_cap, stream);
+      return;
+    }
+  }
+  launch_moe_mxfp8_cfg<T, BLOCK_SIZE_M, THREADS_X, BLOCK_KN_SIZE>(
+      a, c, b_q_weight, b_scales, topk_weights, sorted_token_ids, expert_ids,
+      num_tokens_post_padded, num_token_blocks, size_m, size_n, size_k, top_k,
+      expert_weight_stride, expert_scales_stride, mul_topk_weight, output_topk,
+      gate_cap, up_cap, stream);
 }
 
 template <typename T>

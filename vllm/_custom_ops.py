@@ -2051,6 +2051,166 @@ def moe_mxfp8_gemm_swiglu_rdna2(
     )
 
 
+def moe_nvfp4_gemm_hybrid_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    dev_q_weight: torch.Tensor,
+    dev_scales: torch.Tensor,
+    dev_globals: torch.Tensor,
+    host_q_weight: torch.Tensor,
+    host_scales: torch.Tensor,
+    host_globals: torch.Tensor,
+    resident_map: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_nvfp4_gemm_hybrid_rdna2(
+        a,
+        c,
+        dev_q_weight,
+        dev_scales,
+        dev_globals,
+        host_q_weight,
+        host_scales,
+        host_globals,
+        resident_map,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+def moe_nvfp4_gemm_swiglu_hybrid_rdna2(
+    gate_up: torch.Tensor,
+    c: torch.Tensor,
+    dev_q_weight: torch.Tensor,
+    dev_scales: torch.Tensor,
+    dev_globals: torch.Tensor,
+    host_q_weight: torch.Tensor,
+    host_scales: torch.Tensor,
+    host_globals: torch.Tensor,
+    resident_map: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+    gate_cap: float,
+    up_cap: float,
+) -> None:
+    torch.ops._rocm_C.moe_nvfp4_gemm_swiglu_hybrid_rdna2(
+        gate_up,
+        c,
+        dev_q_weight,
+        dev_scales,
+        dev_globals,
+        host_q_weight,
+        host_scales,
+        host_globals,
+        resident_map,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        gate_cap,
+        up_cap,
+    )
+
+
+def moe_mxfp8_gemm_hybrid_rdna2(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    dev_q_weight: torch.Tensor,
+    dev_scales: torch.Tensor,
+    host_q_weight: torch.Tensor,
+    host_scales: torch.Tensor,
+    resident_map: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+) -> None:
+    torch.ops._rocm_C.moe_mxfp8_gemm_hybrid_rdna2(
+        a,
+        c,
+        dev_q_weight,
+        dev_scales,
+        host_q_weight,
+        host_scales,
+        resident_map,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+def moe_mxfp8_gemm_swiglu_hybrid_rdna2(
+    gate_up: torch.Tensor,
+    c: torch.Tensor,
+    dev_q_weight: torch.Tensor,
+    dev_scales: torch.Tensor,
+    host_q_weight: torch.Tensor,
+    host_scales: torch.Tensor,
+    resident_map: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int,
+    gate_cap: float,
+    up_cap: float,
+) -> None:
+    torch.ops._rocm_C.moe_mxfp8_gemm_swiglu_hybrid_rdna2(
+        gate_up,
+        c,
+        dev_q_weight,
+        dev_scales,
+        host_q_weight,
+        host_scales,
+        resident_map,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+        gate_cap,
+        up_cap,
+    )
+
+
 _INKLING2_MAX_SPLITS = 256  # kI2MaxSplits of csrc/rocm/inkling2_attn_rdna2.cu
 
 #: ``VLLM_INKLING2_DECODE_FUSED`` picks the decode kernel of `inkling2_attention`
@@ -6833,6 +6993,114 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp8_gemm_
         block_size_m: int,
         mul_topk_weight: bool,
         output_topk: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_nvfp4_gemm_hybrid_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_nvfp4_gemm_hybrid_rdna2")
+    def _moe_nvfp4_gemm_hybrid_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        dev_q_weight: torch.Tensor,
+        dev_scales: torch.Tensor,
+        dev_globals: torch.Tensor,
+        host_q_weight: torch.Tensor,
+        host_scales: torch.Tensor,
+        host_globals: torch.Tensor,
+        resident_map: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_nvfp4_gemm_swiglu_hybrid_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_nvfp4_gemm_swiglu_hybrid_rdna2")
+    def _moe_nvfp4_gemm_swiglu_hybrid_rdna2_fake(
+        gate_up: torch.Tensor,
+        c: torch.Tensor,
+        dev_q_weight: torch.Tensor,
+        dev_scales: torch.Tensor,
+        dev_globals: torch.Tensor,
+        host_q_weight: torch.Tensor,
+        host_scales: torch.Tensor,
+        host_globals: torch.Tensor,
+        resident_map: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+        gate_cap: float,
+        up_cap: float,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_mxfp8_gemm_hybrid_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_mxfp8_gemm_hybrid_rdna2")
+    def _moe_mxfp8_gemm_hybrid_rdna2_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        dev_q_weight: torch.Tensor,
+        dev_scales: torch.Tensor,
+        host_q_weight: torch.Tensor,
+        host_scales: torch.Tensor,
+        resident_map: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "moe_mxfp8_gemm_swiglu_hybrid_rdna2"
+):
+
+    @register_fake("_rocm_C::moe_mxfp8_gemm_swiglu_hybrid_rdna2")
+    def _moe_mxfp8_gemm_swiglu_hybrid_rdna2_fake(
+        gate_up: torch.Tensor,
+        c: torch.Tensor,
+        dev_q_weight: torch.Tensor,
+        dev_scales: torch.Tensor,
+        host_q_weight: torch.Tensor,
+        host_scales: torch.Tensor,
+        resident_map: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int,
+        gate_cap: float,
+        up_cap: float,
     ) -> None:
         return
 

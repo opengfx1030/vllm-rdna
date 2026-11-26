@@ -98,13 +98,21 @@ def _rccl_group(world: int):
         return None
 
 
-def _worker(rank: int, world: int, port: int, cache_root: str) -> None:
+def _worker(
+    rank: int,
+    world: int,
+    port: int,
+    cache_root: str,
+    max_kb: int = GATE_KB,
+    oneshot_kb: int = GATE_KB,
+    sizes: tuple[int, ...] = SIZES,
+) -> None:
     os.environ.update(
         MASTER_ADDR="127.0.0.1",
         MASTER_PORT=str(port),
         VLLM_CACHE_ROOT=cache_root,
-        VLLM_RDNA_AR_MAX_KB=str(GATE_KB),
-        VLLM_RDNA_AR_ONESHOT_KB=str(GATE_KB),
+        VLLM_RDNA_AR_MAX_KB=str(max_kb),
+        VLLM_RDNA_AR_ONESHOT_KB=str(oneshot_kb),
     )
     torch.accelerator.set_device_index(rank)
     dist.init_process_group("gloo", rank=rank, world_size=world)
@@ -119,7 +127,10 @@ def _worker(rank: int, world: int, port: int, cache_root: str) -> None:
     rccl_iters = int(os.environ.get("VLLM_RDNA_AR_TEST_RCCL_ITERS", "3"))
 
     # --- bit-equal to the fixed-order fp32 reference, back-to-back --------
-    cases = [(n, dt) for dt in DTYPES for n in SIZES if _fits(n, dt)]
+    def _fits_gate(n: int, dtype: torch.dtype) -> bool:
+        return n * torch.empty((), dtype=dtype).element_size() <= max_kb * 1024
+
+    cases = [(n, dt) for dt in DTYPES for n in sizes if _fits_gate(n, dt)]
     pending: list[tuple[torch.Tensor, torch.Tensor, tuple]] = []
     checked = 0
 
@@ -239,3 +250,21 @@ def test_rdna_ar_allreduce_is_exact(tmp_path, world, port):
     ):
         pytest.skip(f"needs {world} gfx10x GPUs")
     mp.spawn(_worker, args=(world, port, str(tmp_path)), nprocs=world, join=True)
+
+
+@pytest.mark.skipif(not _has_rdna_ar(), reason="rdna_ar all-reduce not built")
+@pytest.mark.parametrize(("world", "port"), [(2, 29545), (4, 29547)])
+def test_rdna_ar_twoshot_allreduce_is_exact(tmp_path, world, port):
+    if not (
+        torch.cuda.is_available()
+        and torch.accelerator.device_count() >= world
+        and on_rdna2()
+    ):
+        pytest.skip(f"needs {world} gfx10x GPUs")
+    twoshot_sizes = (1, 17, 2560, 30720, 65536, 131072, 262144, 393216)
+    mp.spawn(
+        _worker,
+        args=(world, port, str(tmp_path), 1536, 0, twoshot_sizes),
+        nprocs=world,
+        join=True,
+    )

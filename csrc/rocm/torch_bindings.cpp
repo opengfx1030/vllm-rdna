@@ -656,6 +656,50 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_mxfp8_gemm_swiglu_rdna2", torch::kCUDA,
                 &moe_mxfp8_gemm_swiglu_rdna2);
 
+  rocm_ops.def(
+      "moe_nvfp4_gemm_hybrid_rdna2(Tensor a, Tensor! c, "
+      "Tensor dev_q_weight, Tensor dev_scales, Tensor dev_globals, "
+      "Tensor host_q_weight, Tensor host_scales, Tensor host_globals, "
+      "Tensor resident_map, Tensor topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_nvfp4_gemm_hybrid_rdna2", torch::kCUDA,
+                &moe_nvfp4_gemm_hybrid_rdna2);
+
+  rocm_ops.def(
+      "moe_nvfp4_gemm_swiglu_hybrid_rdna2(Tensor gate_up, Tensor! c, "
+      "Tensor dev_q_weight, Tensor dev_scales, Tensor dev_globals, "
+      "Tensor host_q_weight, Tensor host_scales, Tensor host_globals, "
+      "Tensor resident_map, Tensor topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk, float gate_cap, float up_cap) -> ()");
+  rocm_ops.impl("moe_nvfp4_gemm_swiglu_hybrid_rdna2", torch::kCUDA,
+                &moe_nvfp4_gemm_swiglu_hybrid_rdna2);
+
+  rocm_ops.def(
+      "moe_mxfp8_gemm_hybrid_rdna2(Tensor a, Tensor! c, "
+      "Tensor dev_q_weight, Tensor dev_scales, "
+      "Tensor host_q_weight, Tensor host_scales, "
+      "Tensor resident_map, Tensor topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_mxfp8_gemm_hybrid_rdna2", torch::kCUDA,
+                &moe_mxfp8_gemm_hybrid_rdna2);
+
+  rocm_ops.def(
+      "moe_mxfp8_gemm_swiglu_hybrid_rdna2(Tensor gate_up, Tensor! c, "
+      "Tensor dev_q_weight, Tensor dev_scales, "
+      "Tensor host_q_weight, Tensor host_scales, "
+      "Tensor resident_map, Tensor topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk, float gate_cap, float up_cap) -> ()");
+  rocm_ops.impl("moe_mxfp8_gemm_swiglu_hybrid_rdna2", torch::kCUDA,
+                &moe_mxfp8_gemm_swiglu_hybrid_rdna2);
+
   // Inkling-2-Mini attention core on RDNA2 (gfx1030): paged short convs,
   // K/V prep and attention with learned relative bias + sink logit.
   rocm_ops.def(
