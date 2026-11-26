@@ -174,7 +174,7 @@ class Rdna2UnquantizedExperts(mk.FusedMoEExpertsModular):
             hidden_states, w1, w2, topk_ids
         )
         n_dim = self.adjust_N_for_activation(N, activation)
-        assert w1.shape[1] == N and w1.shape[2] == K and N == 2 * n_dim
+        assert w1.shape[1] == N and w1.shape[2] == K and 2 * n_dim == N
 
         # Pair-blocked HIP GEMV re-reads each expert once per token-slot (fast
         # for decode M <= 32, slow at prefill M >= 64). Route large prefill

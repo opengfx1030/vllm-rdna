@@ -72,9 +72,8 @@ __global__ void gate_up_silu_kernel(const half* __restrict__ x,
                                     const half* __restrict__ w13,
                                     const IdxT* __restrict__ topk_ids,
                                     const int32_t* __restrict__ expert_map,
-                                    half* __restrict__ act,
-                                    const int num_pairs, const int topk,
-                                    const int N, const int K) {
+                                    half* __restrict__ act, const int num_pairs,
+                                    const int topk, const int N, const int K) {
   const int p = blockIdx.x;
   const int warp = threadIdx.x / kWarpSize;
   const int lane = threadIdx.x % kWarpSize;
@@ -191,8 +190,8 @@ __global__ void down_kernel(const half* __restrict__ act,
 
 template <typename IdxT>
 void launch_gate_up_silu(const half* x, const half* w13, const IdxT* topk_ids,
-                         const int32_t* expert_map, half* act, int64_t num_pairs,
-                         int64_t topk, int64_t N, int64_t K,
+                         const int32_t* expert_map, half* act,
+                         int64_t num_pairs, int64_t topk, int64_t N, int64_t K,
                          hipStream_t stream) {
   const int j_tile = kWarpThreads / kWarpSize * kColsPerWarp;
   const dim3 grid((unsigned)num_pairs, (unsigned)((N + j_tile - 1) / j_tile));
@@ -234,15 +233,13 @@ void check_common(const torch::Tensor& x, int64_t N, int64_t K) {
 //   W: [E, N_out, K] fp16
 //   C: [num_pairs, N_out] fp16 (row = slot)
 // ---------------------------------------------------------------------------
-__global__ void __launch_bounds__(64)
-    moe_gemm_unquantized_prefill_kernel(
-        const half* __restrict__ A, const half* __restrict__ W,
-        const int32_t* __restrict__ sorted_token_ids,
-        const int32_t* __restrict__ expert_ids,
-        const int32_t* __restrict__ num_tokens_post_padded,
-        const float* __restrict__ topk_weights, half* __restrict__ C,
-        int num_pairs, int input_div_topk, int N_out, int K,
-        bool mul_topk_weight) {
+__global__ void __launch_bounds__(64) moe_gemm_unquantized_prefill_kernel(
+    const half* __restrict__ A, const half* __restrict__ W,
+    const int32_t* __restrict__ sorted_token_ids,
+    const int32_t* __restrict__ expert_ids,
+    const int32_t* __restrict__ num_tokens_post_padded,
+    const float* __restrict__ topk_weights, half* __restrict__ C, int num_pairs,
+    int input_div_topk, int N_out, int K, bool mul_topk_weight) {
   constexpr int BM = 16, BN = 64, BK = 32, TM = 4, TN = 4;
   constexpr int TX = 16, TY = 4, T = 64;
   constexpr int LD = BK + 4;  // 36 halves = 72 B (conflict-free)
@@ -379,21 +376,28 @@ void moe_gemm_unquantized_prefill_rdna2(
     bool mul_topk_weight, torch::Tensor topk_weights) {
   TORCH_CHECK(x.scalar_type() == at::kHalf && x.is_contiguous(), "x fp16");
   TORCH_CHECK(w.scalar_type() == at::kHalf && w.is_contiguous(), "w fp16");
-  TORCH_CHECK(out.scalar_type() == at::kHalf && out.is_contiguous(), "out fp16");
+  TORCH_CHECK(out.scalar_type() == at::kHalf && out.is_contiguous(),
+              "out fp16");
+  TORCH_CHECK(sorted_token_ids.is_contiguous() && expert_ids.is_contiguous() &&
+                  num_tokens_post_padded.is_contiguous(),
+              "routing metadata must be contiguous");
+  TORCH_CHECK(!mul_topk_weight || (topk_weights.scalar_type() == at::kFloat &&
+                                   topk_weights.is_contiguous()),
+              "topk_weights must be contiguous float32");
   const int64_t N_out = w.size(1);
   const int64_t K = w.size(2);
   TORCH_CHECK(K % 32 == 0, "K must be a multiple of 32");
   const int64_t num_blocks = expert_ids.size(0);
   if (num_pairs == 0 || num_blocks == 0 || N_out == 0 || K == 0) return;
 
+  using namespace vllm::moe_unquantized_rdna2;
   const at::cuda::OptionalCUDAGuard guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const dim3 grid((unsigned)num_blocks, (unsigned)((N_out + 63) / 64));
-  const float* tw = mul_topk_weight
-                        ? reinterpret_cast<const float*>(topk_weights.data_ptr())
-                        : nullptr;
-  vllm::moe_unquantized_rdna2::moe_gemm_unquantized_prefill_kernel<<<
-      grid, 64, 0, stream>>>(
+  const float* tw =
+      mul_topk_weight ? reinterpret_cast<const float*>(topk_weights.data_ptr())
+                      : nullptr;
+  moe_gemm_unquantized_prefill_kernel<<<grid, 64, 0, stream>>>(
       reinterpret_cast<const half*>(x.data_ptr()),
       reinterpret_cast<const half*>(w.data_ptr()),
       sorted_token_ids.data_ptr<int32_t>(), expert_ids.data_ptr<int32_t>(),
@@ -433,7 +437,8 @@ void moe_gate_up_silu_unquantized_rdna2(
         reinterpret_cast<const int32_t*>(topk_ids.data_ptr()), emap,
         reinterpret_cast<half*>(act.data_ptr()), num_pairs, topk, N, K, stream);
   } else {
-    TORCH_CHECK(topk_ids.scalar_type() == at::kLong, "topk_ids must be int32/int64");
+    TORCH_CHECK(topk_ids.scalar_type() == at::kLong,
+                "topk_ids must be int32/int64");
     launch_gate_up_silu<int64_t>(
         reinterpret_cast<const half*>(x.data_ptr()),
         reinterpret_cast<const half*>(w13.data_ptr()),
@@ -443,11 +448,12 @@ void moe_gate_up_silu_unquantized_rdna2(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void moe_down_unquantized_rdna2(
-    torch::Tensor act, torch::Tensor w2, torch::Tensor topk_ids,
-    const std::optional<torch::Tensor>& expert_map, torch::Tensor topk_weights,
-    bool mul_topk_weight, torch::Tensor slot_out, int64_t topk, int64_t N,
-    int64_t K) {
+void moe_down_unquantized_rdna2(torch::Tensor act, torch::Tensor w2,
+                                torch::Tensor topk_ids,
+                                const std::optional<torch::Tensor>& expert_map,
+                                torch::Tensor topk_weights,
+                                bool mul_topk_weight, torch::Tensor slot_out,
+                                int64_t topk, int64_t N, int64_t K) {
   using namespace vllm::moe_unquantized_rdna2;
   TORCH_CHECK(act.scalar_type() == at::kHalf && act.is_contiguous() &&
                   act.size(0) == topk_ids.numel() && act.size(1) == N,
@@ -459,8 +465,7 @@ void moe_down_unquantized_rdna2(
                   slot_out.size(-1) == K &&
                   slot_out.numel() == topk_ids.numel() * K,
               "slot_out must be fp16 [M*topk, K]");
-  TORCH_CHECK(K % 4 == 0,
-              "K must be a multiple of 4 (packed fp16 slot store)");
+  TORCH_CHECK(K % 4 == 0, "K must be a multiple of 4 (packed fp16 slot store)");
   TORCH_CHECK(topk_ids.dim() == 1, "topk_ids must be flattened");
   TORCH_CHECK(!expert_map.has_value() || expert_map->scalar_type() == at::kInt,
               "expert_map must be int32");
@@ -485,16 +490,17 @@ void moe_down_unquantized_rdna2(
                          reinterpret_cast<const half*>(w2.data_ptr()),
                          reinterpret_cast<const int32_t*>(topk_ids.data_ptr()),
                          emap, tw, mul_topk_weight,
-                         reinterpret_cast<half*>(slot_out.data_ptr()), num_pairs,
-                         topk, N, K, stream);
+                         reinterpret_cast<half*>(slot_out.data_ptr()),
+                         num_pairs, topk, N, K, stream);
   } else {
-    TORCH_CHECK(topk_ids.scalar_type() == at::kLong, "topk_ids must be int32/int64");
+    TORCH_CHECK(topk_ids.scalar_type() == at::kLong,
+                "topk_ids must be int32/int64");
     launch_down<int64_t>(reinterpret_cast<const half*>(act.data_ptr()),
                          reinterpret_cast<const half*>(w2.data_ptr()),
                          reinterpret_cast<const int64_t*>(topk_ids.data_ptr()),
                          emap, tw, mul_topk_weight,
-                         reinterpret_cast<half*>(slot_out.data_ptr()), num_pairs,
-                         topk, N, K, stream);
+                         reinterpret_cast<half*>(slot_out.data_ptr()),
+                         num_pairs, topk, N, K, stream);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

@@ -1757,9 +1757,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         return
 
 
-if hasattr(torch.ops, "_rocm_C") and hasattr(
-    torch.ops._rocm_C, "gemm_w8a8_i8_rdna2"
-):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gemm_w8a8_i8_rdna2"):
 
     @register_fake("_rocm_C::gemm_w8a8_i8_rdna2")
     def _gemm_w8a8_i8_rdna2_fake(

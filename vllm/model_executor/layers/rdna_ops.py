@@ -61,6 +61,8 @@ def _w8a8_prefill_ok(x: torch.Tensor, weight_i8: torch.Tensor) -> bool:
         and x.size(-1) % 64 == 0
         and weight_i8.dtype == torch.int8
     )
+
+
 # Shared-expert fused kernels cover MTP verify batches (fp16 weights). 8 keeps
 # the torch path above the exact-MT range; 0 turns the fused kernels off.
 _SE_DECODE_MAX = int(os.environ.get("VLLM_RDNA_SE_DECODE_MAX", "32") or 0)
@@ -172,6 +174,7 @@ def _rdna_hc_mix(
             and w_up_i8.shape[1] == lora_rank
             and w_up_i8.shape[0] == xn.shape[1]
             and xn.shape[1] % (32 * hc_count) == 0
+            and dai.stride(0) % 8 == 0
         ):
             block_input = ops.rdna_hc_up_gate_mix_prefill_i8(
                 dai, w_up_i8, s_up, xn, lora_rank, hc_count
@@ -191,6 +194,7 @@ def _rdna_hc_mix(
                 and w_up.shape[1] == lora_rank
                 and w_up.shape[0] == xn.shape[1]
                 and xn.shape[1] % (32 * hc_count) == 0
+                and dai.stride(0) % 8 == 0
             ):
                 block_input = ops.rdna_hc_up_gate_mix_prefill(
                     dai, w_up, xn, lora_rank, hc_count
@@ -363,10 +367,12 @@ def _rdna_shared_expert(
     ):
         from vllm import _custom_ops as ops
 
-        gu = ops.gemm_w8a8_i8_rdna2(x, w1_i8, s1, None)
+        x2 = x.reshape(-1, x.size(-1)).contiguous()
+        gu = ops.gemm_w8a8_i8_rdna2(x2, w1_i8, s1, None)
         half = gu.shape[-1] // 2
         act = (F.silu(gu[..., :half]) * gu[..., half:]).contiguous()
         out = ops.gemm_w8a8_i8_rdna2(act, w2_i8, s2, None)
+        out = out.reshape(*x.shape[:-1], out.shape[-1])
         return torch.sigmoid(F.linear(x, w_gate.reshape(1, -1))) * out
     from vllm.model_executor.layers.rdna_dense_int8 import weight_for_gemm
 

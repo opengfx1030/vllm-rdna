@@ -18,6 +18,7 @@
 // v_dot4 sources sit in distinct VGPR banks, and tail wave skip (SKIP=1).
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -34,12 +35,44 @@
 
 #include "ops.h"
 
-#if defined(__HIPCC__) && defined(__gfx1030__)
+#if defined(__HIPCC__) && \
+    (defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__))
   #define __HIP__RDNA2_W8A8__
 #endif
 
 namespace vllm {
 namespace gemm_w8a8_i8_rdna2 {
+
+template <int BM_, int BN_, int BK_, int TM_, int TN_, int RAST_>
+struct DesignI8 {
+  static constexpr int BM = BM_, BN = BN_, BK = BK_, TM = TM_, TN = TN_;
+  static constexpr int RAST = RAST_;
+  static constexpr int NBUF = 2;
+  static constexpr int LW = 8;   // 8-byte LDS fragment (ds_read_b64, 2 dwords)
+  static constexpr int ND = 2;   // dwords per fragment
+  static constexpr int KS = 8;   // int8 elements per k step
+  static constexpr int CH = 16;  // int8 elements per 16-byte global chunk
+  static constexpr int CPR = BK / CH;  // chunks per tile row (4 for BK=64)
+  static constexpr int TX = BN / TN, TY = BM / TM, T = TX * TY;
+  static constexpr int A_CHUNKS = BM * CPR, B_CHUNKS = BN * CPR;
+  static constexpr int A_PER_T = (A_CHUNKS + T - 1) / T;
+  static constexpr int B_PER_T = (B_CHUNKS + T - 1) / T;
+  static constexpr int A_LDS = BM * BK, B_LDS = BN * BK;  // bytes
+  static constexpr int STAGE = A_LDS + B_LDS;             // bytes per buffer
+  static constexpr int SRP = CPR <= 8 ? 8 / CPR : 1;      // rows/swizzle step
+  static constexpr int LDS_BYTES = NBUF * STAGE;
+
+  static_assert(BK == 64 && CPR == 4, "BK=64 int8 (64 B/row, 4 chunks)");
+  static_assert(TX % 8 == 0 && TY % 8 == 0, "SWZ requires TX, TY % 8 == 0");
+  static_assert(BM % TM == 0 && BN % TN == 0, "tile divisibility");
+  static_assert(T >= 32 && T <= 1024 && T % 32 == 0, "block size");
+  static_assert(LDS_BYTES <= 65536, "LDS <= 64 KiB");
+};
+
+using D1_I8 = DesignI8<128, 128, 64, 8, 16, 8>;  // 128 thr, 32 KiB LDS
+using D4_I8 = DesignI8<256, 128, 64, 8, 16, 4>;  // 256 thr, 48 KiB LDS
+using D6_I8 = DesignI8<64, 128, 64, 8, 8, 0>;    // 128 thr, 24 KiB LDS
+using D7_I8 = DesignI8<64, 64, 64, 8, 8, 4>;  //  64 thr, 16 KiB LDS (skinny N)
 
 #if defined(__HIP__RDNA2_W8A8__) || !defined(__HIP_DEVICE_COMPILE__)
 
@@ -74,7 +107,7 @@ __global__ void __launch_bounds__(256)
     if (tid < nvec) {
       reg_v[0] = x_row[tid];
       const __half2* h2 = reinterpret_cast<const __half2*>(&reg_v[0]);
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         float2 f = __half22float2(h2[j]);
         local_max = fmaxf(local_max, fmaxf(fabsf(f.x), fabsf(f.y)));
@@ -83,7 +116,7 @@ __global__ void __launch_bounds__(256)
     if (tid + 256 < nvec) {
       reg_v[1] = x_row[tid + 256];
       const __half2* h2 = reinterpret_cast<const __half2*>(&reg_v[1]);
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         float2 f = __half22float2(h2[j]);
         local_max = fmaxf(local_max, fmaxf(fabsf(f.x), fabsf(f.y)));
@@ -93,7 +126,7 @@ __global__ void __launch_bounds__(256)
     for (int i = tid; i < nvec; i += 256) {
       uint4 v = x_row[i];
       const __half2* h2 = reinterpret_cast<const __half2*>(&v);
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         float2 f = __half22float2(h2[j]);
         local_max = fmaxf(local_max, fmaxf(fabsf(f.x), fabsf(f.y)));
@@ -104,7 +137,7 @@ __global__ void __launch_bounds__(256)
   // Wave32 reduction
   const int lane = tid & 31;
   const int wave = tid >> 5;
-#pragma unroll
+  #pragma unroll
   for (int off = 16; off > 0; off >>= 1) {
     local_max = fmaxf(local_max, __shfl_xor(local_max, off, 32));
   }
@@ -115,7 +148,7 @@ __global__ void __launch_bounds__(256)
 
   float row_max = (tid < 8) ? smax[tid] : 0.0f;
   if (wave == 0) {
-#pragma unroll
+  #pragma unroll
     for (int off = 4; off > 0; off >>= 1) {
       row_max = fmaxf(row_max, __shfl_xor(row_max, off, 32));
     }
@@ -131,7 +164,7 @@ __global__ void __launch_bounds__(256)
   auto quant_store = [&](int idx, const uint4& v) {
     const __half2* h2 = reinterpret_cast<const __half2*>(&v);
     uint32_t p[2] = {0u, 0u};
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) {
       float2 f = __half22float2(h2[j]);
       uint32_t q0 = static_cast<uint8_t>(static_cast<int8_t>(
@@ -159,37 +192,6 @@ __global__ void __launch_bounds__(256)
 //   W: [N, K] int8 (row-major, 16-byte aligned)
 //   C: [M, N] fp16 (row-major)
 // ---------------------------------------------------------------------------
-template <int BM_, int BN_, int BK_, int TM_, int TN_, int RAST_>
-struct DesignI8 {
-  static constexpr int BM = BM_, BN = BN_, BK = BK_, TM = TM_, TN = TN_;
-  static constexpr int RAST = RAST_;
-  static constexpr int NBUF = 2;
-  static constexpr int LW = 8;    // 8-byte LDS fragment (ds_read_b64, 2 dwords)
-  static constexpr int ND = 2;    // dwords per fragment
-  static constexpr int KS = 8;    // int8 elements per k step
-  static constexpr int CH = 16;   // int8 elements per 16-byte global chunk
-  static constexpr int CPR = BK / CH;  // chunks per tile row (4 for BK=64)
-  static constexpr int TX = BN / TN, TY = BM / TM, T = TX * TY;
-  static constexpr int A_CHUNKS = BM * CPR, B_CHUNKS = BN * CPR;
-  static constexpr int A_PER_T = (A_CHUNKS + T - 1) / T;
-  static constexpr int B_PER_T = (B_CHUNKS + T - 1) / T;
-  static constexpr int A_LDS = BM * BK, B_LDS = BN * BK;  // bytes
-  static constexpr int STAGE = A_LDS + B_LDS;             // bytes per buffer
-  static constexpr int SRP = CPR <= 8 ? 8 / CPR : 1;      // rows/swizzle step
-  static constexpr int LDS_BYTES = NBUF * STAGE;
-
-  static_assert(BK == 64 && CPR == 4, "BK=64 int8 (64 B/row, 4 chunks)");
-  static_assert(TX % 8 == 0 && TY % 8 == 0, "SWZ requires TX, TY % 8 == 0");
-  static_assert(BM % TM == 0 && BN % TN == 0, "tile divisibility");
-  static_assert(T >= 32 && T <= 1024 && T % 32 == 0, "block size");
-  static_assert(LDS_BYTES <= 65536, "LDS <= 64 KiB");
-};
-
-using D1_I8 = DesignI8<128, 128, 64, 8, 16, 8>;  // 128 thr, 32 KiB LDS
-using D4_I8 = DesignI8<256, 128, 64, 8, 16, 4>;  // 256 thr, 48 KiB LDS
-using D6_I8 = DesignI8<64, 128, 64, 8, 8, 0>;    // 128 thr, 24 KiB LDS
-using D7_I8 = DesignI8<64, 64, 64, 8, 8, 4>;     //  64 thr, 16 KiB LDS (skinny N)
-
 template <class P>
 __global__ void __launch_bounds__(P::T)
     gemm_w8a8_i8_kernel(const char* __restrict__ A, const char* __restrict__ W,
@@ -238,10 +240,11 @@ __global__ void __launch_bounds__(P::T)
 
   // Tail wave skip
   const int w0 = __builtin_amdgcn_readfirstlane(tid) & ~31;
-  const bool wave_live = (m0 + w0 / TX < M) && (n0 + (TX >= 32 ? w0 % TX : 0) < N);
+  const bool wave_live =
+      (m0 + w0 / TX < M) && (n0 + (TX >= 32 ? w0 % TX : 0) < N);
 
   uint32_t aoff[A_PER_T], boff[B_PER_T];
-#pragma unroll
+  #pragma unroll
   for (int v = 0; v < A_PER_T; ++v) {
     const int c = tid + v * T;
     const int row = min(c / CPR, BM - 1);
@@ -249,7 +252,7 @@ __global__ void __launch_bounds__(P::T)
     const int grow = min(m0 + row, M - 1);
     aoff[v] = static_cast<uint32_t>(grow * K + kc);
   }
-#pragma unroll
+  #pragma unroll
   for (int v = 0; v < B_PER_T; ++v) {
     const int c = tid + v * T;
     const int row = min(c / CPR, BN - 1);
@@ -270,11 +273,11 @@ __global__ void __launch_bounds__(P::T)
 
   auto gload = [&](int kt) {
     const uint32_t kb = static_cast<uint32_t>(kt * BK);
-#pragma unroll
+  #pragma unroll
     for (int v = 0; v < A_PER_T; ++v)
       if (A_PER_T * T == P::A_CHUNKS || tid + v * T < P::A_CHUNKS)
         ra[v] = __builtin_amdgcn_raw_buffer_load_b128(rsa, aoff[v], kb, 0);
-#pragma unroll
+  #pragma unroll
     for (int v = 0; v < B_PER_T; ++v)
       if (B_PER_T * T == P::B_CHUNKS || tid + v * T < P::B_CHUNKS)
         rb[v] = __builtin_amdgcn_raw_buffer_load_b128(rsw, boff[v], kb, 0);
@@ -283,13 +286,13 @@ __global__ void __launch_bounds__(P::T)
   auto lstore = [&](int buf) {
     char* as = lds + buf * P::STAGE;
     char* bs = as + P::A_LDS;
-#pragma unroll
+  #pragma unroll
     for (int v = 0; v < A_PER_T; ++v) {
       const int c = tid + v * T;
       if (A_PER_T * T == P::A_CHUNKS || c < P::A_CHUNKS)
         *reinterpret_cast<Chunk*>(as + store_off(c / CPR, c % CPR)) = ra[v];
     }
-#pragma unroll
+  #pragma unroll
     for (int v = 0; v < B_PER_T; ++v) {
       const int c = tid + v * T;
       if (B_PER_T * T == P::B_CHUNKS || c < P::B_CHUNKS) {
@@ -303,29 +306,29 @@ __global__ void __launch_bounds__(P::T)
   };
 
   int32_t acc[TM][TN];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < TM; ++i)
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < TN; ++j) acc[i][j] = 0;
 
   auto compute = [&](int buf) {
     if (!wave_live) return;
     const char* as = lds + buf * P::STAGE;
     const char* bs = as + P::A_LDS;
-#pragma unroll 1
+  #pragma unroll 1
     for (int kk = 0; kk < BK; kk += P::KS) {
       Frag af[TM], bf[TN];
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < TM; ++i)
         af[i] = *reinterpret_cast<const Frag*>(as + (ty + TY * i) * BK +
                                                frag_off(kk, swa));
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < TN; ++j)
         bf[j] = *reinterpret_cast<const Frag*>(bs + (tx + TX * j) * BK +
                                                frag_off(kk, swb));
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < TM; ++i)
-#pragma unroll
+  #pragma unroll
         for (int j = 0; j < TN; ++j) {
           acc[i][j] = sdot4u(af[i][0], bf[j][1], acc[i][j]);
           acc[i][j] = sdot4u(af[i][1], bf[j][0], acc[i][j]);
@@ -350,23 +353,23 @@ __global__ void __launch_bounds__(P::T)
   // Epilogue: single float scale multiply + optional bias -> fp16
   if (!wave_live) return;
   float asc[TM], wsc[TN], bi[TN];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < TM; ++i) {
     const int row = m0 + ty + TY * i;
     asc[i] = (row < M) ? a_scale[row] : 0.0f;
   }
-#pragma unroll
+  #pragma unroll
   for (int j = 0; j < TN; ++j) {
     const int col = n0 + tx + TX * j;
     wsc[j] = (col < N) ? static_cast<float>(w_scale[col]) : 0.0f;
     bi[j] = (bias && col < N) ? static_cast<float>(bias[col]) : 0.0f;
   }
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < TM; ++i) {
     const int row = m0 + ty + TY * i;
     if (row >= M) continue;
     _Float16* out_r = Cout + (int64_t)row * N;
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < TN; ++j) {
       const int col = n0 + tx + TX * j;
       if (col < N) {
@@ -376,6 +379,16 @@ __global__ void __launch_bounds__(P::T)
     }
   }
 }
+
+#else  // non-RDNA2 device pass: signature parity, empty body.
+
+__global__ void __launch_bounds__(256)
+    w8a8_act_quant_per_token_k(const _Float16*, int8_t*, float*, int, int) {}
+
+template <class P>
+__global__ void __launch_bounds__(P::T)
+    gemm_w8a8_i8_kernel(const char*, const char*, const float*, const _Float16*,
+                        const _Float16*, _Float16*, int, int, int) {}
 
 #endif  // __HIP__RDNA2_W8A8__ || !__HIP_DEVICE_COMPILE__
 
@@ -397,8 +410,9 @@ void get_scratch(int dev, int64_t M, int64_t K, torch::Tensor& a_i8,
   Scratch& s = g_scratch[dev];
   const int64_t need_elems = M * K;
   if (s.cap_elems < need_elems) {
-    s.a_i8 = torch::empty({need_elems},
-                          torch::TensorOptions().dtype(torch::kInt8).device(device));
+    s.a_i8 =
+        torch::empty({need_elems},
+                     torch::TensorOptions().dtype(torch::kInt8).device(device));
     s.cap_elems = need_elems;
   }
   if (s.cap_rows < M) {
@@ -435,7 +449,8 @@ at::Tensor gemm_w8a8_i8_rdna2(const at::Tensor& x, const at::Tensor& w_i8,
                               int64_t design) {
   TORCH_CHECK(x.is_cuda() && w_i8.is_cuda() && w_scale.is_cuda(),
               "gemm_w8a8_i8_rdna2: tensors must be on CUDA/HIP");
-  TORCH_CHECK(x.dtype() == torch::kFloat16, "gemm_w8a8_i8_rdna2: x must be fp16");
+  TORCH_CHECK(x.dtype() == torch::kFloat16,
+              "gemm_w8a8_i8_rdna2: x must be fp16");
   TORCH_CHECK(w_i8.dtype() == torch::kInt8,
               "gemm_w8a8_i8_rdna2: w_i8 must be int8");
   TORCH_CHECK(w_scale.dtype() == torch::kFloat16,
@@ -449,6 +464,8 @@ at::Tensor gemm_w8a8_i8_rdna2(const at::Tensor& x, const at::Tensor& w_i8,
   TORCH_CHECK(w_i8.size(1) == K && w_scale.numel() == N,
               "gemm_w8a8_i8_rdna2: shape mismatch");
   TORCH_CHECK(K % 64 == 0, "gemm_w8a8_i8_rdna2: K must be a multiple of 64");
+  TORCH_CHECK(M * K <= INT32_MAX && N * K <= INT32_MAX,
+              "gemm_w8a8_i8_rdna2: tensor element count exceeds int32 buffer");
 
   const at::Tensor x_c = x.contiguous();
   const at::Tensor w_c = w_i8.contiguous();
@@ -514,7 +531,8 @@ at::Tensor gemm_w8a8_i8_rdna2(const at::Tensor& x, const at::Tensor& w_i8,
 // ===========================================================================
 // Phase 1.2.3: Native INT8 v_dot4 HC up-projection + sigmoid + gated mean
 //   lora[m, r] = silu(dai[m, r] / 4) -> quantize to int8 + f32 scale
-//   out[m, h]  = (1/4) * sum_{c=0..3} sigmoid(lora[m] . w_up[c*H+h]) * xn[m, c*H+h]
+//   out[m, h]  = (1/4) * sum_{c=0..3} sigmoid(lora[m] . w_up[c*H+h]) * xn[m,
+//   c*H+h]
 // ===========================================================================
 namespace vllm {
 namespace gemm_w8a8_i8_rdna2 {
@@ -546,7 +564,7 @@ __global__ void __launch_bounds__(128)
     if (tid < nvec) {
       uint4 v = reinterpret_cast<const uint4*>(row_in)[tid];
       const __half2* h2 = reinterpret_cast<const __half2*>(&v);
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         float2 f = __half22float2(h2[j]);
         float x0 = f.x * 0.25f;
@@ -562,7 +580,7 @@ __global__ void __launch_bounds__(128)
     for (int i = tid; i < nvec; i += 128) {
       uint4 v = reinterpret_cast<const uint4*>(row_in)[i];
       const __half2* h2 = reinterpret_cast<const __half2*>(&v);
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         float2 f = __half22float2(h2[j]);
         float x0 = f.x * 0.25f;
@@ -576,7 +594,7 @@ __global__ void __launch_bounds__(128)
 
   const int lane = tid & 31;
   const int wave = tid >> 5;
-#pragma unroll
+  #pragma unroll
   for (int off = 16; off > 0; off >>= 1)
     local_max = fmaxf(local_max, __shfl_xor(local_max, off, 32));
   __shared__ float smax[4];
@@ -598,7 +616,7 @@ __global__ void __launch_bounds__(128)
   if (single_pass) {
     if (tid < nvec) {
       uint32_t p[2] = {0u, 0u};
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         uint32_t q0 = static_cast<uint8_t>(static_cast<int8_t>(
             max(-127, min(127, __float2int_rn(reg_y[2 * j + 0] * inv_scale)))));
@@ -613,7 +631,7 @@ __global__ void __launch_bounds__(128)
       uint4 v = reinterpret_cast<const uint4*>(row_in)[i];
       const __half2* h2 = reinterpret_cast<const __half2*>(&v);
       uint32_t p[2] = {0u, 0u};
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j) {
         float2 f = __half22float2(h2[j]);
         float x0 = f.x * 0.25f;
@@ -633,23 +651,20 @@ __global__ void __launch_bounds__(128)
 
 // Fused INT8 v_dot4 HC up-GEMM + sigmoid + gated mean.
 // TY=16, TM=8 -> BM=128; TX=16, HH=2 -> BH=32, BN=128; kKT=64 int8 (16 dwords).
-__global__ void __launch_bounds__(256)
-    hc_up_mix_prefill_i8_k(const int8_t* __restrict__ lora_i8,
-                           const float* __restrict__ lora_scale,
-                           const int8_t* __restrict__ w_up_i8,
-                           const _Float16* __restrict__ w_up_scale,
-                           const half* __restrict__ xn,
-                           half* __restrict__ out, int M, int H, int R) {
+__global__ void __launch_bounds__(256) hc_up_mix_prefill_i8_k(
+    const int8_t* __restrict__ lora_i8, const float* __restrict__ lora_scale,
+    const int8_t* __restrict__ w_up_i8, const _Float16* __restrict__ w_up_scale,
+    const half* __restrict__ xn, half* __restrict__ out, int M, int H, int R) {
   constexpr int kHC = 4;
   constexpr int kThreads = 256;
   constexpr int TY = 16, TM = 8, HH = 2;
-  constexpr int BM = TY * TM;    // 128
-  constexpr int BH = 16 * HH;    // 32
-  constexpr int BN = kHC * BH;   // 128
-  constexpr int kKT = 64;        // 64 int8 elements per slab
-  constexpr int kKP = kKT / 4;   // 16 dwords per slab
-  constexpr int SA = BM + 4;     // 132 dwords (conflict-free b128)
-  constexpr int SB = BN + 2;     // 130 dwords (conflict-free)
+  constexpr int BM = TY * TM;   // 128
+  constexpr int BH = 16 * HH;   // 32
+  constexpr int BN = kHC * BH;  // 128
+  constexpr int kKT = 64;       // 64 int8 elements per slab
+  constexpr int kKP = kKT / 4;  // 16 dwords per slab
+  constexpr int SA = BM + 4;    // 132 dwords (conflict-free b128)
+  constexpr int SB = BN + 2;    // 130 dwords (conflict-free)
   constexpr int A_LD = (BM * (kKT / 16)) / kThreads;  // 2 uint4 loads/thread
   constexpr int B_LD = (BN * (kKT / 16)) / kThreads;  // 2 uint4 loads/thread
 
@@ -665,7 +680,7 @@ __global__ void __launch_bounds__(256)
   const int8_t* a_src[A_LD];
   bool a_ok[A_LD];
   int a_m[A_LD], a_j[A_LD];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < A_LD; ++i) {
     const int idx = t + kThreads * i;
     a_m[i] = idx >> 2;
@@ -676,7 +691,7 @@ __global__ void __launch_bounds__(256)
   }
   const int8_t* b_src[B_LD];
   int b_n[B_LD], b_j[B_LD];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < B_LD; ++i) {
     const int idx = t + kThreads * i;
     b_n[i] = idx >> 2;
@@ -687,36 +702,36 @@ __global__ void __launch_bounds__(256)
 
   uint4 ra[A_LD], rb[B_LD];
   auto fetch = [&](int k0) {
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < A_LD; ++i)
       ra[i] = a_ok[i] ? *reinterpret_cast<const uint4*>(a_src[i] + k0)
                       : make_uint4(0, 0, 0, 0);
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < B_LD; ++i)
       rb[i] = *reinterpret_cast<const uint4*>(b_src[i] + k0);
   };
 
   auto stage = [&]() {
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < A_LD; ++i) {
       const uint32_t* av = reinterpret_cast<const uint32_t*>(&ra[i]);
-#pragma unroll
+  #pragma unroll
       for (int q = 0; q < 4; ++q) As[a_j[i] * 4 + q][a_m[i]] = av[q];
     }
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < B_LD; ++i) {
       const uint32_t* bv = reinterpret_cast<const uint32_t*>(&rb[i]);
-#pragma unroll
+  #pragma unroll
       for (int q = 0; q < 4; ++q) Bs[b_j[i] * 4 + q][b_n[i]] = bv[q];
     }
   };
 
   int32_t acc[TM][kHC][HH];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < TM; ++i)
-#pragma unroll
+  #pragma unroll
     for (int c = 0; c < kHC; ++c)
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < HH; ++e) acc[i][c][e] = 0;
 
   fetch(0);
@@ -725,23 +740,23 @@ __global__ void __launch_bounds__(256)
     stage();
     __syncthreads();
     if (k0 + kKT < R) fetch(k0 + kKT);
-#pragma unroll
+  #pragma unroll
     for (int kp = 0; kp < kKP; ++kp) {
       uint32_t a[TM];
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < TM; i += 4)
         *reinterpret_cast<uint4*>(&a[i]) =
             *reinterpret_cast<const uint4*>(&As[kp][ty * TM + i]);
       uint32_t b[kHC][HH];
-#pragma unroll
+  #pragma unroll
       for (int c = 0; c < kHC; ++c)
         *reinterpret_cast<uint2*>(&b[c][0]) =
             *reinterpret_cast<const uint2*>(&Bs[kp][c * BH + tx * 2]);
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < TM; ++i)
-#pragma unroll
+  #pragma unroll
         for (int c = 0; c < kHC; ++c)
-#pragma unroll
+  #pragma unroll
           for (int e = 0; e < HH; ++e)
             acc[i][c][e] = sdot4u(a[i], b[c][e], acc[i][c][e]);
     }
@@ -750,19 +765,19 @@ __global__ void __launch_bounds__(256)
   // Epilogue: dequant -> sigmoid -> gated mean over 4 HC streams
   const int h = h0 + tx * HH;
   float wsc[kHC][HH];
-#pragma unroll
+  #pragma unroll
   for (int c = 0; c < kHC; ++c) {
     wsc[c][0] = static_cast<float>(w_up_scale[c * H + h + 0]);
     wsc[c][1] = static_cast<float>(w_up_scale[c * H + h + 1]);
   }
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < TM; ++i) {
     const int row = m0 + ty * TM + i;
     if (row >= M) continue;
     const float asc = lora_scale[row];
     const half* xr = xn + (size_t)row * HCH + h;
     float mix0 = 0.0f, mix1 = 0.0f;
-#pragma unroll
+  #pragma unroll
     for (int c = 0; c < kHC; ++c) {
       const float2 xv =
           __half22float2(*reinterpret_cast<const half2*>(xr + c * H));
@@ -776,6 +791,16 @@ __global__ void __launch_bounds__(256)
   }
 }
 
+#else  // non-RDNA2 device pass: signature parity, empty body.
+
+__global__ void __launch_bounds__(128)
+    hc_silu_quant_k(const _Float16*, int, int8_t*, float*, int, int) {}
+
+__global__ void __launch_bounds__(256)
+    hc_up_mix_prefill_i8_k(const int8_t*, const float*, const int8_t*,
+                           const _Float16*, const half*, half*, int, int, int) {
+}
+
 #endif  // __HIP__RDNA2_W8A8__ || !__HIP_DEVICE_COMPILE__
 
 }  // namespace gemm_w8a8_i8_rdna2
@@ -785,21 +810,28 @@ at::Tensor rdna_hc_up_gate_mix_prefill_i8(const at::Tensor& dai,
                                           const at::Tensor& w_up_i8,
                                           const at::Tensor& w_up_scale,
                                           const at::Tensor& xn,
-                                          int64_t lora_rank,
-                                          int64_t hc_count) {
+                                          int64_t lora_rank, int64_t hc_count) {
   TORCH_CHECK(hc_count == 4, "rdna_hc_up_gate_mix_prefill_i8: hc_count == 4");
   TORCH_CHECK(dai.dtype() == torch::kFloat16 && xn.dtype() == torch::kFloat16,
               "rdna_hc_up_gate_mix_prefill_i8: dai and xn must be fp16");
-  TORCH_CHECK(w_up_i8.dtype() == torch::kInt8 &&
-                  w_up_scale.dtype() == torch::kFloat16,
-              "rdna_hc_up_gate_mix_prefill_i8: w_up_i8 int8, scale fp16");
+  TORCH_CHECK(
+      w_up_i8.dtype() == torch::kInt8 && w_up_scale.dtype() == torch::kFloat16,
+      "rdna_hc_up_gate_mix_prefill_i8: w_up_i8 int8, scale fp16");
   const int64_t M = dai.size(0);
   const int64_t ld_dai = dai.stride(0);
   const int64_t R = lora_rank;
   const int64_t H = xn.size(1) / hc_count;
   TORCH_CHECK(R % 64 == 0 && H % 32 == 0,
               "rdna_hc_up_gate_mix_prefill_i8: R%64==0, H%32==0");
+  TORCH_CHECK(dai.dim() == 2 && dai.stride(1) == 1 && ld_dai % 8 == 0,
+              "rdna_hc_up_gate_mix_prefill_i8: dai must be contiguous with "
+              "stride(0)%8==0");
+  TORCH_CHECK(xn.dim() == 2 && xn.is_contiguous() && w_up_i8.is_contiguous() &&
+                  w_up_scale.is_contiguous(),
+              "rdna_hc_up_gate_mix_prefill_i8: xn, w_up_i8, w_up_scale must be "
+              "contiguous");
 
+  using namespace vllm::gemm_w8a8_i8_rdna2;
   c10::cuda::CUDAGuard device_guard(dai.device());
   hipStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
@@ -807,11 +839,9 @@ at::Tensor rdna_hc_up_gate_mix_prefill_i8(const at::Tensor& dai,
   if (M == 0) return out;
 
   torch::Tensor lora_i8, lora_scale;
-  vllm::gemm_w8a8_i8_rdna2::get_scratch(dai.device().index(), M, R, lora_i8,
-                                        lora_scale, dai.device());
+  get_scratch(dai.device().index(), M, R, lora_i8, lora_scale, dai.device());
 
-  vllm::gemm_w8a8_i8_rdna2::hc_silu_quant_k<<<
-      dim3(static_cast<unsigned>(M)), dim3(128), 0, stream>>>(
+  hc_silu_quant_k<<<dim3(static_cast<unsigned>(M)), dim3(128), 0, stream>>>(
       reinterpret_cast<const _Float16*>(dai.data_ptr()),
       static_cast<int>(ld_dai), lora_i8.data_ptr<int8_t>(),
       lora_scale.data_ptr<float>(), static_cast<int>(M), static_cast<int>(R));
@@ -819,8 +849,7 @@ at::Tensor rdna_hc_up_gate_mix_prefill_i8(const at::Tensor& dai,
 
   const dim3 grid(static_cast<unsigned>(H / 32),
                   static_cast<unsigned>((M + 127) / 128));
-  vllm::gemm_w8a8_i8_rdna2::hc_up_mix_prefill_i8_k<<<grid, dim3(256), 0,
-                                                     stream>>>(
+  hc_up_mix_prefill_i8_k<<<grid, dim3(256), 0, stream>>>(
       lora_i8.data_ptr<int8_t>(), lora_scale.data_ptr<float>(),
       w_up_i8.data_ptr<int8_t>(),
       reinterpret_cast<const _Float16*>(w_up_scale.data_ptr()),
