@@ -100,6 +100,10 @@ class TensorParallel:
             raise NotImplementedError(f"{type(self).__name__} has no all_reduce")
         return x
 
+    def rdna_ar_handle(self, nbytes: int = 0) -> int:
+        """Active Wave-7 BAR1 P2P AllReduce handle if usable for ``nbytes``, else -1."""
+        return -1
+
     def all_gather(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
         """Concatenation of the ranks' ``x`` along ``dim`` (rank order)."""
         if self.size > 1:
@@ -135,6 +139,23 @@ class VllmTensorParallel(TensorParallel):
         from vllm.distributed import tensor_model_parallel_all_reduce
 
         return tensor_model_parallel_all_reduce(x)
+
+    def rdna_ar_handle(self, nbytes: int = 0) -> int:
+        if self.size <= 1:
+            return -1
+        from vllm.distributed.parallel_state import get_tp_group
+
+        comm = getattr(get_tp_group(), "device_communicator", None)
+        rc = getattr(comm, "rdna_ar_comm", None)
+        if rc is None or getattr(rc, "disabled", False):
+            return -1
+        max_b = int(getattr(rc, "max_bytes", 0))
+        if nbytes > 0 and max_b > 0 and nbytes > max_b:
+            return -1
+        oneshot_b = int(getattr(rc, "oneshot_max_bytes", 0))
+        if nbytes > 0 and oneshot_b > 0 and nbytes > oneshot_b:
+            return -1
+        return int(getattr(rc, "handle", -1))
 
     def all_gather(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if self.size == 1:

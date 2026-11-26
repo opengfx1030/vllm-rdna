@@ -35,6 +35,7 @@ DROPPED = (
     "EXPERT_CACHE_PREFETCH",
     "EXPERT_CACHE_HYBRID",
     "EXPERT_CACHE_PINGPONG",
+    "MONO_MAX_ROWS",
     "VLLM_INKLING2_MOE_OFFLOAD_SLOTS",
     "VLLM_INKLING2_MOE_OFFLOAD_COPY",
     "VLLM_INKLING2_MOE_OFFLOAD_POLICY",
@@ -44,6 +45,8 @@ DROPPED = (
     "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX",
     "VLLM_INKLING2_MOE_OFFLOAD_HYBRID",
     "VLLM_INKLING2_MOE_OFFLOAD_PINGPONG",
+    "VLLM_INKLING2_MONOKERNEL",
+    "VLLM_INKLING2_MONO_MAX_ROWS",
     "PYTORCH_TUNABLEOP_ENABLED",
 )
 
@@ -296,3 +299,30 @@ def test_tp1_offload_recipe_plan_and_switches(venv):
         '{"method":"dspark","num_speculative_tokens":7,'
         '"num_speculative_tokens_per_batch_size":[[1,2,2],[3,8,0]]}',
     )
+
+
+@pytest.mark.parametrize("recipe", [*RECIPES, "inkling2-mini-tp1-offload"])
+def test_default_recipes_keep_monokernel_off(venv, recipe):
+    out = plan(venv, f"RECIPE={recipe}").stdout
+    assert "VLLM_INKLING2_MONOKERNEL='1'" not in out
+
+
+@pytest.mark.parametrize(
+    ("recipe", "tp", "port", "max_len"),
+    [
+        ("inkling2-mini-tp1-mono", 1, 18221, 194000),
+        ("inkling2-mini-tp2-mono", 2, 18222, 1048576),
+        ("inkling2-mini-tp4-mono", 4, 18223, 1048576),
+    ],
+)
+def test_mono_recipes_enable_monokernel_and_keep_defaults(
+    venv, recipe, tp, port, max_len
+):
+    result = plan(venv, f"RECIPE={recipe}")
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert flag(out, "--tensor-parallel-size", str(tp))
+    assert flag(out, "--port", str(port))
+    assert flag(out, "--max-model-len", str(max_len))
+    assert "export VLLM_INKLING2_MONOKERNEL='1'" in out
+    assert "export VLLM_INKLING2_MONO_MAX_ROWS='1'" in out

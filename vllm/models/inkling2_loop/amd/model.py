@@ -38,7 +38,7 @@ from .attention import (
     static_conv_hip,
 )
 from .glue import FUSE_SCONV_ATTN_RES
-from .moe import Inkling2LoopMoE
+from .moe import _MONO_AR, Inkling2LoopMoE
 from .multimodal import Inkling2MultiModalMixin, register_inkling2_processor
 from .parallel import (
     NO_TP,
@@ -592,11 +592,23 @@ class Inkling2DecoderLayer(nn.Module):
 
         # ---- MoE (route, gemm1, swiglu, gemm2) + post-mlp short convolution
         max_q = 0 if conv_md is None else conv_md.max_query_len
-        moe = self.tp.all_reduce(
-            self.mlp.forward_hip(
-                hq, ws, v.moe_out, max_query_len=max_q, visit=visit, next_mlp=next_mlp
-            )
+        mono_ar_h = (
+            self.tp.rdna_ar_handle(v.moe_out.numel() * v.moe_out.element_size())
+            if _MONO_AR
+            and self.tp.size > 1
+            and self.mlp.mono_ar_enabled(hq.shape[0], max_q)
+            else -1
         )
+        moe_partial = self.mlp.forward_hip(
+            hq,
+            ws,
+            v.moe_out,
+            max_query_len=max_q,
+            visit=visit,
+            next_mlp=next_mlp,
+            ar_handle=mono_ar_h,
+        )
+        moe = moe_partial if mono_ar_h >= 0 else self.tp.all_reduce(moe_partial)
         next_n = n_blocks + int(self.is_block_boundary)
         out_c = v.mlp_c if mlp_c_out is None else mlp_c_out
         if conv_md is None:

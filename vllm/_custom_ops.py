@@ -3466,6 +3466,55 @@ def inkling2_glue_swiglu(
     torch.ops._rocm_C.inkling2_glue_swiglu(gate_up, out, gate_cap, up_cap)
 
 
+def inkling2_mono_moe_k2(
+    x: torch.Tensor,
+    router_w: torch.Tensor,
+    bias: torch.Tensor,
+    w13_qweight: torch.Tensor,
+    w13_scales: torch.Tensor,
+    w13_globals: torch.Tensor | None,
+    w2_qweight: torch.Tensor,
+    w2_scales: torch.Tensor,
+    w2_globals: torch.Tensor | None,
+    logits_ws: torch.Tensor,
+    topk_ids_ws: torch.Tensor,
+    topk_w_ws: torch.Tensor,
+    act_ws: torch.Tensor,
+    ctrl_ws: torch.Tensor,
+    out: torch.Tensor,
+    top_k: int,
+    route_scale: float,
+    gate_cap: float,
+    up_cap: float,
+    ar_handle: int = -1,
+    n_ctas: int = 56,
+) -> None:
+    """Persistent RDNA2 decode MoE monokernel (router + w13/SwiGLU + w2 [+ AR])."""
+    torch.ops._rocm_C.inkling2_mono_moe_k2(
+        x,
+        router_w,
+        bias,
+        w13_qweight,
+        w13_scales,
+        w13_globals,
+        w2_qweight,
+        w2_scales,
+        w2_globals,
+        logits_ws,
+        topk_ids_ws,
+        topk_w_ws,
+        act_ws,
+        ctrl_ws,
+        out,
+        top_k,
+        route_scale,
+        gate_cap,
+        up_cap,
+        ar_handle,
+        n_ctas,
+    )
+
+
 def inkling2_glue_copy_states(src: torch.Tensor, dst: torch.Tensor) -> None:
     """Copy a persistent fp32 state ``[T, H]`` / ``[T, P, H]`` into ``dst``.
 
@@ -7781,6 +7830,34 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "inkling2_glue_s
     @register_fake("_rocm_C::inkling2_glue_copy_states")
     def _inkling2_glue_copy_states_fake(src: torch.Tensor, dst: torch.Tensor) -> None:
         return
+
+    if hasattr(torch.ops._rocm_C, "inkling2_mono_moe_k2"):
+
+        @register_fake("_rocm_C::inkling2_mono_moe_k2")
+        def _inkling2_mono_moe_k2_fake(
+            x: torch.Tensor,
+            router_w: torch.Tensor,
+            bias: torch.Tensor,
+            w13_qweight: torch.Tensor,
+            w13_scales: torch.Tensor,
+            w13_globals: torch.Tensor | None,
+            w2_qweight: torch.Tensor,
+            w2_scales: torch.Tensor,
+            w2_globals: torch.Tensor | None,
+            logits_ws: torch.Tensor,
+            topk_ids_ws: torch.Tensor,
+            topk_w_ws: torch.Tensor,
+            act_ws: torch.Tensor,
+            ctrl_ws: torch.Tensor,
+            out: torch.Tensor,
+            top_k: int,
+            route_scale: float,
+            gate_cap: float,
+            up_cap: float,
+            ar_handle: int,
+            n_ctas: int,
+        ) -> None:
+            return
 
     if hasattr(torch.ops._rocm_C, "inkling2_glue_loopcd_blend"):
 

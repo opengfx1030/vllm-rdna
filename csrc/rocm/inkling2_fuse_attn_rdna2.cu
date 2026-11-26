@@ -39,6 +39,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <type_traits>
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAException.h>
@@ -205,9 +206,10 @@ struct FuseArgs {
   int nw_rows;
   void* out;  // [T, Q, H] fp32 (or fp16 with norm_w) (+ blockIdx.y * o_layer)
   int64_t o_t, o_q, o_layer;
-  ConvMeta m;          // conv state (XSRC != 0)
-  const _Float16* cx;  // conv input, fp16 [T, H]
+  ConvMeta m;      // conv state (XSRC != 0)
+  const void* cx;  // conv input, fp16 or fp32 [T, H]
   int64_t cx_t;
+  int cx_f16;       // 1 if conv_x is fp16, 0 if fp32
   const float* cw;  // conv weight [H, 4]
   int width;        // channels per kv head
   int o0;           // column of the stream in the state rows
@@ -278,19 +280,35 @@ __device__ __forceinline__ HistPlan hist_plan(const ConvMeta& m,
   return hp;
 }
 
-// h[lag - 1] = raw fp16 input `lag` tokens back for channels [c, c + 4) of the
-// token (head hd, channel jch of the head)
-__device__ __forceinline__ void hist_load(uint2 (&h)[3], const HistPlan& hp,
-                                          const ConvMeta& m,
-                                          const _Float16* __restrict__ x, int c,
-                                          int hd, int jch) {
+// h[lag - 1] = input `lag` tokens back for channels [c, c + 4) of the token
+// (head hd, channel jch of the head); CT = uint2 (fp16) or float4 (fp32).
+template <typename CT>
+__device__ __forceinline__ void hist_load(CT (&h)[3], const HistPlan& hp,
+                                          const ConvMeta& m, const void* cx,
+                                          int c, int hd, int jch) {
+  constexpr bool kF16 = sizeof(CT) == sizeof(uint2);
+  const __half* cx16 = reinterpret_cast<const __half*>(cx);
+  const float* cx32 = reinterpret_cast<const float*>(cx);
   #pragma unroll
   for (int i = 0; i < 3; ++i) {
-    uint2 v = make_uint2(0u, 0u);
-    if (hp.valid[i])
-      v = load8(hp.use_x[i] ? x + hp.base[i] + c
-                            : m.cache + hp.base[i] + (int64_t)hd * m.cs1 + jch);
-    h[i] = v;
+    if constexpr (kF16) {
+      uint2 v = make_uint2(0u, 0u);
+      if (hp.valid[i]) {
+        v = load8(hp.use_x[i] ? cx16 + hp.base[i] + c
+                              : reinterpret_cast<const __half*>(m.cache) +
+                                    hp.base[i] + (int64_t)hd * m.cs1 + jch);
+      }
+      h[i] = v;
+    } else {
+      float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (hp.valid[i]) {
+        if (hp.use_x[i])
+          v = load4(cx32 + hp.base[i] + c);
+        else
+          v = cvt4h(load8(m.cache + hp.base[i] + (int64_t)hd * m.cs1 + jch));
+      }
+      h[i] = v;
+    }
   }
 }
 
@@ -397,12 +415,13 @@ __device__ __forceinline__ float bcast_lane(float x, int lane) {
   return __int_as_float(__builtin_amdgcn_readlane(__float_as_int(x), lane));
 }
 
-template <int Q, int ITER, bool NORM, int XSRC>
+template <int Q, int ITER, bool NORM, int XSRC, bool CX_F16 = true>
 __device__ __forceinline__ void attn_res_fused_body(const FuseArgs& a) {
   constexpr int kNReg = 5;  // states kept in registers between the two passes
   constexpr int kQ1 = Q + 1;
   constexpr bool kPrefW = NORM && Q == 1;  // norm weights held in registers
   constexpr int kConv = XSRC != 0 ? ITER : 1;
+  using ConvVec = std::conditional_t<CX_F16, uint2, float4>;
   const int tid = threadIdx.x;
   const int nth = blockDim.x;
   const int lane = tid & (kWave - 1);
@@ -423,8 +442,9 @@ __device__ __forceinline__ void attn_res_fused_body(const FuseArgs& a) {
 
   // ---- 1. every load that needs nothing from the conv metadata
   float4 Qv[Q][ITER], S[kNReg][ITER], P[ITER], A[ITER], X1[ITER];
+  ConvVec Cx0[ITER];
   float4 Wc[kConv][4];
-  uint2 Xh[ITER], Wa[ITER], Wb[ITER];
+  uint2 Wa[ITER], Wb[ITER];
   #pragma unroll
   for (int k = 0; k < ITER; ++k) {
     const int v = tid + k * nth;
@@ -448,15 +468,22 @@ __device__ __forceinline__ void attn_res_fused_body(const FuseArgs& a) {
     P[k] = z4;
     A[k] = z4;
     X1[k] = z4;
-    Xh[k] = z2;
+    if constexpr (CX_F16)
+      Cx0[k] = z2;
+    else
+      Cx0[k] = z4;
     Wa[k] = z2;
     Wb[k] = z2;
     if (v < V) {
       if constexpr (XSRC != 2) P[k] = load4(a.x0 + t * a.x0_t + 4 * v);
       if constexpr (XSRC == 0) {
         if (has_x1) X1[k] = load4(a.x1 + t * a.x1_t + 4 * v);
+      } else if constexpr (CX_F16) {
+        Cx0[k] = load8(reinterpret_cast<const __half*>(a.cx) + t * a.cx_t +
+                       4 * v);  // tap 0 of the conv
       } else {
-        Xh[k] = load8(a.cx + t * a.cx_t + 4 * v);  // tap 0 of the conv
+        Cx0[k] = load4(reinterpret_cast<const float*>(a.cx) + t * a.cx_t +
+                       4 * v);  // tap 0 of the conv (fp32)
       }
       if (has_app) A[k] = load4(a.append + t * a.ap_t + 4 * v);
       if constexpr (kPrefW) {
@@ -485,7 +512,7 @@ __device__ __forceinline__ void attn_res_fused_body(const FuseArgs& a) {
   int cr = -1;
   TokPos tp = {0, 0, 0};
   bool keep = false;
-  uint2 Hh[kConv][3];
+  ConvVec Hh[kConv][3];
   HistPlan hp = {};
   if constexpr (XSRC != 0) {
     if (t < a.m.T_md) {
@@ -501,7 +528,7 @@ __device__ __forceinline__ void attn_res_fused_body(const FuseArgs& a) {
             const int c = 4 * v;
             const int h = c / a.width;
             const int jch = c - h * a.width;
-            hist_load(Hh[k], hp, a.m, a.cx, c, h, jch);
+            hist_load<ConvVec>(Hh[k], hp, a.m, a.cx, c, h, jch);
           }
         }
       }
@@ -550,8 +577,14 @@ __device__ __forceinline__ void attn_res_fused_body(const FuseArgs& a) {
           const int c = 4 * v;
           const int h = c / a.width;
           const int jch = c - h * a.width;
-          const float4 tap[4] = {cvt4h(Xh[k]), cvt4h(Hh[k][0]), cvt4h(Hh[k][1]),
-                                 cvt4h(Hh[k][2])};
+          const auto to_f4 = [](const ConvVec& u) -> float4 {
+            if constexpr (CX_F16)
+              return cvt4h(u);
+            else
+              return u;
+          };
+          const float4 tap[4] = {to_f4(Cx0[k]), to_f4(Hh[k][0]),
+                                 to_f4(Hh[k][1]), to_f4(Hh[k][2])};
           cv = conv4_static(tap, Wc[k], a.inv);
           if (keep) write_ring(a.m, hp.blk_cur, tp.p, h, jch, a.o0, tap[0]);
         }
@@ -746,10 +779,10 @@ __device__ __forceinline__ void attn_res_fused_body(const FuseArgs& a) {
 
 #endif  // __HIP__RDNA2__ || !__HIP_DEVICE_COMPILE__
 
-template <int Q, int ITER, bool NORM, int XSRC>
+template <int Q, int ITER, bool NORM, int XSRC, bool CX_F16 = true>
 __global__ void __launch_bounds__(256) attn_res_fused_kernel(const FuseArgs a) {
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
-  attn_res_fused_body<Q, ITER, NORM, XSRC>(a);
+  attn_res_fused_body<Q, ITER, NORM, XSRC, CX_F16>(a);
 #endif
 }
 
@@ -823,10 +856,19 @@ int log2_exact(int64_t v, const char* who) {
 template <int Q, bool NORM, int XSRC>
 void launch_fused(int iter, int block, int64_t T, int64_t layers,
                   const FuseArgs& a, hipStream_t stream) {
-#define I2F_LAUNCH(IT)                                                        \
-  case IT:                                                                    \
-    inkling2_fuse::attn_res_fused_kernel<Q, IT, NORM, XSRC>                   \
-        <<<dim3((unsigned)T, (unsigned)layers), dim3(block), 0, stream>>>(a); \
+#define I2F_LAUNCH(IT)                                                       \
+  case IT:                                                                   \
+    if (a.cx_f16 || XSRC == 0) {                                             \
+      inkling2_fuse::attn_res_fused_kernel<Q, IT, NORM, XSRC, true>          \
+          <<<dim3((unsigned)T, (unsigned)layers), dim3(block), 0, stream>>>( \
+              a);                                                            \
+      C10_CUDA_KERNEL_LAUNCH_CHECK();                                        \
+    } else {                                                                 \
+      inkling2_fuse::attn_res_fused_kernel<Q, IT, NORM, XSRC, false>         \
+          <<<dim3((unsigned)T, (unsigned)layers), dim3(block), 0, stream>>>( \
+              a);                                                            \
+      C10_CUDA_KERNEL_LAUNCH_CHECK();                                        \
+    }                                                                        \
     break
   switch (iter) {
     I2F_LAUNCH(1);
@@ -925,12 +967,12 @@ void inkling2_fuse_attn_res_conv(
   check_gpu(conv_x, who, "conv_x");
   check_gpu(query, who, "query");
   check_gpu(out, who, "out");
-  check_dtype(conv_x, who, "conv_x", at::kHalf);
+  const int cx_f16 = is_f16(conv_x, who, "conv_x") ? 1 : 0;
   TORCH_CHECK(conv_x.dim() == 2, who, ": conv_x must be [T, H]");
   const int64_t T = conv_x.size(0), H = conv_x.size(1);
-  TORCH_CHECK(conv_x.stride(1) == 1 && conv_x.stride(0) % 8 == 0 &&
-                  (reinterpret_cast<uintptr_t>(conv_x.data_ptr()) & 15) == 0,
-              who, ": conv_x rows must be 16-byte aligned");
+  check_vec_rows(conv_x, who, "conv_x", 4);
+  TORCH_CHECK((reinterpret_cast<uintptr_t>(conv_x.data_ptr()) & 15) == 0, who,
+              ": conv_x rows must be 16-byte aligned");
   check_dtype(query, who, "query", at::kFloat);
   TORCH_CHECK(query.dim() == 2 && query.size(1) == H, who,
               ": query must be [Q, H]");
@@ -1019,8 +1061,9 @@ void inkling2_fuse_attn_res_conv(
   a.m.blk_shift = log2_exact(block_size, who);
   a.m.ring = (int)conv_cache.size(2);
   a.m.T_md = (int)std::min<int64_t>(seq_idx.size(0), T);
-  a.cx = reinterpret_cast<const _Float16*>(conv_x.data_ptr());
+  a.cx = conv_x.data_ptr();
   a.cx_t = conv_x.stride(0);
+  a.cx_f16 = cx_f16;
   a.cw = conv_w.data_ptr<float>();
   a.width = (int)width;
   a.o0 = (int)stream_offset;

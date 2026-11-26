@@ -1463,6 +1463,17 @@ void inkling2_glue_swiglu(const torch::Tensor& gate_up,
                           const torch::Tensor& out, double gate_cap,
                           double up_cap);
 
+void inkling2_mono_moe_k2(
+    const torch::Tensor& x, const torch::Tensor& router_w,
+    const torch::Tensor& bias, const torch::Tensor& w13_qweight,
+    const torch::Tensor& w13_scales,
+    const std::optional<torch::Tensor>& w13_globals,
+    const torch::Tensor& w2_qweight, const torch::Tensor& w2_scales,
+    const std::optional<torch::Tensor>& w2_globals, torch::Tensor logits_ws,
+    torch::Tensor topk_ids_ws, torch::Tensor topk_w_ws, torch::Tensor act_ws,
+    torch::Tensor ctrl_ws, torch::Tensor out, int64_t top_k, double route_scale,
+    double gate_cap, double up_cap, int64_t ar_handle, int64_t n_ctas);
+
 void inkling2_glue_copy_states(const torch::Tensor& src,
                                const torch::Tensor& dst);
 

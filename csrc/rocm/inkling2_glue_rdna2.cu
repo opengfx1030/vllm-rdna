@@ -274,8 +274,9 @@ struct GlueConvMeta {
 struct AttnResSconvArgs {
   AttnResArgs base;
   GlueConvMeta cm;
-  const __half* cx;  // [T, H] fp16 conv input
+  const void* cx;  // [T, H] fp16 or fp32 conv input
   int64_t cx_t;
+  int cx_f16;        // 1 if conv_x is fp16, 0 if fp32
   const float* cw;   // [H, 1, 4] fp32 conv weight
   float* sconv_out;  // optional [T, H] fp32 conv output
   int64_t sco_t;
@@ -565,7 +566,7 @@ __device__ __forceinline__ void attn_res_body(const AttnResArgs& a) {
 // Computing P[ITER] in an isolated prologue scope before loading Qv / S keeps
 // conv weights + history taps dead during the state reduction (~104 VGPRs vs
 // 164 VGPRs when all loads overlap).
-template <int Q, int ITER, bool NORM, int SCONV_MODE>
+template <int Q, int ITER, bool NORM, int SCONV_MODE, bool CX_F16 = true>
 __device__ __forceinline__ void attn_res_sconv_body(
     const AttnResSconvArgs& sa) {
   const AttnResArgs& a = sa.base;
@@ -573,6 +574,7 @@ __device__ __forceinline__ void attn_res_sconv_body(
   const int nth = blockDim.x;
   const int64_t t = blockIdx.x;
   const int V = a.H >> 2;
+  using ConvVec = std::conditional_t<CX_F16, uint2, float4>;
   float4 P[ITER];
   {
     int cr = -1;
@@ -617,32 +619,59 @@ __device__ __forceinline__ void attn_res_sconv_body(
       }
     }
 
-    uint2 xh[ITER];
-    uint2 hh[ITER][3];
+    ConvVec t0_v[ITER];
+    ConvVec hh_v[ITER][3];
     float4 wc[ITER][4];
     float4 x0v[ITER];
+    const float4 z4 = make_float4(0.f, 0.f, 0.f, 0.f);
+    const uint2 z2 = make_uint2(0u, 0u);
   #pragma unroll
     for (int k = 0; k < ITER; ++k) {
       const int v = tid + k * nth;
-      xh[k] = make_uint2(0u, 0u);
-      hh[k][0] = hh[k][1] = hh[k][2] = make_uint2(0u, 0u);
-      x0v[k] = make_float4(0.f, 0.f, 0.f, 0.f);
+      if constexpr (CX_F16) {
+        t0_v[k] = z2;
+        hh_v[k][0] = hh_v[k][1] = hh_v[k][2] = z2;
+      } else {
+        t0_v[k] = z4;
+        hh_v[k][0] = hh_v[k][1] = hh_v[k][2] = z4;
+      }
+      x0v[k] = z4;
       if (v < V) {
         const int c = 4 * v;
         if constexpr (SCONV_MODE == 1) {
           x0v[k] = load4(a.x0 + t * a.x0_t + c);
         }
         if (cr >= 0) {
-          xh[k] = *reinterpret_cast<const uint2*>(sa.cx + t * sa.cx_t + c);
+          if constexpr (CX_F16) {
+            t0_v[k] = *reinterpret_cast<const uint2*>(
+                reinterpret_cast<const __half*>(sa.cx) + t * sa.cx_t + c);
+          } else {
+            t0_v[k] =
+                load4(reinterpret_cast<const float*>(sa.cx) + t * sa.cx_t + c);
+          }
           const int h = c / sa.conv_width;
           const int jch = c - h * sa.conv_width;
   #pragma unroll
           for (int i = 0; i < 3; ++i) {
             if (h_valid[i]) {
-              const __half* src = h_use_x[i] ? (sa.cx + h_base[i] + c)
-                                             : (sa.cm.cache + h_base[i] +
-                                                (int64_t)h * sa.cm.cs1 + jch);
-              hh[k][i] = *reinterpret_cast<const uint2*>(src);
+              if constexpr (CX_F16) {
+                const __half* src =
+                    h_use_x[i] ? (reinterpret_cast<const __half*>(sa.cx) +
+                                  h_base[i] + c)
+                               : (sa.cm.cache + h_base[i] +
+                                  (int64_t)h * sa.cm.cs1 + jch);
+                hh_v[k][i] = *reinterpret_cast<const uint2*>(src);
+              } else {
+                if (h_use_x[i]) {
+                  hh_v[k][i] = load4(reinterpret_cast<const float*>(sa.cx) +
+                                     h_base[i] + c);
+                } else {
+                  const uint2 u = *reinterpret_cast<const uint2*>(
+                      sa.cm.cache + h_base[i] + (int64_t)h * sa.cm.cs1 + jch);
+                  hh_v[k][i] = make_float4(h2f_lo(u.x), h2f_hi(u.x),
+                                           h2f_lo(u.y), h2f_hi(u.y));
+                }
+              }
             }
           }
           const float* wp = sa.cw + (int64_t)c * 4;
@@ -662,14 +691,18 @@ __device__ __forceinline__ void attn_res_sconv_body(
         const int c = 4 * v;
         float4 cv = make_float4(0.f, 0.f, 0.f, 0.f);
         if (cr >= 0) {
-          const float4 t0 = make_float4(h2f_lo(xh[k].x), h2f_hi(xh[k].x),
-                                        h2f_lo(xh[k].y), h2f_hi(xh[k].y));
-          const float4 t1 = make_float4(h2f_lo(hh[k][0].x), h2f_hi(hh[k][0].x),
-                                        h2f_lo(hh[k][0].y), h2f_hi(hh[k][0].y));
-          const float4 t2 = make_float4(h2f_lo(hh[k][1].x), h2f_hi(hh[k][1].x),
-                                        h2f_lo(hh[k][1].y), h2f_hi(hh[k][1].y));
-          const float4 t3 = make_float4(h2f_lo(hh[k][2].x), h2f_hi(hh[k][2].x),
-                                        h2f_lo(hh[k][2].y), h2f_hi(hh[k][2].y));
+          const auto to_f4 = [](const ConvVec& u) -> float4 {
+            if constexpr (CX_F16) {
+              return make_float4(h2f_lo(u.x), h2f_hi(u.x), h2f_lo(u.y),
+                                 h2f_hi(u.y));
+            } else {
+              return u;
+            }
+          };
+          const float4 t0 = to_f4(t0_v[k]);
+          const float4 t1 = to_f4(hh_v[k][0]);
+          const float4 t2 = to_f4(hh_v[k][1]);
+          const float4 t3 = to_f4(hh_v[k][2]);
           cv.x = t0.x * wc[k][0].w + t1.x * wc[k][0].z + t2.x * wc[k][0].y +
                  t3.x * wc[k][0].x;
           cv.y = t0.y * wc[k][1].w + t1.y * wc[k][1].z + t2.y * wc[k][1].y +
@@ -720,11 +753,11 @@ __global__ void __launch_bounds__(256) attn_res_kernel(const AttnResArgs a) {
 #endif
 }
 
-template <int Q, int ITER, bool NORM, int SCONV_MODE>
+template <int Q, int ITER, bool NORM, int SCONV_MODE, bool CX_F16 = true>
 __global__ void __launch_bounds__(256)
     attn_res_sconv_kernel(const AttnResSconvArgs sa) {
 #if defined(__HIP__RDNA2__) || !defined(__HIP_DEVICE_COMPILE__)
-  attn_res_sconv_body<Q, ITER, NORM, SCONV_MODE>(sa);
+  attn_res_sconv_body<Q, ITER, NORM, SCONV_MODE, CX_F16>(sa);
 #endif
 }
 
@@ -2543,10 +2576,17 @@ template <int Q, bool NORM, int SCONV_MODE>
 static void launch_attn_res_sconv(int iter, int block, int64_t T,
                                   const AttnResSconvArgs& sa,
                                   hipStream_t stream) {
-#define I2G_ARS(IT)                                               \
-  case IT:                                                        \
-    inkling2_glue::attn_res_sconv_kernel<Q, IT, NORM, SCONV_MODE> \
-        <<<dim3((unsigned)T), dim3(block), 0, stream>>>(sa);      \
+#define I2G_ARS(IT)                                                        \
+  case IT:                                                                 \
+    if (sa.cx_f16) {                                                       \
+      inkling2_glue::attn_res_sconv_kernel<Q, IT, NORM, SCONV_MODE, true>  \
+          <<<dim3((unsigned)T), dim3(block), 0, stream>>>(sa);             \
+      C10_CUDA_KERNEL_LAUNCH_CHECK();                                      \
+    } else {                                                               \
+      inkling2_glue::attn_res_sconv_kernel<Q, IT, NORM, SCONV_MODE, false> \
+          <<<dim3((unsigned)T), dim3(block), 0, stream>>>(sa);             \
+      C10_CUDA_KERNEL_LAUNCH_CHECK();                                      \
+    }                                                                      \
     break
   switch (iter) {
     I2G_ARS(1);
@@ -2741,7 +2781,7 @@ void inkling2_glue_attn_res_sconv(
     const std::optional<at::Tensor>& norm_out2, double eps, double norm_eps) {
   const char* who = "inkling2_glue_attn_res_sconv";
   check_gpu(conv_x, who, "conv_x");
-  check_dtype(conv_x, who, "conv_x", at::kHalf);
+  const int cx_f16 = is_f16(conv_x, who, "conv_x") ? 1 : 0;
   TORCH_CHECK(conv_x.dim() == 2, who, ": conv_x must be [T, H]");
   const int64_t T = conv_x.size(0), H = conv_x.size(1);
   check_vec_rows(conv_x, who, "conv_x", 4);
@@ -2823,8 +2863,9 @@ void inkling2_glue_attn_res_sconv(
   sa.cm.blk_shift = glue_log2_exact(block_size, who);
   sa.cm.ring = (int)conv_cache.size(2);
   sa.cm.T_md = (int)std::min<int64_t>(seq_idx.size(0), T);
-  sa.cx = reinterpret_cast<const __half*>(conv_x.data_ptr());
+  sa.cx = conv_x.data_ptr();
   sa.cx_t = conv_x.stride(0);
+  sa.cx_f16 = cx_f16;
   sa.cw = conv_w.data_ptr<float>();
   sa.conv_width = (int)width;
   sa.conv_o0 = (int)stream_offset;
