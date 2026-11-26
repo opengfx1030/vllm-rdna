@@ -904,3 +904,52 @@ without the speculator, boot720 uses the served model id);
 plain_spec_check_off, boot720_spec_check_off); `mutants_launchers.py`
 **17/17 killed** (serve_passes_empty_spec_config); ruff check/format clean.
 GPU: only the one proof boot above; the resumed run executes dspark + boot720.
+
+## 5. Receipt results: `pr_receipt.sh MODE=ab QUALITY=1`, completed 2026-11-26 09:39Z
+
+Command (wrapper `pr195_receipt_run2.sh`, under my own lease): both trees are
+`git archive` of the two commits plus the attached, csrc-identical `_rocm_C`, so the
+venv's `vllm` import is satisfied by each tree; the base tree has no `.git`.  The full
+invocation with the 8 cells, the exact cells, and the receipt driver's defaults is in
+`scratch-run/pr195-receipt/pr195_receipt_run2.sh` (records the argv verbatim); head tested
+`5b892553e3d9de676aba5f8f0164498ed774da2e`, base `41ef6ba1e066571a3346c6f7d1f6c38419fb9c29`
+(the merge-base `origin/rdna_extras`).  Result `rc=1` (the token-exact gate is INCONCLUSIVE;
+every other gate the contract requires ran).  All 5 boots exited 0; 8 speed cells per side;
+KFD eviction checks `+0 ms` on every cell (none invalidated by eviction); no thermal abort
+(peak ~80 C on d1); no fault markers in the server logs or dmesg.
+
+| Gate | Result |
+| --- | --- |
+| token-exact | **INCONCLUSIVE** -- base does not repeat its own solo outputs (`unstable{base:[solo/5], head:[solo/4]}`), 20/26 equal; 5 differ (`bench-1024x128-c1/1`, `long_solo/0..2`, `solo2/4,5`) |
+| quality | **PASS** -- KL `0.00118 <= 0.00125`, top-1 `0.9879 >= 0.9870`, PPL `-0.054 %` (limit 2.0), concurrency/greedy/after-load probes PASS |
+| overlap (`FULL_AND_PIECEWISE` capture) | **PASS** |
+| stall hard gate | **PASS** -- relative direction only: 1 worse, 11 better, 2 equal |
+| speed direction | 4 worse, 4 better -- one run per cell; direction only, not a verdict |
+| archdiff | **PASS** -- `units []; no function may differ`; all six arches gfx903..gfx1100 identical (`archdiff/results/archdiff.{md,json}`) |
+| xfail/missing | none |
+
+### 5.1 Why token-exact is INCONCLUSIVE here, and why it is the base, not this branch
+
+`VLLM_RDNA2_MOE_DETERMINISTIC=1` is wired only into the compressed-tensors WNA16 RDNA2
+MoE (`compressed_tensors_moe_wna16_rdna2.py`); the Inkling2Loop stock expert path in
+**both** trees does not read it (both trees' `_custom_ops.py`/`envs.py` only define the
+switch).  The flag therefore cannot make this model's MoE bit-identical, and greedy solo
+requests differ between repeated runs inside *each* boot.  A supplemental plain-decoding
+run (`DSPARK=0`, same exact cells) is INCONCLUSIVE for the same reason: base unstable on
+`solo/4,5`, head on `solo/1,3,5`, 17/26 equal.  By the contract's own rule this is
+INCONCLUSIVE rather than PASS or FAIL: there is no branch-controlled defect the gate can
+show.  The quality gate (KL/PPL against the stock model) is the numeric-equivalence proof
+this model admits; a token-exact gate would first need the `VLLM_RDNA2_MOE_DETERMINISTIC`
+switch wired through the Inkling2Loop expert path -- out of this change's Python-only
+scope and not a regression of it.
+
+### 5.2 Artifacts
+
+- main receipt: `~/w4a8_runs/pr195-receipt/run2-20261126T071411Z/receipt.{md,json}`
+- plain-decoding exactness: `~/w4a8_runs/pr195-receipt/run-plain-20261126T071411Z/receipt.{md,json}`
+- archdiff: `~/w4a8_runs/pr195-receipt/archdiff/results/{archdiff.{md,json},commits.txt}`
+- logs: `~/w4a8_runs/pr195-receipt/{receipt2-20261126T071411Z.log,boots/*/{driver.log,serve.log,temps-gpus.log},run-plain-*/pr_receipt.log}`
+- dry-run (client/JSON contract, not the receipt): `~/w4a8_runs/pr195-receipt/dryrun/DRY_RUN_OK/`
+- the earlier `run-20261126T070419Z` (refused, missing `REFUSED_GPUS=0`) and
+  `run-20261126T070542Z` (FAIL_FAST stop after the exactness) remain as evidence of the
+  INCONCLUSIVE verdict being reproducible across three independent pairs of boots.
