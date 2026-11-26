@@ -157,6 +157,53 @@ def _sum_topk_rows(rows: torch.Tensor, topk_w: torch.Tensor, out: torch.Tensor) 
     torch.sum(y, dim=1, out=out)
 
 
+def _sum_topk_rows_f32(
+    rows: torch.Tensor, topk_w: torch.Tensor, out: torch.Tensor
+) -> None:
+    """``out[t] = sum_k rows[t * K + k] * topk_w[t, k]`` in fp32, in ascending k.
+
+    The deterministic replacement for the decode kernels' fp16 top-k epilogue
+    (packed-fp16 CAS atomics: the sum rounds in arrival order, which changes
+    between runs).  Element-wise multiplies and additions only -- no atomics,
+    no reduction kernel -- so the result of a given set of routed rows does not
+    depend on how ``sorted_ids`` ordered them.  ``rows`` is fp16 (the BM w2
+    kernel's plain stores), the arithmetic is fp32, ``out`` is the layer's
+    (fp16) output.
+    """
+    t, k = topk_w.shape
+    y = rows.view(t, k, rows.shape[-1]).float()
+    y.mul_(topk_w.unsqueeze(-1))
+    acc = y[:, 0]
+    for j in range(1, k):
+        acc = acc + y[:, j]
+    out.copy_(acc)
+
+
+def _det_routed_rows(
+    ws: Any, tokens: int, top_k: int, hidden: int, device: torch.device
+) -> torch.Tensor:
+    """``[tokens * top_k, hidden]`` fp16 scratch for the deterministic w2 stage.
+
+    Cached on the workspace (one allocation per process / graph pool, like the
+    HI2 path's ``moe_hidden_view``) so the serving forward does not allocate
+    per step.  The BM kernels write one plain-store row per routed id, so this
+    buffer needs no zeroing.
+    """
+    n = tokens * top_k
+    device = torch.device(device)
+    buf = getattr(ws, "_moe_det_rows", None)
+    if (
+        buf is None
+        or buf.shape[0] < n
+        or buf.shape[1] != hidden
+        or buf.device != device
+    ):
+        cap = max(int(getattr(ws, "moe_chunk", tokens)), tokens) * top_k
+        buf = torch.empty(cap, hidden, dtype=torch.float16, device=device)
+        ws._moe_det_rows = buf
+    return buf[:n]
+
+
 # ---------------------------------------------------------------------------
 # Experts
 # ---------------------------------------------------------------------------
@@ -682,6 +729,19 @@ def _prefill_switches(env) -> tuple[bool, bool, int]:
 
 
 _PREFILL_BM, _PREFILL_INT8, _PREFILL_BM_MIN_TOKENS = _prefill_switches(os.environ)
+
+
+def _deterministic_switch(env) -> bool:
+    """``VLLM_RDNA2_MOE_DETERMINISTIC``: the routed experts must be run-to-run
+    bit-identical.  Same variable, same truth values and same "resolved once at
+    import" semantics as the WNA16 compressed-tensors MoE
+    (``compressed_tensors_moe_wna16_rdna2.py`` / ``vllm.envs``); the stock
+    Inkling-2 experts are NVFP4 / MXFP8, whose decode kernels reduce the K
+    slices and the top-k rows with packed-fp16 CAS atomics."""
+    return env.get("VLLM_RDNA2_MOE_DETERMINISTIC", "0").lower() in ("true", "1")
+
+
+_DETERMINISTIC = _deterministic_switch(os.environ)
 
 
 def _announce(message: str, *args: Any) -> None:
@@ -1382,11 +1442,19 @@ class Inkling2LoopMoE(_ExpertsKernel):
         for s in range(0, T, step):
             e = min(s + step, T)
             tc = e - s
+            det = _DETERMINISTIC
             prefill = (
                 _PREFILL_BM
-                and tc >= _PREFILL_BM_MIN_TOKENS
+                and (tc >= _PREFILL_BM_MIN_TOKENS or det)
                 and self._prefill_supported()
             )
+            if det and not prefill:
+                raise RuntimeError(
+                    f"{self.prefix}: VLLM_RDNA2_MOE_DETERMINISTIC=1 needs the "
+                    f"prefill-BM expert GEMMs (hidden and intermediate multiples of "
+                    f"32, VLLM_INKLING2_PREFILL_BM on), got hidden "
+                    f"{self.hidden_dim}, intermediate {self.intermediate_dim}"
+                )
             # the prefill kernels group the router's 8-row blocks
             bm = (
                 _BLOCK_M_WIDE
@@ -1459,6 +1527,37 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 )
                 continue
             ops.inkling2_glue_swiglu(m.gu, m.act, self.gate_softcap, self.up_softcap)
+            if det:
+                # Deterministic expert path (VLLM_RDNA2_MOE_DETERMINISTIC=1).
+                # The decode kernels sum the K slices and the top-k rows of a
+                # token with packed-fp16 CAS atomics, so their result rounds in
+                # arrival order and changes between runs (the 48-layer model
+                # amplifies that).  The prefill-BM w13 stores ONE fp32-chained
+                # accumulator per (routed row, column) with plain stores, and
+                # the BM w2 does the same when output_topk == 0; the weighted
+                # top-k sum then runs in fp32 in ascending k, element-wise.
+                _announce(
+                    "Inkling-2 MoE deterministic expert path ACTIVE "
+                    "(VLLM_RDNA2_MOE_DETERMINISTIC=1): prefill-BM kernels with "
+                    "plain stores, fp32 top-k sum"
+                )
+                rows = _det_routed_rows(ws, tc, K, self.hidden_dim, out.device)
+                self._gemm(
+                    "w2",
+                    m.act,
+                    rows,
+                    ws.no_weights,
+                    m.sorted_ids,
+                    m.expert_ids,
+                    ws.post_pad,
+                    1,
+                    bm,
+                    False,
+                    0,
+                    cta_info=cta,
+                )
+                _sum_topk_rows_f32(rows, m.topk_w, out)
+                continue
             self._gemm(
                 "w2",
                 m.act,
