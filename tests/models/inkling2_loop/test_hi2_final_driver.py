@@ -929,6 +929,8 @@ numbers = {
 }
 with open(a.json, "w") as f:
     json.dump({"checks": {"x": True}, "numbers": numbers}, f)
+if os.environ.get("FAKE_FLOOR_FAIL") == "1" and a.floor_json:
+    sys.exit(1)
 """
 
 
@@ -961,6 +963,26 @@ def test_dspark_step_fails_when_the_boot_lost_the_speculator(kit):
     assert "spec_config_missing: dspark" in status, status
     assert "speculative_config=None" in status, status
     assert not (kit["calls"] / "mtp").exists(), "the probe ran without the speculator"
+
+
+def test_a_gated_dspark_finding_still_records_the_numbers(kit):
+    serve = _spec_kit(kit, "dsp-floor")
+    r = run(
+        kit,
+        "dsp-floor",
+        ONLY="dspark",
+        SERVE=str(serve),
+        MTP_PROBE=str(kit["kit"] / "fake_mtp_probe.py"),
+        FAKE_FLOOR_FAIL="1",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "dsp-floor") / "STATUS.log").read_text()
+    assert "FAIL dspark" in status, status
+    numbers = json.loads((rt(kit, "dsp-floor") / "steps" / "dspark.json").read_text())[
+        "numbers"
+    ]
+    assert "floor_max=1" in numbers["dspark"], numbers
+    assert "spec_diff_max=1" in numbers["dspark"], numbers
 
 
 def test_plain16k_boot_must_not_enable_the_speculator(kit):

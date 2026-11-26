@@ -851,8 +851,12 @@ s_dspark() {
         --plain-url http://127.0.0.1:18231 --log "$RUN/logs/serve-dspark.log" \
         --floor-json "$RUN/steps/dspark-1.json" \
         --drop-batch 3 --settle-seconds "${MTP_SETTLE:-10}" \
-        --json "$RUN/steps/dspark.json" || return 1
+        --json "$RUN/steps/dspark.json"
+    local probe_rc=$?
+    # record the numbers even when the probe's gate failed: the finding is the
+    # card's evidence (the probe writes its JSON before exiting non-zero)
     num "dspark" "$("$V" -c "import json;n=json.load(open('$RUN/steps/dspark.json'))['numbers'];print('accept_len=%s accept_rate=%s speedup_c1=%s drafts_delta_b3=%s floor_max=%s spec_diff_max=%s' % (n.get('mean_acceptance_length'), n.get('acceptance_rate'), n.get('speedup_c1'), n.get('drafts_delta_at_batch'), n.get('floor_diff_max'), n.get('spec_diff_max')))")"
+    [[ $probe_rc == 0 ]] || return 1
     stop_server plain16k 18231
     stop_server dspark 18230
 }
