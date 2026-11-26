@@ -21,7 +21,7 @@ Upstream's rules (the pointer above and `AGENTS.md`) still apply. The fork's cod
 | Docs, tools, CI | pre-commit; tests for the tool |
 | Code gated to one arch (e.g. RDNA3 only) | everything below on that arch; proof the other arches are untouched |
 | Shared code (runs on every platform) | CPU unit tests; receipt on your arch; list every caller and which platforms reach it |
-| New or changed kernel | kernel test against an fp32/fp64 reference for every shape the dispatcher sends it; worst-element error reported; a bug fix adds a test that fails before and passes after |
+| New or changed kernel | kernel test against an fp32/fp64 reference for every shape the dispatcher sends it; worst-element error reported; kernel-by-kernel before/after table with ISA counts (VGPR, SGPR, LDS, spills, private scratch); `tools/rdna/archdiff.sh` for `csrc/` changes; a bug fix adds a test that fails before and passes after |
 | Default path, numerics should not change | token-exact gate + speed receipt |
 | Default path, numerics change | token-exact gate (measure token divergence with `FAIL_FAST=0`) + quality gate + speed receipt |
 | Lossy feature (int8 activations, int4 KV, ...) | opt-in only; token-exact gate (measure token divergence with `FAIL_FAST=0`) + quality gate (run even when known lossy, to measure loss) + task-eval A/B; turning it on in a recipe needs the task-eval A/B and maintainer sign-off |
@@ -112,14 +112,21 @@ Write down the platforms you ran and the ones you did not. Not run is not a pass
 
 ### Receipt in the PR body
 
-The pull request template has an "RDNA receipt" block. Its sections are the ones of the `receipt.md` that `tools/rdna/pr_receipt.sh` writes, so paste `receipt.md` in its place and fill in what the script cannot know:
+Every pull request follows `.github/PULL_REQUEST_TEMPLATE.md`:
 
-- Environment: base and head SHAs, GPU and gfx target, ROCm, torch, recipe, model revision, environment overrides.
-- Change class and reach: the row of the table above, the paths and platforms reached (platforms run and not run), and for `csrc` changes the `archdiff.md` result.
-- Exactness and quality: the results of the two gates.
-- Speed: the table.
-- Concurrency and stalls: the overlap table, the stall probe results and the list of added syncs and launches.
-- Raw results: where the run directory is, so that a reviewer can read the logs.
+- **Overview**: concise headline summary of the change and measured outcome, a **Duplicate-work check** against open PRs (`gh pr list --repo opengfx1030/vllm-rdna --state open`), and an **AI assistance** disclosure.
+- **Claims**: concrete claims, including the default values of any new flags or environment variables.
+- **Validation**: for kernel/`csrc` changes, a kernel-by-kernel before/after table with compiled ISA counts (VGPR, SGPR, LDS, spills, private scratch), plus copy-pasteable **How to Reproduce Locally** steps (incremental build, launch command + expected activation log marker, and `pr_receipt.sh` / test command).
+- **Details**: design fit, arch guards (`on_gfx10x()`, `#ifdef`), current-stream launches + `C10_CUDA_KERNEL_LAUNCH_CHECK()`, non-regression scope, tradeoffs, and rejected experiments.
+- **RDNA receipt**: paste `receipt.md` from `tools/rdna/pr_receipt.sh` in place of the receipt block, fill in every row of the 8-gate summary table, and fill in what the script cannot know. Neither `token-exact` nor `stall, hard gate` may be `NOT RUN` on a Ready PR that reaches inference:
+    - Environment: base and head SHAs, GPU and gfx target, pinned clocks/power caps when set, ROCm, torch, recipe, model revision, environment overrides.
+    - Change class and reach: the row of the table above, the callers and platforms the change reaches (platforms run and not run), and for `csrc` changes the `archdiff.md` result.
+    - Exactness and quality: the results of the two gates (plus `decode_kl.py` and task-eval A/B for lossy features).
+    - Speed: the table.
+    - Concurrency and stalls: the overlap table, the stall probe results and the list of added syncs and launches.
+    - Raw results: where the run directory is, so that a reviewer can read the logs.
+
+`tools/rdna/check_pr_contract.py` (enforced by `.github/workflows/rdna-pr-contract.yml`) checks that these required sections and gates are populated based on the changed files (`csrc/`, `vllm/`, or `docs/tools/ci`). Draft PRs receive advisory output only; Ready PRs fail CI when required sections or gates are missing.
 
 ### One command
 

@@ -2,19 +2,41 @@
 
 ## Overview
 
-<!-- Summarize the change in 1-2 lines. Link relevant issues and PRs. -->
+<!-- Summarize the change, target hardware/model, and key measured delta in 1-3 lines. Link relevant issues and PRs. -->
+
+- **Duplicate-work check**: <!-- Checked `gh pr list --repo opengfx1030/vllm-rdna --state open`; state overlapping open PRs or "no conflict". -->
+- **AI assistance**: <!-- State AI tool/model used (or "none") and confirm hardware/test review by the author. -->
 
 ## Claims
 
-<!-- State the accomplishments in a few concrete bullets: speedups, feature support, bug fixes, etc. -->
+<!-- State the accomplishments in concrete bullets: speedups, feature support, bug fixes, and default values of any new flags/env vars. -->
 
 ## Validation
 
-<!-- Show evidence that the claims are met by this change, and steps to reproduce validations. -->
+<!-- Show evidence that claims are met. Non-kernel PRs may mark the kernel table N/A. -->
+
+### Kernel-by-Kernel Before vs After
+
+<!-- For kernel/csrc changes, report baseline vs PR latency and compiled ISA resource counts (VGPR, SGPR, LDS, spills, scratch bytes). Mark "N/A (no kernel changes)" otherwise. -->
+
+| Kernel / Subsystem | Before (Baseline) | After (This PR) | Speedup / Delta | Final ISA (VGPR / SGPR / LDS / spills / scratch) |
+|---|---|---|---|---|
+| <!-- kernel_name --> | <!-- ms / us --> | <!-- ms / us --> | <!-- x / % --> | <!-- e.g. 64 VGPR, 32 SGPR, 16 KiB LDS, 0 spills, 0 scratch --> |
+
+### How to Reproduce Locally
+
+<!-- Exact, copy-pasteable steps to reproduce (or "Docs/tools only: command used"). -->
+
+1. **Incremental build** (`gfx1030` / target arch):
+   <!-- build command -->
+2. **Launch command and activation marker**:
+   <!-- serve/recipe command and expected log line per rank confirming the path is active -->
+3. **Validation / `pr_receipt.sh` command**:
+   <!-- exact pr_receipt.sh / pytest command -->
 
 ## Details
 
-<!-- Explain motivation, design decisions, root cause, tradeoffs, and limitations concisely. Link or collapse lengthy supporting material. -->
+<!-- Explain design fit, arch guards (on_gfx10x(), #ifdef), stream/launch checks (getCurrentCUDAStream + C10_CUDA_KERNEL_LAUNCH_CHECK), default-off opt-in flags, non-regression scope, tradeoffs, and rejected experiments. -->
 
 ## RDNA receipt: head-sha against base-sha
 
@@ -33,7 +55,7 @@
 
 ### Environment
 
-<!-- Base and head SHA and tree, md5 of the built vllm/_rocm_C*.so, venv, torch and ROCm (HIP) versions, GPUs with gfx target and PCI bus, recipe and its overrides, model and revision, compilation config, host and date. -->
+<!-- Base and head SHA and tree, md5 of the built vllm/_rocm_C*.so, venv, torch and ROCm (HIP) versions, GPUs with gfx target, PCI bus, and clocks/power caps, recipe and its overrides, model and revision, compilation config, host and date. -->
 
 ### Change class and reach
 

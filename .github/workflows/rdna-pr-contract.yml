@@ -1,0 +1,57 @@
+name: RDNA PR Contract
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, ready_for_review, synchronize]
+
+concurrency:
+  group: rdna-pr-contract-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-pr-contract:
+    name: Check PR contract
+    if: github.repository_owner == 'opengfx1030'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+
+      - name: Export PR body and changed files
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const pr = context.payload.pull_request;
+            const outDir = process.env.RUNNER_TEMP;
+            fs.writeFileSync(path.join(outDir, 'pr_body.md'), pr.body || '', 'utf8');
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            fs.writeFileSync(
+              path.join(outDir, 'pr_files.txt'),
+              files.map(f => f.filename).join('\n') + '\n',
+              'utf8'
+            );
+
+      - name: Validate PR contract
+        env:
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          args=(--body-file "${RUNNER_TEMP}/pr_body.md" --files-file "${RUNNER_TEMP}/pr_files.txt")
+          if [[ "$IS_DRAFT" == "true" ]]; then
+            args+=(--draft)
+          fi
+          uv run --no-project --with regex --python 3.12 tools/rdna/check_pr_contract.py "${args[@]}"
