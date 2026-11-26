@@ -259,6 +259,75 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
         ],
         "dry_run",
     ),
+    (
+        "bench8_success_ignored",
+        [
+            (
+                "validate_final_a2.sh",
+                "if completed != n or failed:",
+                "if False:",
+            )
+        ],
+        "bench8_fails_when_a_cell_loses",
+    ),
+    (
+        "bench8_health_gate_off",
+        [
+            (
+                "validate_final_a2.sh",
+                (
+                    '    health 18230 || { log "bench8 $label $in: server '
+                    'unhealthy before the cell"; return 1; }'
+                ),
+                "    true",
+            ),
+            (
+                "validate_final_a2.sh",
+                (
+                    '    health 18230 || { log "bench8 $label $in: server '
+                    'unhealthy after the cell"; return 1; }'
+                ),
+                "    true",
+            ),
+        ],
+        "bench8_fails_when_the_server_dies",
+    ),
+    (
+        "bench8_graph_gate_off",
+        [
+            (
+                "validate_final_a2.sh",
+                (
+                    '    if ! grep -q "FULL_AND_PIECEWISE" '
+                    '"$RUN/logs/serve-$name.log"; then'
+                ),
+                "    if false; then",
+            )
+        ],
+        "bench8_requires_the_piecewise",
+    ),
+    (
+        "bench8_spec_check_off",
+        [
+            (
+                "validate_final_a2.sh",
+                (
+                    '    require_spec_config "$RUN/logs/serve-b8stock.log" off'
+                    " b8stock ||\n        { SEQS=$saved_seqs; return 1; }\n"
+                ),
+                "",
+            ),
+            (
+                "validate_final_a2.sh",
+                (
+                    '    require_spec_config "$RUN/logs/serve-b8hi2.log" off'
+                    " b8hi2 ||\n        { SEQS=$saved_seqs; return 1; }\n"
+                ),
+                "",
+            ),
+        ],
+        "bench8_fails_when_the_boot_enabled",
+    ),
 ]
 
 

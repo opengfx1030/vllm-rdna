@@ -188,7 +188,7 @@ Step order (all requested checks; grouped to keep the pair boot alive):
 check_real on CPU) -> `smoke` (self-contained: its own stock + its own HI2, both
 stopped before it returns) -> `kl` (the first step on the run pair; mixed gated
 at 0.15, long 8k/16k recorded) -> `eval` (two labels on the a2 tree) ->
-`vision` -> `bench` -> `boot720` (single HI2, 720000, GMEM 0.92;
+`vision` -> `bench` -> `bench8` -> `boot720` (single HI2, 720000, GMEM 0.92;
 `/v1/models` must report 720000) -> `dspark` (spec + two plain boots: 16384,
 GMEM 0.45 each).  `bench` runs
 last inside the pair boot and has TWO arms: the pair arm (both servers resident
@@ -196,7 +196,21 @@ at GMEM 0.45, the conservative number) and then a SOLO arm: stock is stopped and
 HI2 is booted alone at GMEM 0.92 with the recipe's MAXBAT/MAXLEN.  Both arms use
 `--decode-tokens 128` (less prefill contamination of a decode step) and both are
 recorded in `steps/bench.json` with their flags; the card quotes the solo arm
-(production runs one server) and footnotes the pair ratios.  `vision` before
+(production runs one server) and footnotes the pair ratios.  `bench8` is the
+stock HTTP client (`vllm bench serve`, separate from `bench.py`): stock solo at
+32768/SEQS=8/MAXBAT=2048, then HI2 solo the same way, with cells
+1024->512 n=16 and 16384->512 n=8 at concurrency 8, `--dataset-name random
+--ignore-eos --save-result`, and `--tokenizer` pointed at the arm's model
+directory (the served name `inkling2-hi2` is not an HF id the client could
+resolve).  A cell passes only when `completed == num-prompts`,
+`failed == 0`, the server was healthy before and after it, and the serve log
+shows the FULL_AND_PIECEWISE graph capture; per-cell TTFT/ITL p50/p99,
+output tok/s and KV usage land in `steps/bench8.json` and the raw client JSONs
+stay in `steps/bench8-*.json`.  It runs the client with `BENCH8_PY`
+(default: the 0.32 venv, see below), because the runtime venv's `import vllm`
+aborts on this box with an LLVM duplicate-option error (`spirv-expand-step`) -
+verified 2026-11-26 even with the GPUs visible, while the 0.32 venv's client
+imports and its result schema is the one `b8_extract` parses.  `vision` before
 `boot720`/`dspark` is deliberate: a 720k KV failure must not discard the vision
 evidence, and `boot720` before `dspark` so a DSpark verdict cannot block the
 context test.  Everything that shares the stock+HI2 pair runs under that one boot
@@ -210,17 +224,22 @@ in `numbers.vision_probe` and, when the probe defects before a verdict, falls
 back to the eval vision compare (`numbers.vision_eval`; comparable, >= 50 paired
 items, non-inferior within its `mdd`); a probe verdict that failed a check stays
 fatal.  `steps/kl.json` carries the three KL numbers (and a resumed run backfills
-them from `steps/kl-*.json` if the first attempt left them empty).  ~4 h
-(5 h budget).
+them from `steps/kl-*.json` if the first attempt left them empty).  ~4 h 20
+(5 h budget; `bench8` adds two boots and four HTTP cells, ~15 min).
 Useful knobs: `DRY_RUN=1` (assemble and dry-run every GPU argv on CPU, no
-lease), `ONLY=smoke,kl`, `RESUME=1` (default), `BOOT_WAIT`, `CTX`,
-`GMEM_PAIR`, `KL_MIXED_WINDOWS`, `TAG`.  `DETACH=0` for a foreground/tmux run.
+lease), `ONLY=smoke,kl` (or `ONLY=bench8`), `RESUME=1` (default), `BOOT_WAIT`,
+`CTX`, `GMEM_PAIR`, `KL_MIXED_WINDOWS`, `TAG`, `BENCH8_PY` (the HTTP client's
+interpreter), `BENCH8_CTX`, `BENCH8_SEQS`.  `DETACH=0` for a foreground/tmux run.
 CPU proof: `tests/models/inkling2_loop/test_hi2_final_driver.py` (stubs, no GPU,
 no /tmp; includes the pair health gate: dead pair -> one restart -> pass, and
-restart-fails -> clean pair-unhealthy + no traceback) and
-`tools/inkling_hi2/mutants_final.py` (kills the disk-guard-off,
-failed-step-not-fatal, resume-ignored, dry-run-skips-tools, pair-gate-skipped,
-pair-retried-twice and pair-unhealthy-ignored mutants).
+restart-fails -> clean pair-unhealthy + no traceback, and `bench8`: four cells
+PASS with the numbers recorded, a short cell / a server that dies after a cell /
+a boot without the FULL_AND_PIECEWISE capture / a boot that enabled the
+speculator all FAIL) and `tools/inkling_hi2/mutants_final.py` (kills the
+disk-guard-off, failed-step-not-fatal, resume-ignored, dry-run-skips-tools,
+pair-gate-skipped, pair-retried-twice, pair-unhealthy-ignored,
+bench8-success-ignored, bench8-health-gate-off, bench8-graph-gate-off and
+bench8-spec-check-off mutants).
 
 ## 2. Ordered GPU checklist
 

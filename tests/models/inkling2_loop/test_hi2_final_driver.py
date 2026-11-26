@@ -53,6 +53,9 @@ def make_kit(base: Path) -> dict:
     )
     _stub(kit / "smoke.sh", "exit 0\n")
     (kit / "help.py").write_text("print('help')\n")
+    # bench8's interpreter: real python, so the preflight's find_spec dry-run
+    # and `-c` JSON helpers work; bench8 tests point BENCH8_PY at the fake CLI.
+    _stub(kit / "bench8_py.sh", f'exec "{sys.executable}" "$@"\n')
     _stub(kit / "evalpy", "echo eval-help\n")
     _stub(kit / "prep.sh", "exit 0\n")
     (kit / "validate.py").write_text("import sys\nsys.exit(0)\n")
@@ -124,6 +127,7 @@ def run(k: dict, tag: str, **extra) -> subprocess.CompletedProcess:
         "SMOKE": str(k["kit"] / "smoke.sh"),
         "KLPROBE": str(k["kit"] / "help.py"),
         "BENCH": str(k["kit"] / "help.py"),
+        "BENCH8_PY": str(k["kit"] / "bench8_py.sh"),
         "MTP_PROBE": str(k["kit"] / "help.py"),
         "VISION_PROBE": str(k["kit"] / "help.py"),
         "PREP": str(k["kit"] / "prep.sh"),
@@ -183,6 +187,9 @@ def test_dry_run_needs_no_lease(kit):
     lines = dry.splitlines()
     assert lines.count("help") == 4, dry  # the four tool --help dry-runs
     assert "eval-help" in lines
+    assert "bench8 CLI ok:" in dry, dry
+    assert dry.count("bench8 cell ") == 4, dry
+    assert "--max-concurrency 8" in dry and "--save-result" in dry, dry
     assert (
         (rt(kit, "dry") / "summary.md")
         .read_text()
@@ -824,7 +831,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port = int(os.environ["PORT"])
 mode = os.environ.get("FAKE_SPEC_MODE", "ok")
-if port == 18230 or os.environ.get("DSPARK") == "1":
+if os.environ.get("DSPARK") == "1":
     on = mode != "none"
 else:
     on = mode == "plain_on"
@@ -836,17 +843,35 @@ if on:
     print("INFO [dspark.py:682] Inkling-2 DSpark weights: bf16 -> fp16")
 else:
     print("INFO with config: model='x', speculative_config=None")
+if os.environ.get("FAKE_SPEC_NO_GRAPH") != "1":
+    print("INFO Capturing CUDA graphs (FULL_AND_PIECEWISE)")
 sys.stdout.flush()
 pidfile = os.environ.get("SERVER_PID_FILE")
 if pidfile:
     with open(pidfile, "w") as f:
         f.write(str(os.getpid()))
 
+down = False
+
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
+        global down
         if self.path == "/health":
-            self._send({"status": "ok"})
+            if down:
+                self.send_error(503)
+            else:
+                self._send({"status": "ok"})
+        elif self.path == "/die":
+            down = True
+            self._send({"status": "dying"})
+        elif self.path == "/metrics":
+            data = b"vllm:kv_cache_usage_perc 1.5\\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         elif self.path == "/v1/models":
             self._send({"data": [{"id": "inkling2-mini", "max_model_len": 720000}]})
         else:
@@ -1067,3 +1092,190 @@ def test_boot720_uses_the_served_model_id(kit):
         json.loads(line) for line in (kit["calls"] / "boot720").read_text().splitlines()
     ]
     assert calls[-1]["model"] == "inkling2-mini", calls
+
+
+# --- bench8: `vllm bench serve` over the HTTP API -------------------------
+FAKE_BENCH8 = """#!/usr/bin/env python3
+import json
+import os
+import sys
+import urllib.request
+
+args = sys.argv[1:]
+if args[:1] == ["-"]:
+    exec(sys.stdin.read())
+    raise SystemExit(0)
+
+
+def value(flag, default=None):
+    return args[args.index(flag) + 1] if flag in args else default
+
+
+base = value("--base-url")
+fname = value("--result-filename")
+rdir = value("--result-dir")
+n = int(value("--num-prompts"))
+record = {
+    "in": int(value("--random-input-len")),
+    "out": int(value("--random-output-len")),
+    "n": n,
+    "model": value("--model"),
+    "tokenizer": value("--tokenizer"),
+    "file": fname,
+    "ignore_eos": "--ignore-eos" in args,
+    "save_result": "--save-result" in args,
+}
+with open(os.environ["CALLS"] + "/bench8", "a") as f:
+    f.write(json.dumps(record) + "\\n")
+if os.environ.get("FAKE_BENCH8_DIE") == "1" and base:
+    urllib.request.urlopen(base + "/die", timeout=5).read()
+if os.environ.get("FAKE_BENCH8_FAIL") == "1":
+    raise SystemExit(7)
+completed = n - 1 if os.environ.get("FAKE_BENCH8_SHORT") == "1" else n
+# The 0.32 client's schema (seen in controls/parsecheck): median_* is p50,
+# p99_* is explicit, percentiles_* is absent; b8_extract must handle it.
+result = {
+    "completed": completed,
+    "failed": 0,
+    "num_prompts": n,
+    "median_ttft_ms": 12.0,
+    "p99_ttft_ms": 40.0,
+    "median_itl_ms": 8.0,
+    "p99_itl_ms": 20.0,
+    "output_throughput": 123.4,
+}
+os.makedirs(rdir, exist_ok=True)
+with open(os.path.join(rdir, fname), "w") as f:
+    json.dump(result, f)
+print("Successful requests:", completed)
+"""
+
+
+def _bench8_kit(kit: dict, tag: str) -> tuple[Path, Path]:
+    serve = _spec_kit(kit, tag)
+    (kit["kit"] / "fake_bench8.py").write_text(FAKE_BENCH8)
+    bench = _stub(
+        kit["kit"] / "bench8.sh",
+        'exec "{}" "{}" "$@"\n'.format(sys.executable, kit["kit"] / "fake_bench8.py"),
+    )
+    return serve, bench
+
+
+def test_bench8_runs_four_cells_and_passes(kit):
+    serve, bench = _bench8_kit(kit, "b8-ok")
+    r = run(kit, "b8-ok", ONLY="bench8", SERVE=str(serve), BENCH8_PY=str(bench))
+    assert r.returncode == 0, r.stdout + r.stderr
+    run_dir = rt(kit, "b8-ok")
+    status = (run_dir / "STATUS.log").read_text()
+    assert "PASS bench8" in status, status
+    data = json.loads((run_dir / "steps" / "bench8.json").read_text())
+    assert data["rc"] == 0, data
+    numbers = data["numbers"]
+    assert numbers["flags"].startswith("maxlen=32768 maxbat=2048 seqs=8"), numbers
+    cells = {k: v for k, v in numbers.items() if k.startswith("cell_")}
+    assert list(cells) == [
+        "cell_stock_1024",
+        "cell_stock_16384",
+        "cell_hi2_1024",
+        "cell_hi2_16384",
+    ], numbers
+    assert "ok=16" in cells["cell_stock_1024"], cells
+    assert "ok=8" in cells["cell_stock_16384"], cells
+    assert "ok=16" in cells["cell_hi2_1024"], cells
+    assert "ok=8" in cells["cell_hi2_16384"], cells
+    for key in cells:
+        assert "ttft_p50=12.0" in cells[key] and "itl_p99=20.0" in cells[key], cells
+    assert numbers["kv_stock_1024"] == "1.5", numbers
+    assert numbers["kv_hi2_16384"] == "1.5", numbers
+    assert numbers["b8stock_full_and_piecewise_lines"] == "1", numbers
+    assert numbers["b8hi2_full_and_piecewise_lines"] == "1", numbers
+    for name in ("stock", "hi2"):
+        for length in (1024, 16384):
+            assert (run_dir / "steps" / f"bench8-{name}-{length}.json").is_file()
+    argv = (run_dir / "steps" / "bench8-argv.txt").read_text().splitlines()
+    assert len(argv) == 4, argv
+    assert all("--max-concurrency 8" in line for line in argv), argv
+    calls = [
+        json.loads(line) for line in (kit["calls"] / "bench8").read_text().splitlines()
+    ]
+    assert [(c["in"], c["out"], c["n"]) for c in calls] == [
+        (1024, 512, 16),
+        (16384, 512, 8),
+        (1024, 512, 16),
+        (16384, 512, 8),
+    ], calls
+    assert all(c["model"] == "inkling2-mini" for c in calls), calls
+    assert all(c["ignore_eos"] and c["save_result"] for c in calls), calls
+    assert [c["tokenizer"] for c in calls] == [
+        str(kit["stock"]),
+        str(kit["stock"]),
+        str(kit["kit"] / "serve"),
+        str(kit["kit"] / "serve"),
+    ], calls
+
+
+def test_bench8_fails_when_a_cell_loses_requests(kit):
+    serve, bench = _bench8_kit(kit, "b8-short")
+    r = run(
+        kit,
+        "b8-short",
+        ONLY="bench8",
+        SERVE=str(serve),
+        BENCH8_PY=str(bench),
+        FAKE_BENCH8_SHORT="1",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "b8-short") / "STATUS.log").read_text()
+    assert "FAIL bench8" in status, status
+    assert "completed != num-prompts" in status, status
+    numbers = json.loads((rt(kit, "b8-short") / "steps" / "bench8.json").read_text())[
+        "numbers"
+    ]
+    assert "ok=15" in numbers["cell_stock_1024"], numbers
+    assert "cell_hi2_1024" not in numbers, numbers
+
+
+def test_bench8_fails_when_the_server_dies_after_a_cell(kit):
+    serve, bench = _bench8_kit(kit, "b8-dead")
+    r = run(
+        kit,
+        "b8-dead",
+        ONLY="bench8",
+        SERVE=str(serve),
+        BENCH8_PY=str(bench),
+        FAKE_BENCH8_DIE="1",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "b8-dead") / "STATUS.log").read_text()
+    assert "server unhealthy after the cell" in status, status
+
+
+def test_bench8_requires_the_piecewise_graph_capture(kit):
+    serve, bench = _bench8_kit(kit, "b8-nograph")
+    r = run(
+        kit,
+        "b8-nograph",
+        ONLY="bench8",
+        SERVE=str(serve),
+        BENCH8_PY=str(bench),
+        FAKE_SPEC_NO_GRAPH="1",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "b8-nograph") / "STATUS.log").read_text()
+    assert "no FULL_AND_PIECEWISE graph capture" in status, status
+    assert not (kit["calls"] / "bench8").exists(), "a cell ran without the graph window"
+
+
+def test_bench8_fails_when_the_boot_enabled_the_speculator(kit):
+    serve, bench = _bench8_kit(kit, "b8-spec")
+    r = run(
+        kit,
+        "b8-spec",
+        ONLY="bench8",
+        SERVE=str(serve),
+        BENCH8_PY=str(bench),
+        FAKE_SPEC_MODE="plain_on",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "b8-spec") / "STATUS.log").read_text()
+    assert "spec_config_unexpected: b8stock" in status, status

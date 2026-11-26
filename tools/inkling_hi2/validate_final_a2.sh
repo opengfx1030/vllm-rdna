@@ -44,6 +44,12 @@
 #                 HI2 alone at GMEM 0.92 with the recipe's MAXBAT/MAXLEN; both
 #                 arms use --decode-tokens 128 and both are recorded in the
 #                 step JSON with their flags (the card quotes the solo arm)
+#   7b bench8     `vllm bench serve` over the HTTP API (dataset-name random):
+#                 stock solo then HI2 solo, ctx 32768, SEQS=8, MAXBAT=2048,
+#                 cells 1024->512 n=16 and 16384->512 n=8 (concurrency 8);
+#                 each cell must complete num-prompts with failed=0, the
+#                 server healthy before/after, and the serve log showing the
+#                 FULL_AND_PIECEWISE graph capture; results JSON kept per cell
 #   8 boot720     single HI2 DSPARK=1, 720000 context (GMEM=0.92) + health
 #                 (before dspark: a DSpark verdict must not block the context
 #                 test)
@@ -103,6 +109,15 @@ VALIDATE=${VALIDATE:-$HERE/validate_dir.py}
 CHECK_REAL=${CHECK_REAL:-$HERE/check_real_dir.py}
 KLPROBE=${KLPROBE:-$HERE/kl_probe.py}
 BENCH=${BENCH:-$HERE/bench.py}
+# bench8 uses the HTTP client, not the tree's in-process bench: the runtime
+# venv's `import vllm` aborts on this box with an LLVM "spirv-expand-step"
+# duplicate-option error (verified 2026-11-26, with GPUs visible); the 0.32
+# venv's `vllm bench serve` imports and prints usage, and its result JSON
+# schema (percentiles_*/median_*/completed/output_throughput) is the one
+# b8_extract parses.  Set BENCH8_PY to another interpreter if that changes.
+BENCH8_PY=${BENCH8_PY:-$HOME/Apps/vllm/venv-7.14.0_0.32.0/bin/python}
+BENCH8_SEQS=${BENCH8_SEQS:-8}
+BENCH8_CTX=${BENCH8_CTX:-32768}
 MTP_PROBE=${MTP_PROBE:-$HERE/mtp_probe.py}
 VISION_PROBE=${VISION_PROBE:-$HERE/vision_probe.py}
 
@@ -134,7 +149,7 @@ RUN=${RUN:-$RT/final/$TAG}
 BOOT_WAIT=${BOOT_WAIT:-1800}
 QUIET_WAIT=${QUIET_WAIT:-1800}
 
-STEPS=(kernel serve_dir smoke kl eval vision bench boot720 dspark)
+STEPS=(kernel serve_dir smoke kl eval vision bench bench8 boot720 dspark)
 IFS=, read -r -a _only <<<"$ONLY"
 want() {
     [[ -z ${ONLY//,/} ]] && return 0
@@ -239,7 +254,7 @@ lines = [
     f"- model: `{model}`",
     f"- tag: `{tag}`",
     f"- results: `{run}`",
-    f"- a2 estimate: ~4 h wall (5 h budget); see the driver header",
+    f"- a2 estimate: ~4 h 20 wall (5 h budget); see the driver header",
     "",
     "| step | status | seconds | numbers |",
     "| --- | --- | --- | --- |",
@@ -464,6 +479,41 @@ preflight() {
     (cd "$EVAL_TREE" && env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES= \
         "$EVAL_PY" -m tools.inkling_eval.cli run --help) >>"$RUN/dryrun.log" 2>&1 ||
         die "dry-run of the eval CLI failed (see $RUN/dryrun.log)"
+    log "dry-run: bench8 CLI and result schema (find_spec, no vllm import)"
+    # The bench8 client imports vllm, which needs the GPU runtime; on CPU this
+    # locates the package without executing it and asserts the flags/keys the
+    # step relies on exist in that CLI's serve.py.  The argv is echoed too.
+    if ! "$BENCH8_PY" - >>"$RUN/dryrun.log" 2>&1 <<'PY'
+import importlib.util
+import pathlib
+
+spec = importlib.util.find_spec("vllm")
+root = next(iter(spec.submodule_search_locations))
+serve = pathlib.Path(root) / "benchmarks" / "serve.py"
+text = serve.read_text()
+needed = (
+    "save_result", "result_filename", "base_url", "ignore_eos",
+    "percentiles_ttft_ms", "percentiles_itl_ms", "completed",
+    "output_throughput",
+)
+missing = [name for name in needed if name not in text]
+if missing:
+    raise SystemExit(f"bench8 CLI {serve} lacks {missing}")
+print("bench8 CLI ok:", serve)
+PY
+    then
+        die "dry-run of the bench8 CLI failed (see $RUN/dryrun.log)"
+    fi
+    b8_argv stock 1024 512 16 '<served-id>' "$STOCK"
+    {
+        echo "bench8 cell 1 (stock): env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \"$BENCH8_PY\" ${B8_ARGS[*]}"
+        b8_argv stock 16384 512 8 '<served-id>' "$STOCK"
+        echo "bench8 cell 2 (stock): env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \"$BENCH8_PY\" ${B8_ARGS[*]}"
+        b8_argv hi2 1024 512 16 '<served-id>' "$SERVE_DIR"
+        echo "bench8 cell 3 (hi2): env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \"$BENCH8_PY\" ${B8_ARGS[*]}"
+        b8_argv hi2 16384 512 8 '<served-id>' "$SERVE_DIR"
+        echo "bench8 cell 4 (hi2): env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \"$BENCH8_PY\" ${B8_ARGS[*]}"
+    } >>"$RUN/dryrun.log"
     log "preflight: every GPU argv dry-ran on CPU; no lease taken yet"
 }
 
@@ -708,6 +758,160 @@ s_bench() {
     stop_server solo 18230
 }
 
+# --- step 7b: vllm bench serve over the HTTP API (the card's b8) -----------
+# Unlike step 7 (in-process bench.py with its own serve), this is the stock
+# `vllm bench serve` client against the OpenAI endpoint: random prompts,
+# --ignore-eos, result JSON saved per cell.  BENCH8_PY: see the variable block.
+b8_argv() { # label in out n model_id tokenizer_dir -> B8_ARGS
+    # The client resolves the tokenizer before it talks to the server; the
+    # served name (inkling2-hi2) is not an HF id, so --tokenizer must be the
+    # model directory (the stock dir; it holds the tokenizer files).
+    B8_ARGS=(-m vllm.entrypoints.cli.main bench serve
+        --backend openai --base-url http://127.0.0.1:18230 --endpoint /v1/completions
+        --model "$5" --tokenizer "$6" --dataset-name random
+        --random-input-len "$2" --random-output-len "$3" --num-prompts "$4"
+        --max-concurrency 8 --ignore-eos --save-result
+        --result-dir "$RUN/steps" --result-filename "bench8-$1-$2.json")
+}
+
+b8_model_id() {
+    curl -sf http://127.0.0.1:18230/v1/models |
+        "$V" -c 'import json, sys; print(json.load(sys.stdin)["data"][0]["id"])'
+}
+
+b8_extract() { # result.json -> one-line summary of ttft/itl p50/p99 + throughput
+    "$V" - "$1" <<'PY'
+import json
+import sys
+
+d = json.load(open(sys.argv[1]))
+
+
+def pct(values, p):
+    for item in values or []:
+        if item and int(item[0]) == p:
+            return item[1]
+    return None
+
+
+def pick(values, p, direct):
+    value = d.get(direct)
+    return pct(values, p) if value is None else value
+
+
+def fmt(value):
+    return "n/a" if value is None else "%.2f" % value
+
+
+p50_ttft = pick(d.get("percentiles_ttft_ms"), 50, "p50_ttft_ms") or d.get("median_ttft_ms")
+p99_ttft = pick(d.get("percentiles_ttft_ms"), 99, "p99_ttft_ms")
+p50_itl = pick(d.get("percentiles_itl_ms"), 50, "p50_itl_ms") or d.get("median_itl_ms")
+p99_itl = pick(d.get("percentiles_itl_ms"), 99, "p99_itl_ms")
+print(
+    "ttft_p50=%s ttft_p99=%s itl_p50=%s itl_p99=%s out_tok_s=%s ok=%s failed=%s"
+    % (
+        fmt(p50_ttft), fmt(p99_ttft), fmt(p50_itl), fmt(p99_itl),
+        fmt(d.get("output_throughput")), d.get("completed"), d.get("failed", 0),
+    )
+)
+PY
+}
+
+b8_kv() { # tag -> recorded KV-cache usage after the cell
+    local kv
+    kv=$(curl -sf http://127.0.0.1:18230/metrics 2>/dev/null | "$V" -c '
+import sys
+for line in sys.stdin:
+    if line.startswith(("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")):
+        print(line.split()[-1])
+        break
+' 2>/dev/null)
+    num "kv_$1" "${kv:-n/a}"
+}
+
+b8_window() { # name -> health + the FULL_AND_PIECEWISE graph capture must hold
+    local name=$1 lines
+    health 18230 || { log "bench8: $name server not healthy"; return 1; }
+    lines=$(grep -c "FULL_AND_PIECEWISE" "$RUN/logs/serve-$name.log" 2>/dev/null || true)
+    num "${name}_full_and_piecewise_lines" "${lines:-0}"
+    if ! grep -q "FULL_AND_PIECEWISE" "$RUN/logs/serve-$name.log"; then
+        log "bench8: $name serve log has no FULL_AND_PIECEWISE graph capture"
+        return 1
+    fi
+}
+
+b8_cell() { # label in out n
+    local label=$1 in=$2 out=$3 n=$4 file="$RUN/steps/bench8-$1-$2.json" model summary tokenizer
+    case $label in
+        stock) tokenizer=$STOCK ;;
+        *) tokenizer=$SERVE_DIR ;;
+    esac
+    model=$(b8_model_id) || { log "bench8 $label $in: cannot read /v1/models"; return 1; }
+    health 18230 || { log "bench8 $label $in: server unhealthy before the cell"; return 1; }
+    b8_argv "$label" "$in" "$out" "$n" "$model" "$tokenizer"
+    printf '%s\n' "env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \"$BENCH8_PY\" ${B8_ARGS[*]}" >>"$RUN/steps/bench8-argv.txt"
+    log "bench8 $label: in=$in out=$out n=$n conc=8"
+    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
+        "$BENCH8_PY" "${B8_ARGS[@]}" >"$RUN/logs/bench8-$label-$in.log" 2>&1 ||
+        { log "bench8 $label $in: CLI failed (see logs/bench8-$label-$in.log)"; return 1; }
+    [[ -f $file ]] || { log "bench8 $label $in: no result JSON at $file"; return 1; }
+    summary=$(b8_extract "$file") || { log "bench8 $label $in: cannot parse $file"; return 1; }
+    log "bench8 $label $in: $summary"
+    num "cell_${label}_${in}" "$summary"
+    b8_kv "${label}_${in}"
+    health 18230 || { log "bench8 $label $in: server unhealthy after the cell"; return 1; }
+    b8_complete "$file" "$n" ||
+        { log "bench8 $label $in: completed != num-prompts or failed > 0"; return 1; }
+}
+
+b8_complete() { # result.json n -> 0 iff completed == n and failed == 0
+    "$V" - "$1" "$2" <<'PY'
+import json
+import sys
+
+d = json.load(open(sys.argv[1]))
+n = int(sys.argv[2])
+completed = d.get("completed")
+failed = d.get("failed", 0)
+if completed != n or failed:
+    raise SystemExit(f"completed={completed} failed={failed} want={n}/0")
+PY
+}
+
+s_bench8() {
+    local ctx=$BENCH8_CTX maxbat=$MAXBAT saved_seqs=$SEQS
+    SEQS=$BENCH8_SEQS
+    : >"$RUN/steps/bench8-argv.txt"
+    num "flags" "maxlen=$ctx maxbat=$maxbat seqs=$SEQS conc=8 cells=1024x512x16,16384x512x8 client=$(basename "$BENCH8_PY")"
+    num "argv" "$RUN/steps/bench8-argv.txt"
+    stop_server stock 18231
+    stop_server hi2 18230
+    stop_server b8stock 18230
+    stop_server b8hi2 18230
+
+    log "bench8: stock boot (maxlen $ctx maxbat $maxbat seqs $SEQS)"
+    boot_server b8stock 18230 "$STOCK" "$ctx" "$maxbat" 0 0 "$GMEM_SINGLE" ||
+        { log "bench8: stock boot failed (see logs/serve-b8stock.log)"; SEQS=$saved_seqs; return 1; }
+    require_spec_config "$RUN/logs/serve-b8stock.log" off b8stock ||
+        { SEQS=$saved_seqs; return 1; }
+    b8_window b8stock || { SEQS=$saved_seqs; return 1; }
+    b8_cell stock 1024 512 16 || { SEQS=$saved_seqs; return 1; }
+    b8_cell stock 16384 512 8 || { SEQS=$saved_seqs; return 1; }
+    stop_server b8stock 18230
+
+    log "bench8: HI2 boot"
+    boot_server b8hi2 18230 "$SERVE_DIR" "$ctx" "$maxbat" 0 0 "$GMEM_SINGLE" ||
+        { log "bench8: HI2 boot failed (see logs/serve-b8hi2.log)"; SEQS=$saved_seqs; return 1; }
+    require_spec_config "$RUN/logs/serve-b8hi2.log" off b8hi2 ||
+        { SEQS=$saved_seqs; return 1; }
+    b8_window b8hi2 || { SEQS=$saved_seqs; return 1; }
+    b8_cell hi2 1024 512 16 || { SEQS=$saved_seqs; return 1; }
+    b8_cell hi2 16384 512 8 || { SEQS=$saved_seqs; return 1; }
+    stop_server b8hi2 18230
+    SEQS=$saved_seqs
+    num "pass" "4 cells completed==num-prompts, failed=0, healthy around each, FULL_AND_PIECEWISE captured"
+}
+
 # --- step 6: task eval (main 245 + agentic-probe + vision) -----------------
 s_eval() {
     require_pair eval || return 1
@@ -900,7 +1104,7 @@ fi
 
 trap 'stop_all' EXIT
 log "final validation MODEL=$MODEL TAG=$TAG RUN=$RUN"
-log "a2 estimate: ~4 h wall (5 h budget); steps: ${STEPS[*]}"
+log "a2 estimate: ~4 h 20 wall (5 h budget); steps: ${STEPS[*]}"
 
 preflight
 if [[ $DRY_RUN == 1 ]]; then
@@ -918,6 +1122,7 @@ run_step kl s_kl
 run_step eval s_eval
 run_step vision s_vision
 run_step bench s_bench
+run_step bench8 s_bench8
 run_step boot720 s_boot720
 run_step dspark s_dspark
 
