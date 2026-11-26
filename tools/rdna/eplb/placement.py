@@ -15,7 +15,7 @@ Policies
     first (what DeepSeek's ``balanced_packing`` and the fork's
     ``tools/rdna/prof/moe_placement.py`` do) followed by pairwise swaps between the
     heaviest rank and every other rank until no swap lowers the maximum.
-``repair_owner``
+``repair_owner`` (in ``rdna_eplb_policy``, with ``rank_weight`` / ``balance_ratio``)
     The same swap descent started from the placement in force: the swaps in the order
     of their gain, so a prefix is the cheapest placement that captures that much (a
     swap moves two experts; ``pack_owner`` from scratch reshuffles about 3/4 of them).
@@ -41,7 +41,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from tools.rdna.eplb.geometry import DEFAULT_COST, CostModel
+from tools.rdna.eplb._core import core
 
 KNUTH = 2654435769  # the engine's replica hash multiplier
 
@@ -57,55 +57,6 @@ def round_robin_owner(experts: int, ranks: int) -> np.ndarray:
     if experts % ranks:
         raise ValueError(f"{experts} experts do not divide over {ranks} ranks")
     return (np.arange(experts) % ranks).astype(np.int16)
-
-
-def rank_weight(weights: np.ndarray, owner: np.ndarray, ranks: int) -> np.ndarray:
-    return np.bincount(owner, weights=weights, minlength=ranks)
-
-
-def balance_ratio(weights: np.ndarray, owner: np.ndarray, ranks: int) -> float:
-    """Max / mean of the per-rank weight sums (1.0 = perfectly balanced)."""
-    per_rank = rank_weight(weights, owner, ranks)
-    return float(per_rank.max() / per_rank.mean()) if per_rank.sum() > 0 else 1.0
-
-
-def _swap_descent(
-    w: np.ndarray, owner: np.ndarray, ranks: int, max_swaps: int
-) -> list[tuple[int, int]]:
-    """Best-improvement swap descent on ``owner`` (in place); the swaps it made.
-
-    Each step swaps one expert of the heaviest rank with one of another rank, the pair
-    that lowers the maximum the most. A swap is ``(a, b)``: expert ``a`` leaves the
-    heaviest rank for the other rank, expert ``b`` takes its place.
-    """
-    done: list[tuple[int, int]] = []
-    for _ in range(max_swaps):
-        load = rank_weight(w, owner, ranks)
-        hi = int(np.argmax(load))
-        best: tuple[float, int, int, int] | None = None
-        mem_hi = np.flatnonzero(owner == hi)
-        for lo in range(ranks):
-            gap = load[hi] - load[lo]
-            if lo == hi or gap <= 0:
-                continue
-            mem_lo = np.flatnonzero(owner == lo)
-            delta = w[mem_hi][:, None] - w[mem_lo][None, :]
-            ok = (delta > 0) & (delta < gap)
-            if not ok.any():
-                continue
-            new_max = np.where(
-                ok, np.maximum(load[hi] - delta, load[lo] + delta), np.inf
-            )
-            i, j = np.unravel_index(int(np.argmin(new_max)), new_max.shape)
-            cand = (float(new_max[i, j]), lo, int(mem_hi[i]), int(mem_lo[j]))
-            if best is None or cand < best:
-                best = cand
-        if best is None or best[0] >= load[hi] - 1e-12 * max(load[hi], 1.0):
-            break
-        _, lo, a, b = best
-        owner[a], owner[b] = lo, hi
-        done.append((a, b))
-    return done
 
 
 def pack_owner(
@@ -129,24 +80,8 @@ def pack_owner(
         owner[e] = r
         load[r] += w[e]
         room[r] -= 1
-    _swap_descent(w, owner, ranks, refine_iters)
+    core._swap_descent(w, owner, ranks, refine_iters)
     return owner
-
-
-def repair_owner(
-    weights: np.ndarray, current: np.ndarray, ranks: int, *, max_swaps: int = 400
-) -> tuple[np.ndarray, list[tuple[int, int]]]:
-    """Lower the heaviest rank of ``current`` by swaps only: ``(owner, swaps)``.
-
-    ``pack_owner`` ignores where the experts are now and reshuffles about three
-    quarters of them; a swap moves two experts, and the first swaps carry most of the
-    gain, so the move cost (bytes over the link) is what the caller trades against the
-    gain by taking a prefix of ``swaps`` (``a`` leaves, ``b`` arrives, in order).
-    """
-    w = np.asarray(weights, dtype=np.float64)
-    owner = np.asarray(current, dtype=np.int16).copy()
-    swaps = _swap_descent(w, owner, ranks, max_swaps)
-    return owner, swaps
 
 
 def step_max_sum(costs: np.ndarray, owner: np.ndarray, ranks: int) -> float:
@@ -290,7 +225,7 @@ def route_loads(
     n_steps: int,
     holders: Holders,
     policy: str,
-    cost: CostModel = DEFAULT_COST,
+    cost: core.CostModel = core.DEFAULT_COST,
 ) -> dict[str, np.ndarray]:
     """Per-step, per-rank loads ``T`` (live experts), ``P`` (pairs), ``us`` (time).
 
@@ -332,7 +267,7 @@ def _min_touch(
     s_flat: np.ndarray,
     n_steps: int,
     holders: Holders,
-    cost: CostModel,
+    cost: core.CostModel,
 ) -> dict[str, np.ndarray]:
     ranks, experts = holders.ranks, holders.table.shape[0]
     copies = holders.copies

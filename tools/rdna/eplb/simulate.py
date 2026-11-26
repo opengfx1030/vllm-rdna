@@ -41,7 +41,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from tools.rdna.eplb import loads, placement
-from tools.rdna.eplb.geometry import DEFAULT_COST, FLASHNEXT, CostModel, Geometry
+from tools.rdna.eplb._core import core
 from tools.rdna.hetero_moe import row_model as row_models
 from tools.rdna.hetero_moe.sampling import inclusion_probs
 from tools.rdna.hetero_moe.stats_io import LayerStats, StatsRecord, load_stats
@@ -218,8 +218,8 @@ def decode_study(
     mtp: int = 2,
     rows_budget: int = 24000,
     seed: int = 0,
-    cost: CostModel = DEFAULT_COST,
-    geometry: Geometry = FLASHNEXT,
+    cost: core.CostModel = core.DEFAULT_COST,
+    geometry: core.Geometry = core.FLASHNEXT,
     model: row_models.RowModel | None = None,
     train_width: int | None = None,
 ) -> dict:
@@ -262,8 +262,8 @@ def redundancy_study(
     extras: tuple[int, ...] = (0, 2, 4, 8, 12, 24),
     rows_budget: int = 12000,
     seed: int = 0,
-    cost: CostModel = DEFAULT_COST,
-    geometry: Geometry = FLASHNEXT,
+    cost: core.CostModel = core.DEFAULT_COST,
+    geometry: core.Geometry = core.FLASHNEXT,
     model: row_models.RowModel | None = None,
 ) -> dict:
     """Extra slots per rank against the best permutation (``pack_touch``)."""
@@ -361,7 +361,7 @@ def prefill_study(
     tokens: int = 2048,
     top_k: int = 10,
     seed: int = 0,
-    cost: CostModel = DEFAULT_COST,
+    cost: core.CostModel = core.DEFAULT_COST,
 ) -> dict:
     """Persistent (marginal) imbalance, and with ``alpha`` the chunk-level transient
     (per-chunk max/mean of the rank time and of the pairs)."""
@@ -382,7 +382,7 @@ def prefill_study(
             "oracle": placement.pack_owner(ld.pre_test, ranks),
         }
         for name, o in own.items():
-            pers[name].append(placement.balance_ratio(ld.pre_test, o, ranks))
+            pers[name].append(core.balance_ratio(ld.pre_test, o, ranks))
         if alpha is not None:
             counts = dirichlet_chunks(ld.pre_test, alpha, chunks, tokens, top_k, rng)
             for name in ("linear", "round_robin", "pack", "oracle"):
@@ -467,10 +467,10 @@ def ep_study(
             wt = expected_touch(ld.q_test, width)
             pack_p = placement.pack_owner(ld.q_train, r)
             pack_t = placement.pack_owner(expected_touch(ld.q_train, width), r)
-            buckets["pairs_linear"].append(placement.balance_ratio(ld.q_test, lin, r))
-            buckets["pairs_pack"].append(placement.balance_ratio(ld.q_test, pack_p, r))
-            buckets["touch_linear"].append(placement.balance_ratio(wt, lin, r))
-            buckets["touch_pack"].append(placement.balance_ratio(wt, pack_t, r))
+            buckets["pairs_linear"].append(core.balance_ratio(ld.q_test, lin, r))
+            buckets["pairs_pack"].append(core.balance_ratio(ld.q_test, pack_p, r))
+            buckets["touch_linear"].append(core.balance_ratio(wt, lin, r))
+            buckets["touch_pack"].append(core.balance_ratio(wt, pack_t, r))
         out[str(r)] = {k: _stats(v) for k, v in buckets.items()}
     return out
 
@@ -484,7 +484,7 @@ def replay_counts(
     *,
     ranks: int = 4,
     objective: str = "pairs",
-    cost: CostModel = DEFAULT_COST,
+    cost: core.CostModel = core.DEFAULT_COST,
 ) -> dict:
     """Score placements on measured ``counts[step, E]``.
 
@@ -522,8 +522,10 @@ def replay_counts(
 def _fmt_decode(res: dict, itl_ms: dict[int, float]) -> str:
     names = ["linear", "round_robin", "pack_pairs", "pack_touch", "oracle"]
     lines = [
-        f"decode, EP{res['ranks']}, MTP{res['mtp']}: E[max]/E[mean] of touched "
-        "experts T | pairs P | time, MoE ms per step (all layers)",
+        (
+            f"decode, EP{res['ranks']}, MTP{res['mtp']}: E[max]/E[mean] of touched "
+            "experts T | pairs P | time, MoE ms per step (all layers)"
+        ),
         f"{'rows':>5} " + " ".join(f"{n:>26}" for n in names),
     ]
     for width, row in res["widths"].items():
@@ -547,10 +549,14 @@ def _fmt_decode(res: dict, itl_ms: dict[int, float]) -> str:
 
 def _fmt_red(res: dict) -> str:
     lines = [
-        f"redundancy, EP{res['ranks']}, {res['width']} rows: permutation-only T "
-        f"ratio {res['perm_T']:.3f}, layer {res['perm_layer_us']:.1f} us",
-        f"{'kind':>10} {'routing':>10} {'+slots':>6} {'T':>6} {'live':>7} "
-        f"{'gain%':>7} {'VRAM MiB':>9} {'KV lost':>8}",
+        (
+            f"redundancy, EP{res['ranks']}, {res['width']} rows: permutation-only T "
+            f"ratio {res['perm_T']:.3f}, layer {res['perm_layer_us']:.1f} us"
+        ),
+        (
+            f"{'kind':>10} {'routing':>10} {'+slots':>6} {'T':>6} {'live':>7} "
+            f"{'gain%':>7} {'VRAM MiB':>9} {'KV lost':>8}"
+        ),
     ]
     for r in res["rows"]:
         lines.append(

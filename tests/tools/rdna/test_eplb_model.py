@@ -11,7 +11,9 @@ import numpy as np
 import pytest
 
 from tools.rdna.eplb import geometry, loads, placement, policy, simulate
-from tools.rdna.eplb.geometry import FLASHNEXT, CostModel
+from tools.rdna.eplb._core import core
+
+FLASHNEXT, CostModel = core.FLASHNEXT, core.CostModel
 
 ROOT = Path(__file__).resolve().parents[3]
 T10 = ROOT / "bench_results" / "2026-11-07_expert-stats-t10"
@@ -56,7 +58,7 @@ def test_pack_owner_balances_the_textbook_case_with_equal_cardinality():
     w = np.array([8, 7, 6, 5, 4, 3, 2, 1], dtype=float)
     owner = placement.pack_owner(w, 2)
     assert np.bincount(owner).tolist() == [4, 4]
-    assert placement.rank_weight(w, owner, 2).tolist() == [18.0, 18.0]
+    assert core.rank_weight(w, owner, 2).tolist() == [18.0, 18.0]
 
 
 def test_pack_owner_is_deterministic_and_beats_linear_on_zipf():
@@ -67,8 +69,8 @@ def test_pack_owner_is_deterministic_and_beats_linear_on_zipf():
     b = placement.pack_owner(w, 4)
     assert np.array_equal(a, b)
     assert np.bincount(a).tolist() == [128] * 4
-    lin = placement.balance_ratio(w, placement.linear_owner(512, 4), 4)
-    assert placement.balance_ratio(w, a, 4) < min(lin, 1.01)
+    lin = core.balance_ratio(w, placement.linear_owner(512, 4), 4)
+    assert core.balance_ratio(w, a, 4) < min(lin, 1.01)
 
 
 def test_pack_empirical_splits_a_co_activating_cluster_over_the_ranks():
@@ -249,12 +251,12 @@ def test_moved_bytes_and_move_cost_of_one_swap():
     old = placement.linear_owner(8, 2)
     new = old.copy()
     new[0], new[7] = 1, 0
-    n, per_rank = policy.moved_bytes(old, new, 2)
+    n, per_rank = core.moved_bytes(old, new, 2)
     assert (n, per_rank) == (2, FLASHNEXT.param_expert_bytes)
-    cfg = policy.PolicyConfig()
+    cfg = core.PolicyConfig()
     expect = 0.25 * FLASHNEXT.param_expert_bytes / (14.0 * 1e3) + 300.0
-    assert policy.move_us(per_rank, cfg) == pytest.approx(expect)
-    assert policy.move_us(0, cfg) == 0.0
+    assert core.move_us(per_rank, cfg) == pytest.approx(expect)
+    assert core.move_us(0, cfg) == 0.0
 
 
 def _skewed_weight():
@@ -265,7 +267,7 @@ def _skewed_weight():
 
 def test_decide_moves_only_when_the_gain_pays_for_the_move():
     w, lin = _skewed_weight(), placement.linear_owner(64, 4)
-    cfg = policy.PolicyConfig(window=100, interval=1000, holdout=False)
+    cfg = core.PolicyConfig(window=100, interval=1000, holdout=False)
     go = policy.decide(w, lin, 4, cfg)
     assert go.owner is not None and go.reason == "rebalance"
     assert go.gain_us_per_step > 0 and go.experts_moved > 0
@@ -279,7 +281,7 @@ def test_decide_moves_only_when_the_gain_pays_for_the_move():
 
 def test_decide_holdout_rejects_a_gain_that_the_newer_half_does_not_show():
     w, lin = _skewed_weight(), placement.linear_owner(64, 4)
-    cfg = policy.PolicyConfig(window=100, interval=1000, holdout=True)
+    cfg = core.PolicyConfig(window=100, interval=1000, holdout=True)
     flat = np.full(64, 0.3)  # the newest half shows no skew at all
     d = policy.decide(w, lin, 4, cfg, older=w, newer=flat)
     assert d.owner is None and d.reason == "holdout gain below min_rel_gain"
@@ -299,7 +301,7 @@ def _drifting_counts(steps: int, seed: int = 0) -> dict[int, np.ndarray]:
 
 
 def test_replay_schedule_follows_drift_and_stays_put_when_stationary():
-    cfg = policy.PolicyConfig(window=200, interval=500, objective="touch")
+    cfg = core.PolicyConfig(window=200, interval=500, objective="touch")
     drift = policy.replay_schedule(_drifting_counts(4000), 4, cfg)
     assert drift["rebalances"] >= 2
     assert drift["total_us"]["schedule"] < drift["total_us"]["linear"]
@@ -316,7 +318,7 @@ def test_replay_schedule_follows_drift_and_stays_put_when_stationary():
 
 
 def test_replay_schedule_does_not_move_when_the_copy_is_too_expensive():
-    slow = policy.PolicyConfig(window=200, interval=500, bw_gbps=1e-4, stall=1.0)
+    slow = core.PolicyConfig(window=200, interval=500, bw_gbps=1e-4, stall=1.0)
     res = policy.replay_schedule(_drifting_counts(2000), 4, slow)
     assert res["rebalances"] == 0
     assert res["total_us"]["schedule"] == pytest.approx(res["total_us"]["linear"])
@@ -324,25 +326,25 @@ def test_replay_schedule_does_not_move_when_the_copy_is_too_expensive():
 
 def test_repair_owner_swaps_replay_to_the_result_and_move_fewer_than_a_repack():
     w, cur = _skewed_weight(), placement.linear_owner(64, 4)
-    owner, swaps = placement.repair_owner(w, cur, 4)
+    owner, swaps = core.repair_owner(w, cur, 4)
     assert np.bincount(owner, minlength=4).tolist() == [16] * 4
-    redo, peak = cur.copy(), [placement.rank_weight(w, cur, 4).max()]
+    redo, peak = cur.copy(), [core.rank_weight(w, cur, 4).max()]
     for a, b in swaps:
         redo[a], redo[b] = redo[b], redo[a]
-        peak.append(placement.rank_weight(w, redo, 4).max())
+        peak.append(core.rank_weight(w, redo, 4).max())
     assert np.array_equal(redo, owner)
     assert all(x >= y for x, y in zip(peak, peak[1:]))  # no swap raises the maximum
-    assert placement.repair_owner(w, cur, 4)[1] == swaps  # deterministic
-    assert placement.repair_owner(w, cur, 4, max_swaps=2)[1] == swaps[:2]
+    assert core.repair_owner(w, cur, 4)[1] == swaps  # deterministic
+    assert core.repair_owner(w, cur, 4, max_swaps=2)[1] == swaps[:2]
     assert (owner != cur).sum() < (placement.pack_owner(w, 4) != cur).sum()
 
 
 def test_shifted_gain_keeps_the_noise_floor():
     persistent = np.array([[3.0, 1.0]] * 4)
-    assert policy.shifted_gain(persistent, np.array([-1.0, 1.0])) == pytest.approx(1.0)
+    assert core.shifted_gain(persistent, np.array([-1.0, 1.0])) == pytest.approx(1.0)
     noise = np.array([[3.0, 1.0], [1.0, 3.0]])  # the slow rank alternates
-    assert policy.shifted_gain(noise, np.array([-1.0, 1.0])) == pytest.approx(0.0)
-    assert policy.shifted_gain(noise, np.zeros(2)) == 0.0
+    assert core.shifted_gain(noise, np.array([-1.0, 1.0])) == pytest.approx(0.0)
+    assert core.shifted_gain(noise, np.zeros(2)) == 0.0
 
 
 def _near_balanced_weight():
@@ -354,28 +356,28 @@ def _near_balanced_weight():
 
 def test_decide_swaps_acts_on_a_skew_above_the_noise_and_not_below_it():
     w, cur = _near_balanced_weight(), placement.linear_owner(64, 4)
-    sums = placement.rank_weight(w, cur, 4)
-    cfg = policy.PolicyConfig(interval=1000, holdout=False, bw_gbps=1e6)
+    sums = core.rank_weight(w, cur, 4)
+    cfg = core.PolicyConfig(interval=1000, holdout=False, bw_gbps=1e6)
     quiet = np.random.default_rng(1).normal(sums, 0.5, size=(2000, 4))
-    d = policy.decide_swaps(w, cur, 4, cfg, quiet)
+    d = core.decide_swaps(w, cur, 4, cfg, quiet)
     assert d.reason == "rebalance" and d.experts_moved == 2  # one swap
     noisy = np.random.default_rng(1).normal(sums, 4.0, size=(2000, 4))
-    d = policy.decide_swaps(w, cur, 4, cfg, noisy)
+    d = core.decide_swaps(w, cur, 4, cfg, noisy)
     assert d.owner is None and d.reason == "gain below min_rel_gain"
     # the expectation-based predictor rebalances the same layer and reshuffles 48
     old = policy.decide(w, cur, 4, cfg)
     assert old.reason == "rebalance" and old.experts_moved == 48
     assert old.gain_us_per_step > 5 * d.gain_us_per_step
     with pytest.raises(ValueError, match="samples"):
-        policy.decide_swaps(w, cur, 4, cfg, noisy[:, :3])
+        core.decide_swaps(w, cur, 4, cfg, noisy[:, :3])
 
 
 def test_decide_swaps_holdout_judges_each_half_with_the_other_halfs_weights():
     w, cur = _near_balanced_weight(), placement.linear_owner(64, 4)
-    sums = placement.rank_weight(w, cur, 4)
-    cfg = policy.PolicyConfig(interval=1000, holdout=True, bw_gbps=1e6)
+    sums = core.rank_weight(w, cur, 4)
+    cfg = core.PolicyConfig(interval=1000, holdout=True, bw_gbps=1e6)
     s = np.random.default_rng(1).normal(sums, 0.5, size=(2000, 4))
     flat = np.full(64, 10.0 / 16.0)  # the newer half shows no skew
-    d = policy.decide_swaps(w, cur, 4, cfg, s, older=w, newer=flat)
+    d = core.decide_swaps(w, cur, 4, cfg, s, older=w, newer=flat)
     assert d.owner is None and d.reason == "holdout gain below min_rel_gain"
-    assert policy.decide_swaps(w, cur, 4, cfg, s, older=w, newer=w).owner is not None
+    assert core.decide_swaps(w, cur, 4, cfg, s, older=w, newer=w).owner is not None
