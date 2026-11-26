@@ -874,3 +874,33 @@ kit mutants `mtp_probe_posts_default_model`, `mtp_probe_accepts_a_path_base`,
 `vision_probe_posts_default_model`, `vision_probe_accepts_a_path_base`: all
 **KILLED**; ruff check/format clean.  GPU unchanged: a resumed run executes
 dspark -> boot720.
+
+### 2026-11-26 fix: the dspark boot lost the speculator (card1 dspark FAIL)
+
+Card1's dspark step booted `speculative_config=None` (0 drafts, speedup 1.001).
+`serve.sh` passed `SPEC_CONFIG="${SPEC_CONFIG:-}"` as a launcher override even
+when the caller left it empty; `serve_rdna.sh` applies overrides *after* the
+recipe, so the empty value wiped the recipe's dspark block.  `serve.sh` now
+passes `SPEC_CONFIG` only when the caller set it (empty otherwise), and the
+driver asserts the resolved config from each boot log before probing:
+`speculative_config=SpeculativeConfig(method='dspark'...)` plus the
+`Inkling-2 DSpark weights` line for `dspark`/`boot720`, and
+`speculative_config=None` for `plain16k`; a mismatch fails the step as
+`spec_config_missing`/`spec_config_unexpected` with the config line.
+
+Measured on a2 (2026-11-26, one boot with the driver argv: DSPARK=1,
+MAXLEN=16384, GMEM 0.92, port 18339; stopped, lease clean):
+`speculative_config=SpeculativeConfig(method='dspark', model='/home/chenco_adm/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5', num_spec_tokens=7)`
+and `Inkling-2 DSpark weights: bf16 -> fp16, max |w| 38.500, 446 of 317897088
+values flushed to zero` on both workers; launch argv carried
+`--speculative-config {"method":"dspark","num_speculative_tokens":7,
+"num_speculative_tokens_per_batch_size":[[1,2,2],[3,8,0]]}`, `/health` 200.
+
+CPU proof (box): slots module **42 passed**; driver module **20 passed**
+(5 new: dspark missing speculator fails before the probe, plain16k with a
+speculator is refused, dspark passes with both sides right, boot720 fails
+without the speculator, boot720 uses the served model id);
+`mutants_final.py` **18/18 killed** (dspark_spec_check_off,
+plain_spec_check_off, boot720_spec_check_off); `mutants_launchers.py`
+**17/17 killed** (serve_passes_empty_spec_config); ruff check/format clean.
+GPU: only the one proof boot above; the resumed run executes dspark + boot720.

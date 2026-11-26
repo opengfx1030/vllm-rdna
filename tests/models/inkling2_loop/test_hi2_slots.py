@@ -194,6 +194,7 @@ echo "STUB HIP=${HIP_VISIBLE_DEVICES:-<unset>}" \\
 printf 'HIP=%s\\nROCR=%s\\nCUDA=%s\\n' \\
     "${HIP_VISIBLE_DEVICES:-}" "${ROCR_VISIBLE_DEVICES:-}" \\
     "${CUDA_VISIBLE_DEVICES:-}" > "$STUB_MARKERS/env.txt"
+printf '%s\n' "$@" > "$STUB_MARKERS/args.txt"
 if [[ ${STUB_REQUIRE_ENV:-1} == 1 ]]; then
     [[ ${HIP_VISIBLE_DEVICES:-} == 0,1 ]] || { echo "STUB bad HIP"; exit 3; }
     [[ -z ${ROCR_VISIBLE_DEVICES:-} && -z ${CUDA_VISIBLE_DEVICES:-} ]] || {
@@ -699,6 +700,28 @@ def test_serve_holds_the_boot_lock_until_ready(dry):
     (dry.markers / "booting").unlink()
 
 
+def test_serve_lets_the_recipe_set_the_spec_config(dry):
+    # DSPARK=1 alone must reach serve_rdna without an empty SPEC_CONFIG
+    # override: the recipe builds the dspark block and an empty override would
+    # wipe it (speculative_config=None, 0 drafts).
+    dry.start_serve(DSPARK="1")
+    assert _wait_port(dry.port)
+    args = (dry.markers / "args.txt").read_text().splitlines()
+    assert "DSPARK=1" in args, args
+    assert not any(a.startswith("SPEC_CONFIG=") for a in args), args
+    (dry.markers / "booting").unlink()
+
+
+def test_serve_forwards_an_explicit_spec_config(dry):
+    spec = '{"method":"dspark"}'
+    dry.start_serve(DSPARK="1", SPEC_CONFIG=spec)
+    assert _wait_port(dry.port)
+    args = (dry.markers / "args.txt").read_text().splitlines()
+    assert "DSPARK=1" in args, args
+    assert f"SPEC_CONFIG={spec}" in args, args
+    (dry.markers / "booting").unlink()
+
+
 def test_serve_checks_the_devices_around_the_boot(dry):
     dry.start_serve(ROCR_VISIBLE_DEVICES="2,3,4,5", CUDA_VISIBLE_DEVICES="2,3")
     assert _wait_port(dry.port)
@@ -1052,7 +1075,7 @@ def test_the_boot_lock_is_held_until_the_server_is_ready():
     assert "exec 9>" in serve
     assert "flock 9" in serve
     assert serve.index("exec 9>&-") > serve.index("READY_SECONDS")
-    assert 'EXTRA_ARGS="$EXTRA" 9>&-' in serve
+    assert 'EXTRA_ARGS="$EXTRA" "${spec_args[@]}" 9>&-' in serve
     assert 'flock -w 900 "$BOOT_LOCK" true' not in serve
     assert "quiet window opened under the boot lock" in serve
 

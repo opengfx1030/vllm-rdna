@@ -814,3 +814,215 @@ def test_kl_backfill_fills_numbers_on_resume(kit):
     assert numbers["kl_long8k"] == "mean_kl=0.03460 sem=0.00200 top1=0.9150 windows=8"
     status = (run_dir / "STATUS.log").read_text()
     assert "kl.json numbers backfilled" in status
+
+
+FAKE_SPEC_HTTP = """#!/usr/bin/env python3
+import json
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port = int(os.environ["PORT"])
+mode = os.environ.get("FAKE_SPEC_MODE", "ok")
+on = (mode != "none") if port == 18230 else (mode == "plain_on")
+if on:
+    print(
+        "INFO with config: model='x', "
+        "speculative_config=SpeculativeConfig(method='dspark', num_spec_tokens=7)"
+    )
+    print("INFO [dspark.py:682] Inkling-2 DSpark weights: bf16 -> fp16")
+else:
+    print("INFO with config: model='x', speculative_config=None")
+sys.stdout.flush()
+pidfile = os.environ.get("SERVER_PID_FILE")
+if pidfile:
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self._send({"status": "ok"})
+        elif self.path == "/v1/models":
+            self._send({"data": [{"id": "inkling2-mini", "max_model_len": 720000}]})
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n))
+        calls = os.environ.get("CALLS")
+        if calls:
+            with open(calls + "/boot720", "a") as f:
+                f.write(
+                    json.dumps({"path": self.path, "model": body.get("model")})
+                    + "\\n"
+                )
+        self._send(
+            {
+                "choices": [
+                    {"message": {"content": "OK"}, "finish_reason": "stop"}
+                ],
+                "usage": {"completion_tokens": 1},
+            }
+        )
+
+    def _send(self, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+"""
+
+FAKE_SPEC_SERVE = """#!/usr/bin/env bash
+if [[ ${PRINT:-0} == 1 ]]; then
+    echo "DRY MODEL=$MODEL MAXLEN=$MAXLEN DSPARK=$DSPARK VISION=$VISION"
+    exit 0
+fi
+exec {python} "{FAKE_KIT}/fake_spec_http.py"
+"""
+
+FAKE_MTP_PROBE = """#!/usr/bin/env python3
+import argparse
+import json
+import os
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--spec-url", required=True)
+ap.add_argument("--plain-url")
+ap.add_argument("--log")
+ap.add_argument("--drop-batch", type=int, default=0)
+ap.add_argument("--json", required=True)
+ap.add_argument("--max-tokens", type=int, default=96)
+ap.add_argument("--timeout", type=float, default=600.0)
+a = ap.parse_args()
+with open(os.environ["CALLS"] + "/mtp", "a") as f:
+    f.write(json.dumps({"spec": a.spec_url, "plain": a.plain_url}) + "\\n")
+with open(a.json, "w") as f:
+    json.dump(
+        {
+            "checks": {"x": True},
+            "numbers": {
+                "mean_acceptance_length": 3.5,
+                "acceptance_rate": 0.8,
+                "speedup_c1": 1.2,
+                "drafts_delta_at_batch": 0,
+            },
+        },
+        f,
+    )
+"""
+
+
+def _spec_kit(kit: dict, tag: str) -> Path:
+    _free_ports()
+    (kit["kit"] / "fake_spec_http.py").write_text(FAKE_SPEC_HTTP)
+    (kit["kit"] / "fake_mtp_probe.py").write_text(FAKE_MTP_PROBE)
+    serve = kit["kit"] / "fake_spec_serve.sh"
+    _stub(
+        serve,
+        FAKE_SPEC_SERVE.replace("{python}", sys.executable).replace(
+            "{FAKE_KIT}", str(kit["kit"])
+        ),
+    )
+    return serve
+
+
+def test_dspark_step_fails_when_the_boot_lost_the_speculator(kit):
+    serve = _spec_kit(kit, "dsp-nospec")
+    r = run(
+        kit,
+        "dsp-nospec",
+        ONLY="dspark",
+        SERVE=str(serve),
+        MTP_PROBE=str(kit["kit"] / "fake_mtp_probe.py"),
+        FAKE_SPEC_MODE="none",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "dsp-nospec") / "STATUS.log").read_text()
+    assert "spec_config_missing: dspark" in status, status
+    assert "speculative_config=None" in status, status
+    assert not (kit["calls"] / "mtp").exists(), "the probe ran without the speculator"
+
+
+def test_plain16k_boot_must_not_enable_the_speculator(kit):
+    serve = _spec_kit(kit, "dsp-plain")
+    r = run(
+        kit,
+        "dsp-plain",
+        ONLY="dspark",
+        SERVE=str(serve),
+        MTP_PROBE=str(kit["kit"] / "fake_mtp_probe.py"),
+        FAKE_SPEC_MODE="plain_on",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "dsp-plain") / "STATUS.log").read_text()
+    assert "spec_config_unexpected: plain16k" in status, status
+    assert not (kit["calls"] / "mtp").exists(), "the probe ran on a bad pair"
+
+
+def test_dspark_step_passes_with_the_speculator_loaded(kit):
+    serve = _spec_kit(kit, "dsp-ok")
+    r = run(
+        kit,
+        "dsp-ok",
+        ONLY="dspark",
+        SERVE=str(serve),
+        MTP_PROBE=str(kit["kit"] / "fake_mtp_probe.py"),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    status = (rt(kit, "dsp-ok") / "STATUS.log").read_text()
+    assert "spec_config ok: dspark" in status, status
+    assert "spec_config ok: plain16k" in status, status
+    calls = [
+        json.loads(line) for line in (kit["calls"] / "mtp").read_text().splitlines()
+    ]
+    assert calls == [
+        {
+            "spec": "http://127.0.0.1:18230",
+            "plain": "http://127.0.0.1:18231",
+        }
+    ], calls
+    numbers = json.loads((rt(kit, "dsp-ok") / "steps" / "dspark.json").read_text())[
+        "numbers"
+    ]
+    assert "accept_len=3.5" in numbers["dspark"], numbers
+
+
+def test_boot720_fails_when_the_speculator_is_missing(kit):
+    serve = _spec_kit(kit, "b720-nospec")
+    r = run(
+        kit,
+        "b720-nospec",
+        ONLY="boot720",
+        SERVE=str(serve),
+        FAKE_SPEC_MODE="none",
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    status = (rt(kit, "b720-nospec") / "STATUS.log").read_text()
+    assert "spec_config_missing: boot720" in status, status
+    assert not (kit["calls"] / "boot720").exists()
+
+
+def test_boot720_uses_the_served_model_id(kit):
+    serve = _spec_kit(kit, "b720-ok")
+    r = run(kit, "b720-ok", ONLY="boot720", SERVE=str(serve))
+    assert r.returncode == 0, r.stdout + r.stderr
+    numbers = json.loads((rt(kit, "b720-ok") / "steps" / "boot720.json").read_text())[
+        "numbers"
+    ]
+    assert numbers["max_model_len"] == "720000", numbers
+    assert numbers["reply"] == "OK", numbers
+    calls = [
+        json.loads(line) for line in (kit["calls"] / "boot720").read_text().splitlines()
+    ]
+    assert calls[-1]["model"] == "inkling2-mini", calls

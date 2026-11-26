@@ -28,7 +28,8 @@ TEST = "tests/models/inkling2_loop/test_hi2_final_driver.py"
 SUBSET = (
     "dry_run or disk_guard or resume or first_failure or bench or "
     "lease_inherit or own_request or pair_restarted_once or "
-    "pair_unhealthy_fails_cleanly or vision_ or kl_backfill"
+    "pair_unhealthy_fails_cleanly or vision_ or kl_backfill or speculator or "
+    "boot720_"
 )
 
 # (name, [(file, old, new), ...], pytest -k of the tests that must fail)
@@ -165,6 +166,48 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
             )
         ],
         "kl_backfill",
+    ),
+    (
+        "dspark_spec_check_off",
+        [
+            (
+                "validate_final_a2.sh",
+                (
+                    '    require_spec_config "$RUN/logs/serve-dspark.log" on dspark'
+                    " || return 1\n"
+                ),
+                "",
+            )
+        ],
+        "speculator",
+    ),
+    (
+        "plain_spec_check_off",
+        [
+            (
+                "validate_final_a2.sh",
+                (
+                    '    require_spec_config "$RUN/logs/serve-plain16k.log" off'
+                    " plain16k || return 1\n"
+                ),
+                "",
+            )
+        ],
+        "plain16k_boot_must_not",
+    ),
+    (
+        "boot720_spec_check_off",
+        [
+            (
+                "validate_final_a2.sh",
+                (
+                    '    require_spec_config "$RUN/logs/serve-boot720.log" on'
+                    " boot720 || return 1\n"
+                ),
+                "",
+            )
+        ],
+        "boot720_fails_when_the_speculator",
     ),
     (
         "vision_fallback_ignored",

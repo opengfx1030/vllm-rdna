@@ -92,8 +92,8 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
         [
             (
                 "serve.sh",
-                "    break\ndone\n\nif [[ $VISION == 1 ]]; then",
-                "    break\ndone\nexec 9>&-\n\nif [[ $VISION == 1 ]]; then",
+                "    break\ndone\n\nif [[ $REGRESSION == 0 ]]; then",
+                "    break\ndone\nexec 9>&-\n\nif [[ $REGRESSION == 0 ]]; then",
             ),
             (
                 "serve.sh",
@@ -197,6 +197,17 @@ MUTANTS: list[tuple[str, list[tuple[str, str, str]], str]] = [
             )
         ],
         "bench_invalid_without_kfd_workers or bench_window_record",
+    ),
+    (
+        "serve_passes_empty_spec_config",
+        [
+            (
+                "serve.sh",
+                'EXTRA_ARGS="$EXTRA" "${spec_args[@]}" 9>&- &',
+                'EXTRA_ARGS="$EXTRA" SPEC_CONFIG="${SPEC_CONFIG:-}" 9>&- &',
+            )
+        ],
+        "lets_the_recipe_set_the_spec_config",
     ),
 ]
 

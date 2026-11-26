@@ -287,7 +287,11 @@ def test_serve_forwards_recipe_dspark_and_vision():
     assert "RECIPE=${RECIPE:-inkling2-mini-tp2}" in text
     assert "DSPARK=${DSPARK:-0}" in text
     assert "VISION=${VISION:-0}" in text
-    assert 'DSPARK="$DSPARK" VISION="$VISION" SPEC_CONFIG="${SPEC_CONFIG:-}"' in text
+    assert 'DSPARK="$DSPARK" VISION="$VISION"' in text
+    assert "spec_args=()" in text
+    assert 'spec_args=(SPEC_CONFIG="$SPEC_CONFIG")' in text
+    assert '"${spec_args[@]}"' in text
+    assert 'SPEC_CONFIG="${SPEC_CONFIG:-}"' not in text
     assert 'RECIPE="$RECIPE"' in text
     assert "VISION_IMAGES=${VISION_IMAGES:-1}" in text
     assert '\\"image\\":$VISION_IMAGES' in text and '"image":0' in text

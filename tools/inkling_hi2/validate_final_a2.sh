@@ -301,6 +301,32 @@ run_step() {
 # --- probes/health ----------------------------------------------------------
 health() { curl -sf "http://127.0.0.1:$1/health" >/dev/null 2>&1; }
 
+# The speculator must be on/off as the recipe intends.  vLLM prints the resolved
+# config in its "with config:" line; a lost DSPARK/SPEC_CONFIG shows up as
+# speculative_config=None, which used to surface only as 0 drafts in the probe.
+spec_config_line() { grep -E "speculative_config=" "$1" 2>/dev/null | tail -1; }
+
+require_spec_config() { # logfile on|off what
+    local logfile=$1 want=$2 what=$3 line
+    line=$(spec_config_line "$logfile")
+    if [[ $want == on ]]; then
+        if [[ -z $line || $line == *"speculative_config=None"* ]]; then
+            log "spec_config_missing: $what booted without the speculator (${line:-no config line in $logfile})"
+            return 1
+        fi
+        if ! grep -q "Inkling-2 DSpark weights" "$logfile"; then
+            log "spec_config_missing: $what has no 'Inkling-2 DSpark weights' draft-load line (${line})"
+            return 1
+        fi
+    else
+        if [[ $line != *"speculative_config=None"* ]]; then
+            log "spec_config_unexpected: $what must boot plain (${line:-no config line in $logfile})"
+            return 1
+        fi
+    fi
+    log "spec_config ok: $what ${line}"
+}
+
 # The exact environment/argv of one boot; used by boot_server and the dry-run.
 boot_env() { # name port model maxlen maxbat dspark vision gmem
     local name=$1 port=$2 model=$3 maxlen=$4 maxbat=$5 dspark=$6 vision=$7 gmem=$8
@@ -783,8 +809,10 @@ s_dspark() {
     stop_server hi2 18230
     boot_server dspark 18230 "$SERVE_DIR" "$CTX_DSPARK" "$MAXBAT" 1 0 "$GMEM_PAIR" ||
         { log "DSpark boot failed (see $RUN/logs/serve-dspark.log)"; return 1; }
+    require_spec_config "$RUN/logs/serve-dspark.log" on dspark || return 1
     boot_server plain16k 18231 "$SERVE_DIR" "$CTX_DSPARK" "$MAXBAT" 0 0 "$GMEM_PAIR" ||
         { log "plain boot failed (see $RUN/logs/serve-plain16k.log)"; return 1; }
+    require_spec_config "$RUN/logs/serve-plain16k.log" off plain16k || return 1
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
         "$V" "$MTP_PROBE" --spec-url http://127.0.0.1:18230 \
         --plain-url http://127.0.0.1:18231 --log "$RUN/logs/serve-dspark.log" \
@@ -799,6 +827,7 @@ s_boot720() {
     stop_server dspark 18230
     boot_server boot720 18230 "$SERVE_DIR" 720000 1024 1 0 "$GMEM_SINGLE" ||
         { log "720k boot failed (see $RUN/logs/serve-boot720.log)"; return 1; }
+    require_spec_config "$RUN/logs/serve-boot720.log" on boot720 || return 1
     local served_name served_len
     read -r served_name served_len < <(curl -sf http://127.0.0.1:18230/v1/models |
         "$V" -c "import json,sys;d=json.load(sys.stdin)['data'][0];print(d['id'], d.get('max_model_len'))") || return 1

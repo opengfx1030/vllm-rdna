@@ -327,7 +327,14 @@ the log.
    The spec boot must log `Inkling-2 DSpark weights: bf16 -> fp16, ... 54 tensors`
    (no `mtp.safetensors` parse error, no `get_draft_quant_config` failure: the
    draft's config has no quantization and the HI2 quant config stays on the
-   target) and `SpecDecoding metrics:` lines. Verifies, all hard checks in the
+   target) and `SpecDecoding metrics:` lines.  The launcher must not pass an
+   empty `SPEC_CONFIG=` override, or the recipe's dspark block is wiped and vLLM
+   boots with `speculative_config=None` (measured card1 dspark failure); the
+   driver now checks `speculative_config` in `serve-dspark.log`/`serve-boot720.log`
+   (must be `SpeculativeConfig(method='dspark'...)` plus the draft-load line) and
+   `serve-plain16k.log` (must be `speculative_config=None`) before the probe, and
+   fails the step as `spec_config_missing`/`spec_config_unexpected`. Verifies,
+   all hard checks in the
    probe: greedy outputs token-identical with and without DSpark on the 8
    code/chat/agentic prompts, deterministic on repeat, clean non-empty text; a
    mean acceptance length and per-position acceptance rates from the log (record

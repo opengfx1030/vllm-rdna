@@ -185,6 +185,10 @@ check_devices
 if [[ -n $SERVER_PID_FILE ]]; then
     mkdir -p "$(dirname "$SERVER_PID_FILE")"
 fi
+spec_args=()
+if [[ -n ${SPEC_CONFIG:-} ]]; then
+    spec_args=(SPEC_CONFIG="$SPEC_CONFIG")
+fi
 env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
     HIP_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES" EXPECT_PCI_BUSES="$EXPECT_PCI_BUSES" \
     bash "$TREE/tools/rdna/serve_rdna.sh" \
@@ -193,10 +197,10 @@ env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
     VENV="$VENV" \
     HIP_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES" \
     PORT="$PORT" \
-    DSPARK="$DSPARK" VISION="$VISION" SPEC_CONFIG="${SPEC_CONFIG:-}" \
+    DSPARK="$DSPARK" VISION="$VISION" \
     MTP=0 EAGER="$EAGER" CG_MODE=FULL_AND_PIECEWISE \
     MAXLEN="$MAXLEN" MAXBAT="$MAXBAT" SEQS="$SEQS" GMEM="$GMEM" \
-    EXTRA_ARGS="$EXTRA" 9>&- &
+    EXTRA_ARGS="$EXTRA" "${spec_args[@]}" 9>&- &
 SERVER=$!
 cleanup() {
     local pid=${SERVER:-}
