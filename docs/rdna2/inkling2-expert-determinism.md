@@ -22,7 +22,9 @@ greedy outputs.
   ordered the routed rows.
 - Requires the BM kernels' eligibility (hidden and intermediate multiples of
   32, `VLLM_INKLING2_PREFILL_BM` on). If a model is not eligible the path
-  raises instead of silently returning the atomic path's output.
+  raises instead of silently returning the atomic path's output. The
+  offloaded expert path (`_forward_hip_offload`) is refused under the flag: it
+  is not wired.
 
 ## Cost, measured
 
@@ -48,7 +50,8 @@ algorithm selection, prefix-cache hit paths) is deterministic.
 ## Tests
 
 - `tests/models/inkling2_loop/test_moe_deterministic.py` - flag resolution, the
-  unset dispatch being the shipped one, the fp32 top-k sum against a reference,
-  the scratch buffer reuse, and the ineligible-shape error.
+  unset dispatch being the shipped one (subprocess import with the variable
+  removed), the fp32 top-k sum against a reference, the scratch buffer reuse,
+  the ineligible-shape error and the offload refusal.
 - `tools/rdna/inkling2/moe_det_mutants.py` - mutation battery over those tests.
 - Pre-commit and the existing Inkling-2 moe suites.

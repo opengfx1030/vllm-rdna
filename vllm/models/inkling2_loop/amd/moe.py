@@ -206,32 +206,6 @@ def softcapped_swiglu(
     return out.to(out_dtype)
 
 
-def _require_gfx10x(where: str) -> None:
-    """The HI2 expert GEMMs are gfx1030 kernels (``rdna_hint_flex_rdna2.cu``).
-
-    vLLM registers an empty stub on other architectures; refuse them here instead
-    of returning zeros from a model that looks healthy.
-    """
-    from vllm.platforms.rocm import on_gfx10x
-
-    if not on_gfx10x():
-        raise RuntimeError(f"{where}: the HI2 expert GEMMs need gfx1030 (RDNA2)")
-
-
-def _sum_topk_rows(rows: torch.Tensor, topk_w: torch.Tensor, out: torch.Tensor) -> None:
-    """``out[t] = sum_k rows[t * K + k] * topk_w[t, k]``, in place.
-
-    ``rows`` is the 2-D ``[T * K, H]`` w2 output view of the workspace and
-    ``topk_w`` is the workspace's fp32 ``[T, K]`` view; ``out`` is ``[T, H]``.
-    The w2 GEMM writes the per-expert rows in that 2-D view, so the K axis is
-    only a view here.
-    """
-    t, k = topk_w.shape
-    y = rows.view(t, k, rows.shape[-1])
-    y.mul_(topk_w.unsqueeze(-1))
-    torch.sum(y, dim=1, out=out)
-
-
 def _sum_topk_rows_f32(
     rows: torch.Tensor, topk_w: torch.Tensor, out: torch.Tensor
 ) -> None:
@@ -1447,8 +1421,18 @@ class Inkling2LoopMoE(_ExpertsKernel):
         share the scratch of ``ws`` (``Inkling2GlueWorkspace``): the router launch
         zero-fills ``gate_up`` (not on the prefill path, whose w13 kernel stores every
         routed row) and the chunk's output, the GEMMs accumulate into them.
+
+        ``VLLM_RDNA2_MOE_DETERMINISTIC=1`` (``_DETERMINISTIC``) runs every chunk,
+        decode included, through the prefill-BM kernels with a plain-store w2 and
+        the fp32 top-k sum (``_sum_topk_rows_f32``).  The offloaded expert path is
+        refused under the flag: it is not wired.
         """
         if self.expert_cache is not None:
+            if _DETERMINISTIC:
+                raise RuntimeError(
+                    f"{self.prefix}: VLLM_RDNA2_MOE_DETERMINISTIC=1 is not wired "
+                    "into the offloaded expert path"
+                )
             return _forward_hip_offload(
                 self, x16, ws, out_all, max_query_len, visit, next_mlp
             )

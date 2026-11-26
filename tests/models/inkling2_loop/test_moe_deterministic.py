@@ -16,7 +16,9 @@ make the stock NVFP4 / MXFP8 routed experts run-to-run bit-identical:
 * with the flag off the shipped dispatch is unchanged (decode kernels, fused
   w2 top-k epilogue, no deterministic scratch on the workspace);
 * a shape the BM kernels cannot run under the flag is refused, not silently
-  run nondeterministically.
+  run nondeterministically, as is the offloaded expert path (not wired);
+* with the variable unset the module resolves the switch off, so the default
+  serving dispatch is exactly the shipped one (the flag is opt-in).
 
     pytest tests/models/inkling2_loop/test_moe_deterministic.py -q
 """
@@ -64,6 +66,25 @@ def test_switch_is_the_wna16_variable():
         src = fh.read()
     assert 'env.get("VLLM_RDNA2_MOE_DETERMINISTIC", "0")' in src
     assert "_DETERMINISTIC = _deterministic_switch(os.environ)" in src
+
+
+def test_flag_unset_resolves_to_the_shipped_dispatch():
+    # the default path is what ships: without the variable the module resolves
+    # the switch off (and the flag-off dispatch test below pins the call tuple)
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != SWITCH}
+    code = (
+        "from vllm.models.inkling2_loop.amd import moe;"
+        "print(moe._DETERMINISTIC, moe._deterministic_switch({}))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert proc.stdout.strip() == "False False"
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +207,7 @@ def _layer(hidden=HIDDEN, inter=INTER):
         router_w=torch.zeros(EXPERTS, hidden),
         gate_softcap=4.0,
         up_softcap=25.0,
+        expert_cache=None,
     )
     layer.max_tokens_per_call = 1024
     layer._default_block_size_m = lambda tc, k, max_query_len=0: 1
@@ -281,6 +303,18 @@ def test_flag_off_keeps_the_shipped_dispatch(monkeypatch):
 def test_flag_on_refuses_shapes_without_the_bm_kernels(monkeypatch):
     with pytest.raises(RuntimeError, match="needs the prefill-BM expert GEMMs"):
         _run(monkeypatch, True, hidden=16, inter=24)  # 24 is not a multiple of 32
+
+
+def test_flag_on_refuses_the_offload_path(monkeypatch):
+    monkeypatch.setattr(moe_mod, "_DETERMINISTIC", True)
+    layer = _layer()
+    layer.expert_cache = object()  # any non-None cache: the offload dispatch
+    layer._gemm = lambda *a, **k: None
+    ws = _workspace(2, HIDDEN, INTER, TOP_K)
+    x = torch.zeros(2, HIDDEN, dtype=torch.float16)
+    out = torch.zeros(2, HIDDEN, dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="offloaded expert path"):
+        moe_mod.Inkling2LoopMoE.forward_hip(layer, x, ws, out)
 
 
 def test_flag_on_uses_the_bm_kernels_for_big_chunks_too(monkeypatch):
