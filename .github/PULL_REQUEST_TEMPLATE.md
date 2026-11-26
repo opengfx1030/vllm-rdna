@@ -41,11 +41,11 @@
 
 ### Exactness
 
-<!-- Greedy output hashes base against head with VLLM_RDNA2_MOE_DETERMINISTIC=1, and the concurrency probe of base and head. -->
+<!-- Greedy output hashes base against head with VLLM_RDNA2_MOE_DETERMINISTIC=1, and the concurrency probe of base and head. Numerics-change and known-lossy features also run this with EXACT=1 FAIL_FAST=0 so greedy token divergence and concurrency_probe.py are measured. -->
 
 ### Quality
 
-<!-- topk_kl.py head against base within the base-against-base floor (KL and top-1 with their intervals), PPL rise at most 2 %, concurrency and greedy probes; for a lossy feature also the task-eval A/B. -->
+<!-- topk_kl.py head against base within the base-against-base floor (KL and top-1 with their intervals), PPL rise at most 2 %, concurrency and greedy probes; known-lossy features still run the full quality gate to measure loss (plus decode_kl.py for decode-step lossy changes and the task-eval A/B). -->
 
 ### Speed
 
