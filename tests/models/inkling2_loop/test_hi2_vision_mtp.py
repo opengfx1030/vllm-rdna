@@ -310,6 +310,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E40
 class _VisionStub(BaseHTTPRequestHandler):
     model = "inkling2-hi2"
     fail_post = False
+    with_token_ids = True
+    reject_token_ids = False
     posts: list = []
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
@@ -321,18 +323,20 @@ class _VisionStub(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
         n = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(n))
-        type(self).posts.append({"path": self.path, "payload": payload})
+        type(self).posts.append({"path": self.path, "payload": dict(payload)})
         if type(self).fail_post:
             self.send_error(404)
             return
-        self._send(
-            {
-                "choices": [
-                    {"message": {"content": "a red square"}, "finish_reason": "stop"}
-                ],
-                "usage": {"completion_tokens": 2},
-            }
-        )
+        if self.path == "/tokenize":
+            self._send({"count": 3, "tokens": [101, 102, 103]})
+            return
+        if payload.get("return_token_ids") and type(self).reject_token_ids:
+            self.send_error(400)
+            return
+        choice: dict = {"message": {"content": "a red square"}, "finish_reason": "stop"}
+        if type(self).with_token_ids and payload.get("return_token_ids"):
+            choice["token_ids"] = [11, 12]
+        self._send({"choices": [choice], "usage": {"completion_tokens": 2}})
 
     def _send(self, body: dict) -> None:
         data = json.dumps(body).encode()
@@ -350,6 +354,8 @@ class _VisionStub(BaseHTTPRequestHandler):
 def vision_stub():
     _VisionStub.posts = []
     _VisionStub.fail_post = False
+    _VisionStub.with_token_ids = True
+    _VisionStub.reject_token_ids = False
     server = ThreadingHTTPServer(("127.0.0.1", 0), _VisionStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -392,6 +398,8 @@ def test_mtp_complete_posts_the_served_model(vision_stub):
     last = _VisionStub.posts[-1]
     assert last["path"] == "/v1/chat/completions"
     assert last["payload"]["model"] == "inkling2-hi2"
+    assert last["payload"]["return_token_ids"] is True
+    assert got["token_ids"] == [11, 12]
     mtp_probe._SERVED.clear()
 
 
@@ -407,3 +415,79 @@ def test_mtp_404_names_the_url_and_model(vision_stub):
         mtp_probe.complete(vision_stub, "hello", 8, 5.0)
     assert "POST " + vision_stub + "/v1/chat/completions: HTTP 404" in str(e.value)
     mtp_probe._SERVED.clear()
+
+
+# --- mtp_probe: the token-level floor and the settled no-draft window -------
+# The stack is not bitwise reproducible across processes, so the greedy gate is
+# "identical, or within what two plain boots of the same weights already show".
+
+
+def test_diff_tokens_reports_the_first_divergence_and_count():
+    assert mtp_probe.diff_tokens([1, 2, 3], [1, 2, 3]) == {"first": None, "count": 0}
+    assert mtp_probe.diff_tokens([1, 2, 3], [1, 2, 4]) == {"first": 2, "count": 1}
+    assert mtp_probe.diff_tokens([1, 2, 3], [1, 2]) == {"first": 2, "count": 1}
+    assert mtp_probe.diff_tokens([1, 9, 3, 4], [1, 2, 3]) == {
+        "first": 1,
+        "count": 2,
+    }
+
+
+def test_the_floor_verdict_passes_identity_and_within_floor_only():
+    v = mtp_probe.floor_verdict([1, 2, 3], [1, 2, 3], None)
+    assert v["ok"] and v["floor"] is None
+    # two plain boots differ at one token; the spec differs by the same amount
+    v = mtp_probe.floor_verdict([1, 2, 9], [1, 2, 3], [1, 2, 4])
+    assert v["ok"]
+    assert v["spec"]["first"] == 2 and v["floor"]["count"] == 1
+    # beyond the floor is a finding
+    v = mtp_probe.floor_verdict([1, 2, 9, 9], [1, 2, 3], [1, 2, 4])
+    assert not v["ok"]
+    assert v["spec"]["count"] == 2 and v["spec"]["first"] == 2
+    # no floor: identity is required; a zero floor keeps the strict gate
+    assert not mtp_probe.floor_verdict([1, 2, 9], [1, 2, 3], None)["ok"]
+    assert not mtp_probe.floor_verdict([1, 2, 9], [1, 2, 3], [1, 2, 3])["ok"]
+
+
+def test_the_no_draft_verdict_uses_the_window_delta():
+    assert mtp_probe.no_draft_verdict(10, 10) == {"delta": 0, "ok": True}
+    v = mtp_probe.no_draft_verdict(10, 13)
+    assert v["delta"] == 3 and not v["ok"]
+
+
+def test_the_no_draft_window_settles_before_reading_the_counter():
+    text = (KIT / "mtp_probe.py").read_text()
+    sleep_at = text.index("time.sleep(args.settle_seconds)")
+    read_at = text.index(
+        'window_before = metric(spec, "vllm:spec_decode_num_drafts_total")'
+    )
+    assert sleep_at < read_at
+
+
+def test_mtp_complete_falls_back_to_the_server_tokenizer(vision_stub):
+    mtp_probe._SERVED.clear()
+    _VisionStub.with_token_ids = False
+    got = mtp_probe.complete(vision_stub, "hello", 8, 5.0)
+    assert got["token_ids"] == [101, 102, 103]
+    assert any(p["path"] == "/tokenize" for p in _VisionStub.posts)
+    mtp_probe._SERVED.clear()
+
+
+def test_mtp_complete_retries_without_the_token_id_extension(vision_stub):
+    mtp_probe._SERVED.clear()
+    _VisionStub.with_token_ids = False
+    _VisionStub.reject_token_ids = True
+    got = mtp_probe.complete(vision_stub, "hello", 8, 5.0)
+    assert got["token_ids"] == [101, 102, 103]
+    chats = [p for p in _VisionStub.posts if p["path"] == "/v1/chat/completions"]
+    assert "return_token_ids" in chats[0]["payload"]
+    assert "return_token_ids" not in chats[1]["payload"]
+    mtp_probe._SERVED.clear()
+
+
+def test_the_driver_boots_two_plain_servers_and_runs_720k_first():
+    text = (KIT / "validate_final_a2.sh").read_text()
+    assert "STEPS=(kernel serve_dir smoke kl eval vision bench boot720 dspark)" in text
+    assert text.count('boot_server plain16k 18231 "$SERVE_DIR"') == 2
+    assert "--floor-json" in text and "--stock-only" in text
+    assert "run_step boot720 s_boot720\nrun_step dspark s_dspark" in text
+    assert 'dry_serve "stock dspark" stockspec 18231 "$STOCK"' in text

@@ -824,7 +824,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port = int(os.environ["PORT"])
 mode = os.environ.get("FAKE_SPEC_MODE", "ok")
-on = (mode != "none") if port == 18230 else (mode == "plain_on")
+if port == 18230 or os.environ.get("DSPARK") == "1":
+    on = mode != "none"
+else:
+    on = mode == "plain_on"
 if on:
     print(
         "INFO with config: model='x', "
@@ -897,9 +900,14 @@ import json
 import os
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--spec-url", required=True)
+ap.add_argument("--spec-url")
 ap.add_argument("--plain-url")
 ap.add_argument("--log")
+ap.add_argument("--floor-json")
+ap.add_argument("--settle-seconds", type=float, default=10.0)
+ap.add_argument("--stock-spec-url")
+ap.add_argument("--stock-log")
+ap.add_argument("--stock-only", action="store_true")
 ap.add_argument("--drop-batch", type=int, default=0)
 ap.add_argument("--json", required=True)
 ap.add_argument("--max-tokens", type=int, default=96)
@@ -907,19 +915,19 @@ ap.add_argument("--timeout", type=float, default=600.0)
 a = ap.parse_args()
 with open(os.environ["CALLS"] + "/mtp", "a") as f:
     f.write(json.dumps({"spec": a.spec_url, "plain": a.plain_url}) + "\\n")
+numbers = {
+    "mean_acceptance_length": 3.5,
+    "acceptance_rate": 0.8,
+    "speedup_c1": 1.2,
+    "drafts_delta_at_batch": 0,
+    "floor_diff_max": 1,
+    "spec_diff_max": 1,
+    "stock_mean_acceptance_length": 2.4,
+    "stock_acceptance_rate": 0.6,
+    "stock_drafts": 40,
+}
 with open(a.json, "w") as f:
-    json.dump(
-        {
-            "checks": {"x": True},
-            "numbers": {
-                "mean_acceptance_length": 3.5,
-                "acceptance_rate": 0.8,
-                "speedup_c1": 1.2,
-                "drafts_delta_at_batch": 0,
-            },
-        },
-        f,
-    )
+    json.dump({"checks": {"x": True}, "numbers": numbers}, f)
 """
 
 
@@ -983,19 +991,29 @@ def test_dspark_step_passes_with_the_speculator_loaded(kit):
     status = (rt(kit, "dsp-ok") / "STATUS.log").read_text()
     assert "spec_config ok: dspark" in status, status
     assert "spec_config ok: plain16k" in status, status
+    assert "spec_config ok: stockspec" in status, status
     calls = [
         json.loads(line) for line in (kit["calls"] / "mtp").read_text().splitlines()
     ]
+    # plain boot #1, plain boot #2 (the floor), then the stock reference
     assert calls == [
         {
             "spec": "http://127.0.0.1:18230",
             "plain": "http://127.0.0.1:18231",
-        }
+        },
+        {
+            "spec": "http://127.0.0.1:18230",
+            "plain": "http://127.0.0.1:18231",
+        },
+        {"spec": None, "plain": None},
     ], calls
     numbers = json.loads((rt(kit, "dsp-ok") / "steps" / "dspark.json").read_text())[
         "numbers"
     ]
     assert "accept_len=3.5" in numbers["dspark"], numbers
+    assert "floor_max=1" in numbers["dspark"], numbers
+    assert "stock_dspark" in numbers, numbers
+    assert "accept_len=2.4" in numbers["stock_dspark"], numbers
 
 
 def test_boot720_fails_when_the_speculator_is_missing(kit):

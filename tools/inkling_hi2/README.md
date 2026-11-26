@@ -188,16 +188,18 @@ Step order (all requested checks; grouped to keep the pair boot alive):
 check_real on CPU) -> `smoke` (self-contained: its own stock + its own HI2, both
 stopped before it returns) -> `kl` (the first step on the run pair; mixed gated
 at 0.15, long 8k/16k recorded) -> `eval` (two labels on the a2 tree) ->
-`vision` -> `bench` -> `dspark` (spec pair: 16384, GMEM 0.45 each) -> `boot720`
-(single HI2, 720000, GMEM 0.92; `/v1/models` must report 720000).  `bench` runs
+`vision` -> `bench` -> `boot720` (single HI2, 720000, GMEM 0.92;
+`/v1/models` must report 720000) -> `dspark` (spec + two plain boots: 16384,
+GMEM 0.45 each).  `bench` runs
 last inside the pair boot and has TWO arms: the pair arm (both servers resident
 at GMEM 0.45, the conservative number) and then a SOLO arm: stock is stopped and
 HI2 is booted alone at GMEM 0.92 with the recipe's MAXBAT/MAXLEN.  Both arms use
 `--decode-tokens 128` (less prefill contamination of a decode step) and both are
 recorded in `steps/bench.json` with their flags; the card quotes the solo arm
 (production runs one server) and footnotes the pair ratios.  `vision` before
-`dspark`/`boot720` is deliberate: a 720k KV failure must not discard the vision
-evidence.  Everything that shares the stock+HI2 pair runs under that one boot
+`boot720`/`dspark` is deliberate: a 720k KV failure must not discard the vision
+evidence, and `boot720` before `dspark` so a DSpark verdict cannot block the
+context test.  Everything that shares the stock+HI2 pair runs under that one boot
 (VISION=1, 32768, GMEM 0.45 each); all boots go through `serve.sh` (28 GiB lease
 gate, quiet windows, boot.lock, HIP->PCI litmus).  After smoke the driver boots
 one fresh stock+HI2 pair with its own pidfiles; every step that talks to the
@@ -298,9 +300,15 @@ the log.
 3b. **DSpark / MTP probe** (the production card's speculative path). The draft is
    the stock bf16 `mtp.safetensors` that `prep_serve_dir.sh` links into the serve
    directory; its 3 layers and Markov head are not quantized and read the target's
-   hidden-state taps, which `_forward_hip_hi2` writes like the stock path. Boot
-   **two HI2 servers of the same directory** (spec and plain) with a small context
-   so both fit without the stock server:
+   hidden-state taps, which `_forward_hip_hi2` writes like the stock path. The
+   stack is not bitwise reproducible across processes (TunableOp row selection,
+   PLE state), so the greedy gate is the **cross-process floor**: the same 8
+   prompts run on TWO plain boots of the same directory, and a spec-vs-plain
+   token difference is only a finding when it exceeds plain-vs-plain on that
+   prompt. Boot **two HI2 servers of the same directory** (spec and plain) with a
+   small context so both fit without the stock server; the driver does plain
+   boot #1 (records `steps/dspark-1.json`), stops it, boots plain #2 and reruns
+   with `--floor-json`. Manually:
 
    ```bash
    MODEL=$HOME/w4a8_runs/inkling-hi2-runtime/serve-bpw3.5 SLOT=a2 \
@@ -321,7 +329,15 @@ the log.
    python3 $TREE/tools/inkling_hi2/mtp_probe.py \
      --spec-url http://127.0.0.1:18230 --plain-url http://127.0.0.1:18231 \
      --log ~/w4a8_runs/inkling-hi2-runtime/logs/hi2-dspark.log \
-     --drop-batch 3 --json ~/w4a8_runs/inkling-hi2-runtime/mtp_probe.json
+     --drop-batch 3 --settle-seconds 10 \
+     --json ~/w4a8_runs/inkling-hi2-runtime/mtp_probe-1.json
+   # then restart the plain server identically and run
+   #   ... --plain-url http://127.0.0.1:18231 --floor-json mtp_probe-1.json \
+   #       --json mtp_probe.json
+   # and, after stopping the plain server and booting STOCK with DSPARK=1 on
+   # 18231, the acceptance reference:
+   #   ... --stock-only --stock-spec-url http://127.0.0.1:18231 \
+   #       --stock-log .../serve-stockspec.log --json dspark-stock.json
    ```
 
    The spec boot must log `Inkling-2 DSpark weights: bf16 -> fp16, ... 54 tensors`
@@ -336,14 +352,18 @@ the log.
    fails the step as `spec_config_missing`/`spec_config_unexpected`. Verifies,
    all hard checks in the
    probe: greedy outputs token-identical with and without DSpark on the 8
-   code/chat/agentic prompts, deterministic on repeat, clean non-empty text; a
-   mean acceptance length and per-position acceptance rates from the log (record
-   them; the stock card's numbers are the reference, HI2's are unmeasured); decode
-   tokens/s at c=1 (spec vs plain) and c=2; at `--drop-batch 3`
-   `vllm:spec_decode_num_drafts_total` does not move and every request succeeds
-   (`[[1,2,2],[3,8,0]]`). Exit 0 = all checks passed; keep `mtp_probe.json`.
-   Stop both servers afterwards (send SIGTERM to the pid files; the lease trap
-   releases the holder).
+   code/chat/agentic prompts (`choice.token_ids`, falling back to the server
+   `/tokenize`), OR within the plain-vs-plain floor recorded per prompt
+   (`greedy_within_floor[...]`, `floor_diff_max`, `spec_diff_max`), deterministic
+   on repeat, clean non-empty text; a mean acceptance length and per-position
+   acceptance rates from the log (record them); decode tokens/s at c=1
+   (spec vs plain) and c=2; at `--drop-batch 3`, after a 10 s idle settle,
+   `vllm:spec_decode_num_drafts_total` does not move over that window and every
+   request succeeds (`[[1,2,2],[3,8,0]]`); then the stock model's DSPARK=1
+   acceptance on the same prompts (`--stock-only`: drafts, accepted, mean
+   acceptance length, per-position) as the card's reference. Exit 0 = all checks
+   passed; keep `mtp_probe.json` and `dspark-stock.json`. Stop every server
+   afterwards (send SIGTERM to the pid files; the lease trap releases the holder).
 
 1. **Greedy smoke** with the HI2 server (it boots its own) and the stock server as
    the reference:

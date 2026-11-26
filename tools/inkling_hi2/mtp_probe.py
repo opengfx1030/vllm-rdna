@@ -160,20 +160,81 @@ def complete(
         "temperature": temperature,
         "top_p": top_p,
         "seed": seed,
+        # vLLM extension: the generated token ids, so the cross-process
+        # comparison is token-level and not a re-detokenisation of the text.
+        "return_token_ids": True,
     }
     t0 = time.monotonic()
-    status, body = _http_json(f"{base}/v1/chat/completions", payload, timeout)
+    try:
+        status, body = _http_json(f"{base}/v1/chat/completions", payload, timeout)
+    except RuntimeError:
+        # Older servers reject the token-id extension as an unknown field; the
+        # text is still comparable through /tokenize.
+        payload.pop("return_token_ids", None)
+        status, body = _http_json(f"{base}/v1/chat/completions", payload, timeout)
     elapsed = time.monotonic() - t0
     if status != 200 or not isinstance(body, dict):
         raise RuntimeError(f"{base}: HTTP {status}")
     choice = (body.get("choices") or [{}])[0]
     text = (choice.get("message") or {}).get("content") or ""
+    ids = choice.get("token_ids")
+    if ids is None:
+        ids = tokenize(base, text, timeout) if text else []
     return {
         "text": text,
+        "token_ids": [int(i) for i in ids],
         "finish_reason": choice.get("finish_reason"),
         "usage": body.get("usage") or {},
         "elapsed": elapsed,
     }
+
+
+def tokenize(base: str, text: str, timeout: float = 60.0) -> list[int]:
+    """Token ids from the server's own tokenizer (the fallback for responses
+    that do not return them)."""
+    url = f"{base}/tokenize"
+    payload = {
+        "model": served_model(base, timeout),
+        "prompt": text,
+        "add_special_tokens": False,
+    }
+    status, body = _http_json(url, payload, timeout)
+    if status != 200 or not isinstance(body, dict):
+        raise RuntimeError(f"{url}: HTTP {status}")
+    return [int(t) for t in body.get("tokens") or []]
+
+
+def diff_tokens(a: list[int], b: list[int]) -> dict:
+    """Token-level diff: first divergence index (None if identical) + count."""
+    n = min(len(a), len(b))
+    first = next((i for i in range(n) if a[i] != b[i]), None)
+    count = sum(1 for i in range(n) if a[i] != b[i]) + abs(len(a) - len(b))
+    if first is None and count:
+        first = n
+    return {"first": first, "count": count}
+
+
+def floor_verdict(spec: list[int], plain: list[int], floor: list[int] | None) -> dict:
+    """Identity against the cross-process floor (plain boot #1 vs #2).
+
+    The stack is not bitwise reproducible across processes (TunableOp rows, PLE
+    state), so a difference is only a finding when it exceeds what two plain
+    boots of the same weights already show on that prompt.
+    """
+    sd = diff_tokens(spec, plain)
+    if floor is None:
+        return {"ok": sd["count"] == 0, "spec": sd, "floor": None}
+    fd = diff_tokens(plain, floor)
+    return {
+        "ok": sd["count"] == 0 or sd["count"] <= fd["count"],
+        "spec": sd,
+        "floor": fd,
+    }
+
+
+def no_draft_verdict(before: float, after: float) -> dict:
+    delta = after - before
+    return {"delta": delta, "ok": delta == 0}
 
 
 def metric(base: str, name: str, timeout: float = 10.0) -> float:
@@ -246,9 +307,74 @@ class Report:
         self.log.append(f"{status} {name}{(': ' + note) if note else ''}")
 
 
+def measure_stock(
+    report: Report,
+    stock: str,
+    log_path: str | None,
+    max_tokens: int,
+    timeout: float,
+) -> None:
+    """Stock-model DSPARK=1 acceptance on the same 8 prompts (a reference)."""
+    log_pos = 0
+    if log_path:
+        path = Path(log_path).expanduser()
+        log_pos = path.stat().st_size if path.is_file() else 0
+    model = served_model(stock, timeout)
+    print(f"mtp_probe: stock-spec {stock} serves {model!r}")
+    before = spec_metrics(stock)
+    results = [complete(stock, p["prompt"], max_tokens, timeout) for p in PROMPTS]
+    after = spec_metrics(stock)
+    drafts = (
+        after["vllm:spec_decode_num_drafts_total"]
+        - before["vllm:spec_decode_num_drafts_total"]
+    )
+    accepted = (
+        after["vllm:spec_decode_num_accepted_tokens_total"]
+        - before["vllm:spec_decode_num_accepted_tokens_total"]
+    )
+    drafted = (
+        after["vllm:spec_decode_num_draft_tokens_total"]
+        - before["vllm:spec_decode_num_draft_tokens_total"]
+    )
+    report.numbers["stock_drafts"] = drafts
+    report.numbers["stock_accepted_tokens"] = accepted
+    report.numbers["stock_draft_tokens"] = drafted
+    report.numbers["stock_mean_acceptance_length"] = (
+        round(1 + accepted / drafts, 3) if drafts else None
+    )
+    report.numbers["stock_acceptance_rate"] = (
+        round(accepted / drafted, 4) if drafted else None
+    )
+    report.check(
+        "stock_dspark_active",
+        drafts > 0 and accepted > 0,
+        f"{drafts:g} drafts, {accepted:g} accepted",
+    )
+    report.check(
+        "stock_text_clean",
+        all(not _garbage(r["text"]) for r in results),
+        f"{len(results)} prompts",
+    )
+    if log_path:
+        path = Path(log_path).expanduser()
+        if path.is_file():
+            with open(path, "rb") as f:
+                f.seek(log_pos)
+                parsed = parse_log_metrics(f.read().decode("utf-8", "replace"))
+            report.numbers["stock_per_position"] = parsed["per_position"]
+            report.numbers["stock_mean_acceptance_length_log"] = parsed[
+                "mean_acceptance_length"
+            ]
+            report.check(
+                "stock_per_position_logged",
+                bool(parsed["per_position"]),
+                str(parsed["per_position"]),
+            )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--spec-url", required=True, help="DSpark (DSPARK=1) server")
+    ap.add_argument("--spec-url", default=None, help="DSpark (DSPARK=1) server")
     ap.add_argument(
         "--plain-url",
         default=None,
@@ -258,6 +384,32 @@ def main() -> int:
         "--log",
         default=None,
         help="the spec server's stdout log (per-position acceptance)",
+    )
+    ap.add_argument(
+        "--floor-json",
+        default=None,
+        help="the previous probe JSON: its plain-boot outputs are the floor",
+    )
+    ap.add_argument(
+        "--settle-seconds",
+        type=float,
+        default=10.0,
+        help="idle wait before the batch-K=0 window (leftover requests drain)",
+    )
+    ap.add_argument(
+        "--stock-spec-url",
+        default=None,
+        help="stock model served with DSPARK=1 (acceptance reference)",
+    )
+    ap.add_argument(
+        "--stock-log",
+        default=None,
+        help="the stock spec server's stdout log (per-position acceptance)",
+    )
+    ap.add_argument(
+        "--stock-only",
+        action="store_true",
+        help="measure the stock DSPARK=1 reference only and exit",
     )
     ap.add_argument("--max-tokens", type=int, default=96)
     ap.add_argument("--timeout", type=float, default=600.0)
@@ -271,18 +423,58 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        spec = base_url(args.spec_url)
+        spec = base_url(args.spec_url) if args.spec_url else None
         plain = base_url(args.plain_url) if args.plain_url else None
+        stock = base_url(args.stock_spec_url) if args.stock_spec_url else None
     except ValueError as e:
         print(f"mtp_probe: {e}", file=sys.stderr)
         return 2
     report = Report()
 
+    if args.stock_only:
+        if stock is None:
+            print("mtp_probe: --stock-only needs --stock-spec-url", file=sys.stderr)
+            return 2
+        if not health(stock):
+            print(f"mtp_probe: {stock} is not serving (/health)", file=sys.stderr)
+            return 3
+        try:
+            measure_stock(report, stock, args.stock_log, args.max_tokens, args.timeout)
+        except RuntimeError as e:
+            print(f"mtp_probe: {e}", file=sys.stderr)
+            return 3
+        for line in report.log:
+            print(line)
+        for name, value in report.numbers.items():
+            print(f"  {name}: {value}")
+        passed = all(report.checks.values())
+        print("PASS" if passed else "FAIL")
+        if args.json:
+            Path(args.json).write_text(
+                json.dumps(
+                    {
+                        "checks": report.checks,
+                        "numbers": report.numbers,
+                        "log": report.log,
+                        "outputs": {},
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        return 0 if passed else 1
+
+    if spec is None:
+        print("mtp_probe: --spec-url is required", file=sys.stderr)
+        return 2
     if not health(spec):
         print(f"mtp_probe: {spec} is not serving (/health)", file=sys.stderr)
         return 3
     if plain and not health(plain):
         print(f"mtp_probe: {plain} is not serving (/health)", file=sys.stderr)
+        return 3
+    if stock and not health(stock):
+        print(f"mtp_probe: stock {stock} is not serving (/health)", file=sys.stderr)
         return 3
     try:
         spec_model = served_model(spec, args.timeout)
@@ -308,7 +500,7 @@ def main() -> int:
     again = complete(spec, PROMPTS[0]["prompt"], args.max_tokens, args.timeout)
     report.check(
         "spec_deterministic",
-        first["text"] == again["text"] and _tokens(first) == _tokens(again),
+        first["token_ids"] == again["token_ids"],
         f"{_tokens(first)} tokens",
     )
     report.check(
@@ -321,19 +513,55 @@ def main() -> int:
         f"finish={first['finish_reason']}",
     )
 
-    # 2. greedy identity / plain decode
-    spec_out: list[dict] = []
-    plain_out: list[dict] = []
+    # 2. token-level identity against the plain boot, gated by the
+    #    cross-process floor measured by two plain boots (--floor-json)
+    outputs: dict[str, dict] = {"spec": {}, "plain": {}}
+    floor_tokens: dict[str, list[int]] = {}
+    if args.floor_json:
+        prior = Path(args.floor_json).expanduser()
+        if not prior.is_file():
+            print(f"mtp_probe: no floor JSON at {prior}", file=sys.stderr)
+            return 2
+        floor_tokens = (json.loads(prior.read_text()).get("outputs") or {}).get(
+            "plain"
+        ) or {}
+        if sorted(floor_tokens) != sorted(p["name"] for p in PROMPTS):
+            print(
+                f"mtp_probe: floor JSON lacks the {len(PROMPTS)} prompt outputs",
+                file=sys.stderr,
+            )
+            return 2
     if plain:
         for p in PROMPTS:
-            spec_out.append(complete(spec, p["prompt"], args.max_tokens, args.timeout))
-            plain_out.append(
-                complete(plain, p["prompt"], args.max_tokens, args.timeout)
+            so = complete(spec, p["prompt"], args.max_tokens, args.timeout)
+            po = complete(plain, p["prompt"], args.max_tokens, args.timeout)
+            outputs["spec"][p["name"]] = so["token_ids"]
+            outputs["plain"][p["name"]] = po["token_ids"]
+            verdict = floor_verdict(
+                so["token_ids"], po["token_ids"], floor_tokens.get(p["name"])
             )
-            report.check(
-                f"greedy_identical[{p['name']}]",
-                spec_out[-1]["text"] == plain_out[-1]["text"],
-                f"{_tokens(spec_out[-1])}/{_tokens(plain_out[-1])} tokens",
+            sd, fd = verdict["spec"], verdict["floor"]
+            report.numbers[f"spec_diff[{p['name']}]"] = sd["count"]
+            report.numbers[f"spec_first_diff[{p['name']}]"] = sd["first"]
+            if fd is not None:
+                report.numbers[f"floor_diff[{p['name']}]"] = fd["count"]
+                report.check(
+                    f"greedy_within_floor[{p['name']}]",
+                    verdict["ok"],
+                    f"spec_diff={sd['count']} floor={fd['count']} first={sd['first']}",
+                )
+            else:
+                report.check(
+                    f"greedy_identical[{p['name']}]",
+                    verdict["ok"],
+                    f"spec_diff={sd['count']} first={sd['first']}",
+                )
+        report.numbers["spec_diff_max"] = max(
+            report.numbers[f"spec_diff[{p['name']}]"] for p in PROMPTS
+        )
+        if floor_tokens:
+            report.numbers["floor_diff_max"] = max(
+                report.numbers[f"floor_diff[{p['name']}]"] for p in PROMPTS
             )
 
     # 3. per-position acceptance from the log / the Prometheus counters
@@ -346,14 +574,14 @@ def main() -> int:
             log_metrics = parse_log_metrics(tail)
         else:
             log_metrics = {"mean_acceptance_length": None, "per_position": None}
-        report.numbers["log"] = log_metrics
+        report.numbers["per_position"] = log_metrics["per_position"]
         report.check(
-            "per_position_acceptance_logged",
+            "per_position_logged",
             bool(log_metrics["per_position"]),
             str(log_metrics["per_position"]),
         )
 
-    # 4. speed at c=1 (spec vs plain) and c=2 (spec)
+    # 4. throughput record (not a gate)
     def timed(base: str, count: int, max_tokens: int) -> float:
         prompts = [PROMPTS[i % len(PROMPTS)]["prompt"] for i in range(count)]
 
@@ -385,25 +613,37 @@ def main() -> int:
             f"{speed_spec_1:.1f} vs {speed_plain_1:.1f} tok/s",
         )
 
-    # 5. the configured no-draft region: drafts must stop and requests succeed
+    # 5. the configured no-draft region: drafts must stop and requests succeed.
+    #    The counters are read only after the earlier cells have drained.
     if args.drop_batch > 1:
-        drafts_before = metric(spec, "vllm:spec_decode_num_drafts_total")
-        prompts = [PROMPTS[i % len(PROMPTS)]["prompt"] for i in range(args.drop_batch)]
+        if args.settle_seconds:
+            print(
+                f"mtp_probe: settling {args.settle_seconds:g}s before the "
+                f"batch-{args.drop_batch} window",
+                flush=True,
+            )
+            time.sleep(args.settle_seconds)
+        window_before = metric(spec, "vllm:spec_decode_num_drafts_total")
+        n = args.drop_batch
+        prompts = [PROMPTS[i % len(PROMPTS)]["prompt"] for i in range(n)]
 
         def run_long(prompt: str) -> dict:
             return complete(spec, prompt, min(args.max_tokens, 48), args.timeout)
 
-        with futures.ThreadPoolExecutor(max_workers=args.drop_batch) as pool:
+        with futures.ThreadPoolExecutor(max_workers=n) as pool:
             results = list(pool.map(run_long, prompts))
-        drafts_after = metric(spec, "vllm:spec_decode_num_drafts_total")
-        report.numbers["drafts_delta_at_batch"] = drafts_after - drafts_before
+        window_after = metric(spec, "vllm:spec_decode_num_drafts_total")
+        verdict = no_draft_verdict(window_before, window_after)
+        report.numbers["drafts_before_batch"] = window_before
+        report.numbers["drafts_after_batch"] = window_after
+        report.numbers["drafts_delta_at_batch"] = verdict["delta"]
         report.check(
-            f"no_drafts_at_batch_{args.drop_batch}",
-            drafts_after - drafts_before == 0,
-            f"delta {drafts_after - drafts_before:g}",
+            f"no_drafts_at_batch_{n}",
+            verdict["ok"],
+            f"{window_before:g}->{window_after:g} delta {verdict['delta']:g}",
         )
         report.check(
-            f"batch_{args.drop_batch}_all_ok",
+            f"batch_{n}_all_ok",
             all(not _garbage(r["text"]) for r in results),
             f"{len(results)} requests",
         )
@@ -436,6 +676,14 @@ def main() -> int:
         f"{drafts:g} drafts, {accepted:g} accepted",
     )
 
+    # 6. the stock model's DSPARK=1 acceptance on the same prompts
+    if stock is not None:
+        try:
+            measure_stock(report, stock, args.stock_log, args.max_tokens, args.timeout)
+        except RuntimeError as e:
+            print(f"mtp_probe: {e}", file=sys.stderr)
+            return 3
+
     for line in report.log:
         print(line)
     for name, value in report.numbers.items():
@@ -449,6 +697,7 @@ def main() -> int:
                     "checks": report.checks,
                     "numbers": report.numbers,
                     "log": report.log,
+                    "outputs": outputs,
                 },
                 indent=2,
             )

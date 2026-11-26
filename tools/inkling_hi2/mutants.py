@@ -249,6 +249,54 @@ MUTANTS = [
         ],
     ),
     (
+        "mtp_floor_ignored",
+        "tools/inkling_hi2/mtp_probe.py",
+        '        "ok": sd["count"] == 0 or sd["count"] <= fd["count"],',
+        '        "ok": True,',
+        [
+            (
+                "tests/models/inkling2_loop/test_hi2_vision_mtp.py::"
+                "test_the_floor_verdict_passes_identity_and_within_floor_only"
+            )
+        ],
+    ),
+    (
+        "mtp_floor_strict_equality",
+        "tools/inkling_hi2/mtp_probe.py",
+        'sd["count"] <= fd["count"]',
+        'sd["count"] < fd["count"]',
+        [
+            (
+                "tests/models/inkling2_loop/test_hi2_vision_mtp.py::"
+                "test_the_floor_verdict_passes_identity_and_within_floor_only"
+            )
+        ],
+    ),
+    (
+        "mtp_diff_counts_one",
+        "tools/inkling_hi2/mtp_probe.py",
+        "    count = sum(1 for i in range(n) if a[i] != b[i]) + abs(len(a) - len(b))",
+        "    count = 0 if first is None else 1",
+        [
+            (
+                "tests/models/inkling2_loop/test_hi2_vision_mtp.py::"
+                "test_diff_tokens_reports_the_first_divergence_and_count"
+            )
+        ],
+    ),
+    (
+        "mtp_no_draft_delta_ignored",
+        "tools/inkling_hi2/mtp_probe.py",
+        '    return {"delta": delta, "ok": delta == 0}',
+        '    return {"delta": delta, "ok": True}',
+        [
+            (
+                "tests/models/inkling2_loop/test_hi2_vision_mtp.py::"
+                "test_the_no_draft_verdict_uses_the_window_delta"
+            )
+        ],
+    ),
+    (
         "mtp_probe_accepts_a_path_base",
         "tools/inkling_hi2/mtp_probe.py",
         '    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:',

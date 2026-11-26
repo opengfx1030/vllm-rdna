@@ -44,9 +44,12 @@
 #                 HI2 alone at GMEM 0.92 with the recipe's MAXBAT/MAXLEN; both
 #                 arms use --decode-tokens 128 and both are recorded in the
 #                 step JSON with their flags (the card quotes the solo arm)
-#   8 dspark      HI2 spec+plain pair (16384): mtp_probe.py (identity, per-
-#                 position acceptance, c=1/c=2 speed, no-draft region at 3)
-#   9 boot720     single HI2 DSPARK=1, 720000 context (GMEM=0.92) + health
+#   8 boot720     single HI2 DSPARK=1, 720000 context (GMEM=0.92) + health
+#                 (before dspark: a DSpark verdict must not block the context
+#                 test)
+#   9 dspark      HI2 spec + TWO plain boots (16384): the cross-process floor,
+#                 identity within it, per-position, no-draft batch 3; then a
+#                 stock DSPARK=1 boot for the acceptance reference
 #
 # Estimated a2 wall time: about 4 h, budget 5 h (do not start with < 5 h free):
 # CPU/preflight 15 min; kernel 3; smoke 6; KL 25-35; bench 12-18; task eval
@@ -131,7 +134,7 @@ RUN=${RUN:-$RT/final/$TAG}
 BOOT_WAIT=${BOOT_WAIT:-1800}
 QUIET_WAIT=${QUIET_WAIT:-1800}
 
-STEPS=(kernel serve_dir smoke kl eval vision bench dspark boot720)
+STEPS=(kernel serve_dir smoke kl eval vision bench boot720 dspark)
 IFS=, read -r -a _only <<<"$ONLY"
 want() {
     [[ -z ${ONLY//,/} ]] && return 0
@@ -446,9 +449,10 @@ preflight() {
     # used here: step 2 owns the HI2 directory and runs after the kernel test.
     dry_serve "stock" stock 18231 "$STOCK" "$CTX" "$MAXBAT" 0 1 "$GMEM_PAIR"
     dry_serve "hi2 plain" hi2 18230 "$STOCK" "$CTX" "$MAXBAT" 0 1 "$GMEM_PAIR"
-    dry_serve "hi2 dspark" dspark 18230 "$STOCK" "$CTX_DSPARK" "$MAXBAT" 1 0 "$GMEM_PAIR"
-    dry_serve "hi2 plain-16k" plain16k 18231 "$STOCK" "$CTX_DSPARK" "$MAXBAT" 0 0 "$GMEM_PAIR"
-    dry_serve "hi2 720k" boot720 18230 "$STOCK" 720000 1024 1 0 "$GMEM_SINGLE"
+    dry_serve "hi2 dspark" dspark 18230 "$SERVE_DIR" "$CTX_DSPARK" "$MAXBAT" 1 0 "$GMEM_PAIR"
+    dry_serve "hi2 plain-16k" plain16k 18231 "$SERVE_DIR" "$CTX_DSPARK" "$MAXBAT" 0 0 "$GMEM_PAIR"
+    dry_serve "stock dspark" stockspec 18231 "$STOCK" "$CTX_DSPARK" "$MAXBAT" 1 0 "$GMEM_PAIR"
+    dry_serve "hi2 720k" boot720 18230 "$SERVE_DIR" 720000 1024 1 0 "$GMEM_SINGLE"
 
     local tool
     for tool in "$KLPROBE" "$BENCH" "$MTP_PROBE" "$VISION_PROBE"; do
@@ -803,23 +807,53 @@ s_vision() {
     return 1
 }
 
-# --- step 8: DSpark/MTP (HI2 spec + plain pair) ----------------------------
+# --- step 8: DSpark/MTP (HI2 spec + two plain boots), stock reference ------
+# The stack is not bitwise reproducible across processes (TunableOp rows, PLE
+# state), so the greedy gate is the cross-process floor: the same 8 prompts on
+# TWO plain boots of the same directory.  Phase 2 also re-asks the spec server
+# (still up, deterministic) and compares spec-vs-plain2 against plain1-vs-plain2.
+# Then a stock DSPARK=1 boot gives the reference acceptance on the same prompts.
 s_dspark() {
     stop_server stock 18231
     stop_server hi2 18230
+    stop_server plain16k 18231
+    stop_server stockspec 18231
     boot_server dspark 18230 "$SERVE_DIR" "$CTX_DSPARK" "$MAXBAT" 1 0 "$GMEM_PAIR" ||
         { log "DSpark boot failed (see $RUN/logs/serve-dspark.log)"; return 1; }
     require_spec_config "$RUN/logs/serve-dspark.log" on dspark || return 1
+    # plain boot #1: its outputs are the floor for phase 2
     boot_server plain16k 18231 "$SERVE_DIR" "$CTX_DSPARK" "$MAXBAT" 0 0 "$GMEM_PAIR" ||
-        { log "plain boot failed (see $RUN/logs/serve-plain16k.log)"; return 1; }
+        { log "plain boot #1 failed (see $RUN/logs/serve-plain16k.log)"; return 1; }
     require_spec_config "$RUN/logs/serve-plain16k.log" off plain16k || return 1
     env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
         "$V" "$MTP_PROBE" --spec-url http://127.0.0.1:18230 \
         --plain-url http://127.0.0.1:18231 --log "$RUN/logs/serve-dspark.log" \
-        --drop-batch 3 --json "$RUN/steps/dspark.json" || return 1
-    num "dspark" "$("$V" -c "import json;n=json.load(open('$RUN/steps/dspark.json'))['numbers'];print('accept_len=%s accept_rate=%s speedup_c1=%s drafts_delta_b3=%s' % (n.get('mean_acceptance_length'), n.get('acceptance_rate'), n.get('speedup_c1'), n.get('drafts_delta_at_batch')))")"
-    stop_server dspark 18230
+        --drop-batch 3 --settle-seconds "${MTP_SETTLE:-10}" \
+        --json "$RUN/steps/dspark-1.json" || return 1
     stop_server plain16k 18231
+    # plain boot #2: the floor (plain vs plain) and spec vs plain2
+    boot_server plain16k 18231 "$SERVE_DIR" "$CTX_DSPARK" "$MAXBAT" 0 0 "$GMEM_PAIR" ||
+        { log "plain boot #2 failed (see $RUN/logs/serve-plain16k.log)"; return 1; }
+    require_spec_config "$RUN/logs/serve-plain16k.log" off plain16k || return 1
+    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
+        "$V" "$MTP_PROBE" --spec-url http://127.0.0.1:18230 \
+        --plain-url http://127.0.0.1:18231 --log "$RUN/logs/serve-dspark.log" \
+        --floor-json "$RUN/steps/dspark-1.json" \
+        --drop-batch 3 --settle-seconds "${MTP_SETTLE:-10}" \
+        --json "$RUN/steps/dspark.json" || return 1
+    num "dspark" "$("$V" -c "import json;n=json.load(open('$RUN/steps/dspark.json'))['numbers'];print('accept_len=%s accept_rate=%s speedup_c1=%s drafts_delta_b3=%s floor_max=%s spec_diff_max=%s' % (n.get('mean_acceptance_length'), n.get('acceptance_rate'), n.get('speedup_c1'), n.get('drafts_delta_at_batch'), n.get('floor_diff_max'), n.get('spec_diff_max')))")"
+    stop_server plain16k 18231
+    # stock DSPARK=1 reference (same 8 prompts): the card's acceptance baseline
+    boot_server stockspec 18231 "$STOCK" "$CTX_DSPARK" "$MAXBAT" 1 0 "$GMEM_PAIR" ||
+        { log "stock DSPARK boot failed (see $RUN/logs/serve-stockspec.log)"; return 1; }
+    require_spec_config "$RUN/logs/serve-stockspec.log" on stockspec || return 1
+    env -u ROCR_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=0,1 \
+        "$V" "$MTP_PROBE" --stock-only --stock-spec-url http://127.0.0.1:18231 \
+        --stock-log "$RUN/logs/serve-stockspec.log" \
+        --json "$RUN/steps/dspark-stock.json" || return 1
+    num "stock_dspark" "$("$V" -c "import json;n=json.load(open('$RUN/steps/dspark-stock.json'))['numbers'];print('accept_len=%s accept_rate=%s drafts=%s' % (n.get('stock_mean_acceptance_length'), n.get('stock_acceptance_rate'), n.get('stock_drafts')))")"
+    stop_server stockspec 18231
+    stop_server dspark 18230
 }
 
 # --- step 9: 720k production-context boot ----------------------------------
@@ -879,8 +913,8 @@ run_step kl s_kl
 run_step eval s_eval
 run_step vision s_vision
 run_step bench s_bench
-run_step dspark s_dspark
 run_step boot720 s_boot720
+run_step dspark s_dspark
 
 stop_all
 lease_release
