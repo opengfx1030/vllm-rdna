@@ -953,3 +953,51 @@ scope and not a regression of it.
 - the earlier `run-20261126T070419Z` (refused, missing `REFUSED_GPUS=0`) and
   `run-20261126T070542Z` (FAIL_FAST stop after the exactness) remain as evidence of the
   INCONCLUSIVE verdict being reproducible across three independent pairs of boots.
+
+## 6. Deterministic expert path: `VLLM_RDNA2_MOE_DETERMINISTIC` on the stock Inkling-2 MoE
+
+Commit `652293a61e`.  The token-exact gate needs both sides to repeat their own greedy
+outputs; the stock NVFP4 / MXFP8 experts did not, because their decode kernels
+(`moe_nvfp4_gemm_rdna2` / `moe_mxfp8_gemm_rdna2`) sum the K slices and the top-k rows of a
+token with packed-fp16 CAS atomics (arrival order), and the WNA16 knob
+(`compressed_tensors_moe_wna16_rdna2.py`, `envs.VLLM_RDNA2_MOE_DETERMINISTIC`) was not
+wired into `Inkling2LoopMoE`.  The same variable now selects a deterministic dispatch
+(same name, truth values `1`/`true`, resolved once at import, no-op when unset):
+
+- every chunk, decode included, runs the prefill-BM kernels: w13 stores ONE fp32-chained
+  accumulator per (routed row, column) with plain stores (no atomics), and the BM w2 runs
+  with `output_topk=0` (plain store per routed row) instead of its atomic top-k epilogue;
+- the weighted top-k sum then runs in `_sum_topk_rows_f32`: fp32, ascending k,
+  element-wise multiplies and adds (no reduction kernel, no atomics), so the result does
+  not depend on how `sorted_ids` ordered the routed rows;
+- the `[tokens * top_k, H]` w2 scratch is cached on the workspace (`_det_routed_rows`,
+  like the HI2 path's `moe_hidden_view`), one allocation per process / graph pool; the
+  BM work list (`moe_prefill_cta_rdna2`) allocates from `expert_ids.numel()`, so the path
+  is HIP-graph capturable;
+- off/unset, the shipped dispatch is bit-for-bit unchanged (decode kernels, fused w2
+  SwiGLU); a shape the BM kernels cannot run under the flag raises instead of silently
+  running the atomic path.
+
+CPU: `test_moe_deterministic.py` 12 passed (truth values, no-op when off, BM w13 +
+plain-store w2 + fp32 sum when on, permuted-routing bit-identity, refusal); with
+`test_serving_path_cpu.py`, `test_moe_prefill_flags.py`, `test_hi2_slots.py`:
+116 passed, 4 skipped.  Mutants `tools/rdna/inkling2/moe_det_mutants.py`: baseline pass,
+4/4 killed (`switch_forgotten`, `atomic_topk_kept`, `decode_w13_kept`, `fp16_topk_sum`),
+checkout restored.  (`test_moe.py` fails at collection on the box on both trees —
+importlib relative-import limitation, pre-existing.)
+
+GPU (a2 lease, exact boots with the flag on, 26 greedy requests per boot):
+
+| run | sides | own-vs-own repeats | verdict |
+| --- | --- | --- | --- |
+| `det1-...091715Z` | merge-base vs head | head stable `[]`, base `[solo/0,4,5]` | token-exact INCONCLUSIVE |
+| `det2-...091715Z` | merge-base vs head | head stable `[]`, base `[solo/3,5,6]` | token-exact INCONCLUSIVE |
+| across det1/det2 | same tree twice | **head 26/26 equal**; base 16/26 | head repeats bit-identically |
+| `det-hh-...091715Z` | head vs head | both stable `[]` | **token-exact PASS, 26/26, rc 0** |
+
+The deterministic announce line appears on every head boot (and on both boots of the
+head-vs-head pair), never on a merge-base boot, so the flag wiring is active exactly
+where the code is.  Consequence for the gate: a `MODE=ab` receipt whose base is the
+merge-base cannot report token-exact PASS — the base tree has no wiring and stays
+nondeterministic (INCONCLUSIVE by the gate's own rule); the gate passes only when both
+trees carry the dispatch (`det-hh`: PASS 26/26).
