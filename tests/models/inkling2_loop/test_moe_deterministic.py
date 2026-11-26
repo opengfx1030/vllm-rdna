@@ -77,14 +77,16 @@ def test_flag_unset_resolves_to_the_shipped_dispatch():
 
     env = {k: v for k, v in os.environ.items() if k != SWITCH}
     code = (
+        "import torch;"  # the serving order: torch before vllm
         "from vllm.models.inkling2_loop.amd import moe;"
-        "print(moe._DETERMINISTIC, moe._deterministic_switch({}))"
+        "print('DET', moe._DETERMINISTIC, moe._deterministic_switch({}))"
     )
     proc = subprocess.run(
         [sys.executable, "-c", code], env=env, capture_output=True, text=True
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
-    assert proc.stdout.strip() == "False False"
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("DET ")]
+    assert lines and lines[-1] == "DET False False", proc.stdout[-2000:]
 
 
 # ---------------------------------------------------------------------------
