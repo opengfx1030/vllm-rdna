@@ -699,6 +699,16 @@ namespace {
 // at rows=2048, 8 costs ~0.3 us at rows<=24).
 constexpr int kColsPerThread = 4;
 
+__device__ __forceinline__ void warp_bitonic_merge32(int& v, int lane,
+                                                     bool asc) {
+#pragma unroll
+  for (int d = 16; d >= 1; d >>= 1) {
+    const int peer = __shfl_xor(v, d);
+    const bool take_min = (((lane & d) == 0) == asc);
+    v = take_min ? min(v, peer) : max(v, peer);
+  }
+}
+
 template <typename TPos, typename TSeq, int CRE>
 __global__ void qsa_expand_indices_kernel(
     const int32_t* __restrict__ block_indices,
@@ -723,34 +733,82 @@ __global__ void qsa_expand_indices_kernel(
   // optional path preserves the standalone expansion's original ordering.
   __shared__ int ordered[512];
   if (canonical_order) {
-    for (int i = threadIdx.x; i < 512; i += blockDim.x) {
-      int block = i < block_topk
-                      ? block_indices[(int64_t)row * stride_blocks_row +
-                                      (int64_t)i * stride_blocks_column]
-                      : -1;
-      ordered[i] = block < 0 ? INT_MAX : block;
+    // 256 threads = 8 Wave32 waves; each wave owns 64 contiguous elements:
+    //   a = ordered[w * 64 + lane], b = ordered[w * 64 + 32 + lane].
+    // All distance <= 32 bitonic stages run purely in registers + __shfl_xor,
+    // cutting __syncthreads() from 45 down to 10.
+    const int tid = threadIdx.x;
+    const int w = tid >> 5;
+    const int lane = tid & 31;
+    const int base = w << 6;
+    const int idx_a = base + lane;
+    const int idx_b = base + 32 + lane;
+    const int64_t row_off = (int64_t)row * stride_blocks_row;
+    int a = idx_a < block_topk
+                ? block_indices[row_off + (int64_t)idx_a * stride_blocks_column]
+                : -1;
+    int b = idx_b < block_topk
+                ? block_indices[row_off + (int64_t)idx_b * stride_blocks_column]
+                : -1;
+    a = (a < 0) ? INT_MAX : a;
+    b = (b < 0) ? INT_MAX : b;
+
+    // Widths 2, 4, 8, 16, 32: intra-wave register bitonic sort (0 syncs).
+#pragma unroll
+    for (int width = 2; width <= 32; width <<= 1) {
+      const bool asc_a = (width == 32) ? true : ((lane & width) == 0);
+      const bool asc_b = (width == 32) ? false : ((lane & width) == 0);
+#pragma unroll
+      for (int d = width >> 1; d >= 1; d >>= 1) {
+        const int pa = __shfl_xor(a, d);
+        const int pb = __shfl_xor(b, d);
+        const bool lo = (lane & d) == 0;
+        a = (lo == asc_a) ? min(a, pa) : max(a, pa);
+        b = (lo == asc_b) ? min(b, pb) : max(b, pb);
+      }
     }
+    // Width 64: d=32 in-thread compare + intra-wave merge (0 syncs).
+    {
+      const bool asc64 = (w & 1) == 0;
+      const int lo = min(a, b), hi = max(a, b);
+      a = asc64 ? lo : hi;
+      b = asc64 ? hi : lo;
+      warp_bitonic_merge32(a, lane, asc64);
+      warp_bitonic_merge32(b, lane, asc64);
+    }
+    ordered[idx_a] = a;
+    ordered[idx_b] = b;
     __syncthreads();
-    for (int width = 2; width <= 512; width <<= 1) {
-      for (int distance = width >> 1; distance; distance >>= 1) {
-        for (int i = threadIdx.x; i < 512; i += blockDim.x) {
-          int peer = i ^ distance;
-          if (peer > i) {
-            int a = ordered[i], b = ordered[peer];
-            bool ascending = (i & width) == 0;
-            if ((a > b) == ascending) {
-              ordered[i] = b;
-              ordered[peer] = a;
-            }
-          }
+
+    // Widths 128, 256, 512: cross-wave stages in LDS, d <= 32 in registers.
+#pragma unroll
+    for (int width = 128; width <= 512; width <<= 1) {
+      for (int d = width >> 1; d >= 64; d >>= 1) {
+        const int lo_mask = d - 1;
+        const int i = ((tid & ~lo_mask) << 1) | (tid & lo_mask);
+        const int peer = i | d;
+        const int va = ordered[i];
+        const int vb = ordered[peer];
+        const bool asc = (i & width) == 0;
+        if ((va > vb) == asc) {
+          ordered[i] = vb;
+          ordered[peer] = va;
         }
         __syncthreads();
       }
+      a = ordered[idx_a];
+      b = ordered[idx_b];
+      const bool asc = (base & width) == 0;
+      const int lo = min(a, b), hi = max(a, b);
+      a = asc ? lo : hi;
+      b = asc ? hi : lo;
+      warp_bitonic_merge32(a, lane, asc);
+      warp_bitonic_merge32(b, lane, asc);
+      ordered[idx_a] = a;
+      ordered[idx_b] = b;
+      __syncthreads();
     }
   }
-  const int col_base =
-      (int)blockIdx.y * (blockDim.x * kColsPerThread) + (int)threadIdx.x;
-
   const int64_t query_position = (int64_t)query_positions[row];
   const int32_t request = token_to_req[row];
   const bool valid_request = (request >= 0) && (request < num_requests);
@@ -765,15 +823,17 @@ __global__ void qsa_expand_indices_kernel(
       (int)((query_position + 1) / compress_ratio) * compress_ratio;
   const int tail_count = (int)((query_position + 1) - tail_start);
 
-  // Each thread owns kColsPerThread columns strided by blockDim.x: the stores
-  // stay fully coalesced, while the per-row preamble above and the workgroup
-  // count are both kColsPerThread times smaller. The strided form measured far
-  // better than giving one thread a whole contiguous rank (that layout writes
-  // 4 bytes every 16 within a warp and loses store coalescing).
-#pragma unroll
-  for (int o = 0; o < kColsPerThread; o++) {
-    const int col = col_base + o * (int)blockDim.x;
-    if (col >= output_width) continue;
+  // When canonical_order is set, run a single block per row (grid.y == 1) so
+  // the 512-element bitonic sort executes once per row instead of per tile.
+  const int col_step = (int)blockDim.x;
+  const int col_start =
+      canonical_order
+          ? (int)threadIdx.x
+          : (int)blockIdx.y * (col_step * kColsPerThread) + (int)threadIdx.x;
+  const int col_limit =
+      canonical_order ? output_width : min(output_width, col_start + col_step * kColsPerThread);
+
+  for (int col = col_start; col < col_limit; col += col_step) {
     int token = -1;
     if (col < expanded_count) {
       // Expanded block entry. Guarded exactly like Triton's masked load, so a
@@ -864,9 +924,12 @@ torch::Tensor qsa_expand_indices_rdna2(
   const at::cuda::OptionalCUDAGuard guard(block_indices.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int64_t num_requests = sequence_lengths.numel();
-  dim3 grid((unsigned)rows,
-            (unsigned)((output_width + kColumnBlock * kColsPerThread - 1) /
-                       (kColumnBlock * kColsPerThread)));
+  const unsigned grid_y =
+      canonical_order
+          ? 1u
+          : (unsigned)((output_width + kColumnBlock * kColsPerThread - 1) /
+                       (kColumnBlock * kColsPerThread));
+  dim3 grid((unsigned)rows, grid_y);
 
   auto launch_one = [&](auto pos_tag, auto seq_tag, auto cr_tag) {
     using TPos = decltype(pos_tag);
