@@ -58,7 +58,71 @@ def load_passages(files: list[str], count: int, chars: int) -> list[str]:
     return [text[i * stride : i * stride + chars] for i in range(count)]
 
 
+def parse_needle_lens(spec: str) -> list[int]:
+    if not spec.strip():
+        return []
+    lens = [int(x.strip()) for x in spec.split(",") if x.strip()]
+    if any(n < 128 for n in lens):
+        raise SystemExit(f"needle lengths must be >= 128 tokens, got {spec!r}")
+    return lens
+
+
+_HAYSTACK_SENTENCE = (
+    "The grass is green. The sky is blue. The sun is yellow. "
+    "Here we go. There and back again.\n"
+)
+
+
+def make_needle_prompt(target_tokens: int) -> tuple[str, str]:
+    """Deterministic ~50%-depth passkey prompt sized to stay within target_tokens."""
+    passkey = str(100000 + ((target_tokens * 7919 + 104729) % 900000))
+    needle = (
+        "\nThere is important information hidden inside a lot of irrelevant text.\n"
+        f"The passkey is {passkey}. Remember it. {passkey} is the passkey.\n"
+    )
+    question = "\nWhat is the passkey? The passkey is"
+    # ~3.8 chars/token lands near ~90% of target_tokens in BPE without exceeding MAXLEN.
+    filler_chars = max(0, int(target_tokens * 3.8) - len(needle) - len(question))
+    half = filler_chars // 2
+    n_rep = (half // len(_HAYSTACK_SENTENCE)) + 1
+    chunk = (_HAYSTACK_SENTENCE * n_rep)[:half]
+    return chunk + needle + chunk + question, passkey
+
+
+def collect_needle(url: str, model: str, needle_lens: list[int]) -> list[dict]:
+    rows: list[dict] = []
+    for target in needle_lens:
+        prompt, passkey = make_needle_prompt(target)
+        resp = post(
+            url,
+            {
+                "model": model,
+                "prompt": prompt,
+                "max_tokens": 32,
+                "temperature": 0,
+            },
+        )
+        reply = resp["choices"][0]["text"]
+        n_prompt = resp.get("usage", {}).get("prompt_tokens", 0)
+        found = passkey in reply
+        rows.append(
+            {
+                "target_tokens": target,
+                "prompt_tokens": n_prompt,
+                "passkey": passkey,
+                "found": found,
+                "reply": reply.strip(),
+            }
+        )
+        print(
+            f"needle {target}: {n_prompt} tokens  {'PASS' if found else 'FAIL'}",
+            flush=True,
+        )
+    return rows
+
+
 def collect(args: argparse.Namespace) -> int:
+    needle_lens = parse_needle_lens(args.needle_lens)
     files = sorted(
         f
         for pattern in args.files or [os.path.join(TREE, "docs", "**", "*.md")]
@@ -119,6 +183,8 @@ def collect(args: argparse.Namespace) -> int:
     total = sum(p["nll"] * (p["prompt_tokens"] - 1) for p in result["passages"])
     count = sum(p["prompt_tokens"] - 1 for p in result["passages"])
     result["ppl"] = math.exp(min(total / count, 50.0))
+    if needle_lens:
+        result["needle"] = collect_needle(url, args.model, needle_lens)
     with open(args.out, "w") as handle:
         json.dump(result, handle)
     print(f"PPL_LONG {result['ppl']:.4f} over {count} tokens -> {args.out}")
@@ -171,7 +237,30 @@ def compare(args: argparse.Namespace) -> int:
         f"{len(a['passages'])}  mean first divergence "
         f"{sum(divergence) / len(divergence):.1f} tokens  {verdict}"
     )
-    return 0 if verdict == "PASS" else 1
+    needle_ok = True
+    b_needle = {r["target_tokens"]: r for r in b.get("needle", [])}
+    pairs = [
+        (na, b_needle[na["target_tokens"]])
+        for na in a.get("needle", [])
+        if na["target_tokens"] in b_needle
+    ]
+    if pairs:
+        a_pass = sum(1 for na, _ in pairs if na.get("found"))
+        b_pass = sum(1 for _, nb in pairs if nb.get("found"))
+        for na, nb in pairs:
+            sa = "PASS" if na.get("found") else "FAIL"
+            sb = "PASS" if nb.get("found") else "FAIL"
+            print(
+                f"needle {na['target_tokens']} "
+                f"({na.get('prompt_tokens', 0)} tok): {sa} -> {sb}"
+            )
+            if na.get("found") and not nb.get("found"):
+                needle_ok = False
+        print(
+            f"NEEDLE {a_pass}/{len(pairs)} -> {b_pass}/{len(pairs)}  "
+            f"{'PASS' if needle_ok else 'FAIL'}"
+        )
+    return 0 if (verdict == "PASS" and needle_ok) else 1
 
 
 def main() -> int:
@@ -185,6 +274,11 @@ def main() -> int:
     c.add_argument("--passages", type=int, default=6)
     c.add_argument("--passage-chars", type=int, default=12000)
     c.add_argument("--gen-tokens", type=int, default=96)
+    c.add_argument(
+        "--needle-lens",
+        default="",
+        help="comma-separated passkey needle prompt lengths",
+    )
     c.set_defaults(func=collect)
     d = sub.add_parser("compare")
     d.add_argument("a")

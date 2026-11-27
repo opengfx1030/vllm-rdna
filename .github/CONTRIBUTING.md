@@ -94,6 +94,10 @@ To claim a win, or when any cell is worse, repeat on fresh boots in the order ba
 
 The script reports these verdicts. Whether a regression is acceptable is a decision for review.
 
+### Long-context sweep
+
+For recipes with `--max-model-len >= 131072`, `tools/rdna/pr_receipt.sh` defaults `LONG_CTX=auto` to append 64k and 128k cells (`65536:1024:1:2 65536:1024:2:4 131072:512:1:2`, exactness `65536:128:1:1`) filtered to `in_len + out_len <= --max-model-len`, and runs deterministic ~50%-depth 6-digit passkey retrieval prompts (`NEEDLE_LENS=32768,65536,131072`, capped by `--max-model-len`) in `tools/rdna/port_v031/quality_ab.py` whenever `QUALITY=1`. Set `LONG_CTX=0` to restrict to the 1k–32k matrix above, or `LONG_CTX=1` to force the 64k/128k sweep.
+
 ### Other cards untouched
 
 RDNA code goes behind the arch helpers in `vllm/platforms/rocm.py` (`on_gfx10x()`, `on_gfx1x()`, ...), never behind a hard-coded arch string.

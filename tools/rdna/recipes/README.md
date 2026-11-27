@@ -72,6 +72,7 @@ port on purpose: only one runs on a given set of cards at a time.
 | `flashnext` | Flash-Next AWQ-W4A16 | 4 x 1 (EP4) | 4 | 18094 | model | 6 | none | tool/reasoning parsers, `HOST=0.0.0.0` |
 | `flashnext-mtp0` | Flash-Next AWQ-W4A16 | 4 x 1 (EP4) | 4 | 18096 | 262144 | 8 | none | plain decode |
 | `flashnext-mtp2` | Flash-Next AWQ-W4A16 | 4 x 1 (EP4) | 4 | 18096 | 262144 | 8 | MTP=2 | spec decode, decode-stall cap |
+| `flashnext-w8a8-mtp2` | Flash-Next AWQ-W4A16 + opt-in INT8 W8A8 | 4 x 1 (EP4) | 4 | 18096 | 262144 | 8 | MTP=2 | `VLLM_RDNA_DENSE_INT8*`, `VLLM_RDNA_HC_W8A8_*`, opt-in INT8 GEMM |
 | `flashnext-dflash2` | Flash-Next AWQ-W4A16 + Inco DFlash2 drafter | 4 x 1 (EP4) | 4 | 18096 | 262144 | 8 | DFlash2, `DFLASH_TOKENS=3` | `--monokernel`, drafter downloaded beforehand |
 | `flashnext-leapquant-mtp2` | Flash-Next AWQ-W4A16 | 4 x 1 (EP4) | 4 | 18096 | 262144 | 8 | MTP=2 | `REPLAYSSM_STATE_DTYPE=leapquant` (lossy INT8 GDN state), `--monokernel` |
 | `flashnext-exl3` | Flash-Next EXL3 | 4 x 1 (EP4) | 4 | 18094 | model | 6 | none | `PLE=exl3`, `HOST=0.0.0.0`, tool/reasoning parsers |

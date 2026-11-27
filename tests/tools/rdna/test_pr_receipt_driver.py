@@ -219,6 +219,7 @@ class Run:
             "TEMPWATCH": "0",
             **(extra_env or {}),
         }
+        env = {k: v for k, v in env.items() if v is not None}
         return subprocess.run(
             ["bash", str(DRIVER), *args],
             capture_output=True,
@@ -663,3 +664,38 @@ def test_abba_quality_run_compares_both_head_boots(harness, tmp_path):
     assert set(quality["ppl"]) == {"floor", "head1", "head2"}
     heads = quality["domains"]["docs"]["heads"]
     assert set(heads) == {"head1", "head2"}
+
+
+def test_long_ctx_auto_detects_max_model_len(harness, tmp_path):
+    no_cells = {"DRY_RUN": "1", "CELLS": None, "EXACT_CELLS": None}
+    h = harness()
+    for tree in (h.base, h.head):
+        (tree / "plan_extra").write_text("'--max-model-len' '262144'")
+    res = h.run(no_cells)
+    assert res.returncode == 0, res.stdout + res.stderr
+    settings = json.loads((h.out / "manifest.json").read_text())["settings"]
+    assert settings["long_ctx"] == "auto"
+    assert settings["max_model_len"] == "262144"
+    assert "65536:1024:1:2" in settings["cells"].split()
+    assert "131072:512:1:2" in settings["cells"].split()
+    assert "65536:128:1:1" in settings["exact_cells"].split()
+    assert settings["needle_lens"] == "32768,65536,131072"
+
+    h_128k = harness()
+    for tree in (h_128k.base, h_128k.head):
+        (tree / "plan_extra").write_text("'--max-model-len' '131072'")
+    res_128k = h_128k.run(no_cells)
+    assert res_128k.returncode == 0, res_128k.stdout + res_128k.stderr
+    s128 = json.loads((h_128k.out / "manifest.json").read_text())["settings"]
+    assert "65536:1024:1:2" in s128["cells"].split()
+    assert "131072:512:1:2" not in s128["cells"].split()
+    assert s128["needle_lens"] == "32768,65536,131072"
+
+    h_off = harness()
+    for tree in (h_off.base, h_off.head):
+        (tree / "plan_extra").write_text("'--max-model-len' '262144'")
+    res_off = h_off.run({**no_cells, "LONG_CTX": "0"})
+    assert res_off.returncode == 0, res_off.stdout + res_off.stderr
+    s_off = json.loads((h_off.out / "manifest.json").read_text())["settings"]
+    assert "65536:1024:1:2" not in s_off["cells"].split()
+    assert s_off["needle_lens"] == ""
