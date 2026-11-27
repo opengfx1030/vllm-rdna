@@ -888,6 +888,41 @@ def test_expand_indices_routes_to_hip_behind_the_gate(monkeypatch):
     assert ref.dtype == torch.int32
 
 
+@pytest.mark.parametrize("block_topk", [1, 17, 64, 128, 512])
+@pytest.mark.parametrize("rows", [1, 7])
+def test_expand_indices_canonical_order_bitonic(block_topk, rows):
+    """Wave32 bitonic canonical_order sort matches torch.sort for 1..512 blocks."""
+    ratio, num_requests = 4, 3
+    gen = torch.Generator(device=device).manual_seed(1000 + block_topk * 7 + rows)
+    blocks = torch.randint(
+        0, 4096, (rows, block_topk), device=device, dtype=torch.int32, generator=gen
+    )
+    if block_topk >= 4:
+        blocks[:, 1::4] = -1
+    positions = torch.full((rows,), 8192, device=device, dtype=torch.int64)
+    seq_lens = torch.full((num_requests,), 16384, device=device, dtype=torch.int32)
+    token_to_req = torch.arange(rows, device=device, dtype=torch.int32) % num_requests
+    token_topk = block_topk * ratio
+    got = qsa_rdna2.qsa_expand_indices(
+        blocks,
+        positions,
+        seq_lens,
+        token_to_req,
+        ratio,
+        token_topk,
+        canonical_order=True,
+    )
+    sort_vals = torch.where(blocks < 0, torch.iinfo(torch.int32).max, blocks)
+    sorted_blocks, _ = torch.sort(sort_vals, dim=-1)
+    sorted_blocks = torch.where(
+        sorted_blocks == torch.iinfo(torch.int32).max, -1, sorted_blocks
+    )
+    ref = qsa_ops.expand_qsa_block_indices_cuda(
+        sorted_blocks, positions, seq_lens, token_to_req, ratio, token_topk
+    )
+    assert torch.equal(got, ref)
+
+
 # --- sparse paged attention vs the splitk + merge Triton pair ----------------
 
 

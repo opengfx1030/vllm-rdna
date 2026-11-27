@@ -521,3 +521,23 @@ def test_gdn_spec_verify_rdna2_model_shaped_arguments(monkeypatch):
     assert torch.isfinite(out).all()
     written = idx.reshape(-1).unique().long()
     assert torch.isfinite(state[written]).all()
+
+
+def test_gdn_spec_verify_rdna2_unaligned_views(monkeypatch):
+    """Unaligned token strides and pointer offsets must fall back cleanly."""
+    parts = _make_spec(2, [3, 3], [3, 3], state_dtype=torch.float16)
+    q, k, v, a, b, A_log, dt_bias, state, cu, idx, acc = parts
+    T = q.shape[1]
+    pad_tok = SPEC_H * K + 3
+    q_buf = torch.randn(T, pad_tok, device=device, dtype=torch.float16)
+    k_buf = torch.randn(T, pad_tok, device=device, dtype=torch.float16)
+    q_buf[:, 1 : 1 + SPEC_H * K] = q[0].reshape(T, SPEC_H * K)
+    k_buf[:, 1 : 1 + SPEC_H * K] = k[0].reshape(T, SPEC_H * K)
+    q_unaligned = q_buf[:, 1 : 1 + SPEC_H * K].view(1, T, SPEC_H, K)
+    k_unaligned = k_buf[:, 1 : 1 + SPEC_H * K].view(1, T, SPEC_H, K)
+    assert q_unaligned.stride(1) % 8 != 0
+    _assert_spec_parity(
+        (q_unaligned, k_unaligned, v, a, b, A_log, dt_bias, state, cu, idx, acc),
+        monkeypatch,
+        state_atol=2e-3,
+    )

@@ -454,8 +454,8 @@ __global__ void __launch_bounds__(WAVES * 32)
 
 template <int MT, bool GUARD = false>
 static void gemv_i8_rdna2_launch(const half* x, const int8_t* w, const half* s,
-                                 const half* bias, half* y, int N, int K,
-                                 int M, cudaStream_t st) {
+                                 const half* bias, half* y, int N, int K, int M,
+                                 cudaStream_t st) {
   if (N >= 1152)
     gemv_i8_rdna2_<8, MT, GUARD>
         <<<(N + 7) / 8, 256, 0, st>>>(x, w, s, bias, y, N, K, M);
@@ -466,8 +466,7 @@ static void gemv_i8_rdna2_launch(const half* x, const int8_t* w, const half* s,
     gemv_i8_rdna2_<2, MT, GUARD>
         <<<(N + 1) / 2, 64, 0, st>>>(x, w, s, bias, y, N, K, M);
   else
-    gemv_i8_rdna2_<1, MT, GUARD>
-        <<<N, 32, 0, st>>>(x, w, s, bias, y, N, K, M);
+    gemv_i8_rdna2_<1, MT, GUARD><<<N, 32, 0, st>>>(x, w, s, bias, y, N, K, M);
 }
 
 at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w,

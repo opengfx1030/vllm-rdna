@@ -703,7 +703,7 @@ __device__ __forceinline__ void warp_bitonic_merge32(int& v, int lane,
                                                      bool asc) {
 #pragma unroll
   for (int d = 16; d >= 1; d >>= 1) {
-    const int peer = __shfl_xor(v, d);
+    const int peer = __shfl_xor(v, d, 32);
     const bool take_min = (((lane & d) == 0) == asc);
     v = take_min ? min(v, peer) : max(v, peer);
   }
@@ -760,8 +760,8 @@ __global__ void qsa_expand_indices_kernel(
       const bool asc_b = (width == 32) ? false : ((lane & width) == 0);
 #pragma unroll
       for (int d = width >> 1; d >= 1; d >>= 1) {
-        const int pa = __shfl_xor(a, d);
-        const int pb = __shfl_xor(b, d);
+        const int pa = __shfl_xor(a, d, 32);
+        const int pb = __shfl_xor(b, d, 32);
         const bool lo = (lane & d) == 0;
         a = (lo == asc_a) ? min(a, pa) : max(a, pa);
         b = (lo == asc_b) ? min(b, pb) : max(b, pb);
@@ -831,7 +831,9 @@ __global__ void qsa_expand_indices_kernel(
           ? (int)threadIdx.x
           : (int)blockIdx.y * (col_step * kColsPerThread) + (int)threadIdx.x;
   const int col_limit =
-      canonical_order ? output_width : min(output_width, col_start + col_step * kColsPerThread);
+      canonical_order
+          ? output_width
+          : min(output_width, col_start + col_step * kColsPerThread);
 
   for (int col = col_start; col < col_limit; col += col_step) {
     int token = -1;

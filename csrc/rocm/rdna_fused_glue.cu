@@ -524,24 +524,24 @@ void dispatch(int M, int wv, bool i8, F&& f) {
 // a capacity and rows >= M are skipped inside the kernel.
 template <typename F>
 void dispatch_guarded(int M, int wv, bool i8, F&& f) {
-#define RDNA_WVG(MT)                                                       \
-  switch (wv) {                                                            \
-    case 8:                                                                \
-      i8 ? f.template run<RowI8, 8, MT, true>()                            \
-         : f.template run<RowF16, 8, MT, true>();                          \
-      break;                                                               \
-    case 4:                                                                \
-      i8 ? f.template run<RowI8, 4, MT, true>()                            \
-         : f.template run<RowF16, 4, MT, true>();                          \
-      break;                                                               \
-    case 2:                                                                \
-      i8 ? f.template run<RowI8, 2, MT, true>()                            \
-         : f.template run<RowF16, 2, MT, true>();                          \
-      break;                                                               \
-    default:                                                               \
-      i8 ? f.template run<RowI8, 1, MT, true>()                            \
-         : f.template run<RowF16, 1, MT, true>();                          \
-      break;                                                               \
+#define RDNA_WVG(MT)                              \
+  switch (wv) {                                   \
+    case 8:                                       \
+      i8 ? f.template run<RowI8, 8, MT, true>()   \
+         : f.template run<RowF16, 8, MT, true>(); \
+      break;                                      \
+    case 4:                                       \
+      i8 ? f.template run<RowI8, 4, MT, true>()   \
+         : f.template run<RowF16, 4, MT, true>(); \
+      break;                                      \
+    case 2:                                       \
+      i8 ? f.template run<RowI8, 2, MT, true>()   \
+         : f.template run<RowF16, 2, MT, true>(); \
+      break;                                      \
+    default:                                      \
+      i8 ? f.template run<RowI8, 1, MT, true>()   \
+         : f.template run<RowF16, 1, MT, true>(); \
+      break;                                      \
   }
   if (M <= 12) {
     RDNA_WVG(12)
@@ -969,9 +969,9 @@ std::tuple<at::Tensor, at::Tensor> rdna_gemv_act(
   const int M = x.size(0), K = x.size(1);
   const int64_t rows = act_cols + inj_cols;
   const bool i8 = w.scalar_type() == at::kChar;
-  TORCH_CHECK(
-      M >= 1 && M <= kMaxSeM && x.scalar_type() == at::kHalf && x.is_contiguous(),
-      "rdna_gemv_act: x must be contiguous fp16 [1..32, K]");
+  TORCH_CHECK(M >= 1 && M <= kMaxSeM && x.scalar_type() == at::kHalf &&
+                  x.is_contiguous(),
+              "rdna_gemv_act: x must be contiguous fp16 [1..32, K]");
   TORCH_CHECK(act_cols >= 1 && inj_cols >= 0 && rows <= w.size(0),
               "rdna_gemv_act: need 1 <= act_cols and act_cols + inj_cols <= N");
   check_weight(w, scale, w.size(0), K, "rdna_gemv_act");
