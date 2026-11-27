@@ -94,10 +94,8 @@ def maybe_share_target_embed(
         target_embed = target_embed.base_layer
     draft_embed = getattr(draft_inner, "embed_tokens", None)
 
-    if (
-        get_pp_group().world_size > 1
-        and not hasattr(draft_model, "has_own_embed_tokens")
-        and not getattr(draft_model, "share_target_embed_under_pp", False)
+    if get_pp_group().world_size > 1 and not hasattr(
+        draft_model, "has_own_embed_tokens"
     ):
         return
 

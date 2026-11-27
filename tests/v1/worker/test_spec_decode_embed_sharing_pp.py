@@ -365,3 +365,73 @@ def test_nemotron_shares_target_embedding_and_refit(
         nemotron_draft.get_input_embeddings(torch.tensor([1])),
         torch.full((1, HIDDEN), 3.0),
     )
+
+
+def test_qwen4_exp_mtp_pp_does_not_require_target_embed(monkeypatch):
+    """After v0.34 #60234, non-first PP stages set target embed_tokens to
+    PPMissingLayer; Qwen4ExpMTP must keep its own embed_tokens under PP > 1."""
+    import inspect
+    from pathlib import Path
+
+    from vllm.models.qwen4_exp.amd import mtp as amd_mtp
+
+    mtp_src = Path(inspect.getfile(amd_mtp)).read_text()
+    predictor_src = mtp_src.split("class Qwen4ExpMTP(", 1)[0]
+    mtp_class_src = mtp_src.split("class Qwen4ExpMTP(", 1)[1]
+    assert not getattr(amd_mtp.Qwen4ExpMTP, "share_target_embed_under_pp", False)
+    assert (
+        "_off_gpu_under_pp"
+        not in predictor_src.split("class Qwen4ExpMultiTokenPredictor(", 1)[1]
+    )
+    assert "requires_device_loading = False" in mtp_class_src
+
+    # Verify process_weights_after_loading keeps a CPU placeholder with
+    # requires_device_loading=False off GPU.
+    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+    from vllm.model_executor.model_loader import utils as loader_utils
+
+    class _NoMoveMethod(QuantizeMethodBase):
+        requires_device_loading = False
+
+        def create_weights(self, *args, **kwargs):
+            pass
+
+        def apply(self, *args, **kwargs):
+            pass
+
+        def process_weights_after_loading(self, layer):
+            assert layer.weight.device.type == "cpu"
+
+    mod = nn.Module()
+    mod.quant_method = _NoMoveMethod()
+    mod.register_parameter("weight", nn.Parameter(torch.zeros(4, 4, device="cpu")))
+    moved: list[torch.device] = []
+    monkeypatch.setattr(loader_utils, "maybe_retie_word_embeddings", lambda *_: None)
+    monkeypatch.setattr(
+        loader_utils,
+        "device_loading_context",
+        lambda *_a: moved.append(torch.device("cuda:0")),
+    )
+    monkeypatch.setattr(loader_utils, "finalize_model_weights", lambda *_: None)
+    loader_utils.process_weights_after_loading(
+        mod, SimpleNamespace(quantization=None), torch.device("cuda:0")
+    )
+    assert moved == []
+    assert mod.weight.device.type == "cpu"
+
+    draft_embed = _embed(fill=1.0)
+    draft_inner = _inner(draft_embed)
+    draft = SimpleNamespace(
+        share_target_embed_under_pp=getattr(
+            amd_mtp.Qwen4ExpMTP, "share_target_embed_under_pp", False
+        )
+    )
+
+    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(3, is_last_rank=True))
+    eagle_utils.maybe_share_target_embed(draft, draft_inner, _inner(PPMissingLayer()))
+    assert draft_inner.embed_tokens is draft_embed
+
+    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(1, is_last_rank=True))
+    target_embed = _embed(fill=2.0)
+    eagle_utils.maybe_share_target_embed(draft, draft_inner, _inner(target_embed))
+    assert draft_inner.embed_tokens is target_embed

@@ -180,7 +180,7 @@ def _make_draft_vllm_config(
 
 
 def _off_gpu_under_pp():
-    """Build on the CPU under PP: placeholders replaced by the target's tensors."""
+    """Build lm_head placeholder on the CPU under PP: replaced by target's."""
     if get_pp_group().world_size > 1:
         return torch.device("cpu")
     return contextlib.nullcontext()
@@ -215,12 +215,9 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         self.hidden_size = config.hidden_size
         self.hc_count = config.hc_count
 
-        # Under PP the drafter borrows the target embedding of the last stage after
-        # loading (load_eagle_model), so the placeholder stays off the GPU.
-        with _off_gpu_under_pp():
-            self.embed_tokens = VocabParallelEmbedding(
-                self.vocab_size, self.hidden_size
-            )
+        # Qwen4ExpModel builds embed_tokens only on rank 0 (PPMissingLayer on
+        # later stages), so the drafter builds its own on GPU under PP too.
+        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, self.hidden_size)
         draft_vllm_config = _make_draft_vllm_config(
             vllm_config,
             self.mtp_start_layer_idx,
@@ -428,9 +425,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 class Qwen4ExpMTP(
     nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts, LocalArgmaxMixin
 ):
-    # Qwen4Exp builds embed_tokens on every PP stage, so the drafter on the last
-    # stage can share the target's copy (see maybe_share_target_embed).
-    share_target_embed_under_pp = True
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -467,6 +461,13 @@ class Qwen4ExpMTP(
                         config.hidden_size,
                         prefix=maybe_prefix(prefix, "lm_head"),
                     )
+                if (
+                    get_pp_group().world_size > 1
+                    and self.lm_head.quant_method is not None
+                ):
+                    # Placeholder stays off GPU until share_target_lm_head
+                    # replaces it; skip CPU->GPU copy during post-processing.
+                    self.lm_head.quant_method.requires_device_loading = False
         else:
             self.lm_head = PPMissingLayer()
 
