@@ -43,6 +43,15 @@ at::Tensor gemv_f16_rdna2(const at::Tensor& x, const at::Tensor& w,
 at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w,
                          const at::Tensor& scale,
                          const std::optional<at::Tensor>& bias);
+at::Tensor gemm_w8a8_i8_rdna2(const at::Tensor& x, const at::Tensor& w_i8,
+                              const at::Tensor& w_scale,
+                              const std::optional<at::Tensor>& bias,
+                              int64_t design);
+at::Tensor rdna_hc_up_gate_mix_prefill_i8(const at::Tensor& dai,
+                                          const at::Tensor& w_up_i8,
+                                          const at::Tensor& w_up_scale,
+                                          const at::Tensor& xn,
+                                          int64_t lora_rank, int64_t hc_count);
 std::tuple<at::Tensor, at::Tensor> rdna_gemv_act(
     const at::Tensor& x, const at::Tensor& w,
     const std::optional<at::Tensor>& scale, int64_t act_cols, double act_scale,
@@ -1568,6 +1577,12 @@ void moe_down_unquantized_rdna2(
     torch::Tensor slot_out,  // [M * topk, K] fp16, weighted down result per
                              // (token, top-k) pair; top-k reduced by moe_sum
     int64_t topk, int64_t N, int64_t K);
+
+void moe_gemm_unquantized_prefill_rdna2(
+    torch::Tensor x, torch::Tensor w, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    torch::Tensor out, int64_t num_pairs, int64_t input_div_topk,
+    bool mul_topk_weight, torch::Tensor topk_weights);
 
 // ---------------------------------------------------------------------------
 // v1 worker input-batch kernels (gfx1030). HIP ports of

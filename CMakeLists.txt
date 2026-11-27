@@ -1793,6 +1793,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.cu"
       "csrc/rocm/int4_fp16_kv_cache.cu"
       "csrc/rocm/gemm_w8a8_fp8_dense_rdna2.cu"
+      "csrc/rocm/gemm_w8a8_i8_rdna2.cu"
       "csrc/rocm/moe_q_gemm_rdna2.cu"
       "csrc/rocm/moe_w4a8_rdna2.cu"
       "csrc/rocm/gdn_decode_rdna2.cu"
@@ -1886,6 +1887,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     # kernels (GEMM, attention) were measured with -O3 too.
     set_source_files_properties(
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/rdna_hint_flex_dense_gemm_rdna2.hip"
+      "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/gemm_w8a8_i8_rdna2.hip"
+      "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/moe_unquantized_rdna2.hip"
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/inkling2_vit_rdna2.hip"
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/inkling2_linear_rdna2.hip"
       PROPERTIES COMPILE_OPTIONS "-O3")
