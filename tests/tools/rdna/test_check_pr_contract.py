@@ -74,13 +74,14 @@ Greedy hashes differed on 4/16 prompts; head concurrency probe 0 FAIL.
 
 ### Quality
 
-KL within noise floor; PPL +0.48%.
+KL within noise floor; PPL +0.48%; passkey needle 3/3 -> 3/3 PASS (32k, 64k, 128k).
 
 ### Speed
 
 | cell | TTFT |
 |---|---|
 | 1k/512 c=1 | -29% |
+| 64k/1k c=1 | -24% |
 
 ### Concurrency and stalls
 
@@ -209,3 +210,41 @@ def test_unfilled_pr_template_fails():
     )
     errors, _ = MOD.validate_pr_contract(template, changed_files=["csrc/rocm/foo.cu"])
     assert len(errors) >= 6
+
+
+def test_runtime_pr_missing_long_context_cell_fails():
+    no_long = VALID_RUNTIME_PR.replace("| 64k/1k c=1 | -24% |\n", "")
+    errors, _ = MOD.validate_pr_contract(no_long, changed_files=["vllm/bar.py"])
+    assert any("long-context cell" in e for e in errors)
+
+
+def test_runtime_pr_short_context_exemption_passes():
+    short_ctx = VALID_RUNTIME_PR.replace(
+        "| 64k/1k c=1 | -24% |",
+        "long-context N/A (max-model-len <= 32k; PP=3 BF16 drafter headroom)",
+    )
+    errors, _ = MOD.validate_pr_contract(short_ctx, changed_files=["vllm/bar.py"])
+    assert errors == []
+
+
+def test_quality_gate_missing_passkey_needle_fails():
+    no_needle = VALID_RUNTIME_PR.replace(
+        "KL within noise floor; PPL +0.48%; "
+        "passkey needle 3/3 -> 3/3 PASS (32k, 64k, 128k).",
+        "KL within noise floor; PPL +0.48%.",
+    )
+    errors, _ = MOD.validate_pr_contract(no_needle, changed_files=["vllm/bar.py"])
+    assert any("passkey needle" in e for e in errors)
+
+
+def test_quality_not_run_does_not_require_passkey_needle():
+    q_not_run = VALID_RUNTIME_PR.replace(
+        "| quality | PASS (KL within floor, PPL +0.48%) |",
+        "| quality | NOT RUN (pure scheduling fix; token-exact 26/26) |",
+    ).replace(
+        "KL within noise floor; PPL +0.48%; "
+        "passkey needle 3/3 -> 3/3 PASS (32k, 64k, 128k).",
+        "Not run (token-exact 26/26).",
+    )
+    errors, _ = MOD.validate_pr_contract(q_not_run, changed_files=["vllm/bar.py"])
+    assert errors == []

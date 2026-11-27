@@ -96,7 +96,7 @@ The script reports these verdicts. Whether a regression is acceptable is a decis
 
 ### Long-context sweep
 
-For recipes with `--max-model-len >= 131072`, `tools/rdna/pr_receipt.sh` defaults `LONG_CTX=auto` to append 64k and 128k cells (`65536:1024:1:2 65536:1024:2:4 131072:512:1:2`, exactness `65536:128:1:1`) filtered to `in_len + out_len <= --max-model-len`, and runs deterministic ~50%-depth 6-digit passkey retrieval prompts (`NEEDLE_LENS=32768,65536,131072`, capped by `--max-model-len`) in `tools/rdna/port_v031/quality_ab.py` whenever `QUALITY=1`. Set `LONG_CTX=0` to restrict to the 1k–32k matrix above, or `LONG_CTX=1` to force the 64k/128k sweep.
+For recipes with `--max-model-len >= 131072`, `tools/rdna/pr_receipt.sh` defaults `LONG_CTX=auto` to append 64k and 128k cells (`65536:1024:1:2 65536:1024:2:4 131072:512:1:2`, exactness `65536:128:1:1`) filtered to `in_len + out_len <= --max-model-len`, and runs deterministic ~50%-depth 6-digit passkey retrieval prompts (`NEEDLE_LENS=32768,65536,131072`, capped by `--max-model-len`) in `tools/rdna/port_v031/quality_ab.py` whenever `QUALITY=1`. Set `LONG_CTX=0` to restrict to the 1k–32k matrix above, or `LONG_CTX=1` to force the 64k/128k sweep. Ready runtime PRs are checked by `tools/rdna/check_pr_contract.py` for at least one `>= 64k` cell in `### Speed` (or an explicit `long-context N/A` reason when `max-model-len <= 32k`) and passkey needle coverage in `### Quality` whenever `QUALITY=1` is run.
 
 ### Other cards untouched
 
@@ -122,7 +122,7 @@ Every pull request follows `.github/PULL_REQUEST_TEMPLATE.md`:
 - **Claims**: concrete claims, including the default values of any new flags or environment variables.
 - **Validation**: for kernel/`csrc` changes, a kernel-by-kernel before/after table with compiled ISA counts (VGPR, SGPR, LDS, spills, private scratch), plus copy-pasteable **How to Reproduce Locally** steps (incremental build, launch command + expected activation log marker, and `pr_receipt.sh` / test command).
 - **Details**: design fit, arch guards (`on_gfx10x()`, `#ifdef`), current-stream launches + `C10_CUDA_KERNEL_LAUNCH_CHECK()`, non-regression scope, tradeoffs, and rejected experiments.
-- **RDNA receipt**: paste `receipt.md` from `tools/rdna/pr_receipt.sh` in place of the receipt block, fill in every row of the 8-gate summary table, and fill in what the script cannot know. Neither `token-exact` nor `stall, hard gate` may be `NOT RUN` on a Ready PR that reaches inference:
+- **RDNA receipt**: paste `receipt.md` from `tools/rdna/pr_receipt.sh` in place of the receipt block, fill in every row of the 8-gate summary table, and fill in what the script cannot know. Neither `token-exact` nor `stall, hard gate` may be `NOT RUN` on a Ready PR that reaches inference; Ready runtime PRs must also report at least one `>= 64k` cell in `### Speed` (or `long-context N/A` for `<= 32k` models) and passkey needle results in `### Quality` when the quality gate is run:
     - Environment: base and head SHAs, GPU and gfx target, pinned clocks/power caps when set, ROCm, torch, recipe, model revision, environment overrides.
     - Change class and reach: the row of the table above, the callers and platforms the change reaches (platforms run and not run), and for `csrc` changes the `archdiff.md` result.
     - Exactness and quality: the results of the two gates (plus `decode_kl.py` and task-eval A/B for lossy features).

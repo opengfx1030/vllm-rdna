@@ -54,6 +54,13 @@ NOT_RUN_RE = re.compile(r"^not\s+run\b", re.IGNORECASE)
 CSRC_PATH_RE = re.compile(r"^(csrc/|CMakeLists\.txt$)")
 RUNTIME_PATH_RE = re.compile(r"^(csrc/|CMakeLists\.txt$|vllm/)")
 TABLE_SEP_RE = re.compile(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$")
+LONG_CTX_CELL_RE = re.compile(r"\b(64k|65536|128k|131072|256k|262144)\b", re.IGNORECASE)
+LONG_CTX_NA_RE = re.compile(
+    r"\b(long[- ]context\s*[:\-]?\s*n/a|short[- ]context\s+only|"
+    r"max[-_ ]model[-_ ]len\s*(?:<|<=|=)\s*(?:32768|32k|49152|48k))\b",
+    re.IGNORECASE,
+)
+NEEDLE_RE = re.compile(r"\b(needle|passkey)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -260,6 +267,39 @@ def validate_pr_contract(
             errors.append(
                 "`stall, hard gate` cannot be `NOT RUN` on runtime changes "
                 "(run `stall_probe.py` / `pr_receipt.sh` with `STALL=1`)"
+            )
+
+        speed_sec = find_section(sections, exact_title="speed")
+        if (
+            speed_sec is not None
+            and speed_sec.clean_body
+            and not (
+                LONG_CTX_CELL_RE.search(speed_sec.clean_body)
+                or LONG_CTX_NA_RE.search(speed_sec.clean_body)
+            )
+        ):
+            errors.append(
+                "`### Speed` must include at least one long-context cell "
+                "(`>= 64k`, e.g. `64k/1k` or `128k/512` via `LONG_CTX=auto`) "
+                "or an explicit `long-context N/A` reason (`max-model-len <= 32k`)"
+            )
+
+        quality_gate = gates.get("quality", "")
+        quality_sec = find_section(sections, exact_title="quality")
+        if (
+            quality_gate
+            and not NOT_RUN_RE.match(quality_gate)
+            and quality_sec is not None
+            and quality_sec.clean_body
+            and not (
+                NEEDLE_RE.search(quality_sec.clean_body)
+                or LONG_CTX_NA_RE.search(quality_sec.clean_body)
+            )
+        ):
+            errors.append(
+                "`### Quality` must report long-context passkey needle results "
+                "(`quality_ab.py --needle-lens`) when the quality gate is run "
+                "(or an explicit `long-context N/A` reason)"
             )
 
     if touches_csrc:
