@@ -376,12 +376,12 @@ __device__ __forceinline__ half2 rdna_i8x2_to_h2(int lo, int hi) {
   return __floats2half2_rn((float)lo, (float)hi);
 }
 
-template <int WAVES, int MT>
+template <int WAVES, int MT, bool GUARD = false>
 __global__ void __launch_bounds__(WAVES * 32)
     gemv_i8_rdna2_(const half* __restrict__ x, const int8_t* __restrict__ w,
                    const half* __restrict__ scale,
                    const half* __restrict__ bias, half* __restrict__ y,
-                   const int N, const int K) {
+                   const int N, const int K, const int M = MT) {
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int n = blockIdx.x * WAVES + wave;
   if (n >= N) return;
@@ -392,15 +392,16 @@ __global__ void __launch_bounds__(WAVES * 32)
   float acc[MT];
 #pragma unroll
   for (int m = 0; m < MT; m++) acc[m] = 0.f;
-  for (int i = lane; i < K16; i += 32 * 4) {
-    uint4 wq[4];
+  constexpr int UNROLL = (MT > 8) ? 1 : 4;
+  for (int i = lane; i < K16; i += 32 * UNROLL) {
+    uint4 wq[UNROLL];
 #pragma unroll
-    for (int u = 0; u < 4; u++) {
+    for (int u = 0; u < UNROLL; u++) {
       const int idx = i + 32 * u;
       wq[u] = (idx < K16) ? wrow[idx] : make_uint4(0, 0, 0, 0);
     }
 #pragma unroll
-    for (int u = 0; u < 4; u++) {
+    for (int u = 0; u < UNROLL; u++) {
       const int idx = i + 32 * u;
       if (idx < K16) {
         const int32_t* q = reinterpret_cast<const int32_t*>(&wq[u]);
@@ -415,6 +416,7 @@ __global__ void __launch_bounds__(WAVES * 32)
         }
 #pragma unroll
         for (int m = 0; m < MT; m++) {
+          if (GUARD && m >= M) continue;
           const uint4 xa = xr[((size_t)m * K16 + idx) * 2];
           const uint4 xb = xr[((size_t)m * K16 + idx) * 2 + 1];
           const half2* xh0 = reinterpret_cast<const half2*>(&xa);
@@ -435,6 +437,7 @@ __global__ void __launch_bounds__(WAVES * 32)
   }
 #pragma unroll
   for (int m = 0; m < MT; m++) {
+    if (GUARD && m >= M) continue;
 #pragma unroll
     for (int off = 16; off >= 1; off >>= 1) acc[m] += __shfl_xor(acc[m], off);
   }
@@ -442,30 +445,35 @@ __global__ void __launch_bounds__(WAVES * 32)
     const float sc = __half2float(scale[n]);
     const float b = bias ? __half2float(bias[n]) : 0.f;
 #pragma unroll
-    for (int m = 0; m < MT; m++)
+    for (int m = 0; m < MT; m++) {
+      if (GUARD && m >= M) continue;
       y[(size_t)m * N + n] = __float2half(acc[m] * sc + b);
+    }
   }
 }
 
-template <int MT>
+template <int MT, bool GUARD = false>
 static void gemv_i8_rdna2_launch(const half* x, const int8_t* w, const half* s,
-                                 const half* bias, half* y, int N, int K,
+                                 const half* bias, half* y, int N, int K, int M,
                                  cudaStream_t st) {
   if (N >= 1152)
-    gemv_i8_rdna2_<8, MT><<<(N + 7) / 8, 256, 0, st>>>(x, w, s, bias, y, N, K);
+    gemv_i8_rdna2_<8, MT, GUARD>
+        <<<(N + 7) / 8, 256, 0, st>>>(x, w, s, bias, y, N, K, M);
   else if (N >= 576)
-    gemv_i8_rdna2_<4, MT><<<(N + 3) / 4, 128, 0, st>>>(x, w, s, bias, y, N, K);
+    gemv_i8_rdna2_<4, MT, GUARD>
+        <<<(N + 3) / 4, 128, 0, st>>>(x, w, s, bias, y, N, K, M);
   else if (N >= 288)
-    gemv_i8_rdna2_<2, MT><<<(N + 1) / 2, 64, 0, st>>>(x, w, s, bias, y, N, K);
+    gemv_i8_rdna2_<2, MT, GUARD>
+        <<<(N + 1) / 2, 64, 0, st>>>(x, w, s, bias, y, N, K, M);
   else
-    gemv_i8_rdna2_<1, MT><<<N, 32, 0, st>>>(x, w, s, bias, y, N, K);
+    gemv_i8_rdna2_<1, MT, GUARD><<<N, 32, 0, st>>>(x, w, s, bias, y, N, K, M);
 }
 
 at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w,
                          const at::Tensor& scale,
                          const std::optional<at::Tensor>& bias) {
   const int M = x.size(0), K = x.size(1), N = w.size(0);
-  TORCH_CHECK(M >= 1 && M <= 8, "gemv_i8_rdna2: M must be 1..8");
+  TORCH_CHECK(M >= 1 && M <= 32, "gemv_i8_rdna2: M must be 1..32");
   TORCH_CHECK(w.size(1) == K && K % 16 == 0,
               "gemv_i8_rdna2: K mismatch / K % 16");
   TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kChar &&
@@ -489,28 +497,38 @@ at::Tensor gemv_i8_rdna2(const at::Tensor& x, const at::Tensor& w,
   half* yp = reinterpret_cast<half*>(y.mutable_data_ptr());
   switch (M) {
     case 1:
-      gemv_i8_rdna2_launch<1>(xp, wp, sp, bp, yp, N, K, st);
+      gemv_i8_rdna2_launch<1>(xp, wp, sp, bp, yp, N, K, M, st);
       break;
     case 2:
-      gemv_i8_rdna2_launch<2>(xp, wp, sp, bp, yp, N, K, st);
+      gemv_i8_rdna2_launch<2>(xp, wp, sp, bp, yp, N, K, M, st);
       break;
     case 3:
-      gemv_i8_rdna2_launch<3>(xp, wp, sp, bp, yp, N, K, st);
+      gemv_i8_rdna2_launch<3>(xp, wp, sp, bp, yp, N, K, M, st);
       break;
     case 4:
-      gemv_i8_rdna2_launch<4>(xp, wp, sp, bp, yp, N, K, st);
+      gemv_i8_rdna2_launch<4>(xp, wp, sp, bp, yp, N, K, M, st);
       break;
     case 5:
-      gemv_i8_rdna2_launch<5>(xp, wp, sp, bp, yp, N, K, st);
+      gemv_i8_rdna2_launch<5>(xp, wp, sp, bp, yp, N, K, M, st);
       break;
     case 6:
-      gemv_i8_rdna2_launch<6>(xp, wp, sp, bp, yp, N, K, st);
+      gemv_i8_rdna2_launch<6>(xp, wp, sp, bp, yp, N, K, M, st);
       break;
     case 7:
-      gemv_i8_rdna2_launch<7>(xp, wp, sp, bp, yp, N, K, st);
+      gemv_i8_rdna2_launch<7>(xp, wp, sp, bp, yp, N, K, M, st);
+      break;
+    case 8:
+      gemv_i8_rdna2_launch<8>(xp, wp, sp, bp, yp, N, K, M, st);
       break;
     default:
-      gemv_i8_rdna2_launch<8>(xp, wp, sp, bp, yp, N, K, st);
+      if (M <= 12)
+        gemv_i8_rdna2_launch<12, true>(xp, wp, sp, bp, yp, N, K, M, st);
+      else if (M <= 16)
+        gemv_i8_rdna2_launch<16, true>(xp, wp, sp, bp, yp, N, K, M, st);
+      else if (M <= 24)
+        gemv_i8_rdna2_launch<24, true>(xp, wp, sp, bp, yp, N, K, M, st);
+      else
+        gemv_i8_rdna2_launch<32, true>(xp, wp, sp, bp, yp, N, K, M, st);
       break;
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();

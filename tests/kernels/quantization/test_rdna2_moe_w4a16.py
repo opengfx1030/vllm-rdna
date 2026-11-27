@@ -549,7 +549,7 @@ def test_quantized_zero_stays_zero(scale):
 
 
 def _resident_skinny_case(m, k, n, topk=10):
-    """Real shuffle plus independent FP16-dequant reference, including EP holes."""
+    """Real shuffle plus independent FP32-dequant reference, including EP holes."""
     from types import SimpleNamespace
 
     e, group = 4, 128
@@ -588,8 +588,8 @@ def _resident_skinny_case(m, k, n, topk=10):
     ids = torch.arange(m * topk, device=device).reshape(m, topk) % (e * 2)
     emap = torch.tensor([2, -1, 0, -1, 3, -1, 1, -1], device=device, dtype=torch.int32)
     weights = torch.softmax(torch.randn(m, topk, device=device), dim=-1)
-    w13 = ((q13.float() - 8) * s13.float().repeat_interleave(group, dim=1)).half()
-    w2 = ((q2.float() - 8) * s2.float().repeat_interleave(group, dim=1)).half()
+    w13 = (q13.float() - 8) * s13.float().repeat_interleave(group, dim=1)
+    w2 = (q2.float() - 8) * s2.float().repeat_interleave(group, dim=1)
     return layer, x, ids, weights, emap, w13, w2
 
 

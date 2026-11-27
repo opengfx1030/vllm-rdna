@@ -37,3 +37,28 @@ def test_gemv_f16_rdna2_matches_linear(M, N, K, with_bias):
         ref = ref + bias.float()
     assert out.shape == (M, N)
     torch.testing.assert_close(out.float(), ref, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not (
+        on_gfx10x()
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "gemv_i8_rdna2")
+    ),
+    reason="Requires gfx10x with gemv_i8_rdna2",
+)
+@pytest.mark.parametrize("M", [1, 4, 8, 9, 12, 13, 16, 17, 24, 25, 32])
+@pytest.mark.parametrize("N, K", [(320, 1024), (1152, 2560)])
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_gemv_i8_rdna2_matches_linear(M, N, K, with_bias):
+    torch.manual_seed(10 + M + N)
+    x = torch.randn(M, K, dtype=torch.half, device="cuda")
+    w_i8 = torch.randint(-127, 127, (N, K), dtype=torch.int8, device="cuda")
+    scale = (torch.rand(N, dtype=torch.half, device="cuda") + 0.1) * 0.01
+    bias = torch.randn(N, dtype=torch.half, device="cuda") if with_bias else None
+    out = torch.ops._rocm_C.gemv_i8_rdna2(x, w_i8, scale, bias)
+    ref = (x.float() @ w_i8.float().T) * scale.float()
+    if bias is not None:
+        ref = ref + bias.float()
+    assert out.shape == (M, N) and out.dtype == torch.float16
+    torch.testing.assert_close(out.float(), ref, atol=2e-2, rtol=1e-2)

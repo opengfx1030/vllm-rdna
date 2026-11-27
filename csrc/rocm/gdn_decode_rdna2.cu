@@ -337,7 +337,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
         int H, int HV, int V, long stride_q_tok, long stride_k_tok,
         long stride_v_tok, long stride_a_tok, long stride_b_tok,
         long stride_o_tok, long stride_state_block, int stride_indices_seq,
-        int stride_indices_tok, float scale) {
+        int stride_indices_tok, float scale, bool vec16_qk, bool vec16_st) {
   const int i_v = blockIdx.x;
   const int i_nh = blockIdx.y;
   const int i_n = i_nh / HV;
@@ -367,7 +367,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
   if (load_idx <= 0) {
     // NULL_BLOCK_ID (or an invalid slot): the Triton kernel returns before
     // writing `o`; zero it instead of leaving the caller's buffer undefined.
-    if (v_ok) {
+    if (v_ok && ks == 0) {
       for (int t = 0; t < n_tok; ++t) {
         out[(long)(bos + t) * stride_o_tok + (long)i_hv * V + o_v] =
             __float2half(0.0f);
@@ -376,12 +376,43 @@ __global__ void __launch_bounds__(GDN_THREADS)
     return;
   }
 
+  // Hoist per-head constants invariant across tokens.
+  const float neg_exp_A = -gdn_exp(gdn_to_f32(A_log[i_hv]));
+  const float dt_b = gdn_to_f32(dt_bias[i_hv]);
+
   float h[16];
   if (v_ok) {
     const ST* p_h0 = state + load_idx * stride_state_block +
                      (long)i_hv * V * GDN_K + (long)o_v * GDN_K + k0;
+    if (vec16_st) {
+      if constexpr (std::is_same_v<ST, float>) {
+        const float4* v4 = reinterpret_cast<const float4*>(p_h0);
 #pragma unroll
-    for (int j = 0; j < 16; ++j) h[j] = gdn_to_f32(p_h0[j]);
+        for (int j = 0; j < 4; ++j) {
+          const float4 f = v4[j];
+          h[4 * j + 0] = f.x;
+          h[4 * j + 1] = f.y;
+          h[4 * j + 2] = f.z;
+          h[4 * j + 3] = f.w;
+        }
+      } else {
+        const uint4* v4 = reinterpret_cast<const uint4*>(p_h0);
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+          const uint4 raw = v4[j];
+          const __half2* h2 = reinterpret_cast<const __half2*>(&raw);
+#pragma unroll
+          for (int p = 0; p < 4; ++p) {
+            const float2 f2 = __half22float2(h2[p]);
+            h[8 * j + 2 * p + 0] = f2.x;
+            h[8 * j + 2 * p + 1] = f2.y;
+          }
+        }
+      }
+    } else {
+#pragma unroll
+      for (int j = 0; j < 16; ++j) h[j] = gdn_to_f32(p_h0[j]);
+    }
   } else {
 #pragma unroll
     for (int j = 0; j < 16; ++j) h[j] = 0.0f;
@@ -393,10 +424,36 @@ __global__ void __launch_bounds__(GDN_THREADS)
     const __half* p_k = k + g * stride_k_tok + (long)i_h * GDN_K + k0;
 
     float qf[16], kf[16];
+    if (vec16_qk) {
+      const uint4* qv = reinterpret_cast<const uint4*>(p_q);
+      const uint4* kv = reinterpret_cast<const uint4*>(p_k);
+      const uint4 qa = qv[0], qb = qv[1];
+      const uint4 ka = kv[0], kb = kv[1];
+      const __half2* qh0 = reinterpret_cast<const __half2*>(&qa);
+      const __half2* qh1 = reinterpret_cast<const __half2*>(&qb);
+      const __half2* kh0 = reinterpret_cast<const __half2*>(&ka);
+      const __half2* kh1 = reinterpret_cast<const __half2*>(&kb);
 #pragma unroll
-    for (int j = 0; j < 16; ++j) {
-      qf[j] = __half2float(p_q[j]);
-      kf[j] = __half2float(p_k[j]);
+      for (int p = 0; p < 4; ++p) {
+        const float2 fq0 = __half22float2(qh0[p]);
+        const float2 fq1 = __half22float2(qh1[p]);
+        const float2 fk0 = __half22float2(kh0[p]);
+        const float2 fk1 = __half22float2(kh1[p]);
+        qf[2 * p + 0] = fq0.x;
+        qf[2 * p + 1] = fq0.y;
+        qf[8 + 2 * p + 0] = fq1.x;
+        qf[8 + 2 * p + 1] = fq1.y;
+        kf[2 * p + 0] = fk0.x;
+        kf[2 * p + 1] = fk0.y;
+        kf[8 + 2 * p + 0] = fk1.x;
+        kf[8 + 2 * p + 1] = fk1.y;
+      }
+    } else {
+#pragma unroll
+      for (int j = 0; j < 16; ++j) {
+        qf[j] = __half2float(p_q[j]);
+        kf[j] = __half2float(p_k[j]);
+      }
     }
 
     // USE_QK_L2NORM_IN_KERNEL, then the query scale (Triton multiplies by the
@@ -420,10 +477,10 @@ __global__ void __launch_bounds__(GDN_THREADS)
     // Sigmoid gating (non-KDA: scalar per value-head).
     const float a_val = __half2float(a[g * stride_a_tok + i_hv]);
     const float b_val = __half2float(b[g * stride_b_tok + i_hv]);
-    const float x = a_val + gdn_to_f32(dt_bias[i_hv]);
+    const float x = a_val + dt_b;
     const float softplus =
         (x <= GDN_SOFTPLUS_THRESHOLD) ? logf(1.0f + gdn_exp(x)) : x;
-    const float g_val = -gdn_exp(gdn_to_f32(A_log[i_hv])) * softplus;
+    const float g_val = neg_exp_A * softplus;
     const float beta = 1.0f / (1.0f + gdn_exp(-b_val));
 
     const float decay = gdn_exp(g_val);
@@ -444,7 +501,7 @@ __global__ void __launch_bounds__(GDN_THREADS)
 #pragma unroll
     for (int j = 0; j < 16; ++j) o_acc += h[j] * qf[j];
     o_acc = gdn_ksum(o_acc);
-    if (v_ok) {
+    if (v_ok && ks == 0) {
       out[g * stride_o_tok + (long)i_hv * V + o_v] = __float2half(o_acc);
     }
 
@@ -453,8 +510,32 @@ __global__ void __launch_bounds__(GDN_THREADS)
     if (store_idx > 0 && v_ok) {
       ST* p_ht = const_cast<ST*>(state) + store_idx * stride_state_block +
                  (long)i_hv * V * GDN_K + (long)o_v * GDN_K + k0;
+      if (vec16_st) {
+        if constexpr (std::is_same_v<ST, float>) {
+          float4* v4 = reinterpret_cast<float4*>(p_ht);
 #pragma unroll
-      for (int j = 0; j < 16; ++j) p_ht[j] = gdn_to_st<ST>(h[j]);
+          for (int j = 0; j < 4; ++j) {
+            v4[j] = make_float4(h[4 * j + 0], h[4 * j + 1], h[4 * j + 2],
+                                h[4 * j + 3]);
+          }
+        } else {
+          uint4* v4 = reinterpret_cast<uint4*>(p_ht);
+#pragma unroll
+          for (int j = 0; j < 2; ++j) {
+            uint4 raw;
+            __half2* h2 = reinterpret_cast<__half2*>(&raw);
+#pragma unroll
+            for (int p = 0; p < 4; ++p) {
+              h2[p] =
+                  __floats2half2_rn(h[8 * j + 2 * p + 0], h[8 * j + 2 * p + 1]);
+            }
+            v4[j] = raw;
+          }
+        }
+      } else {
+#pragma unroll
+        for (int j = 0; j < 16; ++j) p_ht[j] = gdn_to_st<ST>(h[j]);
+      }
     }
   }
 }
@@ -530,6 +611,8 @@ void gdn_spec_verify_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
   TORCH_CHECK(initial_state.size(1) == HV && initial_state.size(2) == V &&
                   initial_state.size(3) == K,
               "initial_state shape [blocks, HV, V, K] mismatch");
+  TORCH_CHECK(initial_state.stride(2) == K && initial_state.stride(1) == V * K,
+              "initial_state must be contiguous across [HV, V, K]");
   TORCH_CHECK(
       ssm_state_indices.scalar_type() == at::kInt &&
           (ssm_state_indices.dim() == 1 || ssm_state_indices.dim() == 2),
@@ -557,6 +640,13 @@ void gdn_spec_verify_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
   auto stream = at::cuda::getCurrentCUDAStream();
   dim3 grid((V + GDN_BV - 1) / GDN_BV, N * HV);
   const long stride_state_block = initial_state.stride(0);
+  const bool vec16_qk =
+      ((reinterpret_cast<uintptr_t>(q.data_ptr()) & 15) == 0) &&
+      ((reinterpret_cast<uintptr_t>(k.data_ptr()) & 15) == 0) &&
+      (q.stride(1) % 8 == 0) && (k.stride(1) % 8 == 0);
+  const bool vec16_st =
+      ((reinterpret_cast<uintptr_t>(initial_state.data_ptr()) & 15) == 0) &&
+      (((stride_state_block * initial_state.element_size()) & 15) == 0);
 
 #define GDN_SPEC_LAUNCH(AT, DT, ST, APTR, DPTR, SPTR)                         \
   gdn_spec_verify_rdna2_kernel<AT, DT, ST><<<grid, GDN_THREADS, 0, stream>>>( \
@@ -571,7 +661,7 @@ void gdn_spec_verify_rdna2(torch::Tensor q, torch::Tensor k, torch::Tensor v,
       cu_seqlens.data_ptr<int>(), H, HV, V, q.stride(1), k.stride(1),         \
       v.stride(1), a.stride(a_tok_dim), b.stride(a_tok_dim), out.stride(1),   \
       stride_state_block, stride_indices_seq, stride_indices_tok,             \
-      (float)scale)
+      (float)scale, vec16_qk, vec16_st)
 
   if (initial_state.scalar_type() == at::kFloat) {
     if (a_ty == at::kFloat && d_ty == at::kFloat) {

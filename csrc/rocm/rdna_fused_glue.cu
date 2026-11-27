@@ -149,7 +149,6 @@ struct RowI8 {
   __device__ __forceinline__ void dot(const half* __restrict__ x, int K,
                                       int lane, float (&acc)[MT],
                                       int M = MT) const {
-    static_assert(!GUARD, "int8 weights: exact MT <= 8 only");
     const int K16 = K / 16;
     const uint4* wr = reinterpret_cast<const uint4*>(w);
     const uint4* xr = reinterpret_cast<const uint4*>(x);
@@ -177,6 +176,7 @@ struct RowI8 {
           }
 #pragma unroll
           for (int m = 0; m < MT; m++) {
+            if (GUARD && m >= M) continue;
             const uint4 xa = xr[((size_t)m * K16 + idx) * 2];
             const uint4 xb = xr[((size_t)m * K16 + idx) * 2 + 1];
             const half2* h0 = reinterpret_cast<const half2*>(&xa);
@@ -201,8 +201,74 @@ struct RowI8 {
                                            const half* __restrict__ x, int K,
                                            int lane, float (&a0)[MT],
                                            float (&a1)[MT], int M = MT) const {
-    dot<MT, GUARD>(x, K, lane, a0, M);
-    o.template dot<MT, GUARD>(x, K, lane, a1, M);
+    if constexpr (MT > 8) {
+      dot<MT, GUARD>(x, K, lane, a0, M);
+      o.template dot<MT, GUARD>(x, K, lane, a1, M);
+      return;
+    }
+    const int K16 = K / 16;
+    const uint4* w0 = reinterpret_cast<const uint4*>(w);
+    const uint4* w1 = reinterpret_cast<const uint4*>(o.w);
+    const uint4* xr = reinterpret_cast<const uint4*>(x);
+    for (int i = lane; i < K16; i += 32 * 2) {
+      uint4 q0[2], q1[2];
+#pragma unroll
+      for (int u = 0; u < 2; u++) {
+        const int idx = i + 32 * u;
+        q0[u] = (idx < K16) ? w0[idx] : make_uint4(0, 0, 0, 0);
+        q1[u] = (idx < K16) ? w1[idx] : make_uint4(0, 0, 0, 0);
+      }
+#pragma unroll
+      for (int u = 0; u < 2; u++) {
+        const int idx = i + 32 * u;
+        if (idx < K16) {
+          const int32_t* p0 = reinterpret_cast<const int32_t*>(&q0[u]);
+          const int32_t* p1 = reinterpret_cast<const int32_t*>(&q1[u]);
+          half2 wh0[8], wh1[8];
+#pragma unroll
+          for (int j = 0; j < 4; j++) {
+            const int32_t v0 = p0[j], v1 = p1[j];
+            wh0[2 * j] = __floats2half2_rn((float)(int8_t)(v0 & 0xff),
+                                           (float)(int8_t)((v0 >> 8) & 0xff));
+            wh0[2 * j + 1] =
+                __floats2half2_rn((float)(int8_t)((v0 >> 16) & 0xff),
+                                  (float)(int8_t)((v0 >> 24) & 0xff));
+            wh1[2 * j] = __floats2half2_rn((float)(int8_t)(v1 & 0xff),
+                                           (float)(int8_t)((v1 >> 8) & 0xff));
+            wh1[2 * j + 1] =
+                __floats2half2_rn((float)(int8_t)((v1 >> 16) & 0xff),
+                                  (float)(int8_t)((v1 >> 24) & 0xff));
+          }
+#pragma unroll
+          for (int m = 0; m < MT; m++) {
+            if (GUARD && m >= M) continue;
+            const uint4 xa = xr[((size_t)m * K16 + idx) * 2];
+            const uint4 xb = xr[((size_t)m * K16 + idx) * 2 + 1];
+            const half2* h0 = reinterpret_cast<const half2*>(&xa);
+            const half2* h1 = reinterpret_cast<const half2*>(&xb);
+            float p = a0[m], q = a1[m];
+            p = __builtin_amdgcn_fdot2(wh0[0], h0[0], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[0], h0[0], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[1], h0[1], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[1], h0[1], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[2], h0[2], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[2], h0[2], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[3], h0[3], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[3], h0[3], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[4], h1[0], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[4], h1[0], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[5], h1[1], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[5], h1[1], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[6], h1[2], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[6], h1[2], q, false);
+            p = __builtin_amdgcn_fdot2(wh0[7], h1[3], p, false);
+            q = __builtin_amdgcn_fdot2(wh1[7], h1[3], q, false);
+            a0[m] = p;
+            a1[m] = q;
+          }
+        }
+      }
+    }
   }
   __device__ __forceinline__ float scale() const { return s; }
 };
@@ -225,12 +291,13 @@ __device__ __forceinline__ float sigmoid_f(float v) {
 // ---- 1. GEMV with silu(v * act_scale) on the first act_cols outputs, the next
 // inj_cols outputs stored raw into a separate tensor
 // ----------------------------------
-template <typename Row, int WAVES, int MT>
+template <typename Row, int WAVES, int MT, bool GUARD = false>
 __global__ void __launch_bounds__(WAVES * 32)
     gemv_act_k(const half* __restrict__ x, const void* __restrict__ w,
                const half* __restrict__ sc, half* __restrict__ y,
                half* __restrict__ inj, const int N, const int K,
-               const int act_cols, const int inj_cols, const float act_scale) {
+               const int act_cols, const int inj_cols, const float act_scale,
+               const int M = MT) {
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int n = blockIdx.x * WAVES + wave;
   if (n >= N) return;
@@ -238,12 +305,13 @@ __global__ void __launch_bounds__(WAVES * 32)
 #pragma unroll
   for (int m = 0; m < MT; m++) acc[m] = 0.f;
   Row row(w, n, K, sc);
-  row.template dot<MT>(x, K, lane, acc);
+  row.template dot<MT, GUARD>(x, K, lane, acc, M);
   wave_reduce<MT>(acc);
   if (lane == 0) {
     const float s = row.scale();
 #pragma unroll
     for (int m = 0; m < MT; m++) {
+      if (GUARD && m >= M) continue;
       const float v = acc[m] * s;
       if (n < act_cols)
         y[(size_t)m * act_cols + n] = __float2half(silu_f(v * act_scale));
@@ -256,11 +324,12 @@ __global__ void __launch_bounds__(WAVES * 32)
 // ---- 2. hyper-connection up GEMV + sigmoid + gated mean
 // -------------------------------- out[m,h] = (1/HC) * sum_c sigmoid(W[c*H+h,:]
 // . lora[m]) * xn[m, c*H+h]
-template <typename Row, int WAVES, int MT, int HC>
+template <typename Row, int WAVES, int MT, int HC, bool GUARD = false>
 __global__ void __launch_bounds__(WAVES * 32)
     hc_up_gate_mix_k(const half* __restrict__ lora, const void* __restrict__ w,
                      const half* __restrict__ sc, const half* __restrict__ xn,
-                     half* __restrict__ out, const int H, const int R) {
+                     half* __restrict__ out, const int H, const int R,
+                     const int M = MT) {
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int h = blockIdx.x * WAVES + wave;
   if (h >= H) return;
@@ -273,19 +342,24 @@ __global__ void __launch_bounds__(WAVES * 32)
 #pragma unroll
     for (int m = 0; m < MT; m++) acc[m] = 0.f;
     Row row(w, c * H + h, R, sc);
-    row.template dot<MT>(lora, R, lane, acc);
+    row.template dot<MT, GUARD>(lora, R, lane, acc, M);
     wave_reduce<MT>(acc);
-    const float s = row.scale();
+    if (lane == 0) {
+      const float s = row.scale();
 #pragma unroll
-    for (int m = 0; m < MT; m++) {
-      const float g = sigmoid_f(acc[m] * s);
-      mix[m] += g * __half2float(xn[(size_t)m * (HC * H) + c * H + h]);
+      for (int m = 0; m < MT; m++) {
+        if (GUARD && m >= M) continue;
+        const float g = sigmoid_f(acc[m] * s);
+        mix[m] += g * __half2float(xn[(size_t)m * (HC * H) + c * H + h]);
+      }
     }
   }
   if (lane == 0) {
 #pragma unroll
-    for (int m = 0; m < MT; m++)
+    for (int m = 0; m < MT; m++) {
+      if (GUARD && m >= M) continue;
       out[(size_t)m * H + h] = __float2half(mix[m] / HC);
+    }
   }
 }
 
@@ -377,18 +451,19 @@ inline int pick_waves(int N) {
   return N >= 1152 ? 8 : (N >= 576 ? 4 : (N >= 288 ? 2 : 1));
 }
 
-template <typename Row, int WV, int MT>
+template <typename Row, int WV, int MT, bool G = false>
 void launch_gemv_act(int blocks, cudaStream_t st, const half* x, const void* w,
                      const half* sc, half* y, half* inj, int N, int K,
-                     int act_cols, int inj_cols, float act_scale) {
-  gemv_act_k<Row, WV, MT><<<blocks, WV * 32, 0, st>>>(
-      x, w, sc, y, inj, N, K, act_cols, inj_cols, act_scale);
+                     int act_cols, int inj_cols, float act_scale, int M = MT) {
+  gemv_act_k<Row, WV, MT, G><<<blocks, WV * 32, 0, st>>>(
+      x, w, sc, y, inj, N, K, act_cols, inj_cols, act_scale, M);
 }
-template <typename Row, int WV, int MT>
+template <typename Row, int WV, int MT, bool G = false>
 void launch_hc_mix(int blocks, cudaStream_t st, const half* lora, const void* w,
-                   const half* sc, const half* xn, half* out, int H, int R) {
-  hc_up_gate_mix_k<Row, WV, MT, 4>
-      <<<blocks, WV * 32, 0, st>>>(lora, w, sc, xn, out, H, R);
+                   const half* sc, const half* xn, half* out, int H, int R,
+                   int M = MT) {
+  hc_up_gate_mix_k<Row, WV, MT, 4, G>
+      <<<blocks, WV * 32, 0, st>>>(lora, w, sc, xn, out, H, R, M);
 }
 template <typename Row, int WV, int MT, bool G>
 void launch_se_gu(int blocks, cudaStream_t st, const half* x, const void* w,
@@ -445,26 +520,32 @@ void dispatch(int M, int wv, bool i8, F&& f) {
 #undef RDNA_WV
 }
 
-// MTP verify batches, 8 < M <= 32: fp16 weights only, MT is a capacity and
-// rows >= M are skipped inside the kernel. F::run takes a trailing bool G.
+// MTP verify batches, 8 < M <= 32: supports both fp16 and int8 weights, MT is
+// a capacity and rows >= M are skipped inside the kernel.
 template <typename F>
-void dispatch_guarded(int M, int wv, F&& f) {
-#define RDNA_WVG(MT)                         \
-  switch (wv) {                              \
-    case 8:                                  \
-      f.template run<RowF16, 8, MT, true>(); \
-      break;                                 \
-    case 4:                                  \
-      f.template run<RowF16, 4, MT, true>(); \
-      break;                                 \
-    case 2:                                  \
-      f.template run<RowF16, 2, MT, true>(); \
-      break;                                 \
-    default:                                 \
-      f.template run<RowF16, 1, MT, true>(); \
-      break;                                 \
+void dispatch_guarded(int M, int wv, bool i8, F&& f) {
+#define RDNA_WVG(MT)                              \
+  switch (wv) {                                   \
+    case 8:                                       \
+      i8 ? f.template run<RowI8, 8, MT, true>()   \
+         : f.template run<RowF16, 8, MT, true>(); \
+      break;                                      \
+    case 4:                                       \
+      i8 ? f.template run<RowI8, 4, MT, true>()   \
+         : f.template run<RowF16, 4, MT, true>(); \
+      break;                                      \
+    case 2:                                       \
+      i8 ? f.template run<RowI8, 2, MT, true>()   \
+         : f.template run<RowF16, 2, MT, true>(); \
+      break;                                      \
+    default:                                      \
+      i8 ? f.template run<RowI8, 1, MT, true>()   \
+         : f.template run<RowF16, 1, MT, true>(); \
+      break;                                      \
   }
-  if (M <= 16) {
+  if (M <= 12) {
+    RDNA_WVG(12)
+  } else if (M <= 16) {
     RDNA_WVG(16)
   } else if (M <= 24) {
     RDNA_WVG(24)
@@ -504,10 +585,11 @@ struct GemvActF {
   half* inj;
   int N, K, act_cols, inj_cols;
   float act_scale;
-  template <typename Row, int WV, int MT>
+  int M;
+  template <typename Row, int WV, int MT, bool G = false>
   void run() {
-    launch_gemv_act<Row, WV, MT>(blocks, st, x, w, sc, y, inj, N, K, act_cols,
-                                 inj_cols, act_scale);
+    launch_gemv_act<Row, WV, MT, G>(blocks, st, x, w, sc, y, inj, N, K,
+                                    act_cols, inj_cols, act_scale, M);
   }
 };
 
@@ -519,10 +601,10 @@ struct HcMixF {
   const half* sc;
   const half* xn;
   half* out;
-  int H, R;
-  template <typename Row, int WV, int MT>
+  int H, R, M;
+  template <typename Row, int WV, int MT, bool G = false>
   void run() {
-    launch_hc_mix<Row, WV, MT>(blocks, st, lora, w, sc, xn, out, H, R);
+    launch_hc_mix<Row, WV, MT, G>(blocks, st, lora, w, sc, xn, out, H, R, M);
   }
 };
 
@@ -886,9 +968,10 @@ std::tuple<at::Tensor, at::Tensor> rdna_gemv_act(
     int64_t inj_cols) {
   const int M = x.size(0), K = x.size(1);
   const int64_t rows = act_cols + inj_cols;
-  TORCH_CHECK(
-      M >= 1 && M <= kMaxM && x.scalar_type() == at::kHalf && x.is_contiguous(),
-      "rdna_gemv_act: x must be contiguous fp16 [1..8, K]");
+  const bool i8 = w.scalar_type() == at::kChar;
+  TORCH_CHECK(M >= 1 && M <= kMaxSeM && x.scalar_type() == at::kHalf &&
+                  x.is_contiguous(),
+              "rdna_gemv_act: x must be contiguous fp16 [1..32, K]");
   TORCH_CHECK(act_cols >= 1 && inj_cols >= 0 && rows <= w.size(0),
               "rdna_gemv_act: need 1 <= act_cols and act_cols + inj_cols <= N");
   check_weight(w, scale, w.size(0), K, "rdna_gemv_act");
@@ -908,8 +991,12 @@ std::tuple<at::Tensor, at::Tensor> rdna_gemv_act(
              K,
              (int)act_cols,
              (int)inj_cols,
-             (float)act_scale};
-  dispatch(M, wv, w.scalar_type() == at::kChar, f);
+             (float)act_scale,
+             M};
+  if (M <= kMaxM)
+    dispatch(M, wv, i8, f);
+  else
+    dispatch_guarded(M, wv, i8, f);
   return {lora, inj};
 }
 
@@ -920,9 +1007,10 @@ at::Tensor rdna_hc_up_gate_mix(const at::Tensor& lora, const at::Tensor& w,
   TORCH_CHECK(hc_count == 4, "rdna_hc_up_gate_mix: hc_count 4 only");
   const int64_t HCH = w.size(0);
   const int H = (int)(HCH / hc_count);
-  TORCH_CHECK(M >= 1 && M <= kMaxM && lora.scalar_type() == at::kHalf &&
+  const bool i8 = w.scalar_type() == at::kChar;
+  TORCH_CHECK(M >= 1 && M <= kMaxSeM && lora.scalar_type() == at::kHalf &&
                   lora.is_contiguous(),
-              "rdna_hc_up_gate_mix: lora must be contiguous fp16 [1..8, R]");
+              "rdna_hc_up_gate_mix: lora must be contiguous fp16 [1..32, R]");
   TORCH_CHECK(xn.scalar_type() == at::kHalf && xn.is_contiguous() &&
                   xn.size(0) == M && xn.size(1) == HCH,
               "rdna_hc_up_gate_mix: xn must be fp16 [M, HC*H]");
@@ -938,8 +1026,12 @@ at::Tensor rdna_hc_up_gate_mix(const at::Tensor& lora, const at::Tensor& w,
            reinterpret_cast<const half*>(xn.const_data_ptr()),
            reinterpret_cast<half*>(out.mutable_data_ptr()),
            H,
-           R};
-  dispatch(M, wv, w.scalar_type() == at::kChar, f);
+           R,
+           M};
+  if (M <= kMaxM)
+    dispatch(M, wv, i8, f);
+  else
+    dispatch_guarded(M, wv, i8, f);
   return out;
 }
 
@@ -951,10 +1043,9 @@ std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_silu(
   TORCH_CHECK(N2 % 2 == 0, "rdna_se_gate_up_silu: weight rows must be 2*I");
   const int I = (int)(N2 / 2);
   const bool i8 = w.scalar_type() == at::kChar;
-  TORCH_CHECK(M >= 1 && M <= (i8 ? kMaxM : kMaxSeM) &&
-                  x.scalar_type() == at::kHalf && x.is_contiguous(),
-              "rdna_se_gate_up_silu: x must be contiguous fp16 [1..32, K] "
-              "(1..8 with int8 weights)");
+  TORCH_CHECK(M >= 1 && M <= kMaxSeM && x.scalar_type() == at::kHalf &&
+                  x.is_contiguous(),
+              "rdna_se_gate_up_silu: x must be contiguous fp16 [1..32, K]");
   TORCH_CHECK(w_gate.scalar_type() == at::kHalf && w_gate.is_contiguous() &&
                   w_gate.numel() == K && K % 8 == 0,
               "rdna_se_gate_up_silu: w_gate must be fp16 [K], K % 8 == 0");
@@ -977,7 +1068,7 @@ std::tuple<at::Tensor, at::Tensor> rdna_se_gate_up_silu(
   if (M <= kMaxM)
     dispatch(M, wv, i8, f);
   else
-    dispatch_guarded(M, wv, f);
+    dispatch_guarded(M, wv, i8, f);
   return {act, gate};
 }
 
@@ -986,10 +1077,9 @@ at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,
                               const at::Tensor& gate) {
   const int M = act.size(0), I = act.size(1), H = w.size(0);
   const bool i8 = w.scalar_type() == at::kChar;
-  TORCH_CHECK(M >= 1 && M <= (i8 ? kMaxM : kMaxSeM) &&
-                  act.scalar_type() == at::kHalf && act.is_contiguous(),
-              "rdna_se_down_gated: act must be contiguous fp16 [1..32, I] "
-              "(1..8 with int8 weights)");
+  TORCH_CHECK(M >= 1 && M <= kMaxSeM && act.scalar_type() == at::kHalf &&
+                  act.is_contiguous(),
+              "rdna_se_down_gated: act must be contiguous fp16 [1..32, I]");
   TORCH_CHECK(gate.scalar_type() == at::kFloat && gate.is_contiguous() &&
                   gate.numel() == M,
               "rdna_se_down_gated: gate must be fp32 [M]");
@@ -1010,7 +1100,7 @@ at::Tensor rdna_se_down_gated(const at::Tensor& act, const at::Tensor& w,
   if (M <= kMaxM)
     dispatch(M, wv, i8, f);
   else
-    dispatch_guarded(M, wv, f);
+    dispatch_guarded(M, wv, i8, f);
   return out;
 }
 

@@ -211,3 +211,49 @@ def test_down_tile_knob_matches_wave_kernel(monkeypatch):
     monkeypatch.setattr(rdna_ops, "_SE_DOWN_TILE", False)
     wave = _se(x, w1, w2, wg)
     torch.testing.assert_close(tile.float(), wave.float(), atol=3e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("m", [1, 4, 8, 9, 12, 13, 16, 17, 24, 25, 32])
+def test_se_int8_weights_matches_reference(m):
+    """INT8 SE kernels (M<=8 dot_pair & M=9..32 guarded) match fp32 dequant ref."""
+    i, k, h = 160, 1024, 512
+    g = torch.Generator(device="cuda").manual_seed(100 + m)
+    x = torch.randn(m, k, device="cuda", generator=g).half()
+    w1_i8 = torch.randint(-127, 127, (2 * i, k), device="cuda", dtype=torch.int8)
+    s1 = (torch.rand(2 * i, device="cuda", generator=g) + 0.1).half() * 0.01
+    w2_i8 = torch.randint(-127, 127, (h, i), device="cuda", dtype=torch.int8)
+    s2 = (torch.rand(h, device="cuda", generator=g) + 0.1).half() * 0.01
+    wg = (torch.randn(k, device="cuda", generator=g) * 0.05).half()
+
+    act, gate = torch.ops._rocm_C.rdna_se_gate_up_silu(x, w1_i8, s1, wg)
+    out = torch.ops._rocm_C.rdna_se_down_gated(act, w2_i8, s2, gate)
+
+    gu = (x.float() @ w1_i8.float().T) * s1.float()
+    ref_act = (F.silu(gu[:, :i]) * gu[:, i:]).half()
+    ref_gate = torch.sigmoid(x.float() @ wg.float())
+    ref = ((ref_act.float() @ w2_i8.float().T) * s2.float()) * ref_gate[:, None]
+    torch.testing.assert_close(out.float(), ref, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("m", [1, 4, 8, 9, 12, 13, 16, 17, 24, 32])
+def test_hc_int8_weights_matches_reference(m):
+    """INT8 HC decode glue (rdna_gemv_act + rdna_hc_up_gate_mix) for M=1..32."""
+    hc, h, r, inj_cols = 4, 512, 320, 4
+    k = hc * h
+    g = torch.Generator(device="cuda").manual_seed(200 + m)
+    xn = torch.randn(m, k, device="cuda", generator=g).half()
+    wd_i8 = torch.randint(-127, 127, (r + inj_cols, k), device="cuda", dtype=torch.int8)
+    sd = (torch.rand(r + inj_cols, device="cuda", generator=g) + 0.1).half() * 0.01
+    wu_i8 = torch.randint(-127, 127, (k, r), device="cuda", dtype=torch.int8)
+    su = (torch.rand(k, device="cuda", generator=g) + 0.1).half() * 0.01
+
+    lora, inj = torch.ops._rocm_C.rdna_gemv_act(xn, wd_i8, sd, r, 1.0 / hc, inj_cols)
+    out = torch.ops._rocm_C.rdna_hc_up_gate_mix(lora, wu_i8, su, xn, hc)
+
+    dai = (xn.float() @ wd_i8.float().T) * sd.float()
+    ref_inj = dai[:, r:]
+    ref_lora = F.silu(dai[:, :r] / hc).half()
+    gate = torch.sigmoid((ref_lora.float() @ wu_i8.float().T) * su.float())
+    ref_out = (gate.unflatten(-1, (hc, h)) * xn.float().unflatten(-1, (hc, h))).mean(-2)
+    torch.testing.assert_close(inj.float(), ref_inj, atol=2e-2, rtol=1e-2)
+    torch.testing.assert_close(out.float(), ref_out, atol=2e-2, rtol=1e-2)

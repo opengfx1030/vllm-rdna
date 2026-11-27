@@ -58,10 +58,12 @@
 // Form the small signed INT4 value before applying its scale. Folding the
 // scale into the large 1024/64 encoding offsets rounds away cancellation in
 // fp16: even quantized zero then becomes a nonzero weight.
+// Keeping scale=1.0 in dequant and multiplying once per 32-element k-step in
+// fp32 drops y1y16_h[4][2] (8 VGPRs/thread) and replaces 64 v_pk_mul_f16 +
+// 16 v_add_f32 per group with 4 v_fma_f32.
 __forceinline__ __device__ void refresh_moe_group(
     int group, int n, const uint32_t* zeros, const half* scales, int size_n,
-    int zero_offset, half2 (&z)[4][2], half2 (&y)[4][2],
-    half2 (&group_scales)[4]) {
+    int zero_offset, half2 (&z)[4][2], float (&group_scales)[4]) {
   int column_zeros[4];
   half column_scales[4];
   vllm::gptq_rdna2::load4_zeros(zeros + group * (size_n / 8), n, column_zeros);
@@ -69,10 +71,46 @@ __forceinline__ __device__ void refresh_moe_group(
                                        column_scales);
   #pragma unroll
   for (int col = 0; col < 4; ++col) {
-    vllm::gptq_rdna2::prep_zero_scale_fp16(
-        column_zeros[col] + zero_offset, __float2half_rn(1.0f), z[col], y[col]);
-    group_scales[col] = __half2half2(column_scales[col]);
+    const uint32_t zp = (uint32_t)(column_zeros[col] + zero_offset);
+    union {
+      uint16_t u;
+      half h;
+    } z1u;
+    z1u.u = (uint16_t)(0xE400 | zp);
+    half z16 = __hsub(__int2half_rn(-64), __int2half_rn((int)zp));
+    z[col][0] = __half2half2(z1u.h);
+    z[col][1] = __half2half2(z16);
+    group_scales[col] = __half2float(column_scales[col]);
   }
+}
+
+__forceinline__ __device__ void dequant_4bit_8_fp16_unscaled(
+    uint32_t qa, half2 (&dq)[4], const half2 (&z)[2]) {
+  const uint32_t c0 = 0x64006400;
+  const half2 y16 = __float2half2_rn(1.0f / 16.0f);
+  union {
+    uint32_t u;
+    half2 h2;
+  } q0, q1, q2, q3;
+  q0.u = (qa & 0x000F000F) | c0;
+  q1.u = (qa & 0x00F000F0) | c0;
+  const uint32_t qa_hi = qa >> 8;
+  q2.u = (qa_hi & 0x000F000F) | c0;
+  q3.u = (qa_hi & 0x00F000F0) | c0;
+
+  dq[0] = __hadd2(q0.h2, z[0]);
+  dq[1] = __hfma2(q1.h2, y16, z[1]);
+  dq[2] = __hadd2(q2.h2, z[0]);
+  dq[3] = __hfma2(q3.h2, y16, z[1]);
+}
+
+__forceinline__ __device__ float dot22_8_acc(const half2 (&dq)[4],
+                                             const half2* a2_ptr, float acc) {
+  acc = __builtin_amdgcn_fdot2(dq[0], a2_ptr[0], acc, false);
+  acc = __builtin_amdgcn_fdot2(dq[1], a2_ptr[1], acc, false);
+  acc = __builtin_amdgcn_fdot2(dq[2], a2_ptr[2], acc, false);
+  acc = __builtin_amdgcn_fdot2(dq[3], a2_ptr[3], acc, false);
+  return acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,12 +197,13 @@ __global__ void moe_gemm_q4_kernel_rdna2(
   const uint32_t* b_ptr = expert_weights + qk * size_n + n;
 
   // Per-column dequant constants (4 columns per thread)
-  half2 z1z16_h[4][2], y1y16_h[4][2], group_scales[4];
+  half2 z1z16_h[4][2];
+  float group_scales[4];
 
   // Refresh dequant constants for current group + 4 columns at n
   refresh_moe_group(group, n, expert_qzeros,
                     reinterpret_cast<const half*>(expert_scales), size_n,
-                    zero_offset, z1z16_h, y1y16_h, group_scales);
+                    zero_offset, z1z16_h, group_scales);
 
   float block_c[BLOCK_SIZE_M][4];
   #pragma unroll
@@ -181,7 +220,7 @@ __global__ void moe_gemm_q4_kernel_rdna2(
       nextgroup += groupsize;
       refresh_moe_group(group, n, expert_qzeros,
                         reinterpret_cast<const half*>(expert_scales), size_n,
-                        zero_offset, z1z16_h, y1y16_h, group_scales);
+                        zero_offset, z1z16_h, group_scales);
     }
 
     // Prefetch 4 weight words (128 bytes)
@@ -192,36 +231,40 @@ __global__ void moe_gemm_q4_kernel_rdna2(
     }
     b_ptr += 4 * size_n;
 
+    float g_acc[BLOCK_SIZE_M][4];
+  #pragma unroll
+    for (int m = 0; m < BLOCK_SIZE_M; ++m) {
+  #pragma unroll
+      for (int col = 0; col < 4; ++col) g_acc[m][col] = 0.0f;
+    }
+
   #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const int a_off = (k - offset_k) + 8 * j;
 
-      // fp16 path: dequant via bit-trick, dot via v_dot2_f32_f16
+      // fp16 path: unscaled bit-trick dequant + direct v_dot2c_f32_f16
       half2 dq[4][4];
-      vllm::gptq_rdna2::dequant_4bit_8_fp16((uint32_t)b_w[j].x, dq[0],
-                                            z1z16_h[0], y1y16_h[0]);
-      vllm::gptq_rdna2::dequant_4bit_8_fp16((uint32_t)b_w[j].y, dq[1],
-                                            z1z16_h[1], y1y16_h[1]);
-      vllm::gptq_rdna2::dequant_4bit_8_fp16((uint32_t)b_w[j].z, dq[2],
-                                            z1z16_h[2], y1y16_h[2]);
-      vllm::gptq_rdna2::dequant_4bit_8_fp16((uint32_t)b_w[j].w, dq[3],
-                                            z1z16_h[3], y1y16_h[3]);
-
-  #pragma unroll
-      for (int col = 0; col < 4; ++col) {
-  #pragma unroll
-        for (int pair = 0; pair < 4; ++pair) {
-          dq[col][pair] = __hmul2(dq[col][pair], group_scales[col]);
-        }
-      }
+      dequant_4bit_8_fp16_unscaled((uint32_t)b_w[j].x, dq[0], z1z16_h[0]);
+      dequant_4bit_8_fp16_unscaled((uint32_t)b_w[j].y, dq[1], z1z16_h[1]);
+      dequant_4bit_8_fp16_unscaled((uint32_t)b_w[j].z, dq[2], z1z16_h[2]);
+      dequant_4bit_8_fp16_unscaled((uint32_t)b_w[j].w, dq[3], z1z16_h[3]);
 
   #pragma unroll
       for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-        const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
-        block_c[m][0] += vllm::gptq_rdna2::dot22_8_f(dq[0], a_ptr);
-        block_c[m][1] += vllm::gptq_rdna2::dot22_8_f(dq[1], a_ptr);
-        block_c[m][2] += vllm::gptq_rdna2::dot22_8_f(dq[2], a_ptr);
-        block_c[m][3] += vllm::gptq_rdna2::dot22_8_f(dq[3], a_ptr);
+        const half2* a2_ptr =
+            reinterpret_cast<const half2*>(&block_a[m][a_off]);
+        g_acc[m][0] = dot22_8_acc(dq[0], a2_ptr, g_acc[m][0]);
+        g_acc[m][1] = dot22_8_acc(dq[1], a2_ptr, g_acc[m][1]);
+        g_acc[m][2] = dot22_8_acc(dq[2], a2_ptr, g_acc[m][2]);
+        g_acc[m][3] = dot22_8_acc(dq[3], a2_ptr, g_acc[m][3]);
+      }
+    }
+  #pragma unroll
+    for (int m = 0; m < BLOCK_SIZE_M; ++m) {
+  #pragma unroll
+      for (int col = 0; col < 4; ++col) {
+        block_c[m][col] =
+            __fmaf_rn(g_acc[m][col], group_scales[col], block_c[m][col]);
       }
     }
     k += 32;
