@@ -368,3 +368,129 @@ def test_int4_sparse_paged_attention_rejects_fp16_cache():
             torch.zeros(1, device=device, dtype=torch.int32),
             None,
         )
+
+
+@pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize("kv_heads", [1, 2])
+@pytest.mark.parametrize("tokens", [7, 64])
+def test_int4_slot_outer_blnhc_round_trip_and_attention(head_dim, kv_heads, tokens):
+    """BLNHC (slot_outer: [blocks, slots, side, heads*rec]) works end-to-end."""
+    from vllm import _custom_ops
+    from vllm.v1.attention.ops.int4_fp16_kv_layout import (
+        int4_fp16_cache_view,
+        int4_fp16_read_views,
+    )
+
+    pages, slots = 4, 32
+    record_bytes = _int4_record_bytes(head_dim)
+    # Allocate [pages, slots, 2, kv_heads * record_bytes + padding] and
+    # transpose to the framework's [pages, 2, slots, kv_heads * record_bytes]
+    # view (the BLNHC Qwen4Exp QSA memory order).
+    raw = torch.zeros(
+        pages, slots, 2, kv_heads * record_bytes + 16, dtype=torch.uint8, device=device
+    )
+    kv_cache = raw[..., : kv_heads * record_bytes].transpose(1, 2)
+    cache = int4_fp16_cache_view(kv_cache, kv_heads, head_dim)
+    assert cache.shape == (2, pages, slots, kv_heads, record_bytes)
+
+    gen = torch.Generator(device=device).manual_seed(17 + head_dim + kv_heads + tokens)
+    key = torch.randn(tokens, kv_heads, head_dim, device=device, generator=gen).half()
+    value = torch.randn(tokens, kv_heads, head_dim, device=device, generator=gen).half()
+    slot_mapping = torch.randperm(pages * slots, dtype=torch.int64, device=device)[
+        :tokens
+    ]
+    _custom_ops.reshape_and_cache_int4_fp16_rdna2(key, value, cache, slot_mapping)
+
+    mat_k, mat_v = _materialize(cache, head_dim)
+    k_flat = mat_k.reshape(pages * slots, kv_heads, head_dim)[slot_mapping]
+    v_flat = mat_v.reshape(pages * slots, kv_heads, head_dim)[slot_mapping]
+    # FP32 reference check: per-32-channel quantized error stays bounded and
+    # sides/heads do not corrupt each other.
+    k_diff = (k_flat.float() - key.float()).abs().max().item()
+    v_diff = (v_flat.float() - value.float()).abs().max().item()
+    assert k_diff < 0.7 and v_diff < 0.7
+
+    # Both QSA and FA decode read the materialized values identically.
+    k_payload, v_payload, k_scale, v_scale = int4_fp16_read_views(cache, head_dim)
+    heads = kv_heads * 2
+    q = (torch.randn(2, heads, head_dim, device=device, generator=gen) * 0.5).half()
+    block_table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32, device=device)
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    logical = torch.tensor(
+        [[int(slot_mapping[0]), int(slot_mapping[1]), -1, -1]] * 2,
+        dtype=torch.int32,
+        device=device,
+    )
+    got_qsa = qsa_rdna2.qsa_sparse_paged_attention_int4(
+        q, k_payload, v_payload, k_scale, v_scale, logical, block_table, token_to_req
+    )
+    want_qsa = qsa_rdna2.qsa_sparse_paged_attention(
+        q,
+        mat_k.reshape(pages, slots, kv_heads, head_dim),
+        mat_v.reshape(pages, slots, kv_heads, head_dim),
+        logical,
+        block_table,
+        token_to_req,
+    )
+    torch.testing.assert_close(got_qsa, want_qsa, atol=ATOL, rtol=RTOL)
+
+    # FA decode against an FP32 reference over the materialized cache.
+    full_k = mat_k.reshape(pages * slots, kv_heads, head_dim)
+    full_v = mat_v.reshape(pages * slots, kv_heads, head_dim)
+    full_k_ref = full_k.reshape(pages, slots, kv_heads, head_dim)
+    full_v_ref = full_v.reshape(pages, slots, kv_heads, head_dim)
+    seq_lens = torch.tensor([slots, slots], dtype=torch.int32, device=device)
+    cu_q = torch.tensor([0, 1, 2], dtype=torch.int32, device=device)
+    got_fa = torch.empty_like(q)
+    fa_rdna2_backend.fa_rdna2_paged_int4_fp16_block(
+        q,
+        k_payload,
+        v_payload,
+        k_scale,
+        v_scale,
+        block_table,
+        cu_q,
+        seq_lens,
+        slots,
+        kv_splits=4,
+        sliding_window=0,
+        scale=head_dim**-0.5,
+        decode=True,
+        out=got_fa,
+    )
+    want_fa = []
+    for req in range(2):
+        b0 = int(block_table[req, 0].item())
+        kk = full_k_ref[b0].float().repeat_interleave(heads // kv_heads, dim=1)
+        vv = full_v_ref[b0].float().repeat_interleave(heads // kv_heads, dim=1)
+        scores = torch.einsum("hd,shd->hs", q[req].float(), kk) * (head_dim**-0.5)
+        probs = torch.softmax(scores, dim=-1)
+        want_fa.append(torch.einsum("hs,shd->hd", probs, vv).half())
+    torch.testing.assert_close(
+        got_fa, torch.stack(want_fa, dim=0), atol=ATOL, rtol=RTOL
+    )
+
+
+def test_int4_slot_outer_rejects_multi_head_overlap():
+    """stride(0) == record_bytes overlaps side=0,head=1 with side=1,head=0."""
+    from vllm import _custom_ops
+    from vllm.v1.attention.ops.int4_fp16_kv_layout import int4_fp16_cache_view
+
+    pages, slots, kv_heads, head_dim = 2, 4, 2, 128
+    rec = _int4_record_bytes(head_dim)
+    buf = torch.zeros(pages * slots * 4 * rec, dtype=torch.uint8, device=device)
+    # Construct [pages, 2, slots, kv_heads*rec] where side stride is only rec (< 2*rec).
+    bad_4d = torch.as_strided(
+        buf,
+        size=(pages, 2, slots, kv_heads * rec),
+        stride=(slots * 2 * rec, rec, 2 * rec, 1),
+    )
+    with pytest.raises(ValueError, match="invalid int4_fp16_block cache strides"):
+        int4_fp16_cache_view(bad_4d, kv_heads, head_dim)
+
+    bad_5d = bad_4d.unflatten(-1, (kv_heads, rec)).transpose(0, 1)
+    k = torch.zeros(1, kv_heads, head_dim, dtype=torch.float16, device=device)
+    v = torch.zeros_like(k)
+    slot_map = torch.tensor([0], dtype=torch.int64, device=device)
+    with pytest.raises(RuntimeError, match="cache records must not overlap"):
+        _custom_ops.reshape_and_cache_int4_fp16_rdna2(k, v, bad_5d, slot_map)

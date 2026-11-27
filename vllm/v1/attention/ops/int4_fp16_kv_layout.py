@@ -64,9 +64,31 @@ def int4_fp16_cache_view(
         or kv_cache.shape[-1] != num_kv_heads * record_bytes
         or kv_cache.stride(-1) != 1
     ):
-        raise ValueError("invalid int4_fp16_block cache geometry")
-    view = kv_cache.unflatten(-1, (num_kv_heads, record_bytes))
-    return view.transpose(0, 1)
+        raise ValueError(
+            "invalid int4_fp16_block cache geometry: "
+            f"dtype={kv_cache.dtype} shape={tuple(kv_cache.shape)} "
+            f"stride={kv_cache.stride()} num_kv_heads={num_kv_heads} "
+            f"record_bytes={record_bytes}"
+        )
+    view = kv_cache.unflatten(-1, (num_kv_heads, record_bytes)).transpose(0, 1)
+    s0, s1, s2, s3, s4 = view.stride()
+    page_span = view.shape[2] * s2
+    side_outer = s1 >= page_span and s0 >= view.shape[1] * s1
+    page_outer = s0 >= page_span and s1 >= 2 * s0
+    slot_outer = s0 >= num_kv_heads * s3 and s2 >= 2 * s0 and s1 >= page_span
+    if not (
+        s4 == 1
+        and s3 >= record_bytes
+        and s2 >= num_kv_heads * s3
+        and (side_outer or page_outer or slot_outer)
+    ):
+        raise ValueError(
+            "invalid int4_fp16_block cache strides: "
+            f"shape={tuple(view.shape)} stride={view.stride()} "
+            f"record_bytes={record_bytes} page_span={page_span} "
+            f"side_outer={side_outer} page_outer={page_outer} slot_outer={slot_outer}"
+        )
+    return view
 
 
 def int4_fp16_read_views(

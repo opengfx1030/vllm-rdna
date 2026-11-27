@@ -217,9 +217,15 @@ void reshape_and_cache_int4_fp16_rdna2(torch::Tensor key, torch::Tensor value,
                           cache.stride(0) >= cache.size(1) * cache.stride(1);
   const bool page_outer =
       cache.stride(0) >= page_span && cache.stride(1) >= 2 * cache.stride(0);
+  // BLNHC (e.g. Qwen4Exp QSA) interleaves the two sides per slot:
+  // [blocks, slots, side, heads, record_bytes]. Both HIP kernels receive all
+  // four strides and address this layout generically.
+  const bool slot_outer = cache.stride(0) >= heads * cache.stride(3) &&
+                          cache.stride(2) >= 2 * cache.stride(0) &&
+                          cache.stride(1) >= page_span;
   TORCH_CHECK(cache.stride(4) == 1 && cache.stride(3) >= record_bytes &&
                   cache.stride(2) >= heads * cache.stride(3) &&
-                  (side_outer || page_outer),
+                  (side_outer || page_outer || slot_outer),
               "cache records must not overlap");
   const at::cuda::OptionalCUDAGuard guard(device_of(key));
   const auto* props = at::cuda::getDeviceProperties(key.get_device());
