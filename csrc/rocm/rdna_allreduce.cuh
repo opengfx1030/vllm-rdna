@@ -231,6 +231,26 @@ __device__ __forceinline__ bool rdna_ar_peer_announced(const RdnaArPeers& peers,
 
 #define RDNA_AR_POLL_PAUSE() __builtin_amdgcn_s_sleep(8)
 
+template <typename T>
+struct RdnaArLoadDirect {
+  const T* in;
+  __device__ __forceinline__ T operator()(int i) const { return in[i]; }
+};
+
+template <typename T, typename Load>
+struct RdnaArDirectPtr {
+  static __device__ __forceinline__ const T* get(const Load&) {
+    return nullptr;
+  }
+};
+
+template <typename T>
+struct RdnaArDirectPtr<T, RdnaArLoadDirect<T>> {
+  static __device__ __forceinline__ const T* get(const RdnaArLoadDirect<T>& l) {
+    return l.in;
+  }
+};
+
 // ---------------------------------------------------------------------------
 // Phases 1-2 of the protocol, shared by every one-shot collective: push our
 // payload into every peer's staging slot, grid barrier, announce, wait for
@@ -288,10 +308,42 @@ __device__ __forceinline__ bool rdna_ar_exchange(
     const int j = (rank + k) % world;
     T* dst = reinterpret_cast<T*>(peers.stage[j]) +
              ((long long)p * world + rank) * max_elems;
+#if defined(__gfx1030__) || !defined(__HIP_DEVICE_COMPILE__)
+    constexpr int kVec = 16 / (int)sizeof(T);
+    const T* direct_in = RdnaArDirectPtr<T, Load>::get(load);
+    if (pace == 0 && kVec >= 2 && n >= kVec &&
+        ((reinterpret_cast<uintptr_t>(dst) & 15) == 0)) {
+      const int nvec = n / kVec;
+      uint4* dst4 = reinterpret_cast<uint4*>(dst);
+      if (direct_in != nullptr &&
+          ((reinterpret_cast<uintptr_t>(direct_in) & 15) == 0)) {
+        const uint4* src4 = reinterpret_cast<const uint4*>(direct_in);
+        for (int v = gid; v < nvec; v += gstride) dst4[v] = src4[v];
+      } else {
+        for (int v = gid; v < nvec; v += gstride) {
+          union {
+            T e[kVec];
+            uint4 q;
+          } u;
+          const int base = v * kVec;
+  #pragma unroll
+          for (int m = 0; m < kVec; m++) u.e[m] = load(base + m);
+          dst4[v] = u.q;
+        }
+      }
+      for (int i = nvec * kVec + gid; i < n; i += gstride) dst[i] = load(i);
+    } else {
+      for (int i = gid; i < n; i += gstride) {
+        dst[i] = load(i);
+        for (int q = 0; q < pace; q++) __builtin_amdgcn_s_sleep(1);
+      }
+    }
+#else
     for (int i = gid; i < n; i += gstride) {
       dst[i] = load(i);
       for (int q = 0; q < pace; q++) __builtin_amdgcn_s_sleep(1);
     }
+#endif
   }
   __syncthreads();
 
@@ -299,28 +351,40 @@ __device__ __forceinline__ bool rdna_ar_exchange(
   // announce, wait
   if (t == 0) {
     __threadfence_system();
-    atomicAdd(&arrive[p], 1u);
-    if (b == 0) {
-      const long long t0 = wall_clock64();
-      while (__hip_atomic_load(&arrive[p], __ATOMIC_ACQUIRE,
-                               __HIP_MEMORY_SCOPE_AGENT) < (unsigned)nblocks) {
-        RDNA_AR_POLL_PAUSE();
-        const long long dt = wall_clock64() - t0;
-        if (dt > wait_ticks) {
-          rdna_ar_abort_ms(timeout, report, 1u, (unsigned)rank, seq,
-                           dt / ticks_per_ms);
-          s_abort = 1;
-          break;
+#if defined(__gfx1030__) || !defined(__HIP_DEVICE_COMPILE__)
+    const bool use_barrier = (nblocks > 1);
+#else
+    const bool use_barrier = true;
+#endif
+    if (use_barrier) {
+      atomicAdd(&arrive[p], 1u);
+      if (b == 0) {
+        const long long t0 = wall_clock64();
+        while (__hip_atomic_load(&arrive[p], __ATOMIC_ACQUIRE,
+                                 __HIP_MEMORY_SCOPE_AGENT) <
+               (unsigned)nblocks) {
+          RDNA_AR_POLL_PAUSE();
+          const long long dt = wall_clock64() - t0;
+          if (dt > wait_ticks) {
+            rdna_ar_abort_ms(timeout, report, 1u, (unsigned)rank, seq,
+                             dt / ticks_per_ms);
+            s_abort = 1;
+            break;
+          }
+        }
+        if (!s_abort) {
+          // Clear both parity counters. Every block has already atomicAdded.
+          arrive[p] = 0u;
+          arrive[1 - p] = 0u;
+          __hip_atomic_store(seqbuf, seq, __ATOMIC_RELEASE,
+                             __HIP_MEMORY_SCOPE_AGENT);
+          rdna_ar_announce(peers, rank, world, seq);
         }
       }
-      if (!s_abort) {
-        // Clear both parity counters. Every block has already atomicAdded.
-        arrive[p] = 0u;
-        arrive[1 - p] = 0u;
-        __hip_atomic_store(seqbuf, seq, __ATOMIC_RELEASE,
-                           __HIP_MEMORY_SCOPE_AGENT);
-        rdna_ar_announce(peers, rank, world, seq);
-      }
+    } else {
+      __hip_atomic_store(seqbuf, seq, __ATOMIC_RELEASE,
+                         __HIP_MEMORY_SCOPE_AGENT);
+      rdna_ar_announce(peers, rank, world, seq);
     }
     if (!s_abort) {
       // wait: poll OUR flag slots (local uncached memory, no PCIe traffic).
@@ -384,12 +448,6 @@ __device__ __forceinline__ bool rdna_ar_exchange(
   __syncthreads();
   return s_abort != 0;
 }
-
-template <typename T>
-struct RdnaArLoadDirect {
-  const T* in;
-  __device__ __forceinline__ T operator()(int i) const { return in[i]; }
-};
 
 // All-reduce finisher, vector path: one 16-byte load per rank slice, the
 // fixed-order fp32 sum (rank 0 .. W-1, starting from 0.f, exactly the scalar

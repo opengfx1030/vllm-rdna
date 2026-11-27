@@ -25,6 +25,9 @@
 
 #include "rdna_allreduce.cuh"
 #include "rdna_allreduce_hier.cuh"
+#include "rdna_allreduce_twoshot.cuh"
+
+#define RDNA_AR_ALGO_TWOSHOT 3
 
 #define RDNA_AR_CHK(x)                                                     \
   do {                                                                     \
@@ -260,16 +263,28 @@ int rdna_ar_blocks(const RdnaArState& g, int64_t staged_bytes) {
 // VLLM_RDNA_AR_VEC=0.
 int rdna_ar_reduce_blocks(const RdnaArState& g, int64_t staged_bytes) {
   if (!g.vec) return rdna_ar_blocks(g, staged_bytes);
-  int nblocks = staged_bytes <= 8192 ? 4 : (staged_bytes <= 32768 ? 6 : 32);
+  int nblocks = staged_bytes <= 8192     ? 4
+                : staged_bytes <= 32768  ? 6
+                : staged_bytes <= 49152  ? 8
+                : staged_bytes <= 98304  ? 12
+                : staged_bytes <= 196608 ? 16
+                                         : 32;
   if (g.blocks_cap > 0 && nblocks > g.blocks_cap) nblocks = g.blocks_cap;
   return nblocks;
 }
+
+int rdna_ar_twoshot_blocks(const RdnaArState& g, int64_t bytes) {
+  int nblocks = bytes <= 131072 ? 8 : (bytes <= 524288 ? 16 : 32);
+  if (g.blocks_cap > 0 && nblocks > g.blocks_cap) nblocks = g.blocks_cap;
+  nblocks = std::min(nblocks, RDNA_AR_2S_MAX_BLOCKS);
+  return std::max(1, (int)std::min<int64_t>(nblocks, (bytes + 15) / 16));
+}
 }  // namespace
 
-// Largest all-reduce payload of the group: the flat gate, or the hier gate
-// while the hierarchical mode is on.
+// Largest all-reduce payload of the group: the flat/2shot gate, or the hier
+// gate while the hierarchical mode is on.
 static int64_t rdna_ar_gate(const RdnaArState& g) {
-  return g.hier ? g.hier_gate : std::min(g.gate_bytes, g.oneshot_max);
+  return g.hier ? g.hier_gate : std::min(g.gate_bytes, g.max_bytes);
 }
 
 bool rdna_ar_can(int64_t handle, const at::Tensor& t) {
@@ -281,11 +296,16 @@ bool rdna_ar_can(int64_t handle, const at::Tensor& t) {
 }
 
 // The algorithm of an all-reduce of `bytes`: a function of the size and the
-// group's configuration only, so every rank picks the same one. Below
-// hier_min_bytes the legacy flat one-shot (rank-order sum) runs unchanged; from
-// there the 3-phase algorithm (island-grouped sum).
+// group's configuration only, so every rank picks the same one.
+// For world == 2, uint4 oneshot pushes only 1 copy per rank and beats 2-shot
+// across all sizes up to gate_bytes. For world >= 3 (e.g. TP=4), 2-shot wins
+// above oneshot_max (48-64 KiB) by halving total crossbar traffic.
 static int rdna_ar_pick_algo(const RdnaArState& g, int64_t bytes) {
-  if (!g.hier) return RDNA_AR_ALGO_FLAT;
+  if (!g.hier) {
+    if (g.world > 2 && bytes > g.oneshot_max && g.gate_bytes > g.oneshot_max)
+      return RDNA_AR_ALGO_TWOSHOT;
+    return RDNA_AR_ALGO_FLAT;
+  }
   if (g.algo_force >= 0) return g.algo_force;
   return bytes < g.hier_min_bytes ? RDNA_AR_ALGO_FLAT : RDNA_AR_ALGO_HIER;
 }
@@ -339,6 +359,10 @@ static void rdna_ar_launch_algo(RdnaArState& g, const T* inp, T* out, int n,
     rdna_ar_oneshot_isl<T><<<nblocks, 256, 0, stream>>>(
         inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank,
         g.world, n, max_elems, nblocks, g.pace, wait, g.ticks_per_ms, tp);
+  } else if (algo == RDNA_AR_ALGO_TWOSHOT) {
+    rdna_ar_twoshot_mesh<T><<<nblocks, 256, 0, stream>>>(
+        inp, out, g.peers, g.arrive, g.seqbuf, g.timeout, g.report, g.rank,
+        g.world, n, max_elems, nblocks, wait, g.ticks_per_ms);
   } else {
     rdna_ar_launch<T>(g, inp, out, n, nblocks, stream);
   }
@@ -360,11 +384,15 @@ at::Tensor rdna_ar_all_reduce_algo(int64_t handle, const at::Tensor& in,
   const int n = (int)in.numel();
   const int64_t bytes = (int64_t)n * in.element_size();
   int algo = algo_req >= 0 ? (int)algo_req : rdna_ar_pick_algo(g, bytes);
-  TORCH_CHECK(algo == RDNA_AR_ALGO_FLAT || g.hier,
-              "rdna_ar: hier algorithm without rdna_ar_hier_init");
+  TORCH_CHECK(
+      algo == RDNA_AR_ALGO_FLAT || algo == RDNA_AR_ALGO_TWOSHOT || g.hier,
+      "rdna_ar: hier algorithm without rdna_ar_hier_init");
   // Measured on 4x V620: see rdna_ar_reduce_blocks.
-  int nblocks = algo == RDNA_AR_ALGO_HIER ? rdna_ar_hier_blocks(g, bytes)
-                                          : rdna_ar_reduce_blocks(g, bytes);
+  int nblocks =
+      algo == RDNA_AR_ALGO_HIER
+          ? rdna_ar_hier_blocks(g, bytes)
+          : (algo == RDNA_AR_ALGO_TWOSHOT ? rdna_ar_twoshot_blocks(g, bytes)
+                                          : rdna_ar_reduce_blocks(g, bytes));
   if (blocks_req > 0)
     nblocks = (int)std::min<int64_t>(
         blocks_req, algo == RDNA_AR_ALGO_HIER ? RDNA_AR_HFLAG_BLOCKS : 64);

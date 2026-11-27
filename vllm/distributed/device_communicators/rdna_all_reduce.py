@@ -121,30 +121,22 @@ _EVICT_LOG_MS = 1_000
 
 
 def resolve_gate_kb() -> tuple[int, str | None]:
-    """Effective one-shot gate in KiB, and why a requested setting was dropped.
-
-    Two-shot no longer exists, so the gate is
-    min(VLLM_RDNA_AR_MAX_KB, VLLM_RDNA_AR_ONESHOT_KB): larger messages fall
-    back to RCCL instead of reaching a kernel that is not there.
+    """Effective all-reduce gate in KiB (one-shot <= VLLM_RDNA_AR_ONESHOT_KB,
+    2-shot mesh above it up to VLLM_RDNA_AR_MAX_KB; RCCL above max_kb).
     """
     max_kb = int(os.getenv("VLLM_RDNA_AR_MAX_KB", str(_ONESHOT_DEFAULT_KB)))
     oneshot_kb = int(os.getenv("VLLM_RDNA_AR_ONESHOT_KB", str(_ONESHOT_DEFAULT_KB)))
     if oneshot_kb <= 0:
         oneshot_kb = _ONESHOT_DEFAULT_KB
-    gate_kb = min(max_kb, oneshot_kb)
-    algo = os.getenv("VLLM_RDNA_AR_ALGO", "auto").strip().lower()
-    dropped = []
-    if algo in ("twoshot", "2stage"):
-        dropped.append(f"VLLM_RDNA_AR_ALGO={algo}")
-    if max_kb > gate_kb:
-        dropped.append(f"VLLM_RDNA_AR_MAX_KB={max_kb}")
-    if not dropped:
-        return gate_kb, None
-    what = " and ".join(dropped)
-    return gate_kb, (
-        f"{what} asked for the removed two-shot kernel; "
-        f"using one-shot up to {gate_kb} KiB and RCCL above"
-    )
+    if max_kb <= 0:
+        max_kb = oneshot_kb
+    twoshot_kb_raw = os.getenv("VLLM_RDNA_AR_TWOSHOT_KB", "").strip()
+    if twoshot_kb_raw:
+        ts_kb = int(twoshot_kb_raw)
+        if ts_kb > max_kb:
+            max_kb = ts_kb
+    gate_kb = max(max_kb, oneshot_kb)
+    return gate_kb, None
 
 
 @dataclass(frozen=True)

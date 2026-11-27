@@ -456,3 +456,139 @@ def test_gpu_layer_ahead_prefetch_forward_hip_and_graph_parity(copy_mode):
             f"prefetch graph replay {copy_mode} step={step}: max diff "
             f"{(out_static - out_ref).abs().max().item()}"
         )
+
+
+@pytest.mark.skipif(not _is_gfx103x(), reason="gfx1030 RDNA2 required")
+@pytest.mark.parametrize("quant_format", ["nvfp4", "mxfp8"])
+def test_offload_hybrid_decode_matches_fp64_reference(
+    quant_format: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hybrid VRAM-slot + mapped pinned-host decode kernels match FP64 reference."""
+    from vllm.models.inkling2_loop.amd.glue import Inkling2GlueWorkspace
+    from vllm.models.inkling2_loop.configs import Inkling2LoopTextConfig
+
+    if not hasattr(torch.ops._rocm_C, "moe_nvfp4_gemm_hybrid_rdna2"):
+        pytest.skip("hybrid offload ops not built into _rocm_C")
+
+    monkeypatch.setenv("VLLM_INKLING2_MOE_OFFLOAD_HYBRID", "1")
+    cfg = Inkling2LoopTextConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=128,
+        swa_num_attention_heads=4,
+        swa_num_key_value_heads=2,
+        swa_head_dim=128,
+        n_routed_experts=16,
+        num_experts_per_tok=4,
+        loop_layer_index_start=0,
+        loop_layer_index_end=2,
+        loop_num_passes=2,
+        n_layers_per_attn_res_block=1,
+        loop_gate_rank=16,
+    )
+    with torch.device("cuda"):
+        res = Inkling2LoopMoE(cfg, quant_format, offload_slots=0)
+        off = Inkling2LoopMoE(
+            cfg,
+            quant_format,
+            offload_slots=6,
+            offload_copy="native",
+            offload_prefetch=False,
+        )
+    group = _fill_moe_weights(res, seed=71 if quant_format == "nvfp4" else 83)
+    off.gate.weight.data.copy_(res.gate.weight.data)
+    off.gate.e_score_correction_bias.data.copy_(res.gate.e_score_correction_bias.data)
+    off.load_expert_group(group)
+    res.process_weights_after_loading()
+    off.process_weights_after_loading()
+    res.prepare_hip()
+    off.prepare_hip()
+
+    ws = Inkling2GlueWorkspace(cfg, max_tokens=256, device="cuda", tp_size=1)
+    gen = torch.Generator(device="cuda").manual_seed(99)
+    worst_err = 0.0
+    for step in range(5):
+        num_tokens = 1 if step < 3 else 4
+        x = torch.randn(
+            num_tokens,
+            cfg.hidden_size,
+            generator=gen,
+            device="cuda",
+            dtype=torch.float16,
+        )
+        out_res = torch.empty_like(x)
+        out_off = torch.empty_like(x)
+        res.forward_hip(x, ws, out_res)
+        off.forward_hip(x, ws, out_off)
+        torch.accelerator.synchronize()
+        diff = (out_off.double() - out_res.double()).abs().max().item()
+        worst_err = max(worst_err, diff)
+        assert diff <= 2e-3, (
+            f"hybrid {quant_format} step={step} T={num_tokens} max_abs_err={diff}"
+        )
+    print(f"[hybrid {quant_format}] worst_abs_err={worst_err:.3e}")
+
+
+@pytest.mark.skipif(not _is_gfx103x(), reason="gfx1030 RDNA2 required")
+def test_offload_pingpong_prefill_matches_resident(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Double-buffered ping-pong prefill (overflow) matches resident."""
+    from vllm.models.inkling2_loop.amd.glue import Inkling2GlueWorkspace
+    from vllm.models.inkling2_loop.configs import Inkling2LoopTextConfig
+
+    monkeypatch.setenv("VLLM_INKLING2_MOE_OFFLOAD_PINGPONG", "1")
+    cfg = Inkling2LoopTextConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=128,
+        swa_num_attention_heads=4,
+        swa_num_key_value_heads=2,
+        swa_head_dim=128,
+        n_routed_experts=32,
+        num_experts_per_tok=4,
+        loop_layer_index_start=0,
+        loop_layer_index_end=2,
+        loop_num_passes=2,
+        n_layers_per_attn_res_block=1,
+        loop_gate_rank=16,
+    )
+    with torch.device("cuda"):
+        res = Inkling2LoopMoE(cfg, "nvfp4", offload_slots=0)
+        off = Inkling2LoopMoE(
+            cfg,
+            "nvfp4",
+            offload_slots=16,
+            offload_copy="native",
+            offload_prefetch=False,
+        )
+    group = _fill_moe_weights(res, seed=107)
+    off.gate.weight.data.copy_(res.gate.weight.data)
+    off.gate.e_score_correction_bias.data.copy_(res.gate.e_score_correction_bias.data)
+    off.load_expert_group(group)
+    res.process_weights_after_loading()
+    off.process_weights_after_loading()
+    res.prepare_hip()
+    off.prepare_hip()
+
+    ws = Inkling2GlueWorkspace(cfg, max_tokens=256, device="cuda", tp_size=1)
+    gen = torch.Generator(device="cuda").manual_seed(111)
+    x = torch.randn(
+        160, cfg.hidden_size, generator=gen, device="cuda", dtype=torch.float16
+    )
+    out_res = torch.empty_like(x)
+    out_off = torch.empty_like(x)
+    res.forward_hip(x, ws, out_res)
+    off.forward_hip(x, ws, out_off)
+    torch.accelerator.synchronize()
+    diff = (out_off.double() - out_res.double()).abs().max().item()
+    assert diff <= 5e-3, f"pingpong prefill max_abs_err={diff}"
+    print(f"[pingpong prefill] worst_abs_err={diff:.3e}")

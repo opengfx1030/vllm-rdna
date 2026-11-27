@@ -205,6 +205,8 @@ if TYPE_CHECKING:
     VLLM_INKLING2_MOE_OFFLOAD_COPY: str = "tensor"
     VLLM_INKLING2_MOE_OFFLOAD_POLICY: str = "lfu_lru"
     VLLM_INKLING2_MOE_OFFLOAD_DECAY: int = 128
+    VLLM_INKLING2_MOE_OFFLOAD_HYBRID: bool = False
+    VLLM_INKLING2_MOE_OFFLOAD_PINGPONG: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -1706,6 +1708,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX": lambda: int(
         os.getenv("VLLM_INKLING2_MOE_OFFLOAD_PREFETCH_MAX", "4") or "4"
+    ),
+    "VLLM_INKLING2_MOE_OFFLOAD_HYBRID": lambda: (
+        os.getenv("VLLM_INKLING2_MOE_OFFLOAD_HYBRID", "0") == "1"
+    ),
+    "VLLM_INKLING2_MOE_OFFLOAD_PINGPONG": lambda: (
+        os.getenv("VLLM_INKLING2_MOE_OFFLOAD_PINGPONG", "0") == "1"
     ),
     # Enable parallel decode top-16 selection for the MiniMax-M3.1 NVFP4
     # indexer on ROCm gfx950 (MI355X). Set to 1 to enable; disabled by default.

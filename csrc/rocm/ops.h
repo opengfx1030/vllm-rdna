@@ -901,6 +901,44 @@ void moe_mxfp8_gemm_swiglu_rdna2(
     torch::Tensor num_tokens_post_padded, int64_t top_k, int64_t block_size_m,
     bool mul_topk_weight, int64_t output_topk, double gate_cap, double up_cap);
 
+void moe_nvfp4_gemm_hybrid_rdna2(
+    torch::Tensor a, torch::Tensor c, torch::Tensor dev_q_weight,
+    torch::Tensor dev_scales, torch::Tensor dev_globals,
+    torch::Tensor host_q_weight, torch::Tensor host_scales,
+    torch::Tensor host_globals, torch::Tensor resident_map,
+    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
+    int64_t output_topk);
+
+void moe_nvfp4_gemm_swiglu_hybrid_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor dev_q_weight,
+    torch::Tensor dev_scales, torch::Tensor dev_globals,
+    torch::Tensor host_q_weight, torch::Tensor host_scales,
+    torch::Tensor host_globals, torch::Tensor resident_map,
+    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
+    int64_t output_topk, double gate_cap, double up_cap);
+
+void moe_mxfp8_gemm_hybrid_rdna2(
+    torch::Tensor a, torch::Tensor c, torch::Tensor dev_q_weight,
+    torch::Tensor dev_scales, torch::Tensor host_q_weight,
+    torch::Tensor host_scales, torch::Tensor resident_map,
+    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
+    int64_t output_topk);
+
+void moe_mxfp8_gemm_swiglu_hybrid_rdna2(
+    torch::Tensor gate_up, torch::Tensor c, torch::Tensor dev_q_weight,
+    torch::Tensor dev_scales, torch::Tensor host_q_weight,
+    torch::Tensor host_scales, torch::Tensor resident_map,
+    torch::Tensor topk_weights, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
+    int64_t top_k, int64_t block_size_m, bool mul_topk_weight,
+    int64_t output_topk, double gate_cap, double up_cap);
+
 // Inkling-2-Mini attention core on RDNA2 (gfx1030): paged short convolutions,
 // K/V prep and paged attention with learned relative bias and sink logit.
 // See docs/rdna2/inkling2-attn-kernels.md.

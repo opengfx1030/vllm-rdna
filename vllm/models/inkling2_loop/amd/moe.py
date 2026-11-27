@@ -143,6 +143,10 @@ def moe_offload_prefetch_config(env: Any = None) -> tuple[bool, int, int]:
     return enabled, topk_limit, max_experts
 
 
+_OFFLOAD_HYBRID = os.environ.get("VLLM_INKLING2_MOE_OFFLOAD_HYBRID", "0") == "1"
+_OFFLOAD_PINGPONG = os.environ.get("VLLM_INKLING2_MOE_OFFLOAD_PINGPONG", "0") == "1"
+
+
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
@@ -1313,6 +1317,122 @@ class Inkling2LoopMoE(_ExpertsKernel):
                 self.up_softcap,
             )
 
+    def _gemm_hybrid(
+        self,
+        a,
+        c,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    ) -> None:
+        from vllm import _custom_ops as ops
+
+        cache = self.expert_cache
+        assert cache is not None
+        if self.quant_format == "nvfp4":
+            ops.moe_nvfp4_gemm_hybrid_rdna2(
+                a,
+                c,
+                self.w13_qweight,
+                self.w13_scales,
+                self.w13_globals,
+                cache.host_payload["w13_qweight"],
+                cache.host_payload["w13_scales"],
+                cache.host_payload["w13_globals"],
+                cache.resident_map,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                mul_topk_weight,
+                output_topk,
+            )
+        else:
+            ops.moe_mxfp8_gemm_hybrid_rdna2(
+                a,
+                c,
+                self.w13_qweight,
+                self.w13_scales,
+                cache.host_payload["w13_qweight"],
+                cache.host_payload["w13_scales"],
+                cache.resident_map,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                mul_topk_weight,
+                output_topk,
+            )
+
+    def _gemm_swiglu_hybrid(
+        self,
+        gate_up,
+        c,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    ) -> None:
+        from vllm import _custom_ops as ops
+
+        cache = self.expert_cache
+        assert cache is not None
+        if self.quant_format == "nvfp4":
+            ops.moe_nvfp4_gemm_swiglu_hybrid_rdna2(
+                gate_up,
+                c,
+                self.w2_qweight,
+                self.w2_scales,
+                self.w2_globals,
+                cache.host_payload["w2_qweight"],
+                cache.host_payload["w2_scales"],
+                cache.host_payload["w2_globals"],
+                cache.resident_map,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                mul_topk_weight,
+                output_topk,
+                self.gate_softcap,
+                self.up_softcap,
+            )
+        else:
+            ops.moe_mxfp8_gemm_swiglu_hybrid_rdna2(
+                gate_up,
+                c,
+                self.w2_qweight,
+                self.w2_scales,
+                cache.host_payload["w2_qweight"],
+                cache.host_payload["w2_scales"],
+                cache.resident_map,
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                top_k,
+                block_size_m,
+                mul_topk_weight,
+                output_topk,
+                self.gate_softcap,
+                self.up_softcap,
+            )
+
     def forward(  # type: ignore[override]
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
@@ -1504,8 +1624,15 @@ def _forward_hip_offload(
     scale = mlp.gate.routed_scaling_factor
     bias = mlp.gate.e_score_correction_bias
     visit_bucket = 0 if visit <= 0 else 1
+    hybrid_en = os.environ.get("VLLM_INKLING2_MOE_OFFLOAD_HYBRID", "0") == "1"
+    hybrid_ready = (
+        hybrid_en
+        and len(cache.policy._expert_slots) >= cache.slot_count
+        and hasattr(torch.ops._rocm_C, "moe_nvfp4_gemm_hybrid_rdna2")
+    )
     do_prefetch = (
-        mlp.offload_prefetch
+        not hybrid_ready
+        and mlp.offload_prefetch
         and next_mlp is not None
         and next_mlp.expert_cache is not None
         and hasattr(next_mlp, "router_w")
@@ -1564,6 +1691,51 @@ def _forward_hip_offload(
             zero1=None if prefill else m.gu,
             zero2=out,
         )
+
+        if hybrid_ready and not prefill and FUSE_GLUE and tc <= _FUSE_SWIGLU_MAX_TOKENS:
+            copy_stream = ws.offload_copy_stream()
+            prev_ids = cache.poll_and_record_async_route(m.topk_ids)
+            if prev_ids is not None:
+                cache.promote_async(prev_ids, copy_stream=copy_stream, max_experts=2)
+            if cache.device.type == "cuda" and cache._prefetch_event is not None:
+                torch.cuda.current_stream(cache.device).wait_event(
+                    cache._prefetch_event
+                )
+                cache._prefetch_event = None
+            mlp._gemm_hybrid(
+                x,
+                m.gu,
+                ws.no_weights,
+                m.sorted_ids,
+                m.expert_ids,
+                ws.post_pad,
+                K,
+                bm,
+                False,
+                0,
+            )
+            mlp._gemm_swiglu_hybrid(
+                m.gu,
+                out,
+                m.topk_w_flat,
+                m.sorted_ids,
+                m.expert_ids,
+                ws.post_pad,
+                1,
+                bm,
+                True,
+                K,
+            )
+            if cache.device.type == "cuda":
+                cur = torch.cuda.current_stream(cache.device)
+                if cache._consumer_event is None:
+                    cache._consumer_event = torch.cuda.Event()
+                cache._consumer_event.record(cur)
+                cache._consumer_stream = cur
+            cache.expert_demands += tc * K
+            mlp._visit_demands[visit_bucket] += tc * K
+            continue
+
         host_ids, route_event = ws.offload_route_scratch(tc)
         host_ids.copy_(m.topk_ids, non_blocking=True)
         if route_event is not None:
@@ -1584,6 +1756,88 @@ def _forward_hip_offload(
             cta = ops.moe_prefill_cta_rdna2(
                 m.expert_ids, ws.post_pad, mlp.num_experts, bm
             )
+
+        pingpong_en = os.environ.get("VLLM_INKLING2_MOE_OFFLOAD_PINGPONG", "0") == "1"
+        if (
+            pingpong_en
+            and prefill
+            and cta is not None
+            and len(passes) > 1
+            and cache.slot_count >= 16
+        ):
+            half_slots = cache.slot_count // 2
+            all_experts = [e for p_exps in passes for e in p_exps]
+            chunks = [
+                all_experts[i : i + half_slots]
+                for i in range(0, len(all_experts), half_slots)
+            ]
+            copy_stream = ws.offload_copy_stream()
+            cache.begin_pingpong(copy_stream=copy_stream)
+            bank_maps: list[Any] = [None] * len(chunks)
+            bank_maps[0] = cache.prepare_pingpong_bank(
+                0, half_slots, chunks[0], copy_stream=copy_stream
+            )
+            demands_before = cache.expert_demands
+            misses_before = cache.expert_misses
+            cuda = cache.device.type == "cuda"
+            cur_stream = torch.cuda.current_stream(cache.device) if cuda else None
+            for p_idx in range(len(chunks)):
+                bank = p_idx % 2
+                if p_idx + 1 < len(chunks):
+                    next_bank = (p_idx + 1) % 2
+                    bank_maps[p_idx + 1] = cache.prepare_pingpong_bank(
+                        next_bank,
+                        half_slots,
+                        chunks[p_idx + 1],
+                        copy_stream=copy_stream,
+                    )
+                if cuda:
+                    assert (
+                        cur_stream is not None and cache._bank_copy_events is not None
+                    )
+                    cur_stream.wait_event(cache._bank_copy_events[bank])
+                slot_col = cache.remap(cta[:, 0], None, slot_map=bank_maps[p_idx])
+                cta_pass = cta.clone()
+                cta_pass[:, 0] = slot_col.clamp(min=0)
+                cta_pass[:, 2] = torch.where(slot_col >= 0, cta[:, 2], 0)
+                mlp._gemm(
+                    "w13",
+                    x,
+                    m.gu,
+                    ws.no_weights,
+                    m.sorted_ids,
+                    m.expert_ids,
+                    ws.post_pad,
+                    K,
+                    bm,
+                    False,
+                    0,
+                    cta_info=cta_pass,
+                )
+                ops.inkling2_glue_swiglu(m.gu, m.act, mlp.gate_softcap, mlp.up_softcap)
+                mlp._gemm(
+                    "w2",
+                    m.act,
+                    out,
+                    m.topk_w_flat,
+                    m.sorted_ids,
+                    m.expert_ids,
+                    ws.post_pad,
+                    1,
+                    bm,
+                    True,
+                    K,
+                    cta_info=cta_pass,
+                )
+                if cuda:
+                    assert (
+                        cur_stream is not None and cache._bank_done_events is not None
+                    )
+                    cache._bank_done_events[bank].record(cur_stream)
+            cache.end_pingpong()
+            mlp._visit_demands[visit_bucket] += cache.expert_demands - demands_before
+            mlp._visit_misses[visit_bucket] += cache.expert_misses - misses_before
+            continue
 
         demands_before = cache.expert_demands
         misses_before = cache.expert_misses
@@ -1673,6 +1927,8 @@ def _forward_hip_offload(
                         )
             finally:
                 cache.release(lease)
+        if hybrid_en and len(cache.policy._expert_slots) >= cache.slot_count:
+            cache.sync_resident_map()
         mlp._visit_demands[visit_bucket] += cache.expert_demands - demands_before
         mlp._visit_misses[visit_bucket] += cache.expert_misses - misses_before
         if host_pref_ids is not None:
