@@ -67,11 +67,11 @@
 
 ### Quality
 
-<!-- topk_kl.py head against base within the base-against-base floor (KL and top-1 with their intervals), PPL rise at most 2 %, concurrency and greedy probes; known-lossy features still run the full quality gate to measure loss (plus decode_kl.py for decode-step lossy changes and the task-eval A/B). -->
+<!-- topk_kl.py head against base within the base-against-base floor (KL and top-1 with their intervals), PPL rise at most 2 %, long-context passkey needle (32k/64k/128k via `quality_ab.py --needle-lens`, or explicit `long-context N/A` for `max-model-len <= 32k`), concurrency and greedy probes; known-lossy features still run the full quality gate to measure loss (plus decode_kl.py for decode-step lossy changes and the task-eval A/B). -->
 
 ### Speed
 
-<!-- One row per cell: head against base for TTFT p50 and p99, prefill tok/s, ITL p50 and p99, decode tok/s, output tok/s, and the verdict (ABBA to claim a win or when a cell is worse). -->
+<!-- One row per cell: head against base for TTFT p50 and p99, prefill tok/s, ITL p50 and p99, decode tok/s, output tok/s, and the verdict (ABBA to claim a win or when a cell is worse). Ready runtime PRs must include at least one `>= 64k` long-context cell (e.g. `64k/1k` or `128k/512` via `LONG_CTX=auto`) or an explicit `long-context N/A` reason (`max-model-len <= 32k`). -->
 
 #### Speculative acceptance length
 
