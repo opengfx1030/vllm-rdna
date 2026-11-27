@@ -4,7 +4,7 @@
 # serve_validate.sh runs it after the bench cells with URL, PORT, SERVED, MODEL
 # and OUT exported; pr_receipt.sh adds RECEIPT_PY (python of the boot's venv),
 # RECEIPT_TOOLS (tree holding these tools), QUALITY_WINDOWS (topk_kl.py windows
-# file) and QUALITY_LIMIT / QUALITY_TOP / QUALITY_PASSAGES. Writes
+# file) and QUALITY_LIMIT / QUALITY_TOP / QUALITY_PASSAGES / NEEDLE_LENS. Writes
 # $OUT/topk.npz (topk_kl.py collect) and $OUT/quality.json (quality_ab.py
 # collect), and ends with a PASS or FAIL line as serve_validate.sh expects.
 set -uo pipefail
@@ -25,9 +25,11 @@ else
     rc=1
 fi
 
-say "quality_ab collect: ${QUALITY_PASSAGES:-6} passages"
+needle_arg=()
+[[ -n ${NEEDLE_LENS:-} ]] && needle_arg=(--needle-lens "$NEEDLE_LENS")
+say "quality_ab collect: ${QUALITY_PASSAGES:-6} passages (needle: ${NEEDLE_LENS:-none})"
 if "$RECEIPT_PY" "$TOOLS/quality_ab.py" collect --url "$URL" --model "$SERVED" \
-    --passages "${QUALITY_PASSAGES:-6}" --out "$OUT/quality.json" \
+    --passages "${QUALITY_PASSAGES:-6}" "${needle_arg[@]}" --out "$OUT/quality.json" \
     > "$OUT/quality-collect.log" 2>&1; then
     say "quality_ab collect done"
 else

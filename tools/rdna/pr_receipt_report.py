@@ -53,6 +53,8 @@ DEFAULT_CELLS = (
     "32768:2048:1 32768:2048:4"
 )
 DEFAULT_EXACT_CELLS = "1024:128:1:4 16384:128:1:2"
+LONG_CTX_CELLS = "65536:1024:1:2 65536:1024:2:4 131072:512:1:2"
+LONG_CTX_EXACT_CELLS = "65536:128:1:1"
 MAX_PPL_REL = 0.02
 # Gate results that do not fail the run: a gate that was not asked for.
 GATE_OK = ("PASS", "NOT RUN")
@@ -961,6 +963,14 @@ TOTAL_LINE = re.compile(
     r"greedy exact (\d+)/(\d+).*?(PASS|FAIL)\s*$",
     re.MULTILINE,
 )
+NEEDLE_ROW = re.compile(
+    r"^needle (\d+) \((\d+) tok\): (PASS|FAIL) -> (PASS|FAIL)\s*$",
+    re.MULTILINE,
+)
+NEEDLE_TOTAL = re.compile(
+    r"^NEEDLE (\d+)/(\d+) -> (\d+)/(\d+)\s+(PASS|FAIL)\s*$",
+    re.MULTILINE,
+)
 
 
 def parse_ppl_total(text: str) -> dict[str, object] | None:
@@ -975,6 +985,29 @@ def parse_ppl_total(text: str) -> dict[str, object] | None:
         "greedy_exact": int(m.group(4)),
         "passages": int(m.group(5)),
         "verdict": m.group(6),
+    }
+
+
+def parse_needle_total(text: str) -> dict[str, object] | None:
+    """The needle passkey lines of ``quality_ab.py compare``."""
+    m = NEEDLE_TOTAL.search(text)
+    if m is None:
+        return None
+    lengths = [
+        {
+            "target_tokens": int(r.group(1)),
+            "prompt_tokens": int(r.group(2)),
+            "ref": r.group(3),
+            "cand": r.group(4),
+        }
+        for r in NEEDLE_ROW.finditer(text)
+    ]
+    return {
+        "ref_pass": int(m.group(1)),
+        "total": int(m.group(2)),
+        "cand_pass": int(m.group(3)),
+        "verdict": m.group(5),
+        "lengths": lengths,
     }
 
 
@@ -1025,10 +1058,15 @@ def judge_quality(run: Path, boots: Sequence[Boot], settings: dict) -> dict:
     else:
         checks.append({"name": "KL compare", "ok": False, "detail": "kl.json missing"})
     ppl: dict[str, object] = {}
+    needle: dict[str, object] = {}
     for path in sorted((run / "quality").glob("ppl-*.txt")):
+        text = read_text(path)
         label = path.stem.removeprefix("ppl-")
-        total = parse_ppl_total(read_text(path))
+        total = parse_ppl_total(text)
         ppl[label] = total
+        nsum = parse_needle_total(text)
+        if nsum is not None:
+            needle[label] = nsum
         if label == "floor":
             continue  # shown, not gated: the fixed bound applies to head
         ok = total is not None and total["verdict"] == "PASS"
@@ -1039,6 +1077,17 @@ def judge_quality(run: Path, boots: Sequence[Boot], settings: dict) -> dict:
             else f"PPL {total['rel_pct']:+.3f} % (limit {limit:.1f} %)"
         )
         checks.append({"name": f"PPL rise, {label}", "ok": ok, "detail": detail})
+        if nsum is not None:
+            checks.append(
+                {
+                    "name": f"passkey needle, {label}",
+                    "ok": nsum["verdict"] == "PASS",
+                    "detail": (
+                        f"{nsum['ref_pass']}/{nsum['total']} -> "
+                        f"{nsum['cand_pass']}/{nsum['total']}"
+                    ),
+                }
+            )
     if not any(k != "floor" for k in ppl):
         checks.append({"name": "PPL compare", "ok": False, "detail": "not run"})
     heads_boots = [b for b in boots if b.role == "head" and b.kind == "speed"]
@@ -1081,6 +1130,7 @@ def judge_quality(run: Path, boots: Sequence[Boot], settings: dict) -> dict:
         "checks": checks,
         "domains": domains,
         "ppl": ppl,
+        "needle": needle,
     }
 
 
@@ -1522,8 +1572,39 @@ def quality_markdown(quality: dict) -> str:
     if ppl_rows:
         out.append(
             md_table(
-                ["pair", "long-context PPL", "rise", "greedy exact passages", "result"],
+                [
+                    "pair",
+                    "doc-passage PPL (~4k tok)",
+                    "rise",
+                    "greedy exact passages",
+                    "result",
+                ],
                 ppl_rows,
+            )
+        )
+    needle_rows = []
+    for label, nsum in (quality.get("needle") or {}).items():
+        lens = ", ".join(
+            f"{int(r['target_tokens']) // 1024}k:{r['cand']}"
+            for r in nsum.get("lengths", [])
+        )
+        shown = "floor, not gated" if label == "floor" else nsum["verdict"]
+        needle_rows.append(
+            [
+                label,
+                (
+                    f"{nsum['ref_pass']}/{nsum['total']}"
+                    f" -> {nsum['cand_pass']}/{nsum['total']}"
+                ),
+                lens or "—",
+                shown,
+            ]
+        )
+    if needle_rows:
+        out.append(
+            md_table(
+                ["pair", "passkey needle", "lengths", "result"],
+                needle_rows,
             )
         )
     out.append(
@@ -1990,13 +2071,21 @@ def cmd_boot(args: argparse.Namespace) -> int:
 def cmd_cells(args: argparse.Namespace) -> int:
     if args.spec is not None:
         spec = args.spec
+    elif args.exact:
+        spec = (
+            f"{DEFAULT_EXACT_CELLS} {LONG_CTX_EXACT_CELLS}"
+            if args.long_ctx
+            else DEFAULT_EXACT_CELLS
+        )
     else:
-        spec = DEFAULT_EXACT_CELLS if args.exact else DEFAULT_CELLS
+        spec = f"{DEFAULT_CELLS} {LONG_CTX_CELLS}" if args.long_ctx else DEFAULT_CELLS
     try:
         cells = parse_cells(spec)
     except ValueError as err:
         print(err, file=sys.stderr)
         return 2
+    if args.max_len is not None:
+        cells = [c for c in cells if c.in_len + c.out_len <= args.max_len]
     print(" ".join(c.spec for c in cells) or "none")
     return 0
 
@@ -2029,6 +2118,7 @@ def cmd_plan_diff(args: argparse.Namespace) -> int:
 PLAN_FIELDS = {
     "compilation": r"'--compilation-config'\s+'([^']*)'",
     "max-num-seqs": r"'--max-num-seqs'\s+'(\d+)'",
+    "max-model-len": r"'--max-model-len'\s+'(\d+)'",
 }
 
 
@@ -2088,6 +2178,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = sub.add_parser("cells", help="print the default or a checked cell list")
     p.add_argument("spec", nargs="?")
     p.add_argument("--exact", action="store_true", help="the exactness cells")
+    p.add_argument("--long-ctx", action="store_true", help="include 64k/128k cells")
+    p.add_argument(
+        "--max-len", type=int, default=None, help="drop cells above max-model-len"
+    )
     p.set_defaults(func=cmd_cells)
     p = sub.add_parser("set", help="record run-wide settings")
     p.add_argument("run")

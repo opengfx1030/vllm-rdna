@@ -641,7 +641,7 @@ def ppl_text(rel, verdict):
 def quality_run(tmp_path, head_kl=0.0011, head_top1=0.985, rel=0.002, verdict="PASS"):
     run = tmp_path / "run"
     boots = [("A1", "base", "speed"), ("B1", "head", "speed"), ("A2", "base", "floor")]
-    for bid, role, kind in boots:
+    for bid, _role, _kind in boots:
         write_boot(run, bid, hook="PASS pr_receipt hook")
     manifest(
         run,
@@ -1102,3 +1102,127 @@ def test_a_stall_probe_that_was_not_run_is_not_run(tmp_path):
     got = rep.judge_stall([], {"stall": "0"}, "ab")
     assert got == {"ran": False, "verdict": "NOT RUN", "relative": "NOT RUN"}
     assert rep.stall_relative_text(got) == "NOT RUN"
+
+
+def test_cells_long_ctx_and_max_len_filter(capsys):
+    assert rep.main(["cells", "--long-ctx"]) == 0
+    out = capsys.readouterr().out.split()
+    assert out == (rep.DEFAULT_CELLS + " " + rep.LONG_CTX_CELLS).split()
+
+    assert rep.main(["cells", "--exact", "--long-ctx"]) == 0
+    out_exact = capsys.readouterr().out.split()
+    assert (
+        out_exact == (rep.DEFAULT_EXACT_CELLS + " " + rep.LONG_CTX_EXACT_CELLS).split()
+    )
+
+    assert rep.main(["cells", "--long-ctx", "--max-len", "131072"]) == 0
+    capped = capsys.readouterr().out.split()
+    assert "65536:1024:1:2" in capped and "131072:512:1:2" not in capped
+
+    assert rep.main(["cells", "--long-ctx", "--max-len", "32768"]) == 0
+    capped_32k = capsys.readouterr().out.split()
+    assert "16384:1024:1" in capped_32k and "32768:2048:1" not in capped_32k
+
+
+def test_plan_field_extracts_max_model_len(tmp_path, capsys):
+    plan = "cmd '--compilation-config' '{\"mode\":3}' '--max-model-len' '262144'\n"
+    (tmp_path / "head.txt").write_text(plan)
+    assert rep.main(["plan-field", str(tmp_path / "head.txt"), "max-model-len"]) == 0
+    assert capsys.readouterr().out.strip() == "262144"
+
+
+def test_quality_ab_needle_collect_and_compare(tmp_path, monkeypatch, capsys):
+    from tools.rdna.port_v031 import quality_ab as qab
+
+    doc = tmp_path / "doc.md"
+    doc.write_text("hello world paragraph\n" * 400)
+
+    def fake_post_pass(url, body):
+        if body.get("echo"):
+            return {
+                "usage": {"prompt_tokens": 4},
+                "choices": [
+                    {
+                        "logprobs": {
+                            "tokens": ["a", "b", "c", "d"],
+                            "token_logprobs": [None, -1.0, -1.0, -1.0],
+                        }
+                    }
+                ],
+            }
+        if "passkey" in body["prompt"].lower():
+            key = body["prompt"].split("The passkey is ")[1][:6]
+            return {"usage": {"prompt_tokens": 500}, "choices": [{"text": f" {key}."}]}
+        return {
+            "choices": [
+                {
+                    "text": "xy",
+                    "logprobs": {"tokens": ["x", "y"], "token_logprobs": [-0.1, -0.2]},
+                }
+            ]
+        }
+
+    def fake_post_reg(url, body):
+        res = fake_post_pass(url, body)
+        if "passkey" in body["prompt"].lower():
+            res["choices"][0]["text"] = " 999999."
+        return res
+
+    base_out = tmp_path / "base.json"
+    head_ok = tmp_path / "head_ok.json"
+    head_bad = tmp_path / "head_bad.json"
+    for out_path, fn in [
+        (base_out, fake_post_pass),
+        (head_ok, fake_post_pass),
+        (head_bad, fake_post_reg),
+    ]:
+        monkeypatch.setattr(qab, "post", fn)
+        rc = qab.main_ret if hasattr(qab, "main_ret") else None
+        assert rc is None
+        import sys
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "quality_ab.py",
+                "collect",
+                "--url",
+                "http://127.0.0.1:18096",
+                "--model",
+                "m",
+                "--files",
+                str(doc),
+                "--passages",
+                "1",
+                "--passage-chars",
+                "100",
+                "--needle-lens",
+                "32768,65536",
+                "--out",
+                str(out_path),
+            ],
+        )
+        assert qab.main() == 0
+
+    import sys
+
+    monkeypatch.setattr(
+        sys, "argv", ["quality_ab.py", "compare", str(base_out), str(head_ok)]
+    )
+    assert qab.main() == 0
+    ok_text = capsys.readouterr().out
+    assert "NEEDLE 2/2 -> 2/2  PASS" in ok_text
+
+    monkeypatch.setattr(
+        sys, "argv", ["quality_ab.py", "compare", str(base_out), str(head_bad)]
+    )
+    assert qab.main() == 1
+    bad_text = capsys.readouterr().out
+    assert "NEEDLE 2/2 -> 0/2  FAIL" in bad_text
+    parsed = rep.parse_needle_total(bad_text)
+    assert (
+        parsed is not None
+        and parsed["verdict"] == "FAIL"
+        and len(parsed["lengths"]) == 2
+    )
