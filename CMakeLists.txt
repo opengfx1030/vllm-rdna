@@ -1830,6 +1830,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/inkling2_vit_rdna2.cu"
       "csrc/rocm/inkling2_linear_rdna2.cu"
       "csrc/rocm/inkling2_glue_rdna2.cu"
+      "csrc/rocm/inkling2_mono_rdna2.cu"
       "csrc/rocm/inkling2_fuse_attn_rdna2.cu"
       # DeepSeek-V4 RDNA kernels (csrc/rocm/rdna/<feature>/ layout).
       "csrc/rocm/rdna/dsv4/indexer_mqa_logits.cu"
@@ -1891,6 +1892,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/moe_unquantized_rdna2.hip"
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/inkling2_vit_rdna2.hip"
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/inkling2_linear_rdna2.hip"
+      "${CMAKE_CURRENT_BINARY_DIR}/csrc/rocm/inkling2_mono_rdna2.hip"
       PROPERTIES COMPILE_OPTIONS "-O3")
   endif()
   

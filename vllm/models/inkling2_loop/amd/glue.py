@@ -224,6 +224,16 @@ class Inkling2GlueWorkspace:
         self.post_pad = torch.empty(1, **i32)
         self.route_counters = torch.zeros(chunk + 1, **i32)  # zero ONCE
         self.no_weights = torch.empty(0, **f32)
+        # Persistent MoE decode monokernel buffers (max_rows <= 8, HIP-graph safe).
+        mono_rows = max(
+            1, min(8, int(os.environ.get("VLLM_INKLING2_MONO_MAX_ROWS", "8")))
+        )
+        self.mono_max_rows = mono_rows
+        self.mono_ctrl = torch.zeros(4, **i32)
+        self.mono_logits = torch.empty(mono_rows, E, **f32)
+        self.mono_topk_ids = torch.empty(mono_rows, K, **i32)
+        self.mono_topk_w = torch.empty(mono_rows, K, **f32)
+        self.mono_act = torch.empty(mono_rows * K, inter, **f16)
         # Reusable pinned host buffer + event for MoE expert offload route readback
         # (allocated lazily only when an offloaded MoE layer actually uses it).
         self._offload_host_ids: torch.Tensor | None = None
@@ -271,6 +281,11 @@ class Inkling2GlueWorkspace:
             self.topk_ids,
             self.post_pad,
             self.route_counters,
+            self.mono_ctrl,
+            self.mono_logits,
+            self.mono_topk_ids,
+            self.mono_topk_w,
+            self.mono_act,
             self.attn_ws,
             self.o_out,
             self.final32,

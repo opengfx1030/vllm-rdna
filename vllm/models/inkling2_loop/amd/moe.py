@@ -777,6 +777,18 @@ def _prefill_switches(env) -> tuple[bool, bool, int]:
 _PREFILL_BM, _PREFILL_INT8, _PREFILL_BM_MIN_TOKENS = _prefill_switches(os.environ)
 
 
+def _mono_switches(env) -> tuple[bool, int, int, bool]:
+    """Persistent decode MoE monokernel switches from the environment."""
+    on = env.get("VLLM_INKLING2_MONOKERNEL", "0") == "1"
+    max_rows = max(1, min(8, int(env.get("VLLM_INKLING2_MONO_MAX_ROWS", "8"))))
+    ctas = max(1, min(72, int(env.get("VLLM_INKLING2_MONO_CTAS", "56"))))
+    ar = on and env.get("VLLM_INKLING2_MONO_AR", "0") == "1"
+    return on, max_rows, ctas, ar
+
+
+_MONO_ON, _MONO_MAX_ROWS, _MONO_CTAS, _MONO_AR = _mono_switches(os.environ)
+
+
 _ANNOUNCED_MESSAGES: set[tuple[str, tuple[Any, ...]]] = set()
 
 
@@ -1465,6 +1477,22 @@ class Inkling2LoopMoE(_ExpertsKernel):
         self.router_w = (w16 if self.router_fp16 else weight).contiguous()
         del self.gate.weight
 
+    def can_use_mono(self, num_tokens: int, max_query_len: int = 0) -> bool:
+        return (
+            _MONO_ON
+            and self.expert_cache is None
+            and self._processed
+            and self.hidden_dim <= 2304
+            and self.intermediate_dim <= 1152
+            and self.num_experts <= 128
+            and self.top_k == 8
+            and 1 <= num_tokens <= _MONO_MAX_ROWS
+            and max_query_len <= 1
+        )
+
+    def mono_ar_enabled(self, num_tokens: int, max_query_len: int = 0) -> bool:
+        return _MONO_AR and self.can_use_mono(num_tokens, max_query_len)
+
     def forward_hip(
         self,
         x16: torch.Tensor,
@@ -1473,6 +1501,7 @@ class Inkling2LoopMoE(_ExpertsKernel):
         max_query_len: int = 0,
         visit: int = 0,
         next_mlp: Inkling2LoopMoE | None = None,
+        ar_handle: int = -1,
     ) -> torch.Tensor:
         """Router, expert GEMMs and swiglu on the HIP kernels (no allocation).
 
@@ -1490,9 +1519,43 @@ class Inkling2LoopMoE(_ExpertsKernel):
         from vllm import _custom_ops as ops
 
         T, K = x16.shape[0], self.top_k
-        step = min(self.max_tokens_per_call, ws.moe_chunk)
         scale = self.gate.routed_scaling_factor
         bias = self.gate.e_score_correction_bias
+        if (
+            _MONO_ON
+            and self.can_use_mono(T, max_query_len)
+            and ws is not None
+            and hasattr(ws, "mono_ctrl")
+            and ws.mono_max_rows >= T
+        ):
+            x_in = x16 if x16.is_contiguous() else x16.contiguous()
+            bias_f = bias if bias.dtype == torch.float32 else bias.float()
+            ops.inkling2_mono_moe_k2(
+                x_in,
+                self.router_w,
+                bias_f,
+                self.w13_qweight,
+                self.w13_scales,
+                getattr(self, "w13_globals", None),
+                self.w2_qweight,
+                self.w2_scales,
+                getattr(self, "w2_globals", None),
+                ws.mono_logits[:T],
+                ws.mono_topk_ids[:T],
+                ws.mono_topk_w[:T],
+                ws.mono_act[: T * K],
+                ws.mono_ctrl,
+                out_all,
+                K,
+                float(scale),
+                float(self.gate_softcap),
+                float(self.up_softcap),
+                int(ar_handle),
+                int(_MONO_CTAS),
+            )
+            return out_all
+
+        step = min(self.max_tokens_per_call, ws.moe_chunk)
         for s in range(0, T, step):
             e = min(s + step, T)
             tc = e - s

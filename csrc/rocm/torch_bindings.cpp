@@ -1292,6 +1292,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "inkling2_glue_swiglu(Tensor gate_up, Tensor! out, float gate_cap, "
       "float up_cap) -> ()");
   rocm_ops.impl("inkling2_glue_swiglu", torch::kCUDA, &inkling2_glue_swiglu);
+  rocm_ops.def(
+      "inkling2_mono_moe_k2(Tensor x, Tensor router_w, Tensor bias, "
+      "Tensor w13_qweight, Tensor w13_scales, Tensor? w13_globals, "
+      "Tensor w2_qweight, Tensor w2_scales, Tensor? w2_globals, "
+      "Tensor! logits_ws, Tensor! topk_ids_ws, Tensor! topk_w_ws, "
+      "Tensor! act_ws, Tensor! ctrl_ws, Tensor! out, int top_k, "
+      "float route_scale, float gate_cap, float up_cap, int ar_handle, "
+      "int n_ctas) -> ()");
+  rocm_ops.impl("inkling2_mono_moe_k2", torch::kCUDA, &inkling2_mono_moe_k2);
   rocm_ops.def("inkling2_glue_copy_states(Tensor src, Tensor! dst) -> ()");
   rocm_ops.impl("inkling2_glue_copy_states", torch::kCUDA,
                 &inkling2_glue_copy_states);
